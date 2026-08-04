@@ -28,6 +28,7 @@ import { CrashRecoveryWatcher, recordUnexpectedExit, recordUndeliveredReport } f
 import { RESUME_NUDGE_TAIL } from "../dist/orchestration/resume-nudge.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
+import { SESSION_ROLES } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -439,7 +440,61 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (13) OPERATOR role is RECOVERABLE (card a933613e) ============================
+// Same shape as (10)'s assistant fix: RECOVERABLE_ROLES excluded "operator" with no comment ever
+// mentioning it — it was added to SESSION_ROLES a month after this list was authored, and the array type
+// (SessionRole[]) permitted the now-stale subset with zero diagnostics. Prove it now behaves exactly like
+// a worker/manager/assistant death, PLUS gets its own nudge copy — not the manager/platform "continue
+// orchestrating" branch, which would misroute (an operator has no workers and isn't an orchestrator).
+{
+  const e = makeEnv();
+  seedSession(e, "op-13a", { role: "operator" });
+  const wrote = recordUnexpectedExit(e.db, "op-13a", /*intended*/ false);
+  check("(13) an unexpected operator death records ONE session_died (operator is now recoverable)",
+    wrote === true && evKinds(e, "op-13a", "session_died").length === 1);
+  cleanup(e);
+}
+{
+  const e = makeEnv();
+  seedSession(e, "op-13b", { role: "operator" });
+  die(e, "op-13b", NOW);
+  e.watcher.tick(at(100));
+  check("(13) a dead operator session IS auto-resumed on tick", e.resumes.includes("op-13b"));
+  check("(13) the resume attempt is recorded for the operator session", evKinds(e, "op-13b", "session_resume_attempt").length === 1);
+  const nudge = e.enqueued.find((x) => x.id === "op-13b");
+  check("(13) the operator gets its OWN auto-recovered nudge, not the manager/platform 'continue orchestrating' copy",
+    !!nudge && /auto-recovered/.test(nudge.text) && !/re-check your workers|continue orchestrating/i.test(nudge.text));
+  cleanup(e);
+}
+
+// ==================== (14) EVERY SessionRole has an EXPLICIT, ASSERTED disposition (card a933613e) ========
+// The structural guard (RECOVERABLE_ROLE_MAP, a Record<SessionRole, boolean> in the source) is enforced by
+// the TS COMPILER at build time — a future SESSION_ROLES member with no entry fails to compile. This test
+// is the runtime complement: it drives the REAL SESSION_ROLES array (imported from @loom/shared, not a
+// hand-copied list, so it tracks the source of truth) through recordUnexpectedExit and asserts each role's
+// recorded outcome against an independently hand-authored expected table — so a role's EXCLUSION is proven
+// absent BY ASSERTION, not by "the query happened to return nothing" (the polarity trap: a broken check
+// that always returns false would pass a bare negative-only test). The included roles are checked at the
+// SAME polarity that matters (a present role recording an event) — tests (1)/(10)/(13) already prove that
+// positive case for manager/run/assistant/operator individually; this loop re-derives it for every role in
+// one place so the full table (not just the roles this card happened to touch) stays pinned.
+{
+  const EXPECTED_RECOVERABLE = {
+    manager: true, worker: true, platform: true, assistant: true, operator: true,
+    auditor: false, setup: false, "workspace-auditor": false, run: false,
+  };
+  check("(14) EXPECTED_RECOVERABLE covers every current SESSION_ROLES member (fixture itself is complete, not stale)",
+    SESSION_ROLES.every((r) => r in EXPECTED_RECOVERABLE) && SESSION_ROLES.length === Object.keys(EXPECTED_RECOVERABLE).length);
+  const e = makeEnv();
+  for (const role of SESSION_ROLES) {
+    seedSession(e, `role-${role}`, { role });
+    const wrote = recordUnexpectedExit(e.db, `role-${role}`, false);
+    check(`(14) role "${role}" recoverability is exactly ${EXPECTED_RECOVERABLE[role]} (by assertion)`, wrote === EXPECTED_RECOVERABLE[role]);
+  }
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

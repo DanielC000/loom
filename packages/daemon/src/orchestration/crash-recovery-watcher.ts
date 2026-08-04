@@ -8,13 +8,41 @@ import { computeWakeImpact } from "./wake-impact.js";
 
 /**
  * Session roles the crash-recovery watchdog covers — coordination/work sessions worth auto-recovering.
- * EXCLUDES plain (role null), ephemeral `run` (never resume — a restart fails them clean), `auditor`
- * (a fire-once read-and-file session), `setup`, and `workspace-auditor`. Managers are IN scope: the
- * motivating incident was a dead manager. `assistant` (an isolated Companion session) is IN scope too:
- * an unresumed dead Companion sits silently dark with no Mission Control signal until a full daemon
- * restart — see recordUnexpectedExit.
+ * Managers are IN scope: the motivating incident was a dead manager. `assistant` (an isolated Companion
+ * session) is IN scope too: an unresumed dead Companion sits silently dark with no Mission Control signal
+ * until a full daemon restart — see recordUnexpectedExit. `operator` (card a933613e) is IN scope for the
+ * SAME reason: startOperator (sessions/service.ts) runs it at `cwd: project.repoPath` with no
+ * `parentSessionId` — a standing session structurally identical to manager/platform/assistant, not to the
+ * fire-once/ephemeral roles below, so the assistant argument above transfers verbatim. EXCLUDES plain
+ * (role null), ephemeral `run` (never resume — a restart fails it clean), `auditor` (a fire-once
+ * read-and-file session), `setup`, and `workspace-auditor`.
+ *
+ * STRUCTURAL GUARD (card a933613e): expressed as a `Record<SessionRole, boolean>`, not a bare array, so a
+ * FUTURE `SessionRole` addition to `SESSION_ROLES` (shared/src/types.ts) fails to COMPILE here until this
+ * map picks a disposition for it — the array below is DERIVED from the map, never hand-edited. This is
+ * exactly what `operator` needed and didn't have: it was added to `SESSION_ROLES` a month after this list
+ * was authored, the array type (`SessionRole[]`) permitted the now-stale subset with zero diagnostics, and
+ * the comment read as exhaustive without being re-verified.
+ * DISCRIMINATOR for reusing this shape elsewhere: apply it to an EXHAUSTIVE-DISPOSITION list — one whose
+ * own comment already claims to account for every role, the way this one always has — where a silent
+ * omission is a bug. Do NOT apply it to a narrow CAPABILITY allowlist (e.g. "only these roles may request
+ * credential provisioning"): there a new role's correct default is silent exclusion (fail-closed), and
+ * forcing an explicit decision on every unrelated role addition is ceremony without a safety payoff.
  */
-const RECOVERABLE_ROLES: SessionRole[] = ["manager", "worker", "platform", "assistant"];
+const RECOVERABLE_ROLE_MAP: Record<SessionRole, boolean> = {
+  manager: true,
+  worker: true,
+  platform: true,
+  assistant: true,
+  operator: true,
+  auditor: false,
+  setup: false,
+  "workspace-auditor": false,
+  run: false,
+};
+const RECOVERABLE_ROLES: SessionRole[] = (Object.keys(RECOVERABLE_ROLE_MAP) as SessionRole[]).filter(
+  (role) => RECOVERABLE_ROLE_MAP[role],
+);
 
 /**
  * Stability window: a resumed session must stay LIVE this long (since its last crash-recovery activity)
@@ -318,15 +346,23 @@ export class CrashRecoveryWatcher {
       // resumeFleetOnBoot's per-role continuation nudges. Ready-gated (host.ts queues it until the resumed
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
       if (started && pty) {
-        if (s.role === "worker" || s.role === "assistant") {
-          // Worker/assistant nudges stay UNCONDITIONAL (card c9e51581 scopes the stake-aware silencing to
-          // manager/platform only — a worker/assistant has no board/idle-nudge concept to classify against).
+        if (s.role === "worker" || s.role === "assistant" || s.role === "operator") {
+          // Worker/assistant/operator nudges stay UNCONDITIONAL (card c9e51581 scopes the stake-aware
+          // silencing to manager/platform only — none of the three has a board/idle-nudge concept to
+          // classify against). `operator` joins here for the SAME reason (card a933613e, the RECOVERABLE_
+          // ROLES fix): it has no workers and isn't an orchestrator, so falling into the manager/platform
+          // branch below would misroute "re-check your workers... continue orchestrating" copy — and
+          // worse, hasPendingBoardWork reads the PROJECT's board regardless of role, so an operator could
+          // get a FULL nudge (or stay silent) based on board state it has nothing to do with.
           const note = s.role === "worker"
             ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
               `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
               `worker_report (done/blocked) so your manager isn't left waiting.`
-            : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
-              `off with the human.`;
+            : s.role === "assistant"
+              ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
+                `off with the human.`
+              : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up your task ` +
+                `from where you left off.`;
           // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
           // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
           try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }

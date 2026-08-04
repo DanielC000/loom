@@ -35,14 +35,23 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * this narrow ALLOWLIST runs on the ALREADY-validated role so the ungated Setup Assistant can never mint
  * an elevated-role rig that a later default spawn could silently elevate. "workspace-auditor" is absent
  * from the allowlist, so the operator surface REJECTS it by construction (End-User Platform tier B1 —
- * it's caller-set only by the future startWorkspaceAuditor). Returns an error string when the role is
- * forbidden, else null. Exported so the role-guard unit test can exercise it directly.
+ * it's caller-set only by the future startWorkspaceAuditor).
+ * "operator" (card a933613e) and "assistant" are ALSO absent from the allowlist, but NOT for the same
+ * "elevated" reason as platform/auditor/workspace-auditor above — neither is elevated (assistant's whole
+ * surface is my_context + the companion-gated chat_reply; see roleDisplay.tsx). They're excluded because
+ * their SESSION role is always locked by an explicit human/internal caller role at their own start* path
+ * (startOperator / the assistant spawn path), never by this profile field alone — the same mechanism
+ * PROFILE_SPAWNABLE_ROLES documents (sessions/service.ts) — so minting one here would be inert (or
+ * misleading) rather than unsafe. Recorded here so this allowlist's own claim of "elevated roles only"
+ * doesn't read as the complete story, the way it silently didn't for a month before this note existed.
+ * Returns an error string when the role is forbidden, else null. Exported so the role-guard unit test can
+ * exercise it directly.
  */
 const SETUP_ALLOWED_PROFILE_ROLES = new Set<string>(["manager", "worker", "setup"]);
 export function setupRoleError(role: string | null | undefined): string | null {
   if (role == null) return null; // null/undefined ⇒ a plain role-null profile, allowed
   if (SETUP_ALLOWED_PROFILE_ROLES.has(role)) return null;
-  return `the setup surface cannot create or edit a profile with role "${role}" — only manager, worker, setup, or no role are allowed (an elevated platform/auditor/workspace-auditor rig is human-only).`;
+  return `the setup surface cannot create or edit a profile with role "${role}" — only manager, worker, setup, or no role are allowed (platform/auditor/workspace-auditor is elevated + human-only; operator/assistant are excluded here too, but because their session role is locked to an explicit spawn path, not because they're elevated).`;
 }
 
 /**
