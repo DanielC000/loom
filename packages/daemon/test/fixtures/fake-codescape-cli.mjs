@@ -64,7 +64,9 @@
 //     killed — never actually speaks JSON-RPC (no test here exercises the protocol, only the spawn shape).
 // Every invocation appends ONE JSON line to `fake-codescape-calls.jsonl` IN ITS OWN CWD (never an
 // absolute/env-supplied path) — so the test can prove the CWD CONTRACT (ingest and serve sharing the
-// exact same working directory) purely by reading that one file.
+// exact same working directory) purely by reading that one file. Each recorded line also carries
+// `codescapeHomeEnv` (the invocation's own `CODESCAPE_HOME` env var, or `null` if unset) — card 194d343d:
+// proves the daemon pins the store explicitly via env on both ingest and serve, not just cwd.
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -74,7 +76,9 @@ const cwd = process.cwd();
 const logFile = path.join(cwd, "fake-codescape-calls.jsonl");
 
 function record(fields) {
-  fs.appendFileSync(logFile, `${JSON.stringify({ ...fields, cwd, pid: process.pid })}\n`);
+  // Card 194d343d: also record the spawn's CODESCAPE_HOME env var (null if unset) so a test can prove
+  // the daemon pins it explicitly on both ingest and serve, not just shares a cwd.
+  fs.appendFileSync(logFile, `${JSON.stringify({ ...fields, cwd, codescapeHomeEnv: process.env.CODESCAPE_HOME ?? null, pid: process.pid })}\n`);
 }
 
 if (args[0] === "ingest") {

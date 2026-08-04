@@ -15,10 +15,17 @@ import { resolveCodescapeProjectId } from "./manifest.js";
  * (v1: projects load from `.codescape/projects/index.json` at serve BOOT — a project ingested after serve
  * started isn't picked up until a restart).
  *
- * ★ CWD CONTRACT (load-bearing): both `ingest` and `serve` resolve their `.codescape` state dir relative
- * to `process.cwd()`. So EVERY spawn — ingest and serve alike — runs from the exact same `homeDir`
- * (default {@link CODESCAPE_HOME_DIR}, `<LOOM_HOME>/codescape`), or serve will never see what ingest
- * wrote. Never rely on the daemon's ambient cwd.
+ * ★ CWD CONTRACT (load-bearing) — UPDATED, card 194d343d: `ingest` and `serve` no longer resolve their
+ * `.codescape` state dir purely from `process.cwd()` — as of their `e23c2cb`, a missing `.git` in cwd
+ * makes them WALK UP looking for one, which can silently re-anchor the store outside `homeDir` (this bit
+ * us: our cwd, `<LOOM_HOME>/codescape`, has no `.git`, so the walk climbed to `<LOOM_HOME>` and anchored
+ * there instead). We now pin the store explicitly via `CODESCAPE_HOME=<homeDir>` in the spawn env on
+ * BOTH `ingest` and `serve` (their resolver checks the env var FIRST, ahead of any cwd walk) — that is
+ * the load-bearing guarantee going forward. Running both spawns from the same `homeDir` as `cwd` is kept
+ * as belt-and-braces, but is **not sufficient on its own**: cwd alignment cannot prevent an upstream
+ * resolution change from walking past it. Every spawn — ingest and serve alike — must still carry the
+ * SAME `homeDir` (default {@link CODESCAPE_HOME_DIR}, `<LOOM_HOME>/codescape`) as both `cwd` and
+ * `CODESCAPE_HOME`, or serve will never see what ingest wrote.
  *
  * Mirrors, cited:
  *   - Async best-effort subprocess discipline (spawn not spawnSync, bounded, ~4KB output tail, never
@@ -252,7 +259,7 @@ type DriftCheckState = "match" | "mismatch" | "not-checked:running-absent" | "no
  * for diagnostics. Mirrors `python/venv.ts`'s `runAsync` (a fresh copy: different subsystem, same
  * discipline — spawn not spawnSync, bounded, never throws).
  */
-function runBounded(command: string, args: string[], cwd: string, timeoutMs: number): Promise<RunResult> {
+function runBounded(command: string, args: string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
@@ -272,7 +279,7 @@ function runBounded(command: string, args: string[], cwd: string, timeoutMs: num
     };
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
     } catch {
       finish(false, null);
       return;
@@ -664,7 +671,11 @@ export class CodescapeSupervisor {
     }
     fs.mkdirSync(this.homeDir, { recursive: true });
     const { command, args } = resolveCodescapeBin(this.codescapePath);
-    const r = await runBounded(command, [...args, "ingest", repoPath], this.homeDir, this.ingestTimeoutMs);
+    // Card 194d343d: pin CODESCAPE_HOME explicitly so their resolver's env-first check wins over any
+    // upstream cwd-relative walk — see the "★ CWD CONTRACT" doc above this class for why cwd alone is no
+    // longer sufficient. Must match `serve`'s own CODESCAPE_HOME (spawnServe) or the two can disagree
+    // about where the store lives.
+    const r = await runBounded(command, [...args, "ingest", repoPath], this.homeDir, this.ingestTimeoutMs, { ...process.env, CODESCAPE_HOME: this.homeDir });
     if (!r.ok) {
       console.warn(`[codescape] ingest ${repoPath} ${r.timedOut ? "timed out" : `failed (exit ${r.code})`}${r.output ? ` — ${r.output}` : ""}`);
     }
@@ -797,7 +808,10 @@ export class CodescapeSupervisor {
     const args = [...baseArgs, "serve", "--port", String(this.port)];
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"] });
+      // Card 194d343d: pin CODESCAPE_HOME explicitly (same value as `cwd`) so serve's env-first resolver
+      // check wins over any upstream cwd-relative walk — must match ingest()'s own CODESCAPE_HOME above,
+      // or ingest and serve can disagree about where the store lives.
+      child = spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODESCAPE_HOME: this.homeDir } });
     } catch (err) {
       console.warn(`[codescape] serve spawn failed: ${(err as Error).message}`);
       // Never a "healthy" run — a synchronous throw means no child ever came up. Clearing spawnedAt (it

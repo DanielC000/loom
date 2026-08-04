@@ -179,6 +179,15 @@ check("(a) CWD CONTRACT: ingest ran from the shared homeDir",
 check("(a) CWD CONTRACT: serve ran from the SAME shared homeDir as ingest",
   calls1[0]?.cwd === calls1[1]?.cwd);
 
+// ===================== (a-env) card 194d343d: CODESCAPE_HOME pinned via env on BOTH ingest and serve =====
+// Not merely cwd — an upstream resolver walking up from cwd for a `.git` dir can silently re-anchor the
+// store outside homeDir (the exact regression this card fixes). Negative control: with no fix, this env
+// var would be entirely absent (codescapeHomeEnv === null) — see (neg-env) below for that proven RED case.
+check("(a-env) ingest's spawn env carries CODESCAPE_HOME === the resolved homeDir",
+  calls1[0]?.codescapeHomeEnv === path.resolve(homeDir));
+check("(a-env) serve's spawn env carries CODESCAPE_HOME === the SAME resolved homeDir as ingest",
+  calls1[1]?.codescapeHomeEnv === path.resolve(homeDir) && calls1[1]?.codescapeHomeEnv === calls1[0]?.codescapeHomeEnv);
+
 // ===================== (a2) getHomeDir() (P4 wiring, card 088afc94) =====================
 // Exposes the shared ingest+serve cwd so a caller resolving codescape's OWN project id (manifest.ts
 // `resolveCodescapeProjectId`) reads the manifest from the SAME homeDir this instance actually ingests
