@@ -1206,7 +1206,17 @@ export type OrchestrationEventKind =
   // session when one was live else "". The relay is framed as a subordinate CLAIM, never as attested
   // owner/human words — the recipient manager must independently weigh/verify it, same treatment class as
   // a worker_report.
-  | "assistant_relay_message";
+  | "assistant_relay_message"
+  // Card b68d1f5b DoD-1/DoD-2 — `PtyHostEvents.onPasteLengthLoss` fired: a `[Pasted text #N +M lines]`
+  // placeholder landed in a session's recorded turn text with no known Loom write to explain it (see
+  // `detectPastePlaceholderLengthLoss`'s doc, packages/daemon/src/orchestration/paste-tripwire.ts, for the
+  // `gen`-aware discriminator that rules out a stale re-render before this ever fires) — the
+  // human/raw-terminal-paste delivery gap `detectBarePastePlaceholderTripwire`'s own submittedText-based
+  // check structurally cannot see. Filed under the AFFECTED session (managerSessionId = its parent
+  // session's id if one exists, else its own id — mirrors `session_message_gave_up`'s "notify whoever can
+  // act" convention), workerSessionId = the affected session itself; `detail` carries { token, statedLines,
+  // estimatedBytesLost }. The durable audit trail for a loss Loom could only detect, never recover.
+  | "paste_length_loss";
 
 export interface OrchestrationEvent {
   id: string;

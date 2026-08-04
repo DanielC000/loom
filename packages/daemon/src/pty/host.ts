@@ -16,7 +16,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG } from "../orchestration/paste-tripwire.js";
+import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, type PasteLengthLossCandidate, type WrittenLineCountEntry } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -2134,6 +2134,18 @@ interface Live {
   // detector's CONFIRMATION stage must hash the actual concatenation in gen order, which a signature alone
   // cannot reconstruct — bounded to a handful of entries, this is cheap.
   recentWrittenTurns: { gen: number; text: string }[];
+  // Card b68d1f5b Code Review — a SEPARATE, dedicated, integer-only history for
+  // `detectPastePlaceholderLengthLoss`'s `gen` discriminator, deliberately NOT reusing
+  // `recentWrittenTurns` above: that ring's `COMPOSER_ACCUM_WINDOW` (8) was sized for card c2c750a9's OWN
+  // sum+hash job, not this one, and a stale placeholder whose explaining write had already rotated out of
+  // an 8-entry window read as a fresh loss on a completely correct send — the exact false alarm this card
+  // exists to eliminate (see `abeac33a`'s 15-minute-gap specimen). Pushed once per `submit()` call, same
+  // chokepoint and same `gen` as `recentWrittenTurns` above, via `computeWrittenLineCounts(text)` — so it
+  // never stores the text itself, only the two small candidate-line-count integers that text produced;
+  // that's what lets `PASTE_LOSS_EXPLAIN_WINDOW` be MUCH larger (8x) than `COMPOSER_ACCUM_WINDOW` without
+  // materially growing `Live`'s footprint. See paste-tripwire.ts's own doc on `PASTE_LOSS_EXPLAIN_WINDOW`
+  // and on `detectPastePlaceholderLengthLoss`'s bound for the full reasoning and the stated residual.
+  recentWrittenLineCounts: WrittenLineCountEntry[];
   // Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
   // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route only — null for a
   // DM route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own
@@ -2383,6 +2395,20 @@ export interface PtyHostEvents {
    * event can distinguish them; ⛔ don't back-infer one from the other's absence downstream of this call.
    */
   onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string; detector: "stop_failure" | "weekly_text_sentinel" }): void;
+  /**
+   * Card b68d1f5b DoD-1/DoD-2: `detectPastePlaceholderLengthLoss` (paste-tripwire.ts) found a `[Pasted
+   * text #N +M lines]` placeholder in a turn's recorded text that no known Loom write explains — a
+   * delivery gap the existing `detectBarePastePlaceholderTripwire`+recovery mechanism structurally cannot
+   * see (that one needs `submittedText`, i.e. text LOOM ITSELF wrote; this fires precisely when nothing
+   * Loom wrote explains the placeholder — the human/raw-terminal-paste gap card b68d1f5b names). PtyHost
+   * itself cannot recover or notify beyond the session itself (no DB, no manager lookup — same layering
+   * boundary as `onKickoffGiveUpExhausted` above); the implementer (sessions/service.ts, via index.ts)
+   * decides how to fail LOUD to both the recipient (this session) and — where one exists — the sender
+   * (e.g. a worker's manager, the one party who can actually resend). OPTIONAL, same rationale as
+   * `onGiveUpConfirmed`/`onKickoffGiveUpExhausted`: every existing `PtyHostEvents` test double is
+   * unaffected until it opts in.
+   */
+  onPasteLengthLoss?(sessionId: string, candidate: PasteLengthLossCandidate): void;
   /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
@@ -3530,6 +3556,7 @@ export class PtyHost {
       lastPromptOwnerText: null,
       recentOwnerTurns: [],
       recentWrittenTurns: [],
+      recentWrittenLineCounts: [],
       activeTurnSenderId: null,
       lastPromptSenderId: null,
       activeTurnProactive: false,
@@ -3686,7 +3713,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -3764,7 +3791,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -4431,6 +4458,23 @@ export class PtyHost {
               // collapsed has no durable msgId of its own to inherit.
               setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { logicalId: randomUUID(), mintedAtGen, mintedAtWallClock }); }, 0);
             }
+          }
+          // Card b68d1f5b DoD-1 — the gen-aware, calibrated length check: catches an UNEXPLAINED
+          // `[Pasted text #N +M lines]` placeholder even when `detectBarePastePlaceholderTripwire` above
+          // stayed silent (no `submittedText` to compare, or `submittedText` too short/single-line to
+          // gate on) — the human/raw-terminal-paste class this card exists for. Deliberately a SEPARATE
+          // check from the one above, not a replacement: `live.recentWrittenLineCounts` (its OWN dedicated,
+          // longer-horizon, integer-only history — see that field's doc for why this is NOT
+          // `live.recentWrittenTurns`, card c2c750a9's ring) is what lets it stay silent on a placeholder
+          // that's actually EXPLAINED — either the current gen's own fresh collapse (already owned +
+          // recovered by the block above) or a stale CLI-side re-render of an older, already-delivered gen
+          // still inside the window (card abeac33a's finding) — see detectPastePlaceholderLengthLoss's own
+          // doc for the full discriminator AND its stated bound. Runs on `stats?.lastUserText` regardless
+          // of whether the block above fired, since it can find something that one structurally cannot.
+          for (const candidate of detectPastePlaceholderLengthLoss(stats?.lastUserText, submittedText, live.recentWrittenLineCounts)) {
+            // eslint-disable-next-line no-console
+            console.error(`[paste-length-loss] ${sessionId} UNEXPLAINED ${candidate.token} (engineSessionId=${live.engineSessionId ?? "?"}, gen=${live.submitGeneration}) — no known Loom write accounts for these lines; estimated ~${candidate.estimatedBytesLost} bytes (${candidate.statedLines} lines @ ~${PASTE_LOSS_CALIBRATED_BYTES_PER_LINE} B/line, card abeac33a calibration) never reached the engine and Loom holds no copy to auto-recover (see card b68d1f5b). Failing loud to recipient + sender.`);
+            this.events.onPasteLengthLoss?.(sessionId, candidate);
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
           // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
@@ -5538,6 +5582,11 @@ export class PtyHost {
     // this detects is about what the COMPOSER received, not whether the write later succeeded.
     live.recentWrittenTurns.push({ gen, text });
     if (live.recentWrittenTurns.length > COMPOSER_ACCUM_WINDOW) live.recentWrittenTurns.shift();
+    // Card b68d1f5b Code Review: SAME chokepoint, SAME gen, but a SEPARATE, longer-horizon, integer-only
+    // history for detectPastePlaceholderLengthLoss's gen discriminator — see Live.recentWrittenLineCounts'
+    // own doc for why this is not just reading recentWrittenTurns above.
+    live.recentWrittenLineCounts.push({ gen, lineCounts: computeWrittenLineCounts(text) });
+    if (live.recentWrittenLineCounts.length > PASTE_LOSS_EXPLAIN_WINDOW) live.recentWrittenLineCounts.shift();
     // Card 4a0af485: reset for THIS fresh generation — stamped for real by `fireEnterAndVerify`'s first
     // attempt once the actual Enter write happens (not here — this is only the paste, not the Enter yet).
     live.currentGenFirstWrittenAt = null;

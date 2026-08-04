@@ -11,6 +11,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
+import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
@@ -6317,6 +6318,39 @@ export class SessionService {
     });
     const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
+  }
+
+  /**
+   * Card b68d1f5b DoD-1/DoD-2 — consumes `PtyHostEvents.onPasteLengthLoss`: an UNEXPLAINED
+   * `[Pasted text #N +M lines]` placeholder landed in `sessionId`'s recorded turn text with no known
+   * Loom write to account for it (see `detectPastePlaceholderLengthLoss`'s own doc for what "unexplained"
+   * means — the human/raw-terminal-paste class this card exists for). PtyHost cannot recover the content
+   * (it never had it) or identify a sender beyond the session itself (no DB) — this is where both halves
+   * of DoD-2 ("fail LOUD to the RECIPIENT and the SENDER") actually happen:
+   *   - RECIPIENT: `sessionId` itself — it experienced the gap but, per the card's own "worst case"
+   *     finding, may have no channel to ask anyone what it was owed. A durable nudge at least tells it
+   *     something is missing instead of silently completing on incomplete input.
+   *   - SENDER: for a worker, that's its manager (`parentSessionId`) — the one party who could actually
+   *     have sent (or relayed) the missing paste and can resend it. Mirrors `handleKickoffGiveUpExhausted`'s
+   *     established parent-notify pattern above. A session with no `parentSessionId` (a manager, a `run`/
+   *     plain session, the platform lead) has no programmatic sender Loom can identify — the durable event
+   *     below still records the gap for a human auditing the log, but there is no live party to nudge; this
+   *     is the SAME structural limit the card's own ledger caveat names (a human pasting outside Loom's own
+   *     write path leaves no daemon-side record of who sent it).
+   */
+  handlePasteLengthLoss(sessionId: string, candidate: PasteLengthLossCandidate): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "paste_length_loss", detail: { token: candidate.token, statedLines: candidate.statedLines, estimatedBytesLost: candidate.estimatedBytesLost },
+    });
+    const recipientMsg = `[loom:paste-length-loss] this session's own recorded turn contained an UNEXPLAINED "${candidate.token}" placeholder — the pasted content it names (~${candidate.statedLines} lines, ~${candidate.estimatedBytesLost} bytes estimated) never reached you, and Loom holds no copy of it to resend automatically (see card b68d1f5b). If you were expecting a paste around this point in the conversation, ask whoever sent it to resend it — do not assume it is safe to proceed as if nothing was sent.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:paste-length-loss] your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} recorded an UNEXPLAINED "${candidate.token}" placeholder — an estimated ~${candidate.statedLines} lines (~${candidate.estimatedBytesLost} bytes) of pasted content never reached it, and Loom has no record of writing it, so it cannot be auto-recovered. If you (or the owner, relayed through you) pasted something into that session recently, it did not arrive — please resend it.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
   }
 
   /**

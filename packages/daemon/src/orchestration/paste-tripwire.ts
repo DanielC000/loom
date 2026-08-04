@@ -129,3 +129,164 @@ export function isPasteRecoveryAttempt(submittedText: string): boolean {
 export function buildPasteRecoveryText(originalText: string): string {
   return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). Before dismissing this as already-handled: does anything you have done SINCE assume this content, not merely resemble something you recall seeing? A later message can be fully acted-on while still having depended on THIS one — check your own artifact (a reply you sent, a memory write, a turn count) for that, not just whether the topic feels familiar. Otherwise, here is the original content, resent:\n\n${originalText}`;
 }
+
+/**
+ * Card b68d1f5b DoD-1 — the "compare the placeholder's stated line count against the delivered body"
+ * check (adopted from a peer project manager's suggestion). Unlike `detectBarePastePlaceholderTripwire`
+ * above (which needs `submittedText` — TEXT LOOM ITSELF WROTE — to compare against), this check works
+ * from the RECORDED/delivered side alone: a `[Pasted text #N +M lines]` token surviving into the
+ * transcript's recorded turn text always means those M lines never reached the engine (a placeholder is
+ * never accompanied by its own expansion — if the paste had gone through, the placeholder wouldn't be
+ * there at all). That is what makes it work "regardless of who wrote the text" (card's own framing) —
+ * it covers the human-paste path `detectBarePastePlaceholderTripwire` structurally cannot see (a human
+ * typing directly into their own terminal has no `submittedText` Loom ever captured).
+ *
+ * ⛔ HARD CONSTRAINT (card `abeac33a`, folded into `b68d1f5b` 2026-08-04): a naive version of this check
+ * — "placeholder present ⇒ report a loss" — FIRES ON A CORRECT SEND. A stale placeholder TOKEN can be a
+ * CLI-side rendering ghost: an EARLIER delivery's own placeholder (already fully delivered, at an OLDER
+ * `gen`) re-rendering into a LATER, unrelated, correctly-delivered turn's recorded text. Nothing
+ * daemon-side replayed it — the re-render is CLI-side — so by the time this check runs, the M lines it
+ * names were never actually missing FROM THIS TURN; they were already accounted for, earlier.
+ *
+ * ✅ THE `gen` DISCRIMINATOR: `findExplainingWrittenGen` searches a bounded, `gen`-ordered history of
+ * Loom's OWN writes for ANY entry — current gen or an older one — whose own line count matches the
+ * placeholder's stated M. A match means this occurrence is EXPLAINED, one of two ways, and either way
+ * this check must stay silent:
+ *   - Matches the CURRENT gen's own entry → this is a real, FRESH collapse of THIS turn's own submission
+ *     — but `detectBarePastePlaceholderTripwire` above already owns that case (full-text comparison,
+ *     already gen-safe by construction, already wired to one-shot recovery). Flagging it again here
+ *     would be a duplicate alarm, not a new finding.
+ *   - Matches an OLDER gen's entry → the `abeac33a` stale-token ghost. That gen's content is already
+ *     known-delivered (Loom wrote it and, if it had actually collapsed back then, the tripwire above
+ *     would have already caught and recovered THAT turn) — this later re-appearance is a harmless
+ *     CLI-side artifact, not a new loss.
+ * Only a placeholder matching NO entry in the history is genuinely UNEXPLAINED — Loom has no record of
+ * ever having written text that would produce this token, which is exactly the human/raw-terminal-paste
+ * gap this check exists to close (a raw `writeStdin` turn never pushes into this history — only
+ * `submit()` does — so a human paste that collapsed client-side is unexplainable by construction and
+ * always surfaces here).
+ *
+ * ⚠️ THE BOUND, STATED EXPLICITLY (Code Review, card b68d1f5b): silence above is guaranteed ONLY for a
+ * placeholder whose explaining write is still inside `Live.recentWrittenLineCounts`'s
+ * `PASTE_LOSS_EXPLAIN_WINDOW` — beyond it, an explained token reads as unexplained and this check WILL
+ * fire on a correct send, exactly the failure mode the hard constraint above names. This is a genuinely
+ * SEPARATE, dedicated history from card c2c750a9's `Live.recentWrittenTurns` (8 entries, sized for that
+ * detector's own sum+hash CONCATENATION, which needs full TEXT) — reusing that ring's window would have
+ * inherited a bound picked for a different job: `abeac33a`'s own worked stale-token specimen was a
+ * FIFTEEN-MINUTE gap between the explaining write and its re-render, and whether 8 intervening
+ * submissions fit that gap is a property of session traffic, not of this check's logic. Because this
+ * history stores only a `gen` plus two small integers per entry (see `WrittenLineCountEntry`) rather than
+ * full text, it costs far less per entry than card c2c750a9's ring, which is what justifies giving it a
+ * MUCH longer horizon (`PASTE_LOSS_EXPLAIN_WINDOW`, its own doc) without growing `Live`'s footprint the
+ * way widening `COMPOSER_ACCUM_WINDOW` itself would have (that ring is card c2c750a9's own field, sized
+ * for its own purpose — not this check's to grow as a side effect).
+ *
+ * ✅ CALIBRATION (card `abeac33a`, five specimens, 128.4–132.3 B/line, all kickoffs delivered intact):
+ * `PASTE_LOSS_CALIBRATED_BYTES_PER_LINE` estimates lost BYTES from the placeholder's stated line count
+ * for the alert message only — it is NOT part of the detection gate (presence of an unexplained
+ * placeholder is itself the whole signal; the byte estimate just makes the alert legible). Deliberately
+ * calibrated against PAYLOAD NEWLINES, never wrapped terminal display rows (a fixed 120-column pty only
+ * ever ADDS rows via wrapping, so a row-count reading would undercount).
+ */
+export const PASTE_LOSS_CALIBRATED_BYTES_PER_LINE = 130;
+
+/**
+ * Card b68d1f5b Code Review — how many of the most-recent Loom-authored submissions
+ * `Live.recentWrittenLineCounts` retains, per session, for `findExplainingWrittenGen`'s lookup above.
+ * Deliberately its OWN constant, independent of card c2c750a9's `COMPOSER_ACCUM_WINDOW` (8) — that ring
+ * is sized for a DIFFERENT job (its detector needs full TEXT to concatenate-and-hash a contiguous span;
+ * this one only needs an unordered "was there EVER a write with this line count" membership test over
+ * small integers). Picked 8x c2c750a9's own window — wide enough to meaningfully outlast the 8-entry
+ * blind spot the abeac33a specimen's 15-minute gap could fall into, cheap enough (3 small integers per
+ * entry vs a full text blob) that the memory argument that bounds THAT ring at 8 simply doesn't apply
+ * here. NOT a claim this window is provably sufficient for every real gap — see the bound doc above on
+ * `detectPastePlaceholderLengthLoss` for the residual this leaves, honestly stated rather than hidden
+ * behind a bigger-sounding number.
+ */
+export const PASTE_LOSS_EXPLAIN_WINDOW = 64;
+
+/** Matches a placeholder token AND captures its `#N` id plus its stated `+M lines` count (when present)
+ *  — unlike `PLACEHOLDER_RE` above, this one only matches occurrences that carry a calibratable count. */
+const PLACEHOLDER_WITH_COUNT_RE = /\[Pasted text #(\d+)(?:\s*\+(\d+)\s*lines?)?\]/g;
+
+/**
+ * Candidate line-count readings for a known-written text, under the two plausible conventions for what
+ * the CLI's own "+M lines" counts (newline-delimited segments, or raw newline occurrences) — both are
+ * checked so an off-by-one convention mismatch never turns a genuinely explainable placeholder into a
+ * false "unexplained" alarm (the failure direction this whole check exists to avoid). Exported so host.ts
+ * can compute the SAME candidates once, at write time, to populate `Live.recentWrittenLineCounts` — this
+ * function is the only place that logic lives; the ring stores its OUTPUT (plain integers), never the
+ * source text.
+ */
+export function computeWrittenLineCounts(text: string): number[] {
+  const newlines = (text.match(/\n/g) ?? []).length;
+  return [newlines, newlines + 1];
+}
+
+/** One entry of `Live.recentWrittenLineCounts` — a `gen` plus the candidate line-count readings
+ *  `computeWrittenLineCounts` computed for that generation's written text AT WRITE TIME (never the text
+ *  itself — see `PASTE_LOSS_EXPLAIN_WINDOW`'s doc for why this history is integer-only). */
+export interface WrittenLineCountEntry {
+  gen: number;
+  lineCounts: readonly number[];
+}
+
+/** Does ANY entry in `recentWrittenLineCounts` (any gen — current or older, oldest-evicted at
+ *  `PASTE_LOSS_EXPLAIN_WINDOW`) have a line count matching `statedLines`? Returns that entry's `gen` if
+ *  so, else `null`. See this file's `gen`-discriminator doc above (on the exported detector below) for
+ *  what a match at each position means. */
+function findExplainingWrittenGen(
+  statedLines: number,
+  recentWrittenLineCounts: ReadonlyArray<WrittenLineCountEntry>,
+): number | null {
+  for (const entry of recentWrittenLineCounts) {
+    if (entry.lineCounts.includes(statedLines)) return entry.gen;
+  }
+  return null;
+}
+
+export interface PasteLengthLossCandidate {
+  /** The exact placeholder substring as it appeared in the recorded text, e.g. "[Pasted text #12 +21 lines]". */
+  token: string;
+  /** The CLI-assigned placeholder number ("#N"). */
+  placeholderNum: number;
+  /** The placeholder's own stated line count ("+M lines"). */
+  statedLines: number;
+  /** Calibrated estimate only (see `PASTE_LOSS_CALIBRATED_BYTES_PER_LINE`'s doc) — not measured. */
+  estimatedBytesLost: number;
+}
+
+/**
+ * DoD-1's detector. Returns every placeholder occurrence in `recordedText` that is BOTH calibratable (has
+ * a stated `+M lines` count) AND unexplained by anything Loom has a record of writing (see the `gen`
+ * discriminator doc above, INCLUDING its stated bound) — i.e. a genuine, otherwise-invisible delivery
+ * gap. Empty array ⇒ nothing to report (either no placeholder at all, or every one found is explained).
+ *
+ * `submittedText` is OPTIONAL and, when given, only feeds the SAME false-positive guard
+ * `detectBarePastePlaceholderTripwire` already validated (card 0f9268cc, 18140 real transcript turns): a
+ * placeholder-shaped substring the sender's own submitted text ALSO contains verbatim was typed/quoted,
+ * not CLI-collapsed, and must not be reported as a loss. Passing `null`/`undefined` (the human-paste case
+ * this detector exists for — Loom never captured what was typed) simply skips that guard; every other
+ * guard (the `gen` discriminator) still applies in full.
+ *
+ * `recentWrittenLineCounts` is `Live.recentWrittenLineCounts` — the dedicated, integer-only history (see
+ * `PASTE_LOSS_EXPLAIN_WINDOW`'s doc), NOT card c2c750a9's `Live.recentWrittenTurns`.
+ */
+export function detectPastePlaceholderLengthLoss(
+  recordedText: string | null | undefined,
+  submittedText: string | null | undefined,
+  recentWrittenLineCounts: ReadonlyArray<WrittenLineCountEntry>,
+): PasteLengthLossCandidate[] {
+  if (!recordedText) return [];
+  const trimmed = recordedText.trim();
+  const out: PasteLengthLossCandidate[] = [];
+  for (const match of trimmed.matchAll(PLACEHOLDER_WITH_COUNT_RE)) {
+    if (match[2] === undefined) continue; // no stated count ("[Pasted text #N]" alone) — nothing to calibrate against
+    const statedLines = Number(match[2]);
+    const token = match[0];
+    if (submittedText && submittedText.includes(token)) continue; // authored/typed the phrase — same guard as detectBarePastePlaceholderTripwire
+    if (findExplainingWrittenGen(statedLines, recentWrittenLineCounts) !== null) continue; // explained — see the gen-discriminator doc above
+    out.push({ token, placeholderNum: Number(match[1]), statedLines, estimatedBytesLost: statedLines * PASTE_LOSS_CALIBRATED_BYTES_PER_LINE });
+  }
+  return out;
+}

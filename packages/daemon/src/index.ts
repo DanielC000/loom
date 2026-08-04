@@ -298,6 +298,11 @@ async function main(): Promise<void> {
     // — every REAL exhaustion starts its own chain fresh; only handleKickoffGiveUpExhausted's own re-mint
     // recursion ever calls itself with chainDepth > 0.
     onKickoffGiveUpExhausted: (sessionId, msgId, rootMsgId, kickoffText) => sessions.handleKickoffGiveUpExhausted(sessionId, msgId, rootMsgId, kickoffText),
+    // Card b68d1f5b DoD-1/DoD-2: an UNEXPLAINED paste-length-loss candidate — `sessions` (forward
+    // reference, same pattern as onBusy/onGiveUpConfirmed above) decides how to fail loud to the
+    // recipient AND the sender. See PtyHostEvents.onPasteLengthLoss's own doc / SessionService.
+    // handlePasteLengthLoss's own doc.
+    onPasteLengthLoss: (sessionId, candidate) => sessions.handlePasteLengthLoss(sessionId, candidate),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
