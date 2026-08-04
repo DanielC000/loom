@@ -27,14 +27,32 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (2) (e2e, REAL spawn) a REAL runWorkerGate op's `idleMs` (read via BOTH `gate_queue` and `gate_status`)
 //       grows monotonically while its child is genuinely quiet, and DROPS back down once the child
 //       produces new output — polled via waitUntil (never a blind sleep guessing at timing), so a static
-//       or always-null `idleMs` would time out and fail loudly rather than pass on a lucky guess.
+//       or always-null `idleMs` would time out and fail loudly rather than pass on a lucky guess. Also
+//       proves `liveness` genuinely flips "pending" → "observed" the instant idleMs first becomes real,
+//       and never reverts (card 33aa0291 — see below).
 //   (3) (e2e, REAL spawn, REAL auto-extend) `extended` reads `false` immediately after admission and
 //       flips to `true` once the gate's OWN GATE_EXTEND_IDLE_MS-gated auto-extend genuinely fires (a
 //       steadily-producing child that outlives the first deadline) — proving `extended` isn't a static
 //       stub either, and that it reflects the SAME decision gate-runner.ts's own onTimeout makes.
-//   (4) (e2e, cross-project) `idleMs`/`extended` are present (not omitted) on a FOREIGN project's
-//       `gate_queue` entry — unlike `taskId`/`branch`/`workerLabel`, which stay omitted for a foreign
-//       entry — proving idle/extend visibility was added WITHOUT widening what a foreign entry exposes.
+//   (4) (e2e, cross-project) `idleMs`/`extended`/`liveness` are present (not omitted) on a FOREIGN
+//       project's `gate_queue` entry — unlike `taskId`/`branch`/`workerLabel`, which stay omitted for a
+//       foreign entry — proving idle/extend/liveness visibility was added WITHOUT widening what a foreign
+//       entry exposes. Deliberately the ONE block that reads EAGERLY, immediately after admission (block
+//       (2) polls past the gap below) — so its assertions are written to be race-TOLERANT rather than
+//       polling the race away, which would delete this suite's only observation point on the window itself.
+//
+// CARD 33aa0291 (2026-08-04): `idleMs` on a freshly-admitted RUNNING entry can genuinely still read `null`
+// — not a rare race, a MEASURED, persistent gap. `runWorkerGate` does a real git-subprocess round-trip
+// (`computeWorktreeGateStamp`, ~service.ts:11253) AFTER admission but BEFORE the gate step's first liveness
+// event; a merge/deploy gate has no such gap (its callback calls `runGateSeq` directly on admission). Direct
+// instrumentation of a real `runWorkerGate` op (`process.hrtime.bigint()`; admission at first
+// `activeCount===1`, first-liveness at first `idleMs != null`) on 2026-08-04, 16-logical-core win32/x64
+// (AMD Ryzen 7 3700X): quiet host n=15 → min=142.9ms p50=157.7ms max=209.2ms; loaded host (15 concurrent
+// CPU-saturating children) n=12 → min=171.5ms p50=199.4ms max=1717.4ms. 27/27 trials ≥140ms. Those `max`
+// figures are the LARGEST OBSERVED in a small sample, not a guaranteed ceiling — re-measure before trusting
+// this note as still current. THE FIX: `liveness: "pending" | "observed"` (GateQueueEntry / gate_status),
+// a read-time-derived third state distinguishing "admitted, no liveness event yet" from "observed at least
+// once" — `idleMs` itself is UNCHANGED (still `null` while queued or pending), so this is purely additive.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-idle-liveness.mjs
 
 // LOOM_GATE_EXTEND_IDLE_MS must be set BEFORE gate-runner.js is ever imported (module-load-time constant).
@@ -166,17 +184,29 @@ try {
     check("(2) precondition: opId is present on the running entry (chainable into gate_status)", typeof running0.opId === "string" && running0.opId.length > 0);
     const opId = running0.opId;
 
+    // Card 33aa0291: whichever side of the admission→first-liveness race this read landed on, `liveness`
+    // must already agree with `idleMs` — "pending" iff still null, never omitted while running. This is a
+    // real, deterministic invariant regardless of timing (not a race itself), so it needs no poll.
+    check("(2) liveness matches idleMs immediately after admission, on whichever side of the race this read landed", running0.liveness === (running0.idleMs === null ? "pending" : "observed"));
+
     // `run_gate` has a real pre-flight git-stamp read AFTER admission but BEFORE its own runGateSequential
     // call (see GateSnapshotEntry.lastOutputAt's doc) — so idleMs can genuinely still read null for a brief
-    // real window right after admission. Poll (never a fixed-sleep guess) for it to become non-null, which
-    // itself proves the step actually started and the hook wiring stamped it.
+    // real window right after admission (MEASURED, not rare: card 33aa0291 clocked this at ~140ms-1.7s+ on a
+    // real host — see GateQueueEntry.liveness's doc for the full stamped figures). Poll (never a fixed-sleep
+    // guess) for it to become non-null, which itself proves the step actually started and the hook wiring
+    // stamped it.
     const started = await waitUntil(
       () => { const r = sessions.gateQueueForManager(P).running[0]; return r && r.idleMs != null ? r : undefined; },
       { label: "(2) idleMs becomes non-null once the step genuinely starts (past run_gate's pre-flight gap)" },
     );
     check("(2) idleMs is a real number once the step has started", typeof started.idleMs === "number");
+    // THE EVENTUAL-FLIP PROOF (card 33aa0291 DoD): liveness genuinely transitions "pending" → "observed" the
+    // moment idleMs first becomes real — proving the discriminator isn't pinned to one value forever (a
+    // regression that hardcoded `liveness` would pass block (4)'s poll-free checks below but fail here).
+    check("(2) liveness reads 'observed' the instant idleMs first becomes real", started.liveness === "observed");
     const gsRunning0 = sessions.gateStatus(opId);
     check("(2) gate_status reports the SAME idleMs shape as gate_queue for the SAME live op", gsRunning0.state === "running" && typeof gsRunning0.idleMs === "number");
+    check("(2) gate_status agrees liveness is 'observed' too (both derive from the SAME registry entry)", gsRunning0.liveness === "observed");
 
     // THE GROWTH PROOF: poll until idleMs has grown well past the admission-time reading — a static/broken
     // idleMs (always 0, always the same value, or always null) would time out here instead of passing.
@@ -196,10 +226,12 @@ try {
       { timeoutMs: 8000, label: `(2) idleMs drops back under ${RESET_CEILING_MS}ms after tick-2's new output (the field must MOVE IN BOTH DIRECTIONS, not just grow)` },
     );
     check("(2) idleMs genuinely reset after new output — producing output vs. quiet yield DIFFERENT values, in both directions", reset.idleMs < RESET_CEILING_MS);
+    check("(2) liveness stays 'observed' through the reset too — once observed, never reverts to 'pending' (lastOutputAt only ever advances)", reset.liveness === "observed");
 
     const result = await p1;
     check("(2) the real gate eventually settles passed:true (the script's own clean exit 0)", result?.settled === true && result.ok === true && result.value.passed === true);
     check("(2) once settled, gate_status no longer reports a live idleMs (falls back to the tombstone, idleMs:null)", sessions.gateStatus(opId).idleMs === null && sessions.gateStatus(opId).state === "settled");
+    check("(2) once settled, gate_status omits liveness entirely — no current step left to be pending/observed about", !("liveness" in sessions.gateStatus(opId)));
   }
 
   // ── (3) e2e, REAL spawn, REAL auto-extend: extended flips false → true ───────────────────────────────
@@ -301,11 +333,20 @@ try {
     const ownRunning = own.running[0];
     const foreignQueued = own.queued[0];
     check("(4) precondition: P1's own entry is running, P2's is queued", ownRunning.projectId === P1 && foreignQueued.projectId === P2);
-    check("(4) OWN-project running entry: idleMs is a real number (not omitted, not null)", typeof ownRunning.idleMs === "number");
+    // Card 33aa0291: idleMs on a freshly-admitted RUNNING entry can genuinely still be null (the real,
+    // MEASURED admission→first-liveness gap — see GateQueueEntry.liveness's doc) — asserting `typeof
+    // idleMs === "number"` here unconditionally is exactly the eager read that used to race. `liveness`
+    // resolves the ambiguity WITHOUT polling: it must agree with idleMs on whichever side of the race this
+    // particular read landed, deterministically, every time — this is deliberately the ONE place in this
+    // suite that reads eagerly into the window (block (2) polls past it) and is now STRICTER than before,
+    // not weaker.
+    check("(4) OWN-project running entry: idleMs is present — either still null (pending) or a real number (observed), never omitted", "idleMs" in ownRunning && (ownRunning.idleMs === null || typeof ownRunning.idleMs === "number"));
+    check("(4) OWN-project running entry: liveness is present and matches idleMs exactly — 'pending' iff idleMs is null, 'observed' iff it's a number", ownRunning.liveness === (ownRunning.idleMs === null ? "pending" : "observed"));
     check("(4) OWN-project running entry: extended is present (boolean)", typeof ownRunning.extended === "boolean");
     check("(4) FOREIGN (queued) entry OMITS taskId/branch/workerLabel — the existing redaction, unaffected by this change", !("taskId" in foreignQueued) && !("branch" in foreignQueued) && !("workerLabel" in foreignQueued));
     check("(4) THE POINT OF THIS CHECK: the FOREIGN entry does NOT omit idleMs — it's present (null, since queued — not yet running) exactly like an own-project queued entry would be", "idleMs" in foreignQueued && foreignQueued.idleMs === null);
     check("(4) THE FOREIGN entry does NOT omit extended either — present (false, since queued)", "extended" in foreignQueued && foreignQueued.extended === false);
+    check("(4) a QUEUED foreign entry omits liveness entirely — the concept only applies once running", !("liveness" in foreignQueued));
     check("(4) the foreign task's title never appears anywhere in the snapshot (idleMs/extended didn't smuggle anything else along)", !JSON.stringify(own).includes("GIL foreign task"));
 
     // Flip perspective: from P2's own view, P1's running entry is redacted (existing behavior) but STILL
@@ -313,7 +354,14 @@ try {
     const foreign = sessions.gateQueueForManager(P2);
     const p1RunningFromP2 = foreign.running[0];
     check("(4) from P2's view, P1's running entry is STILL redacted (taskId/branch omitted)", !("taskId" in p1RunningFromP2) && !("branch" in p1RunningFromP2));
-    check("(4) from P2's view, P1's running entry STILL carries a real idleMs (not omitted for a foreign caller)", typeof p1RunningFromP2.idleMs === "number");
+    // Same race-tolerant shape as the OWN-view checks above, not `typeof idleMs === "number"` — this is
+    // candidate (c)'s own disproof: idleMs/liveness are computed BEFORE the callerProjectId branch (see
+    // gateQueueForManager's toEntry), so a foreign read must land on EXACTLY the same idleMs/liveness pair
+    // an own-project read of the SAME entry would at the same instant — never null/omitted merely for being
+    // foreign. Card 33aa0291 ruled this candidate out by reading the source; this assertion is its regression
+    // guard.
+    check("(4) from P2's view, P1's running entry STILL carries idleMs — either still null (pending) or real (observed), never omitted for being foreign", "idleMs" in p1RunningFromP2 && (p1RunningFromP2.idleMs === null || typeof p1RunningFromP2.idleMs === "number"));
+    check("(4) THE POINT OF THIS CHECK: liveness is present and matches idleMs EXACTLY THE SAME WAY as the own-project view above — proving idleMs/liveness are never scoped by caller identity", p1RunningFromP2.liveness === (p1RunningFromP2.idleMs === null ? "pending" : "observed"));
 
     await p1;
     await p2;
@@ -326,6 +374,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore's GateLivenessHooks wiring (onStepStart/onOutput/onExtend) demonstrably moves lastOutputAt/extended on a live snapshot entry (RED-first: a static/broken wiring would leave these unchanged, and the negative/reset controls would time out rather than pass); a REAL runWorkerGate op's idleMs (read via BOTH gate_queue and gate_status) grows monotonically while its child is genuinely quiet and drops back down after new output — producing output vs. going quiet yield DIFFERENT values, in both directions, polled rather than guessed; extended reads false pre-deadline and flips true only once gate-runner.ts's OWN GATE_EXTEND_IDLE_MS-gated auto-extend genuinely fires; and idleMs/extended are present (never omitted) on a cross-project gate_queue entry exactly where taskId/branch/workerLabel remain redacted, proving the new fields didn't widen what a foreign project's entry exposes."
+  ? "\n✅ ALL PASS — GateSemaphore's GateLivenessHooks wiring (onStepStart/onOutput/onExtend) demonstrably moves lastOutputAt/extended on a live snapshot entry (RED-first: a static/broken wiring would leave these unchanged, and the negative/reset controls would time out rather than pass); a REAL runWorkerGate op's idleMs (read via BOTH gate_queue and gate_status) grows monotonically while its child is genuinely quiet and drops back down after new output — producing output vs. going quiet yield DIFFERENT values, in both directions, polled rather than guessed; extended reads false pre-deadline and flips true only once gate-runner.ts's OWN GATE_EXTEND_IDLE_MS-gated auto-extend genuinely fires; liveness genuinely flips 'pending'→'observed' the instant idleMs first becomes real and never reverts; and idleMs/extended/liveness are present (never omitted) on a cross-project gate_queue entry exactly where taskId/branch/workerLabel remain redacted, proving the new fields didn't widen what a foreign project's entry exposes — including a race-tolerant check (block 4, the suite's one eager reader) that idleMs/liveness agree on whichever side of the real admission→first-liveness window a read lands, for both own- and foreign-project callers identically."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
