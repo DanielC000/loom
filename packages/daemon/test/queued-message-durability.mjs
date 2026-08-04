@@ -361,6 +361,11 @@ try {
   // BEFORE this fix carries none of kind/giveUpHeldUntil/rootMsgId/chainDepth. The redrive must apply the
   // EXACT defaults that reproduce this method's pre-fix behavior — never let a missing field silently become
   // something OTHER than what pre-fix code always did (that is how this bug class arrived in the first place).
+  // Card bcaeab8d: the TEXT itself is no longer one of those byte-identical defaults — every Path D redrive
+  // now carries a `[loom:possible-duplicate root:…]` prefix (see redriveQueuedMessage's own comment for why
+  // this path tags unconditionally), so these two blocks assert on CONTAINS, not exact-equals, and separately
+  // assert the tag is present — proving the fix DIRECTLY rather than merely tolerating it.
+  const POSSIBLE_DUP_PREFIX_RE = /^\[loom:possible-duplicate root:[0-9a-f]{8}\] /;
   {
     // (B-g) idle recipient → kind default + no-accidental-hold default.
     const pty = new PtyStub();
@@ -374,9 +379,10 @@ try {
     pty.setLive(wkr); // idle, no busy
     const m = sessions.recoverUndeliveredMessagesOnBoot();
     check("(B-g) the legacy record redrove", m.reEnqueued === 1);
-    const sentEntry = pty.sent.find((s) => s.text === "LEGACY_ROW_IDLE");
+    const sentEntry = pty.sent.find((s) => s.text.includes("LEGACY_ROW_IDLE"));
     check("(B-g) DEFAULT kind → \"agent\" for a legacy record with no persisted kind", sentEntry?.kind === "agent");
     check("(B-g) DEFAULT no hold → an idle recipient gets it delivered immediately (giveUpHeldUntil defaulted to undefined, not an accidental hold)", pty.getPending(wkr).length === 0);
+    check("(B-g) THE FIX: a Path D redrive carries the possible-duplicate tag even for a first-ever legacy row (no signal to know otherwise)", POSSIBLE_DUP_PREFIX_RE.test(sentEntry?.text ?? ""));
   }
   {
     // (B-h) busy recipient → rootMsgId/chainDepth defaults, proven via the resulting give-up event.
@@ -391,7 +397,9 @@ try {
     });
     pty.setLive(wkr); pty.setBusy(wkr); // held → observable in the FIFO, giveUpOn-able
     const m = sessions.recoverUndeliveredMessagesOnBoot();
-    check("(B-h) the legacy record redrove HELD (busy recipient)", m.reEnqueued === 1 && pty.getPending(wkr).some((t) => t === "LEGACY_ROW_BUSY"));
+    const heldEntry = pty.getPending(wkr).find((t) => t.includes("LEGACY_ROW_BUSY"));
+    check("(B-h) the legacy record redrove HELD (busy recipient)", m.reEnqueued === 1 && !!heldEntry);
+    check("(B-h) THE FIX: the held redrive also carries the possible-duplicate tag", POSSIBLE_DUP_PREFIX_RE.test(heldEntry ?? ""));
     pty.giveUpOn(wkr); // exhaust the (redriven) legacy message's in-session budget → re-mint
     const gaveUpEvt = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === legacyMsgId);
     check("(B-h) DEFAULT rootMsgId → self-rooted at the legacy record's OWN msgId (never recoverable, so it starts a fresh chain here)", gaveUpEvt?.detail?.rootMsgId === legacyMsgId);

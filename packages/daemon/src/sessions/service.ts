@@ -3875,7 +3875,9 @@ export class SessionService {
    *     "recipient-gone-or-superseded") so the undelivered set can't grow forever → "retired";
    *   • recipient LIVE → re-enqueue with the SAME msgId (no new queued event) so its drain resolves THIS
    *     event; ready-gated in host.ts (a freshly-resumed pty holds it until its TUI boots, then drains) →
-   *     "reEnqueued";
+   *     "reEnqueued". Card bcaeab8d: the text handed to the recipient is `framePossibleDuplicate`-tagged
+   *     (see that call site's own comment) — this is Loom's ONLY redelivery route with no in-process signal
+   *     of a prior attempt, so it tags unconditionally rather than silently guessing;
    *   • recipient exists but isn't live (exited/starting) or live-without-pty → "stuck" (the caller decides
    *     what to do — the boot scan surfaces it to the live sender; the resume path leaves it for a later flip).
    * IDEMPOTENT two ways: (1) the in-process {@link redriveInFlightMsgIds} guard — a msgId whose previous
@@ -3946,8 +3948,22 @@ export class SessionService {
       const routeDetail = e.detail?.route as { channel?: unknown; chatId?: unknown } | undefined;
       const route: CompanionRoute | undefined = routeDetail && typeof routeDetail.channel === "string" && typeof routeDetail.chatId === "string"
         ? { channel: routeDetail.channel, chatId: routeDetail.chatId } : undefined;
+      // Card bcaeab8d: Path D is the one redelivery route that could NEVER carry the possible-duplicate
+      // banner — unlike B/C (gated on giveUpGen/chainDepth, a reliable in-process signal of "this exact
+      // attempt already failed to confirm once"), a redrive has NO such signal available across a daemon
+      // restart: the persisted session_message_queued row is never mutated with an attempt count, so there
+      // is no way to tell "first-ever delivery, recipient just wasn't live yet" apart from "already
+      // physically written once, but the delivered-marker never made it to disk before a crash" (that race
+      // is card bcaeab8d's own DoD-6, deliberately left unverified — see this method's doc). Given that
+      // genuine ambiguity, tag UNCONDITIONALLY rather than silently guess: `framePossibleDuplicate` is
+      // idempotent (strips any existing frame first) and costs nothing on the common first-delivery case
+      // beyond a harmless, self-explanatory prefix — the alternative (Path D's prior behavior) is a
+      // redelivery that is STRUCTURALLY INCAPABLE of ever being flagged as one. `text` itself stays
+      // pristine for `onGiveUpExhausted` below — that closure's own re-mint applies this same framing
+      // itself (see handleGiveUpExhausted's doc: it needs the UNFRAMED original).
+      const redrivenText = framePossibleDuplicate(text, rootMsgId);
       const r = this.pty.enqueueStdin(
-        recipientId, text, "system", (reason?: string) => {
+        recipientId, redrivenText, "system", (reason?: string) => {
           this.redriveInFlightMsgIds.delete(msgId);
           this.resolveQueuedMessage(msgId, { recipientId, reason });
         }, route, kind, undefined, undefined, undefined, undefined, {
@@ -3956,7 +3972,16 @@ export class SessionService {
           logicalId: rootMsgId, // card 4a0af485 CR follow-up #6 — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
         },
       );
-      if (r.delivered || r.position !== undefined) return "reEnqueued";
+      if (r.delivered || r.position !== undefined) {
+        // Card bcaeab8d DoD-4: before this fix, the ONLY log line anywhere in the redrive machinery was the
+        // decline branch above (retiring a stale row) — the branch that actually re-sends logged nothing at
+        // any spelling, which is exactly why a prior peer's log census of `redrive`/`session_message_queued`
+        // came back a censored zero instead of a genuine absence. Anchor with `^[redrive]` like the decline
+        // branch so both are greppable the same way.
+        // eslint-disable-next-line no-console
+        console.log(`[redrive] re-enqueued msgId=${msgId} rootMsgId=${rootMsgId} for ${recipientId} (held=${r.delivered !== true})`);
+        return "reEnqueued";
+      }
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
       // enqueued; undo the in-flight mark and treat as stuck so a later live-flip can retry it.
       this.redriveInFlightMsgIds.delete(msgId);
