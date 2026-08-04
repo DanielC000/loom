@@ -219,7 +219,8 @@ read as complementary findings, not alternatives. The failure is an **uncaught e
 subprocess**, not a graceful assertion failure. **Observed parent-process exit shapes vary and are not a
 single universal** — the two Experiment 1 crashes below both exited `1`, but other observed specimens
 exited `0` (parent survived) and `3221225477` (`0xC0000005`, ACCESS_VIOLATION); see the counter-evidence
-subsection for the full range and do not assume `exit 1` when characterizing a future occurrence. This
+subsection below (and item 8) for the range — not exhaustive, `timeout` is the dominant shape and is
+recorded separately in item 8 — and do not assume `exit 1` when characterizing a future occurrence. This
 reaches a separate-process, hermetic test exactly as DoD-2 asks (confirmed via a real, forced, repeatable
 crash — not inferred).
 
@@ -376,12 +377,18 @@ concurrency. **The depth-1 trigger is now named (card `d915ef71` — see "What r
 `kill()`, never from spawn — confirmed both from that source location and by a depth-1/concurrency-1
 isolated spawn+stop reproducing the identical failure twice.
 
-**Observed parent-process exit shapes are a range, not a single value.** This document originally asserted
-the crash "kills the parent test process outright (`exit 1`)," generalized from Experiment 1's two
-`exit 1` observations. The full observed range across all known specimens is: `exit 1` (Experiment 1
-above, N=8/depth=9), `exit 0` with the parent surviving (the first three counter-evidence specimens
-above), and `exit 3221225477` / ACCESS_VIOLATION (the fourth). Do not assume any one of these when
-characterizing a future occurrence — check the actual exit code.
+**Observed test-file-process exit shapes are a range, not a single value — and this list is not
+exhaustive.** This document originally asserted the crash "kills the parent test process outright
+(`exit 1`)," generalized from Experiment 1's two `exit 1` observations. Widening the range to `exit 1`
+(Experiment 1 above, N=8/depth=9), `exit 0` with the parent surviving (the first three counter-evidence
+specimens above), and `exit 3221225477` / ACCESS_VIOLATION (the fourth) was itself incomplete: it omits
+`timeout`, which item 8 below records as the DOMINANT recorded shape (7 of 11 merge-gate rejections for
+this test, vs. 2 `exit 1` and 2 `exit 3221225477`) — see item 8 for the distribution, its provenance (a
+read-only `loom.db` query, 2026-08-04), and why those 7 timeouts are NOT retroactively classifiable as
+crashes. **This range is at the TEST-FILE-PROCESS level** — the same level `exit 3221225477` itself
+belongs to (per item 8); the GATE step that runs the whole suite always exits `1` regardless of which of
+these shapes occurred underneath it. Do not assume any one of these when characterizing a future
+occurrence — check the actual exit code, and do not assume this list is exhaustive.
 
 **A caution this raises, not acted on here.** If the crashed process sometimes does not exit promptly (see
 the "does not self-terminate at all" observation reported alongside this investigation on card `6a016f9d`),
