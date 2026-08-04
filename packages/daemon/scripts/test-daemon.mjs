@@ -68,18 +68,31 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // be confused. Same per-row schema (kind:"file"/kind:"run-summary", same field names), so the two stay
 // trivially concatenable for comparison — plus one ADDITIVE field (`runUid` on both row kinds; see the
 // gate-timing emission block in the isMain run below for why `runIndex` alone isn't collision-safe here).
+//
+// Card 05056168: a THIRD row kind, kind:"run-start", is a WRITE-AHEAD record appended BEFORE the first test
+// spawn — carrying `selected` (the full run set by name). Before this card, both existing row kinds were
+// only ever written AFTER the whole suite finished, so a SIGKILLed run left no record at all — not even for
+// files that had already completed. The run-start row is the one line SIGKILL cannot defeat, and every
+// "file" row is now flushed INCREMENTALLY as each file completes (see runLane below), not batched into a
+// post-run loop. A reader pairs a run-start row with the run-summary row sharing its `runUid`: a run-start
+// with no matching run-summary is a run that never terminated normally, and subtracting the "file" rows'
+// names that DID land (same runUid) from `selected` names the file(s) in flight when it died — see the
+// exported `neverCompletedFiles` helper. Existing consumers (e.g.
+// docs/investigations/a591a654-gate-timing-attribution/scripts/compute-sum-wall-slack.mjs) already filter
+// by `kind`, so this additive row kind is silently ignored by anything that doesn't know about it yet.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 
 // Card 17069e7e (CR follow-up, DIRECTIVE #3): tally, don't print, on each individual write failure. A
-// single gate run calls `appendGateTimingRow` up to ~631 times (1 run-summary + one per test file) — if
-// `LOOM_HOME` were ever unwritable, warning ON EVERY CALL would print up to 631 near-identical lines to
-// stderr. The merge gate surfaces only a bounded ~4KB stdout+stderr TAIL on rejection (see gate-runner.ts's
-// OUTPUT_TAIL_BYTES); that many lines would push the actual failing test's assertion clean out of that
-// tail — the failure mode of this OBSERVABILITY feature would destroy the diagnostic output of the very
-// suite it observes. So: silently count here; the isMain block prints ONE summary warning (if any failures
-// occurred at all), after every row for the run has been attempted. NEVER reintroduce a per-call
-// console.warn in the catch below.
+// single gate run calls `appendGateTimingRow` up to ~633 times (1 run-start + 1 run-summary + one per test
+// file — card 05056168 added the run-start row and moved the per-file calls to fire incrementally, but the
+// total call count is unchanged) — if `LOOM_HOME` were ever unwritable, warning ON EVERY CALL would print
+// up to 633 near-identical lines to stderr. The merge gate surfaces only a bounded ~4KB stdout+stderr TAIL
+// on rejection (see gate-runner.ts's OUTPUT_TAIL_BYTES); that many lines would push the actual failing
+// test's assertion clean out of that tail — the failure mode of this OBSERVABILITY feature would destroy
+// the diagnostic output of the very suite it observes. So: silently count here; the isMain block prints ONE
+// summary warning (if any failures occurred at all), after every row for the run has been attempted. NEVER
+// reintroduce a per-call console.warn in the catch below.
 let gateTimingWriteFailureCount = 0;
 let gateTimingWriteFailureLastMessage = null;
 
@@ -134,6 +147,17 @@ export function topSlowestFiles(results, n = 20) {
     .slice()
     .sort((a, b) => b.durationMs - a.durationMs)
     .slice(0, n);
+}
+
+/** Card 05056168: pure set-difference — given `selected` (a "kind":"run-start" row's file list) and
+ *  `completedNames` (the names with a matching "kind":"file" row for the same runUid), returns the names
+ *  that never got one, in `selected`'s original order. On a run that terminated normally this is always
+ *  empty (every selected file has a completion row); on a run killed mid-flight, it names the file(s) that
+ *  were in progress at the moment it died. Exported so a test — or a future reader of the raw NDJSON — can
+ *  compute this directly instead of duplicating the set-difference. */
+export function neverCompletedFiles(selected, completedNames) {
+  const completed = new Set(completedNames);
+  return selected.filter((name) => !completed.has(name));
 }
 
 function formatSeconds(ms) {
@@ -718,7 +742,10 @@ function makeCursor(length) {
   return () => (next < length ? next++ : null);
 }
 
-async function runLane(lane, names, nextIndex, results, completionTimestamps) {
+// `gateTimingCtx` ({runIndex, runUid}) is the SAME join key the write-ahead "run-start" row and the
+// eventual "run-summary" row share (see the isMain block below) — passed in rather than read from a
+// module-level var so a future test can drive this function with a synthetic ctx.
+async function runLane(lane, names, nextIndex, results, completionTimestamps, gateTimingCtx) {
   for (let idx = nextIndex(); idx !== null; idx = nextIndex()) {
     const name = names[idx];
     const result = await runOne(name, lane);
@@ -727,6 +754,26 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps) {
     // same completion event `maxGapMs` measures gaps between. Recorded regardless of pass/fail.
     completionTimestamps.push(performance.now());
     console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}${result.ok ? "" : `  (exit ${result.status})`}`);
+    // Card 05056168: flush THIS file's row the moment it completes, rather than batching every row into a
+    // loop that only ran after the whole suite finished (the original defect — a SIGKILLed run never
+    // reached that loop, so nothing was written even for files that had already completed). Same row shape
+    // as before this card. `appendGateTimingRow` itself never throws (see its own doc) — relied on here
+    // exactly as the old post-run loop relied on it, with no per-call wrapping.
+    appendGateTimingRow(GATE_TIMING_NDJSON, {
+      kind: "file",
+      runIndex: gateTimingCtx.runIndex,
+      runUid: gateTimingCtx.runUid,
+      name: result.name,
+      startTs: result.startTs ?? null,
+      startTsIso: result.startTs != null ? new Date(result.startTs).toISOString() : null,
+      endTs: result.endTs ?? null,
+      endTsIso: result.endTs != null ? new Date(result.endTs).toISOString() : null,
+      durationMs: result.durationMs ?? null,
+      ok: result.ok,
+      status: result.status ?? null,
+      skipped: !!result.skipped,
+      lane: result.lane ?? null,
+    });
   }
 }
 
@@ -918,10 +965,40 @@ if (isMain) {
   const gateTimingRunStartTs = new Date().toISOString();
   const gateTimingRunStartEpoch = Date.now();
   const gateTimingHostBefore = cheapHostSnapshot();
+  // Card 6185fbfc reviewer note: a bare Date.now() run key collides across two gates admitted in the same
+  // millisecond (maxConcurrentGates >= 2) — the exact defect card f5421d27 found in
+  // test/deploy-staleness.mjs's fixture names. `runIndex` stays numeric (Date.now()) for schema
+  // compatibility with the existing investigation NDJSON; `runUid` adds process.pid so two concurrent gate
+  // runs on this host can never share a join key, even if they start in the same ms. Card 05056168 moved
+  // this computation HERE, before any test spawns, so the write-ahead row below and every incremental
+  // per-file row (see runLane) share the same join key the eventual run-summary row will also carry.
+  const gateTimingRunIndex = gateTimingRunStartEpoch;
+  const gateTimingRunUid = `${gateTimingRunStartEpoch}-${process.pid}`;
+  // Card 05056168: the WRITE-AHEAD record — appended BEFORE the first test spawn, so it is the one row a
+  // SIGKILL of this whole process cannot defeat. `selected` is the full run set; a reader pairs this row
+  // with the run-summary row sharing `runUid` (its absence means the run never terminated normally) and can
+  // name the file(s) in flight at kill time via `neverCompletedFiles(selected, <names with a "file" row>)`.
+  try {
+    appendGateTimingRow(GATE_TIMING_NDJSON, {
+      kind: "run-start",
+      runIndex: gateTimingRunIndex,
+      runUid: gateTimingRunUid,
+      runStartTs: gateTimingRunStartTs,
+      poolSize: EFFECTIVE_POOL_SIZE,
+      testCount: SELECTED.length,
+      selected: SELECTED.slice(),
+      hostBefore: gateTimingHostBefore,
+    });
+  } catch (err) {
+    // Belt-and-suspenders only — appendGateTimingRow itself never throws (see its own doc); this guards the
+    // (trivial, should-never-throw) row construction, same posture as the post-run block below.
+    console.warn(`⚠ gate-timing write-ahead record failed (non-fatal): ${err.message}`);
+  }
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
     const nextIndex = makeCursor(SELECTED.length);
+    const gateTimingCtx = { runIndex: gateTimingRunIndex, runUid: gateTimingRunUid };
     await Promise.all(
-      Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, SELECTED.length) }, (_, lane) => runLane(lane, SELECTED, nextIndex, results, completionTimestamps)),
+      Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, SELECTED.length) }, (_, lane) => runLane(lane, SELECTED, nextIndex, results, completionTimestamps, gateTimingCtx)),
     );
 
     // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
@@ -965,16 +1042,14 @@ if (isMain) {
   // already individually guarded; this outer try/catch also guards the (pure, should-never-throw) summary
   // computation itself, belt-and-suspenders.
   try {
-    // Card 6185fbfc reviewer note carried forward here too: a bare Date.now() run key collides across two
-    // gates admitted in the same millisecond (maxConcurrentGates >= 2) — the exact defect card f5421d27
-    // found in test/deploy-staleness.mjs's fixture names. `runIndex` stays numeric (Date.now()) for schema
-    // compatibility with the existing investigation NDJSON; `runUid` adds process.pid so two concurrent gate
-    // runs on this host can never share a join key, even if they start in the same ms.
-    const gateTimingRunIndex = gateTimingRunStartEpoch;
-    const gateTimingRunUid = `${gateTimingRunStartEpoch}-${process.pid}`;
     // gateTimingHostBefore was captured BEFORE runInstrumentedSuite ran (see above) — only the "after" side
     // is taken here, so the two snapshots actually bracket the run instead of both landing post-run.
     const gateTimingHostAfter = cheapHostSnapshot();
+    // Card 05056168: this "run-summary" row is what CLOSES the write-ahead "run-start" row written before
+    // the first spawn (same runUid, computed once above) — its presence is the "the run terminated
+    // normally" signal a reader keys on. Every per-file "file" row was already flushed incrementally in
+    // runLane as each file completed, so there is no longer a post-run loop over `results` here — the
+    // original defect this card fixes was exactly that loop never running when the process was SIGKILLed.
     appendGateTimingRow(GATE_TIMING_NDJSON, {
       kind: "run-summary",
       runIndex: gateTimingRunIndex,
@@ -990,23 +1065,6 @@ if (isMain) {
       hostBefore: gateTimingHostBefore,
       hostAfter: gateTimingHostAfter,
     });
-    for (const r of results) {
-      appendGateTimingRow(GATE_TIMING_NDJSON, {
-        kind: "file",
-        runIndex: gateTimingRunIndex,
-        runUid: gateTimingRunUid,
-        name: r.name,
-        startTs: r.startTs ?? null,
-        startTsIso: r.startTs != null ? new Date(r.startTs).toISOString() : null,
-        endTs: r.endTs ?? null,
-        endTsIso: r.endTs != null ? new Date(r.endTs).toISOString() : null,
-        durationMs: r.durationMs ?? null,
-        ok: r.ok,
-        status: r.status ?? null,
-        skipped: !!r.skipped,
-        lane: r.lane ?? null,
-      });
-    }
     for (const line of formatGateTimingSummaryLines(results, gateTimingWallClockMs)) console.log(line);
     // Card 17069e7e (CR follow-up): ONE summary line for every write failure this run, never one per row —
     // see gateTimingWriteFailureSummary's own doc for why per-row warnings would blind a rejected gate's

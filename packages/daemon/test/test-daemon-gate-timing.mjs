@@ -2,11 +2,14 @@
 // no flag, matching the existing NDJSON schema at
 // docs/investigations/6c1aadf7-daemon-suite-timing/data/per-file-timing.ndjson (produced by that
 // investigation's own measure-per-file-timing.mjs — reused, not reinvented). Exercises the exported
-// `appendGateTimingRow`/`cheapHostSnapshot`/`topSlowestFiles`/`formatGateTimingSummaryLines` directly against
-// synthetic inputs and a scratch file — never a real spawn of the whole script (that would either run the
-// full hermetic suite or need a `--count`-shaped early exit, neither of which exercises this logic in
-// isolation), same reasoning test-daemon-cli-args.mjs/test-daemon-rss-gap.mjs already established for this
-// file.
+// `appendGateTimingRow`/`cheapHostSnapshot`/`topSlowestFiles`/`formatGateTimingSummaryLines`/
+// `neverCompletedFiles` directly against synthetic inputs and a scratch file — never a real spawn of the
+// whole script (that would either run the full hermetic suite or need a `--count`-shaped early exit,
+// neither of which exercises this logic in isolation), same reasoning test-daemon-cli-args.mjs/
+// test-daemon-rss-gap.mjs already established for this file. The REAL-spawn SIGKILL positive control for
+// card 05056168 (the write-ahead record actually surviving a kill) lives separately in
+// test-daemon-gate-timing-sigkill.mjs — that one specifically needs a real subprocess, which is exactly
+// what this file's own pattern avoids for everything else.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +19,7 @@ import {
   cheapHostSnapshot,
   topSlowestFiles,
   formatGateTimingSummaryLines,
+  neverCompletedFiles,
 } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
@@ -58,7 +62,7 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
   }
   check("[negative control] a write target whose parent is un-mkdir-able does NOT throw past this function", caught === null);
   check("[negative control] no file was created at the unwritable target", !fs.existsSync(unwritableTarget));
-  check("[positive control — the actual CR fix] appendGateTimingRow itself NEVER calls console.warn, even across 3 failures (per-row warnings would print 631x in a real gate run)", warnCalls.length === 0);
+  check("[positive control — the actual CR fix] appendGateTimingRow itself NEVER calls console.warn, even across 3 failures (per-row warnings would print 633x in a real gate run)", warnCalls.length === 0);
   const summary = gateTimingWriteFailureSummary();
   check("[positive control] every failed call is still tallied (3 more than before this block)", summary.count === countBefore + 3);
   check("the tally records the real underlying error message (ENOTDIR), not a placeholder", summary.lastMessage?.includes("ENOTDIR") ?? false);
@@ -110,6 +114,35 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
   // formatter or fabricate a slowest-files section.
   const emptyLines = formatGateTimingSummaryLines([{ name: "only-skip", skipped: true }], 500);
   check("[negative control] all-skipped input reports 0 files, no slowest section, and does not throw", emptyLines[0].includes("across 0 file(s)") && !emptyLines.some((l) => l.includes("slowest")));
+}
+
+// ── neverCompletedFiles (card 05056168) ─────────────────────────────────────────────────────────────────
+{
+  // [positive control] the actual scenario this exists for: a run-start "selected" list where some names
+  // never got a matching "file" completion row — the file(s) in flight when a run died mid-way.
+  const selected = ["a", "b", "c"];
+  check(
+    "[positive control] a partially-completed run names exactly the file(s) with no completion row",
+    neverCompletedFiles(selected, ["a", "c"]).join(",") === "b",
+  );
+  check(
+    "[positive control] multiple never-completed files are all named, in original order",
+    neverCompletedFiles(selected, []).join(",") === "a,b,c",
+  );
+  // [negative control] a run that DID terminate normally (every selected file has a completion row) must
+  // report zero never-completed files — not a false positive from a naive implementation.
+  check(
+    "[negative control] a fully-completed run reports zero never-completed files",
+    neverCompletedFiles(selected, ["a", "b", "c"]).length === 0,
+  );
+  check(
+    "[negative control] an empty selected list reports zero never-completed files, not a thrown error",
+    neverCompletedFiles([], ["a"]).length === 0,
+  );
+  check(
+    "a completed name not present in `selected` at all is simply ignored (no crash, no spurious entry)",
+    neverCompletedFiles(["a"], ["a", "z"]).length === 0,
+  );
 }
 
 fs.rmSync(scratchRoot, { recursive: true, force: true });
