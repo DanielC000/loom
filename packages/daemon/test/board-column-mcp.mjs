@@ -13,6 +13,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       is HARD-REJECTED — the existing planColumnLayout guard, not a new one.
 //   (e) all three tools are on the MANAGER surface and ABSENT from the WORKER surface (a worker must
 //       never restructure a shared board).
+//   (f) card bb95a379: my_context (the manager-surface READ) exposes the SAME resolved `columns` array
+//       these three mutators build, so a manager no longer has to issue a mutating call just to see the
+//       layout — proven to discriminate an excludeFromIdleWatchdog lane (true) from every other column
+//       on the SAME board (absent/false), and from a board with none at all (absent/false everywhere).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/board-column-mcp.mjs
 import fs from "node:fs";
@@ -181,6 +185,41 @@ try {
   // Defense in depth: the service method itself is reused verbatim — no bypass of updateBoardColumns.
   let svcHasMethod = typeof svc.updateBoardColumns === "function";
   check("(defense-in-depth) sessions.updateBoardColumns exists and is the delegate", svcHasMethod);
+
+  // ===================== (f) my_context exposes the board layout READ-ONLY (card bb95a379) =====================
+  // Board columns were previously readable ONLY by mutating them (the three board_column_* tools above).
+  // my_context now folds in the SAME resolved `columns` array. Positive control, BOTH directions: project
+  // "p1" (this test's default board — no excludeFromIdleWatchdog anywhere) must show it absent/false on
+  // every column; a SEPARATE project with a flagged "Dropped" lane must show it `true` on that one column
+  // and absent on the rest — proving the read actually discriminates, not just returns a constant.
+  const p1Ctx = await callAs("MGR", "manager", "my_context", {});
+  check("(f) my_context returns a columns array", Array.isArray(p1Ctx.columns) && p1Ctx.columns.length > 0);
+  check("(f) my_context columns carry key/label/role", p1Ctx.columns.every((c) => typeof c.key === "string" && typeof c.label === "string"));
+  check("(f) p1 has NO excludeFromIdleWatchdog column (default board) — every column shows it absent/false",
+    p1Ctx.columns.every((c) => c.excludeFromIdleWatchdog === undefined || c.excludeFromIdleWatchdog === false));
+  check("(f) p1's my_context columns match currentColumns/board_column_* verbatim",
+    JSON.stringify(p1Ctx.columns) === JSON.stringify(resolveConfig(db.getProject("p1").config).kanbanColumns));
+
+  const DROPPED_BOARD = {
+    kanbanColumns: [
+      { key: "backlog", label: "Backlog", role: "defaultLanding" },
+      { key: "todo", label: "Todo", role: "workReady" },
+      { key: "dropped", label: "Dropped", excludeFromIdleWatchdog: true },
+      { key: "done", label: "Done", role: "terminal" },
+    ],
+  };
+  db.insertProject({ id: "p2", name: "Project 2 (dropped lane)", repoPath: repo, vaultPath: repo, config: DROPPED_BOARD, createdAt: now, archivedAt: null, reserved: false });
+  db.insertAgent({ id: "agent2", projectId: "p2", name: "Work2", startupPrompt: "WORK-2", position: 0, profileId: null });
+  seedSession("MGR2", "p2", "agent2", "manager");
+  const p2Ctx = await callAs("MGR2", "manager", "my_context", {});
+  const droppedCol = p2Ctx.columns.find((c) => c.key === "dropped");
+  const otherCols = p2Ctx.columns.filter((c) => c.key !== "dropped");
+  check("(f) p2's flagged 'dropped' lane reads excludeFromIdleWatchdog === true", droppedCol?.excludeFromIdleWatchdog === true);
+  check("(f) p2's OTHER lanes still read it absent/false (the read discriminates, not a constant)",
+    otherCols.every((c) => c.excludeFromIdleWatchdog === undefined || c.excludeFromIdleWatchdog === false));
+
+  // Fold-in must not disturb the pre-existing my_context surface (gateCommand still present).
+  check("(f) my_context still returns gateCommand alongside columns (additive, not a replacement)", "configured" in p1Ctx.gateCommand);
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -188,6 +227,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — board_column_create/rename/delete are manager-gated (absent from the worker surface) and delegate 100% to the existing atomic updateBoardColumns writer: create appends, rename re-keys a moved card old→new, delete re-keys a removed column's cards to defaultLanding, and removing a required-role (defaultLanding/terminal) column without reassigning it is hard-rejected exactly like the human column editor — claude-free, network-free."
+  ? "\n✅ ALL PASS — board_column_create/rename/delete are manager-gated (absent from the worker surface) and delegate 100% to the existing atomic updateBoardColumns writer: create appends, rename re-keys a moved card old→new, delete re-keys a removed column's cards to defaultLanding, and removing a required-role (defaultLanding/terminal) column without reassigning it is hard-rejected exactly like the human column editor; and my_context now exposes the SAME resolved columns array READ-ONLY, proven to discriminate an excludeFromIdleWatchdog lane from an unflagged one — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

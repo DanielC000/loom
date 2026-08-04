@@ -29,7 +29,7 @@ import { validateAgentPatch } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
-import { setProjectConfigSafe } from "../tasks/columns.js";
+import { setProjectConfigSafe, currentColumns } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
@@ -1299,11 +1299,14 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_get",
       {
-        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
+        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids). Also returns `columns` (card bb95a379): the project's RESOLVED board layout — the SAME array the manager-side `board_column_create/rename/delete` tools return in their own {ok, columns, warnings} payload, so this is the Platform Lead's read-only path to it (those three mutators are manager-only and never registered here). Resolves through the project's config override when one is set, else the shipped defaults — both cases go through the ONE `currentColumns` resolver, so this answers either shape, not just one. Each entry carries at least {key, label, role, excludeFromIdleWatchdog}; `role`/`excludeFromIdleWatchdog` are OPTIONAL and ABSENT when unset on that column, meaning today's default (unroled / not discounted from the idle watchdog), never a measured `false`. Use it to audit which lanes are discounted from the idle watchdog across a project without a mutating call.",
         inputSchema: strictShape({ projectId: z.string() }),
       },
-      async ({ projectId }) =>
-        ok(getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project")),
+      async ({ projectId }) => {
+        const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in project) return ok(project);
+        return ok({ ...project, columns: currentColumns(db, project.id) });
+      },
     );
 
     // --- profiles (cross-project rigs). HUMAN-EQUIVALENT ops — gated to the platform role only; the

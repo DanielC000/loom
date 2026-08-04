@@ -750,18 +750,38 @@ export class OrchestrationMcpRouter {
   }
 
   /**
+   * READ-ONLY projection of the caller's project RESOLVED board columns (card bb95a379) — the SAME array
+   * `currentColumns` builds and the three `board_column_*` mutators already return in their `{ok, columns,
+   * warnings}` payload; no new shape. Folded into `my_context` so a manager can read the layout (and, in
+   * particular, which columns carry `excludeFromIdleWatchdog`) WITHOUT issuing a mutating
+   * board_column_rename/create/delete call just to see the response. Resolves through the SAME
+   * `resolveConfig(...).kanbanColumns` expression `idle-watcher.ts`/`wake-impact.ts` themselves consume to
+   * build `excludedColumnKeys` — so this read exposes exactly what both of those shared units act on, not a
+   * parallel reimplementation that could drift. Answers BOTH the shipped-defaults case (no project
+   * override — `currentColumns` resolves straight through to `PLATFORM_DEFAULTS.kanbanColumns`) and the
+   * per-project-override case (an explicit `kanbanColumns` override, resolved in its place) — the same
+   * `currentColumns` call handles both, so there is no separate default-vs-override branch here to omit
+   * one of them.
+   */
+  private resolvedColumns(projectId: string | undefined): KanbanColumn[] {
+    return projectId ? currentColumns(this.db, projectId) : resolveConfig(undefined).kanbanColumns;
+  }
+
+  /**
    * The caller's OWN measured context occupancy (server-derived from the URL-path session id — a
    * session can only ever read itself, so cross-session reads are impossible). Reuses the value the
    * Stop-time measurement path persists (`ctx_input_tokens`, via sessions/context.ts) — NO new
    * measurement. Returns `pct: null` + a note when not yet measured (never a fake 0%). Also folds in the
-   * project's RESOLVED `gateCommand` (READ-ONLY — see resolvedGateCommand) and, for a companion (`role
-   * === "assistant"`), its own delivery/channel introspection (see companionIntrospection).
+   * project's RESOLVED `gateCommand` (READ-ONLY — see resolvedGateCommand), the project's RESOLVED board
+   * `columns` (READ-ONLY — see resolvedColumns), and, for a companion (`role === "assistant"`), its own
+   * delivery/channel introspection (see companionIntrospection).
    */
   private myContext(sessionId: string): Record<string, unknown> {
     const s = this.db.getSession(sessionId);
     const ctxInputTokens = s?.ctxInputTokens ?? null;
     const measuredAt = s?.ctxUpdatedAt ?? null;
     const gateCommand = this.resolvedGateCommand(s?.projectId);
+    const columns = this.resolvedColumns(s?.projectId);
     const companion = s?.role === "assistant" ? this.companionIntrospection(sessionId) : undefined;
     // Card dcd8659c: the same PtyHost getter worker_list/worker_status read, folded in here so a
     // manager/worker can self-check whether ITS OWN composer is holding unsubmitted text — the gap named
@@ -784,7 +804,7 @@ export class OrchestrationMcpRouter {
       const model = profile?.model ?? null;
       const contextWindow = contextWindowForModel(model);
       return {
-        ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, measured: false,
+        ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, columns, measured: false,
         note: "context not measured yet (no completed turn) — occupancy unknown; contextWindow/model " +
           "reflect the CONFIGURED profile model when set, else the DEFAULT_CONTEXT_WINDOW fallback",
         composerDirtyLen,
@@ -801,6 +821,7 @@ export class OrchestrationMcpRouter {
       model,
       measuredAt,
       gateCommand,
+      columns,
       composerDirtyLen,
       unconfirmedDeliveryMs,
       ...(companion ? { companion } : {}),
@@ -884,7 +905,15 @@ export class OrchestrationMcpRouter {
           "includes `companion`: {bindings: [{channel, voiceReplies}], lastDelivery: {channel, text, " +
           "viaVoice, sentAt} | null} — your OWN bound channel(s) + effective voice-reply mode, and the last " +
           "reply you actually delivered (`text` IS that clip's transcript when `viaVoice` is true). Use it " +
-          "to answer 'what did you just send / on which channel / was it spoken' from real state.",
+          "to answer 'what did you just send / on which channel / was it spoken' from real state. " +
+          "`columns` is your project's RESOLVED board layout — the SAME array the `board_column_create/" +
+          "rename/delete` tools already return in their own {ok, columns, warnings} payload, so THIS is " +
+          "the read-only way to see it without issuing a mutating call just to read the response. Each " +
+          "entry carries at least {key, label, role, excludeFromIdleWatchdog} — role and " +
+          "excludeFromIdleWatchdog are OPTIONAL and ABSENT when not set on that column, meaning today's " +
+          "default (unroled / not discounted from the idle watchdog), never a measured `false`. Use it to " +
+          "audit which lanes are discounted from the idle watchdog (`excludeFromIdleWatchdog: true`) " +
+          "instead of guessing from a census that can't see them.",
         inputSchema: strictShape({}),
       },
       async () => ok(this.myContext(sessionId)),

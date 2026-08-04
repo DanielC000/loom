@@ -349,6 +349,43 @@ try {
   check("(f) template_apply: an unknown projectId is rejected (404, matches project_update/project_archive)",
     unknownProject.error === "project not found");
 
+  // ===================== (g) project_get exposes the board layout READ-ONLY (card bb95a379) =====================
+  // Board columns were previously readable on this surface only by inference from other reads (never at
+  // all, actually — project_get returned config.kanbanColumns which is only the STORED override, absent
+  // for a project inheriting shipped defaults). project_get now also returns `columns`: the RESOLVED
+  // layout — the same array the manager-surface board_column_* mutators build. Positive control, BOTH
+  // directions: "pOrd" (no kanbanColumns override — inherits shipped defaults) must show
+  // excludeFromIdleWatchdog absent/false on every column; a SEPARATE project with an explicit override
+  // carrying a flagged "Dropped" lane must show it `true` on that one column and absent on the rest.
+  const pOrdGet = await call("project_get", { projectId: "pOrd" });
+  check("(g) project_get returns a columns array", Array.isArray(pOrdGet.columns) && pOrdGet.columns.length > 0);
+  check("(g) pOrd has NO kanbanColumns override (inherits shipped defaults) — resolved via config.kanbanColumns undefined",
+    pOrdGet.config.kanbanColumns === undefined);
+  check("(g) pOrd's resolved columns show excludeFromIdleWatchdog absent/false everywhere (shipped defaults set no such flag)",
+    pOrdGet.columns.every((c) => c.excludeFromIdleWatchdog === undefined || c.excludeFromIdleWatchdog === false));
+
+  const DROPPED_BOARD = {
+    kanbanColumns: [
+      { key: "backlog", label: "Backlog", role: "defaultLanding" },
+      { key: "todo", label: "Todo", role: "workReady" },
+      { key: "dropped", label: "Dropped", excludeFromIdleWatchdog: true },
+      { key: "done", label: "Done", role: "terminal" },
+    ],
+  };
+  db.insertProject({ id: "pDropped", name: "Dropped-lane project", repoPath: repo, vaultPath: repo, config: DROPPED_BOARD, createdAt: now, archivedAt: null, reserved: false });
+  const pDroppedGet = await call("project_get", { projectId: "pDropped" });
+  const droppedCol = pDroppedGet.columns.find((c) => c.key === "dropped");
+  const otherCols = pDroppedGet.columns.filter((c) => c.key !== "dropped");
+  check("(g) pDropped's project-override kanbanColumns is a STORED override (the pre-existing config field, unaffected)",
+    Array.isArray(pDroppedGet.config.kanbanColumns));
+  check("(g) pDropped's RESOLVED 'dropped' lane reads excludeFromIdleWatchdog === true", droppedCol?.excludeFromIdleWatchdog === true);
+  check("(g) pDropped's OTHER lanes still read it absent/false (the read discriminates, not a constant)",
+    otherCols.every((c) => c.excludeFromIdleWatchdog === undefined || c.excludeFromIdleWatchdog === false));
+
+  const unknownProjectGet = await call("project_get", { projectId: "ghost-project-id" });
+  check("(g) project_get on an unknown id is still a plain not-found error (columns fold-in doesn't disturb the error path)",
+    unknownProjectGet.error === "project not found" && unknownProjectGet.columns === undefined);
+
   await client.close();
 } finally {
   db.close();
