@@ -608,8 +608,16 @@ function ownLineageIds(db: Db, sessionId: string): string[] {
  * per-call mint (see `enqueueDurableMessage`, sessions/service.ts) and only coincidentally equals the true
  * root for a plain first-ever send with no `resendOf`. A directive event whose own msgId is absent from
  * that map (never queued, never gave up — a clean first-ever immediate delivery) self-roots to its own
- * msgId; per `framePossibleDuplicate`'s own doc, such a send is never tagged, so a real worker-supplied
- * label can never legitimately match one — harmless.
+ * msgId and is never tagged — but NOT because `framePossibleDuplicate` itself refuses a self-root (it
+ * applies the tag UNCONDITIONALLY whenever called; there is no such guard inside it — see that function's
+ * own doc, and card fb5d2220's gate-time audit). The real guarantee is CALL-SITE DISCIPLINE: every actual
+ * caller (the `giveUpGen`-gated write in `joinSubmittedText`, `handleGiveUpExhausted`'s re-mint, the
+ * kickoff give-up re-mint, and Path D's `redriveQueuedMessage`, pty/host.ts + sessions/service.ts) only
+ * ever invokes it on a message that WAS queued or gave up. Path D's redrive (bcaeab8d) frames
+ * UNCONDITIONALLY, but only ever redrives a row with an existing `session_message_queued` record — so the
+ * "never queued" case stays unreachable through it too, and the guarantee survives, on that narrower basis
+ * rather than the function-level one this comment used to cite. A real worker-supplied label can never
+ * legitimately match one — harmless.
  *
  * Only `state: "delivered"` and `state: "confirmed-after-park"` outcomes ever produce a delivery record —
  * `"parked"`/`"pending"` never reached any turn, so they carry no information relevant to "have I seen
