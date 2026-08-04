@@ -1097,6 +1097,29 @@ const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => 
   }
 };
 
+/**
+ * Card b798e706: thrown from INSIDE the merge gate's `gateSemaphore.runExclusive` callback when the
+ * ADMISSION-TIME re-union — re-checking whether canonical main moved during this op's semaphore queue
+ * wait and, only if it did, re-unioning against the fresh tip (see `confirmWorkerMerge`'s own doc at the
+ * `reunionAtAdmission` call sites) — itself conflicts or fails outright. Mirrors {@link GateCancelledError}'s
+ * shape exactly (a typed error thrown from inside `runExclusive`, caught BY NAME at the call site, never
+ * left to fall into the generic thrown-error path) so this is always a defined, observable rejection
+ * (`[loom:merge-rejected]` + a `merge_rejected` event), never a silent vanish and never a silent proceed
+ * on the stale base — see this card's DoD-3. Distinct from `gateBaseInvalidated` (a BENIGN staleness race
+ * mergeBranchLocked's own in-lock re-check reports at squash time): this is a REAL git failure — a hard
+ * conflict, or the union write itself erroring — encountered while TRYING to close that staleness gap,
+ * not the staleness itself.
+ */
+class AdmissionReunionFailedError extends Error {
+  constructor(
+    public readonly failReason: "union_conflict_at_admission" | "union_merge_failed_at_admission",
+    public readonly why: string,
+  ) {
+    super(`admission-time re-union failed (${failReason}): ${why}`);
+    this.name = "AdmissionReunionFailedError";
+  }
+}
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -10263,16 +10286,140 @@ export class SessionService {
       let concurrentAtStart = 0;
       let concurrentGatesMax = 0;
       let getConcurrentGatesMax: (() => number) | undefined;
-      // NOTE (card eda70da6): `gateBaseMainHead` for this real-run path is ALREADY set above, at the
-      // union-merge — not captured here at admission. The gap between the union-merge and this admission
-      // is unbounded semaphore queue wait; capturing here instead would leave that whole gap unverified
-      // (a real defect found on review of this card's first draft — see `gateBaseMainHead`'s own doc).
+      // ADMISSION-TIME RE-DERIVATION (card b798e706, fast-follow to eda70da6/92e960d1): `gateBaseMainHead`
+      // above was captured at the PRE-admission union-merge (or, on the preLanded path, a plain HEAD read)
+      // — the gap between that capture and this run actually being ADMITTED is the semaphore queue wait,
+      // unbounded. A queued merge used to run its own full gate against that pre-queue base and then
+      // self-abort at squash time (`gateBaseInvalidated:true`) the moment canonical main had moved AT ALL
+      // during the wait, forcing a manager re-confirm that re-pays the entire gate cost. Re-checked HERE,
+      // the instant this run is actually admitted (top of `fn`, before the gate itself spawns): if
+      // canonical main's CURRENT tip still matches the captured base, this is a no-op — byte-identical to
+      // before this existed (DoD-2(ii), the common uncontended case). If it has moved, re-union against the
+      // fresh tip and advance `gateBaseMainHead` to what THIS re-union actually unioned, so the gate about
+      // to run validates the tree against the main that exists NOW, not the one that existed before the
+      // wait.
+      //
+      // ⚠️ WHAT THIS DOES NOT CLOSE — Code Review, card b798e706, and read this before assuming the
+      // headline "queued behind a same-repo sibling" scenario is fixed: `GateSemaphore.release()` (which
+      // frees THIS repo's per-merge admission guard — `92e960d1`'s `activeMergeRepos`) runs in
+      // `runExclusive`'s own `finally`, i.e. the MOMENT a running merge's GATE settles — not once its
+      // squash lands. A sibling's `mergeBranch` squash call sits OUTSIDE that `runExclusive` scope,
+      // strictly AFTER it, in that sibling's own `confirmWorkerMerge` flow. So the ORDINARY same-repo
+      // sequence is: sibling A's gate finishes → A's slot releases → THIS op (B) is admitted, essentially
+      // immediately → B's `reunionAtAdmission` runs and reads main — which A has NOT yet squashed onto, so
+      // `admissionHead === gateBaseMainHead` and this is a no-op — → B runs its own full gate → SOMEWHERE
+      // during that run, A's squash actually lands → B reaches squash-lock with a `gateBaseMainHead` that
+      // was never re-checked past admission, main HAS since moved, and `requireCanonicalHead` still
+      // self-aborts exactly as before this card. **The same-repo-sibling-squash case is NOT closed by this
+      // change.** What genuinely IS closed: main moving during the queue wait for any OTHER reason — an
+      // out-of-band/GitWriter REST commit, cross-project queueing noise, or a sibling whose squash happens
+      // to have ALREADY landed before this op reaches admission (not guaranteed by the ordering above, but
+      // possible) — those are real, and this re-derivation is never worse than doing nothing in any case.
+      // Closing the same-repo-sibling-squash case for real needs holding the admission guard across the
+      // squash phase too, a materially larger change to `GateSemaphore`'s release contract (also touching
+      // cancel/timeout/queueing) — deliberately OUT OF SCOPE here, carded separately as `c24dd48a`.
+      //
+      // RE-UNION UNCONDITIONALLY, OR ONLY WHEN MOVED? (the card's own DoD-1 ask) — ONLY WHEN MOVED, decided
+      // here: `mergeMainIntoWorktree` is cheap when nothing changed (a merge-base probe short-circuits to
+      // two git reads, no write — see its own doc), but it IS a real write into the worker's worktree when
+      // it does have to merge, and the common case (no queue contention at all, or a queue wait with no
+      // main movement) should touch nothing — matching DoD-2(ii)'s "byte-identical to today" requirement
+      // for the unmoved case, and avoiding a pointless worktree write on every single admission.
+      //
+      // SCOPED TO THE UNION PRODUCER ONLY (`!preLanded`): the preLanded producer's `gateBaseMainHead` is a
+      // plain HEAD read paired with `gateBaseBranchHead` (a DIFFERENT, deliberately narrower proof — see
+      // that pairing's own doc above) specifically to keep a pure re-confirm idempotent; re-unioning on
+      // that path would defeat the entire point of skipping the union there (protecting ALREADY_MERGED
+      // classification) and is out of scope for this card.
+      //
+      // A re-union that CONFLICTS (main advanced in a way that doesn't merge cleanly with this worktree's
+      // already-unioned tree) throws `AdmissionReunionFailedError` — caught below, alongside the existing
+      // `GateCancelledError` catch — so this merge is REJECTED with a defined, observable outcome (a
+      // `[loom:merge-rejected]` push + a `merge_rejected` event), exactly like a pre-admission union
+      // conflict: never silently vanished, never silently proceeding on the stale base (DoD-3). Squash
+      // phase is never reached: canonical repo untouched, worktree retained for the manager to resolve.
+      //
+      // RESIDUAL RACE, DOCUMENTED NOT CLOSED (mirrors the reuse path's own TOCTOU note above): this proves
+      // main hasn't moved AS OF the read taken here — a landing at the exact instant this run is admitted
+      // (between this read and the gate's own eventual squash-lock acquisition — see the same-repo-sibling
+      // case above for the concrete, common shape of this) can still invalidate the captured base.
+      // `requireCanonicalHead`'s in-lock re-check at squash time is what catches THAT window fail-closed,
+      // exactly as it always has — this re-derivation shrinks the stale-base window for causes OTHER than
+      // a same-repo sibling's own squash; it does not claim to eliminate every interleaving, and does not
+      // (by itself) fix the sibling-squash case named above.
+      //
+      // Applied identically on the AUTO-RETRY below (a separate, later `runExclusive` admission of its
+      // own): the repo's per-merge admission guard is released and re-acquired between the two attempts
+      // (see `GateSemaphore.release`/`acquire`), so a queued sibling can slot in between them exactly as it
+      // can before the first attempt — the same staleness gap, the same fix, applied uniformly rather than
+      // leaving the retry as a silent asymmetric gap.
+      //
+      // ⚠️ TIMING-PROFILE NOTE FOR `gate_queue`/`idleMs` READERS (card b798e706): this call runs INSIDE the
+      // gate's `runExclusive` slot, BEFORE `runGateSeq` is ever invoked — so a merge gate's live registry
+      // entry can now show `phase:"running"` with `idleMs` already growing (no gate-step output has been
+      // produced yet) for a short window right after admission. This is EXPECTED, not a wedge: the window
+      // is bounded by nothing more than this function's own git subprocess calls (one `rev-parse`, and — on
+      // the branch where main actually moved — one `merge`), nowhere near `gateCommandTimeoutMs` or
+      // `GATE_EXTEND_IDLE_MS`'s auto-extend threshold. Before this card, a merge/deploy gate's callback
+      // called `runGateSeq` immediately on admission (see `gate-idle-liveness.mjs`'s CARD 33aa0291 doc,
+      // written for the analogous — and already-expected — `runWorkerGate` gap this one now mirrors) — a
+      // manager reading `gate_queue`'s `idleMs` to judge "working hard" vs. "hung" on a merge entry should
+      // read a small, early, non-growing-past-a-couple-seconds `idleMs` as this window, not a stall.
+      const reunionAtAdmission = async (): Promise<void> => {
+        if (preLanded || !gateBaseMainHead) return;
+        const admissionHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs });
+        if (!admissionHead || admissionHead === gateBaseMainHead) return;
+        // REAP BEFORE THIS SECOND UNION TOO (Code Review finding, card b798e706 — mirroring the pre-gate
+        // reap's own c0aeb5b2 doc above verbatim): this re-union WRITES tracked files in the worktree
+        // exactly like the FIRST union-merge does, so it is equally lock-sensitive — an escaped watcher/
+        // build child that (re-)attached during the queue wait would otherwise make THIS write fail with a
+        // spurious EPERM, misreported below as a real git failure rather than the lock issue it actually
+        // is. `reap`/`workerPid` are the SAME closures the pre-gate sweep above already captured — reused
+        // here, not re-derived.
+        try {
+          await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+        } catch {
+          // Best-effort, same guard as the pre-gate sweep above.
+        }
+        const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+        if (!reunion.ok) {
+          const why = reunion.conflict
+            ? "branch conflicts with current main — rebase/resolve before merge"
+            : (reunion.reason ?? "union merge failed");
+          throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
+        }
+        gateBaseMainHead = reunion.mainSha;
+      };
+      // REJECT-ON-ADMISSION-REUNION-FAILURE (card b798e706 DoD-3): shared by both the first attempt's catch
+      // and the retry's own catch below — a real git failure hit while trying to close the queue-wait
+      // staleness gap, surfaced exactly like a pre-admission union conflict (never a generic thrown-error
+      // echo, never silent).
+      //
+      // Code Review finding, card b798e706: the wording must NOT assert "main advanced" as the CAUSE for
+      // the non-conflict failure. `union_conflict_at_admission` (a real textual conflict) DOES prove main
+      // changed in a way that collides with this branch's own content, so that framing is earned there.
+      // `union_merge_failed_at_admission` covers everything else `mergeMainIntoWorktree` can fail on — a
+      // failed HEAD resolve, a failed merge-state inspection, or the `git merge` write itself erroring for
+      // an UNRELATED reason (e.g. a stale lock from an escaped process the reap above didn't catch) — none
+      // of which are actually "main advanced" as the PROBLEM, even though main did move (that's WHY this
+      // ran at all). Asserting causation there would misattribute an unrelated git/filesystem failure and
+      // send a manager chasing the wrong fix.
+      const rejectAdmissionReunionFailure = async (err: AdmissionReunionFailedError): Promise<ConfirmMergeResult> => {
+        const cause = err.failReason === "union_conflict_at_admission"
+          ? " (canonical main advanced while this merge waited in the gate queue, and the advance conflicts with this branch's own content — re-confirm once resolved.)"
+          : " (an admission-time re-union with canonical main, which had moved during the queue wait, failed for a reason unrelated to a content conflict — see the error above; this may be a transient git/filesystem issue, not necessarily main's advance itself.)";
+        const detailText = `${err.why}; squash phase never reached, canonical repo untouched, worktree retained.${cause}`;
+        const suppressed = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: err.failReason, ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId };
+      };
       let gateResult: GateSequentialResult;
       try {
-        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
           gateStartedAt = startedAt;
           concurrentAtStart = this.gateSemaphore.snapshot().active;
           getConcurrentGatesMax = getMaxConcurrentGates;
+          await reunionAtAdmission();
           // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — never a REPLACEMENT
           // of the semaphore's hook (the live registry's own `entry.extended`, read by gate_queue/gate_status
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
@@ -10281,6 +10428,7 @@ export class SessionService {
           return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
         }, "high");
       } catch (err) {
+        if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
         // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
         // by GateSemaphore.runExclusive when THIS op was withdrawn (gate_cancel, card 8d585277) before it
         // was ever admitted — no process was ever spawned, so this is never a real gate/runner exception and
@@ -10376,15 +10524,20 @@ export class SessionService {
         try {
           gateResult = await this.gateSemaphore.runExclusive(
             gateCap, gateDescriptor,
-            (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+            async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
               retryStartedAt = startedAt;
               concurrentAtStart = this.gateSemaphore.snapshot().active;
               getConcurrentGatesMax = getMaxConcurrentGates;
+              // Card b798e706: same admission-time re-derivation as the first attempt — this retry is its
+              // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
+              // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
+              await reunionAtAdmission();
               return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
             },
             "high",
           );
         } catch (err) {
+          if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
           // Same CANCELLED-WHILE-QUEUED case as the first attempt's own catch above — this retry mints a
           // BRAND NEW admission cycle (a fresh `runExclusive` call), so it can independently be withdrawn
           // while it queues even though the first attempt already ran.

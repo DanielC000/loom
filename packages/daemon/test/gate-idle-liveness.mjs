@@ -44,7 +44,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // CARD 33aa0291 (2026-08-04): `idleMs` on a freshly-admitted RUNNING entry can genuinely still read `null`
 // — not a rare race, a MEASURED, persistent gap. `runWorkerGate` does a real git-subprocess round-trip
 // (`computeWorktreeGateStamp`, ~service.ts:11253) AFTER admission but BEFORE the gate step's first liveness
-// event; a merge/deploy gate has no such gap (its callback calls `runGateSeq` directly on admission). Direct
+// event; a deploy gate has no such gap (its callback calls `runGateSeq` directly on admission). A MERGE gate
+// gained an analogous one under card b798e706 (2026-08-04, fast-follow): its callback now does its own real
+// git-subprocess round-trip (`reunionAtAdmission` — re-derives `gateBaseMainHead` if canonical main moved
+// during the queue wait) AFTER admission but BEFORE `runGateSeq` is ever called, same shape as the worker
+// gap this card describes — this file's own blocks don't exercise a merge-type gate, so nothing here needed
+// updating beyond this comment, but a reader relying on the old "merge/deploy have no such gap" framing
+// would now be wrong for merge specifically. Direct
 // instrumentation of a real `runWorkerGate` op (`process.hrtime.bigint()`; admission at first
 // `activeCount===1`, first-liveness at first `idleMs != null`) on 2026-08-04, 16-logical-core win32/x64
 // (AMD Ryzen 7 3700X): quiet host n=15 → min=142.9ms p50=157.7ms max=209.2ms; loaded host (15 concurrent

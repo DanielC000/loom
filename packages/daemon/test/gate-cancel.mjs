@@ -671,7 +671,15 @@ function makeRepo(repo) {
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { gateSpawned = true; await gateHold; return { passed: true }; } });
 
   const pMergeConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  // Since card b798e706: "admitted" (RUNNING in the semaphore) fires BEFORE `fn` itself starts —
+  // confirmWorkerMerge's merge-gate `fn` now does its OWN real git work (the admission-time
+  // gateBaseMainHead re-derivation — a `git rev-parse HEAD`, genuinely async) before ever invoking the
+  // injected gate function, mirroring the SAME pre-existing gap runWorkerGate's `fn` already has via
+  // computeWorktreeGateStamp (see the "(never-settling)" block below, which already asserts around this
+  // for the worker-gate path). So `running.find(...)` can resolve before `gateSpawned` flips true — wait
+  // for BOTH independently rather than assuming one implies the timing of the other.
   const mergeEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.gateType === "merge"));
+  await waitUntil(() => gateSpawned);
   check("(DoD-6) the MERGE gate is genuinely RUNNING, not queued (setup sanity)", !!mergeEntry && gateSpawned === true);
 
   if (mergeEntry) {

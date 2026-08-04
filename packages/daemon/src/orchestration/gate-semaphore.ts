@@ -118,17 +118,36 @@ export interface GateDescriptor {
    * closed and aborts it. This field is what lets the semaphore refuse to ADMIT the second one at all,
    * queueing it instead — see {@link GateSemaphore.mergeRepoFree}/`activeMergeRepos`.
    *
-   * ⚠️ NOT a fix for the second merge's own odds of landing: its `gateBaseMainHead` (the union-merge's
-   * captured main sha) is fixed BEFORE it ever reaches this semaphore, so if the FIRST same-repo merge
-   * lands while the second is queued, the second's captured base is already stale by the time it's
-   * admitted — it still runs its own gate and then still self-aborts via the same fail-closed check,
-   * needing a manager re-confirm exactly as it does today under ordinary cap-driven queueing (see
-   * `merge-gate-reuse.mjs` tests (K)/(L), unmodified by this field). The throughput this buys is: no
-   * more SIMULTANEOUS double-lane loss, and the other cap lane stays free for unrelated cross-project
-   * work during the first merge's run — not a guarantee the second same-repo merge lands on its first
-   * pass. Re-deriving `gateBaseMainHead` at admission (rather than at union-merge time) would close that
-   * remaining gap — deliberately OUT OF SCOPE here; it touches union-merge timing on the merge path and
-   * belongs in its own card.
+   * ⚠️ AT THE TIME THIS FIELD WAS ADDED, it was NOT a fix for the second merge's own odds of landing: its
+   * `gateBaseMainHead` (the union-merge's captured main sha) was fixed BEFORE it ever reached this
+   * semaphore, so if the FIRST same-repo merge landed while the second was queued, the second's captured
+   * base was already stale by the time it was admitted — it still ran its own gate and then still
+   * self-aborted via the fail-closed check, needing a manager re-confirm despite the throughput win this
+   * field buys (no more SIMULTANEOUS double-lane loss, and the other cap lane staying free for unrelated
+   * cross-project work during the first merge's run). PARTIALLY addressed by card b798e706 (fast-follow),
+   * and — Code Review correction, same card — the headline same-repo-sibling scenario is NOT the part that
+   * closed: the merge gate's own `runExclusive` callback now RE-DERIVES `gateBaseMainHead` the instant it
+   * is admitted here (`confirmWorkerMerge`'s `reunionAtAdmission`), re-unioning against canonical main's
+   * then-current tip when it moved during the queue wait — but THIS field's own `release()` (below) frees
+   * the admission guard the MOMENT a running merge's gate settles, strictly BEFORE that merge's own squash
+   * (`mergeBranch`, called outside `runExclusive`, afterward). So the ORDINARY same-repo sequence is:
+   * sibling A's gate finishes → the guard frees → the second merge (B) is admitted, essentially
+   * immediately, reads a main A has NOT yet squashed onto → re-derives to a no-op → runs its own full gate
+   * → A's squash lands SOMEWHERE during that run → B still self-aborts at squash time exactly as before
+   * this card. `merge-gate-reuse.mjs` test (K) DOES now assert first-pass success — but by simulating "main
+   * advanced during the queue wait" via a DIRECT commit under test control (deterministic, and mechanically
+   * identical to any OTHER cause of main moving before this op's admission), not via a second real
+   * concurrent merge's own squash — so it proves the genuinely-closed case, not the sibling-squash one.
+   * What IS genuinely closed: main moving during the wait for reasons OTHER than a same-repo sibling's own
+   * squash — an out-of-band/REST commit, cross-project queueing noise, or a sibling whose squash happens to
+   * have already landed before this op reaches admission (possible, just not the guaranteed ordering above)
+   * — and the re-derivation is never worse than doing nothing in any case. A residual TOCTOU window also
+   * remains BY DESIGN even for the closed cases — a landing at the exact instant this run is admitted can
+   * still invalidate the freshly-re-derived base — caught fail-closed by `requireCanonicalHead`'s own
+   * in-lock re-check at squash time, same as ever. Closing the same-repo-sibling-squash case for real needs
+   * holding THIS field's admission guard across the squash phase too, a materially larger change to this
+   * class's release contract (also touching cancel/timeout/queueing) — deliberately out of scope for
+   * b798e706, carded separately as `c24dd48a`.
    */
   repoPath?: string | null;
 }
