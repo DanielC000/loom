@@ -116,7 +116,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
       "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, admittedAt?, passed?, cancelled?, reason?, " +
-      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `admittedAt` (ISO, when " +
+      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?, proximity?}. `admittedAt` (ISO, when " +
       "the op was minted) is present whenever a row exists at all — live or settled — not gated on a " +
       "recorded verdict. `queued`/`running` mean it's still " +
       "LIVE. `settled` means the op reached a normal terminal result (pass, fail, error, or cancelled). " +
@@ -126,7 +126,19 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "phase/failedStep/failingTest/exitCode/signal/timedOut diagnosis the failure nudge embeds) are set " +
       "together with `durationMs`/`validatedHead`/`headWarning`/`steps` (the same per-step timings the " +
       "green merge nudge already carries) and a bounded `outputTail` (present on BOTH a pass and a fail — " +
-      "a passing run used to retain none of this at all). `cancelled:true` (with `reason`, no `passed`) " +
+      "a passing run used to retain none of this at all). `proximity` ({nearBudget, step, fraction}, card " +
+      "3407caad) is a WARN-BEFORE-BREACH signal — unlike `extended` (which only ever tells you a run " +
+      "ALREADY consumed its one-time auto-extend, i.e. already breached budget), `proximity.nearBudget:true` " +
+      "means the worst step's `durationMs` crossed a threshold set well above this project's own healthy " +
+      "steady state, so it's worth raising `gateCommandTimeoutMs`, splitting the suite, or investigating " +
+      "what got slower — BEFORE the next run actually times out. `fraction` is ALWAYS against the RAW, " +
+      "configured `gateCommandTimeoutMs` — the HARD ceiling a post-timeout retry enforces with NO " +
+      "auto-extend (card 24642c3d) — never the ~2× effective ceiling a FIRST attempt's own one-time " +
+      "auto-extend can reach; a `fraction` over `1` means this step already needed more than the hard " +
+      "ceiling and only survived because it was a first attempt, so a RETRY of it would have no such net. " +
+      "Present on BOTH a pass and a fail whenever " +
+      "a real gate spawned; `undefined` for a gateless project or a REUSED self-check, same discipline as " +
+      "`extended`. `cancelled:true` (with `reason`, no `passed`) " +
       "means no verdict was ever reached — a manager's `gate_cancel`, or your self-check being superseded " +
       "by a merge decision — never read the ABSENCE of `passed` alone as a failure; check `cancelled` " +
       "first. Every one of these fields is OMITTED, never a fabricated `null`/`false`, when there's nothing " +
@@ -178,7 +190,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?}. `queued`/`running` " +
+      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?}. `queued`/`running` " +
       "mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge for the ACTUAL rejection/failure diagnosis (phase, failing test, " +
@@ -193,7 +205,17 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "reports whether ANY step of the gate this op actually ran ever consumed its one-time auto-extend — " +
       "`undefined` (not `false`) when no gate spawned for this op at all (gateless project, or a REUSED " +
       "self-check), so `extended:true` paired with `outcome:\"fail\"` is the specific \"this run was over " +
-      "budget AND it failed\" signal worth flagging, distinct from either fact alone. These four settled- " +
+      "budget AND it failed\" signal worth flagging, distinct from either fact alone. `proximity` " +
+      "({nearBudget, step, fraction}, card 3407caad) is a WARN-BEFORE-BREACH companion to `extended` — " +
+      "unlike `extended` (which only ever fires AFTER a breach), `proximity.nearBudget:true` fires while " +
+      "a run is still comfortably PASSING, once its worst step's duration crosses a threshold set well " +
+      "above this project's own healthy steady state — worth raising `gateCommandTimeoutMs`, splitting " +
+      "the suite, or investigating what got slower BEFORE the next run actually times out. `fraction` is " +
+      "ALWAYS against the RAW, configured `gateCommandTimeoutMs` — the HARD ceiling a post-timeout retry " +
+      "enforces with NO auto-extend (card 24642c3d) — never the ~2× effective ceiling a FIRST attempt's " +
+      "own one-time auto-extend can reach; a `fraction` over `1` means this step already needed more than " +
+      "the hard ceiling and only survived because it was a first attempt. Same " +
+      "`undefined`-for-no-gate-spawned discipline as `extended`. These settled- " +
       "record fields are OMITTED, never fabricated, for a settled op that predates this capability. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +

@@ -1869,6 +1869,12 @@ export interface PendingGateOpVerdict {
    *  for this op (gateless project, or a REUSED self-check) — distinct from `false` ("spawned, never
    *  extended"). Currently populated for "merge" rows only, same scope as `settledAt`. */
   extended?: boolean;
+  /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` — a WARN-BEFORE-BREACH signal,
+   *  distinct from `extended` above (which only ever fires AFTER a breach). `undefined` when no gate
+   *  actually spawned for this op (gateless project, or a REUSED self-check), same "nothing to report"
+   *  discipline as `extended`; otherwise always populated, `nearBudget:false` included, on BOTH "pass"
+   *  and "fail" — this is not a failure-only signal. Populated for both "gate" and "merge" rows. */
+  proximity?: { nearBudget: boolean; step: string; fraction: number };
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

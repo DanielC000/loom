@@ -103,11 +103,38 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GateSemaphore } = await import("../dist/orchestration/gate-semaphore.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { describeGateProximity, GATE_PROXIMITY_THRESHOLD } = await import("../dist/orchestration/gate-runner.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 const GIT_ID = "-c user.email=gst@loom -c user.name=gst";
 const now = new Date().toISOString();
+
+// ── (unit) describeGateProximity (card 3407caad) ────────────────────────────────────────────────────
+{
+  // Manager review, card 3407caad: a REAL Loom merge op (4e7e4123, card 23471268, 2026-08-04) measured
+  // Loom's own worst-step reading at ~61% of its 1,800,000ms budget — see GATE_PROXIMITY_THRESHOLD's own
+  // doc for the full four-stamped reading. The bound below is anchored on THAT number (Loom's own,
+  // ~24 points of headroom), never on a peer project's own magnitude (700,000ms budget, a different
+  // suite/host — no transfer function; see the doc's "ILLEGITIMATE" vs. "LEGITIMATE" transfer split). A
+  // peer project's own per-step healthy-run readings (n=4) separately topped out at 76.6%, which 0.766
+  // below happens to also clear — kept as a bonus sanity check, not the justification for the bound.
+  check("(unit proximity — THE ANCHOR) threshold clears Loom's OWN measured worst-step ceiling (~61%, op 4e7e4123) with real margin — this is what 0.85 is actually anchored on", GATE_PROXIMITY_THRESHOLD > 0.61 && GATE_PROXIMITY_THRESHOLD < 1);
+  check("(unit proximity — bonus, not the justification) also happens to clear the peer's own separately-measured ceiling (76.6%) — kept as a sanity check, never as evidence for THIS value (different budget/suite/host, no transfer function)", GATE_PROXIMITY_THRESHOLD > 0.766);
+  check("(unit proximity) undefined steps (no gate spawned) → undefined, never a fabricated shape", describeGateProximity(undefined, 10000) === undefined);
+  check("(unit proximity) empty steps array → undefined", describeGateProximity([], 10000) === undefined);
+  check("(unit proximity) every step's durationMs null → undefined (nothing timed to compare)", describeGateProximity([{ step: "a", durationMs: null, status: 0 }], 10000) === undefined);
+  const under = describeGateProximity([{ step: "a", durationMs: 1000, status: 0 }], 10000);
+  check("(unit proximity) 10% of budget → nearBudget:false, present (not omitted)", under?.nearBudget === false && under?.fraction === 0.1 && under?.step === "a");
+  const exactlyAt = describeGateProximity([{ step: "a", durationMs: 8500, status: 0 }], 10000);
+  check("(unit proximity) exactly AT the threshold (85%) → nearBudget:true (>=, not >)", exactlyAt?.nearBudget === true && exactlyAt?.fraction === 0.85);
+  const justUnder = describeGateProximity([{ step: "a", durationMs: 8499, status: 0 }], 10000);
+  check("(unit proximity) just under the threshold → nearBudget:false", justUnder?.nearBudget === false);
+  const overBudget = describeGateProximity([{ step: "a", durationMs: 12000, status: 0 }], 10000);
+  check("(unit proximity) a step that already exceeded its budget (already extended) → fraction can exceed 1", overBudget?.nearBudget === true && overBudget?.fraction === 1.2);
+  const worst = describeGateProximity([{ step: "lint", durationMs: 100, status: 0 }, { step: "test", durationMs: 9500, status: 0 }, { step: "build", durationMs: 2000, status: 0 }], 10000);
+  check("(unit proximity) picks the WORST (highest-fraction) step across several, not the first or last", worst?.step === "test" && worst?.nearBudget === true);
+}
 
 // ── (unit) GateSemaphore.findByOpId ──────────────────────────────────────────────────────────────────
 {
@@ -432,6 +459,43 @@ try {
     check("(e2e verdict pass) steps round-trips through the tombstone", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].step === "pnpm test");
     check("(e2e verdict pass) outputTail round-trips through the tombstone — the DoD item 2 fix: a passing gate used to retain NOTHING here", status.outputTail === "42 passed, 0 failed");
     check("(e2e verdict pass) cancelled/reason/gateDetail are all absent (never a fabricated value for fields that don't apply to a pass)", status.cancelled === undefined && status.reason === undefined && status.gateDetail === undefined);
+    // Card 3407caad: a real gate DID spawn here, so gateProximity must be PRESENT — nearBudget:false is
+    // the honest "ran, checked, comfortably under budget" answer (4200ms against the default 120000ms
+    // budget), never an omission — distinct from the gateless/reused negative controls further below.
+    check("(e2e verdict pass — 3407caad) sync result carries gateProximity, comfortably under budget", result.value.gateProximity?.nearBudget === false && result.value.gateProximity?.step === "pnpm test");
+    check("(e2e verdict pass — 3407caad) gate_status ALSO round-trips proximity for a settled PASS", status.proximity?.nearBudget === false);
+  }
+
+  // ── (e2e gate, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) a step whose durationMs crosses
+  // GATE_PROXIMITY_THRESHOLD of the project's OWN gateCommandTimeoutMs must report nearBudget:true on a
+  // run that otherwise PASSES — the whole point per the card's DoD: a signal visible on a failure alone
+  // is worthless. A small configured budget (10s) makes the math exact and the test fast. ──────────────
+  {
+    const P = `gst-proximity-pos-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-PROXIMITY-POS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 10000 } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-PROXIMITY-POS-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    // 9000ms against a 10000ms budget = 90% — above GATE_PROXIMITY_THRESHOLD (0.85) — on a PASSING run.
+    const nearBudgetPassGate = async () => ({ passed: true, steps: [{ step: "pnpm test", durationMs: 9000, status: 0 }], outputTail: "ok" });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: nearBudgetPassGate });
+
+    const result = await sessions.runWorkerGate(workerId);
+    check("(e2e proximity POS) settles INLINE, passed:true (the point: this run PASSES)", result.settled === true && result.ok === true && result.value.passed === true);
+    check("(e2e proximity POS — THE SIGNAL) sync result carries gateProximity.nearBudget:true on a PASSING run", result.value.gateProximity?.nearBudget === true);
+    check("(e2e proximity POS) names the actual step + the real fraction (0.9)", result.value.gateProximity?.step === "pnpm test" && result.value.gateProximity?.fraction === 0.9);
+
+    const status = sessions.gateStatus(result.value.opId);
+    check("(e2e proximity POS) gate_status ALSO reports nearBudget:true for the settled record", status.proximity?.nearBudget === true && status.proximity?.fraction === 0.9);
   }
 
   // ── (e2e gate, card 4c5bf820 — SETTLED VERDICT, FAIL) same regression, the failure side: reason +
@@ -469,6 +533,10 @@ try {
     check("(e2e verdict fail) gateDetail carries the SAME rich diagnosis the failure nudge embeds", status.gateDetail?.failedStep === "pnpm test" && status.gateDetail?.failingTest === "some_test.mjs" && status.gateDetail?.exitCode === 1);
     check("(e2e verdict fail) steps/outputTail are ALSO present on the fail path (parity with pass)", Array.isArray(status.steps) && status.steps.length === 1 && status.outputTail === "FAIL  some_test.mjs");
     check("(e2e verdict fail) cancelled is absent — a real failure must never read as a cancel", status.cancelled === undefined);
+    // Card 3407caad: gateProximity is present on the FAIL path too (parity with pass) — 900ms against the
+    // default 120000ms budget is nowhere near it.
+    check("(e2e verdict fail — 3407caad) sync result carries gateProximity on the fail path too", result.value.gateProximity?.nearBudget === false && result.value.gateProximity?.step === "pnpm test");
+    check("(e2e verdict fail — 3407caad) gate_status ALSO round-trips proximity for a settled FAIL", status.proximity?.nearBudget === false);
   }
 
   // ── (e2e merge, card 9f6598dd — SETTLED VERDICT, PASS + extended, AND retention past registry eviction)
@@ -519,6 +587,11 @@ try {
     if (!viaAsync) {
       check("(e2e merge verdict pass) settled INLINE this run, merged:true", r.ok === true && value.merged === true);
       check("(e2e merge verdict pass) the sync result ALREADY carries gateExtended:true (the wiring this card adds)", value.gateExtended === true);
+      // Card 3407caad: `extended:true` here comes from the INJECTED onExtend() hook call, not from the
+      // step's own duration (4200ms is nowhere near the default 120000ms budget) — proving gateProximity
+      // is a GENUINELY SEPARATE signal from gateExtended, not a renamed alias of it: the same run reports
+      // "already breached" (extended) AND "comfortably under budget by duration" (proximity) together.
+      check("(e2e merge verdict pass — 3407caad) gateProximity is a DISTINCT signal from gateExtended: nearBudget:false even though extended:true", value.gateProximity?.nearBudget === false && value.gateProximity?.step === "pnpm gate");
     }
 
     // Wait for the op to genuinely LEAVE the live retained view — see the block header above for why this
@@ -536,6 +609,46 @@ try {
     // a tail). `richPassGateExtended` above already stubs `outputTail: "ok"` on its green return — this is
     // the exact value that used to be silently discarded the moment `confirmWorkerMerge` saw `passed:true`.
     check("(e2e merge verdict pass — a1a8c5c4 FIX) outputTail round-trips through the tombstone — a passing MERGE gate used to retain NO output of its own before this card", status.outputTail === "ok");
+    check("(e2e merge verdict pass — 3407caad) gate_status ALSO round-trips proximity for a settled merge PASS", status.proximity?.nearBudget === false && status.proximity?.step === "pnpm gate");
+  }
+
+  // ── (e2e merge, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) the merge-gate analogue of the worker
+  // self-check positive control above: a step whose durationMs crosses GATE_PROXIMITY_THRESHOLD of the
+  // project's OWN gateCommandTimeoutMs must report nearBudget:true on a merge that otherwise SUCCEEDS —
+  // the exact "warn while still passing" case the card's DoD calls out. ────────────────────────────────
+  {
+    const P = `gst-mproximity-pos-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-MPROXIMITY-POS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 10000 } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`, mgrId = `${P}-mgr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-MPROXIMITY-POS-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    // 9000ms against a 10000ms budget = 90% — above GATE_PROXIMITY_THRESHOLD (0.85) — on a SUCCESSFUL merge.
+    const nearBudgetPassGate = async () => ({ passed: true, steps: [{ step: "pnpm gate", durationMs: 9000, status: 0 }], outputTail: "ok" });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: nearBudgetPassGate });
+
+    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const { opId, value, viaAsync } = await settleMergeEitherPath(sessions, r, "e2e merge proximity POS");
+    if (!viaAsync) {
+      check("(e2e merge proximity POS) settled INLINE this run, merged:true (the point: this merge SUCCEEDS)", r.ok === true && value.merged === true);
+      check("(e2e merge proximity POS — THE SIGNAL) sync result carries gateProximity.nearBudget:true on a SUCCESSFUL merge", value.gateProximity?.nearBudget === true && value.gateProximity?.fraction === 0.9);
+    }
+
+    await waitUntil(() => (sessions.peekPendingMerge(workerId) === undefined ? true : undefined), { timeoutMs: 10_000, label: "merge op to leave PendingOpRegistry's retained view" });
+
+    const status = sessions.gateStatus(opId);
+    check("(e2e merge proximity POS) gate_status ALSO reports nearBudget:true for the settled merge record", status.proximity?.nearBudget === true && status.proximity?.fraction === 0.9);
   }
 
   // ── (e2e merge, card 9f6598dd — SETTLED VERDICT, FAIL) the rejection side: outcome:"fail" + gateDetail
@@ -592,6 +705,12 @@ try {
     // on the fail path before this card. The FAIL side isn't the gap this card closes (a rejection already
     // had SOME durable trace via the pty notify text) — this just proves parity now that PASS has one too.
     check("(e2e merge verdict fail — a1a8c5c4) outputTail is ALSO present as a top-level field (parity with pass)", status.outputTail === "FAIL  some_test.mjs");
+    // Card 3407caad: gateProximity is present on the merge FAIL path too (parity with pass) — 900ms
+    // against the default 120000ms budget is nowhere near it.
+    if (!viaAsync) {
+      check("(e2e merge verdict fail — 3407caad) sync result carries gateProximity on the fail path too", value.gateProximity?.nearBudget === false && value.gateProximity?.step === "pnpm gate");
+    }
+    check("(e2e merge verdict fail — 3407caad) gate_status ALSO round-trips proximity for a settled merge FAIL", status.proximity?.nearBudget === false);
   }
 
   // ── (e2e merge, card 9f6598dd — NEGATIVE CONTROL) a GATELESS project's merge never spawns a gate at
@@ -624,6 +743,10 @@ try {
     if (!viaAsync) {
       check("(e2e merge negative control) precondition: a gateless project still merges green (settled inline this run)", r.ok === true && value.merged === true);
       check("(e2e merge negative control) gateExtended is undefined on the sync result — no gate ever spawned", value.gateExtended === undefined);
+      // Card 3407caad, DoD-4 NEGATIVE CONTROL: a gateless project must produce NO proximity warning —
+      // gateProximity undefined, same "nothing to report" discipline as gateExtended, never a fabricated
+      // {nearBudget:false}.
+      check("(e2e merge negative control — 3407caad DoD-4) gateProximity is undefined on the sync result — no gate ever spawned", value.gateProximity === undefined);
     }
 
     await waitUntil(() => (sessions.peekPendingMerge(workerId) === undefined ? true : undefined), { timeoutMs: 10_000, label: "merge op to leave PendingOpRegistry's retained view" });
@@ -633,6 +756,7 @@ try {
     // Card a1a8c5c4: no gate spawned at all here — outputTail must stay undefined, never a fabricated
     // empty string, same "nothing to report" discipline `extended` already follows above.
     check("(e2e merge negative control — a1a8c5c4) outputTail is undefined — no gate ran, nothing to report", status.outputTail === undefined);
+    check("(e2e merge negative control — 3407caad DoD-4) gate_status's proximity is ALSO undefined here, never a fabricated {nearBudget:false}", status.proximity === undefined);
   }
 
   // ── (e2e, tombstone terminal states) gate_status maps EVERY pending_gate_ops.state value through —

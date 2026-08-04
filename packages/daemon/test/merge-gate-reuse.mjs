@@ -100,6 +100,9 @@ try {
     check("(A) merged:true", confirm.merged === true);
     check("(A) gateRan:false", confirm.gateRan === false);
     check("(A) reusedOpId === the self-check's own opId", confirm.reusedOpId === selfCheck.value.opId);
+    // Card 3407caad, DoD-4 NEGATIVE CONTROL: a REUSED self-check never spawns a gate for the merge, so
+    // gateProximity must be undefined here too — same "nothing to report" discipline as gateExtended.
+    check("(A) gateProximity is undefined — REUSED, no gate spawned for this merge", confirm.gateProximity === undefined);
     const buildGate = eventsOfKind(db, A.mgrId, "build_gate")[0];
     check("(A) build_gate audit event carries reused:true + the same reusedOpId", buildGate?.detail?.reused === true && buildGate?.detail?.reusedOpId === selfCheck.value.opId);
     check("(A) task moved to done", db.getTask(A.taskId).columnKey === "done");

@@ -44,7 +44,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -322,6 +322,12 @@ type ConfirmMergeResult = {
    *  union-merge failure, circuit breaker), where a gate genuinely never ran. Read by
    *  confirmWorkerMergeTracked's onSettle to persist the durable per-op record `gate_status` exposes. */
   gateExtended?: boolean;
+  /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs`, for whichever gate run(s)
+   *  actually spawned for THIS merge — see {@link GateProximity}'s own doc. Same "nothing to report"
+   *  discipline as `gateExtended`: `undefined` when no gate actually spawned (gateless project, or a
+   *  REUSED self-check), set on every return path from the point the gate run is known onward, same
+   *  scope as `gateExtended`. WARN-BEFORE-BREACH, not a failure signal — set on the PASSING path too. */
+  gateProximity?: GateProximity;
   /** Card 522cf573: the FULL rejection detail suffix (everything after "— " in the rich
    *  `[loom:merge-rejected]` pty text this same rejection would have sent, incl. the squash-phase-began
    *  state and the canonical-repo-state clause) — captured verbatim at EVERY `merged:false` return site so
@@ -392,6 +398,11 @@ type WorkerGateResult = {
   ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
   validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
   steps?: GateStepDuration[]; outputTail?: string;
+  /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` — see {@link GateProximity}'s
+   *  own doc. `undefined` on a `ran:false` outcome (no gateCommand configured — nothing spawned, nothing
+   *  to report); set on every `ran:true` outcome, PASS included (this is a warn-before-breach signal, not
+   *  a failure-only one). */
+  gateProximity?: GateProximity;
   /** Card 8d585277: a distinct "no verdict" outcome — never `passed`/`gateDetail`, never mistakable for a
    *  real pass or failure. `cancelKind` distinguishes the AUTOMATIC merge-decision supersede from a
    *  manager's explicit `gate_cancel`; see {@link GateCancelKind}'s own doc. */
@@ -434,6 +445,7 @@ function deriveWorkerGateVerdict(
       validatedHead: v.validatedHead ?? undefined,
       headWarning: v.headWarning,
       steps: v.steps,
+      proximity: v.gateProximity,
       outputTail: v.outputTail,
       ...(v.passed ? {} : { gateDetail: v.gateDetail && {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
@@ -506,7 +518,7 @@ function deriveMergeGateVerdict(
   return {
     kind: v.merged ? "pass" : "fail",
     payload: {
-      reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended,
+      reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended, proximity: v.gateProximity,
       // Card a1a8c5c4: the SAME bounded (~4KB, OUTPUT_TAIL_BYTES) last-step tail a "gate" row's own
       // deriveWorkerGateVerdict has persisted since 4c5bf820 — set on BOTH "pass" and "fail" (mirroring
       // that sibling exactly), `undefined` when `ConfirmMergeResult.outputTail` was never set (no gate
@@ -2965,6 +2977,12 @@ export class SessionService {
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     gateDetail?: PendingGateOpVerdict["gateDetail"];
+    /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` — a WARN-BEFORE-BREACH signal
+     *  (see {@link GateProximity}'s own doc), distinct from `extended` above (which only ever fires AFTER
+     *  a breach). Present whenever a real gate spawned for this op, on BOTH "pass" and "fail" — omitted
+     *  (never fabricated) for a gateless project, a REUSED self-check, or a settled row that predates this
+     *  capability. Populated for BOTH "gate" and "merge" rows. */
+    proximity?: PendingGateOpVerdict["proximity"];
     /** Card 9f6598dd: the op's own mint instant (ISO) — present for EVERY tombstone-branch result (any
      *  non-live state: settled, evicted-dead-owner, orphaned-by-restart, or the narrow real `pending`
      *  window), not gated on a recorded verdict, since it's the row's own `started_at` column, always
@@ -3040,6 +3058,7 @@ export class SessionService {
           ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
+          ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
           ...settleTimingFields,
         }
         : t.record.verdict === "cancelled"
@@ -9866,6 +9885,11 @@ export class SessionService {
     // onSettle to persist the durable per-op record `gate_status` exposes after settle.
     let anyExtended = false;
     let gateExtended: boolean | undefined;
+    // Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` for whichever gate run actually
+    // settles below — declared at THIS outer scope for the same reason `gateExtended` is (the plain GREEN
+    // return sits OUTSIDE the `if (gate)` block). Derived from `gateStepsResult` right after it's set,
+    // below, so it inherits that field's own "undefined for gateless/reused" discipline for free.
+    let gateProximity: GateProximity | undefined;
     // Card a1a8c5c4: the merge gate's own bounded last-step tail — declared at THIS outer scope for the
     // SAME reason `gateRan`/`gateStepsResult` are: the plain GREEN return at the bottom of this method
     // sits OUTSIDE the `if (gate)` block below, where the value is actually computed. `undefined` for a
@@ -10356,6 +10380,10 @@ export class SessionService {
       // `gateStepsResult`'s own "nothing to report" discipline just above), else whatever `anyExtended`
       // accumulated across whichever attempt(s) actually ran.
       gateExtended = gateRan ? anyExtended : undefined;
+      // Card 3407caad: derived straight from `gateStepsResult` (just set above) — `undefined` whenever
+      // THAT is (gateless project or REUSED gate, the identical "nothing to report" case `gateExtended`
+      // itself follows on the previous line), else the worst step's proximity to `gateTimeoutMs`.
+      gateProximity = describeGateProximity(gateStepsResult, gateTimeoutMs);
       // Card a1a8c5c4: captured ONCE here, independent of pass/fail, so BOTH the plain gate-fail rejection
       // below AND the plain merge-success return further down can carry the SAME bounded tail — before
       // this card only a rejection ever surfaced it (the ephemeral pty tail text / this-call's own
@@ -10493,6 +10521,7 @@ export class SessionService {
           notified: !suppressed,
           opId: thisOpId,
           gateExtended,
+          gateProximity,
           outputTail: gateOutputTailForRecord,
         };
       }
@@ -10526,7 +10555,7 @@ export class SessionService {
         const detailText = `${why}; squash phase aborted before writing — canonical repo AND worktree untouched — just re-run worker_merge_confirm.`;
         const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_base_invalidated", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended };
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
@@ -10536,7 +10565,7 @@ export class SessionService {
       const detailText = `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
       const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended };
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -10565,6 +10594,7 @@ export class SessionService {
             notified: !suppressed,
             opId: thisOpId,
             gateExtended,
+            gateProximity,
           };
         }
         // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
@@ -10573,7 +10603,7 @@ export class SessionService {
         const detailText = "STAGE_EMPTY_RETRY: the branch has no diff to merge (squash staged nothing, no commit made); canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.";
         const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId, gateExtended };
+        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
@@ -10631,8 +10661,8 @@ export class SessionService {
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) };
   }
 
   /**
@@ -10956,6 +10986,19 @@ export class SessionService {
         const stepsLine = outcome.ok && outcome.value.merged && outcome.value.gateSteps
           ? ` ${formatGateStepsDiagnostic(outcome.value.gateSteps)}`
           : "";
+        // Card 3407caad: same WARN-BEFORE-BREACH note as the worker self-check's own `[loom:gate-done]`
+        // echo (runWorkerGate's onSettle, above) — appended ONLY when a step actually crossed
+        // GATE_PROXIMITY_THRESHOLD, so an ordinary green merge stays exactly as quiet as before this
+        // card. No raw `gateCommandTimeoutMs` figure here (unlike the worker echo) — that config value
+        // isn't in scope at THIS call site (it's local to confirmWorkerMerge, a separate method); the
+        // percentage alone is still the actionable signal. NAMES THE CEILING EXPLICITLY (manager review):
+        // `fraction` is always against the HARD gateCommandTimeoutMs a post-timeout RETRY enforces with no
+        // extension — genuinely different from (and smaller than) the ~2× effective ceiling a FIRST
+        // attempt's own one-time auto-extend can reach — see describeGateProximity's "WHICH CEILING" doc.
+        // A bare "% of budget" is ambiguous between two numbers that differ by ~2×; this spells out which.
+        const proximityNote = outcome.ok && outcome.value.merged && outcome.value.gateProximity?.nearBudget
+          ? ` ⚠ gate budget proximity: step '${outcome.value.gateProximity.step}' used ${Math.round(outcome.value.gateProximity.fraction * 100)}% of its HARD gateCommandTimeoutMs retry ceiling (no auto-extend on a retry, card 24642c3d — a first attempt may run ~2× further while still producing output) — consider raising it, splitting the suite, or investigating what got slower before it starts timing out.`
+          : "";
         // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
         // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
         // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
@@ -10967,7 +11010,7 @@ export class SessionService {
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2: a THROWN exception can strike at literally any point inside confirmWorkerMerge — including
           // AFTER mergeBranch's own squash commit succeeded, during finalizeMerge's worktree/branch cleanup —
@@ -11495,6 +11538,9 @@ export class SessionService {
             return {
               ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency,
               steps: gateResult.steps, outputTail: passOutputTail,
+              // Card 3407caad: warn-before-breach signal, set on the PASSING path too — see
+              // GateProximity's own doc.
+              gateProximity: describeGateProximity(gateResult.steps, gateTimeoutMs),
             };
           }
           const finalClass = classifyGateFailure(gateResult);
@@ -11533,6 +11579,8 @@ export class SessionService {
             // the RESULT no longer has to reach into `gateDetail` for the tail on a failure while getting
             // nothing at all on a pass; both branches now populate the same two top-level fields.
             steps: gateResult.steps, outputTail,
+            // Card 3407caad: same warn-before-breach signal as the pass path above.
+            gateProximity: describeGateProximity(gateResult.steps, gateTimeoutMs),
             gateDetail: {
               phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
@@ -11621,9 +11669,21 @@ export class SessionService {
         const passDurationNote = outcome.ok && outcome.value.passed && outcome.value.durationMs != null
           ? ` in ${formatStepDurationMs(outcome.value.durationMs)}`
           : "";
+        // Card 3407caad: a WARN-BEFORE-BREACH note — appended ONLY when a step actually crossed
+        // GATE_PROXIMITY_THRESHOLD, so an ordinary green run (the steady-state case) stays exactly as
+        // quiet as before this card; see GateProximity's own doc for why the threshold sits well above
+        // Loom's own measured steady state instead of firing on every healthy run. NAMES THE CEILING
+        // EXPLICITLY (manager review): `fraction` is always against the HARD gateCommandTimeoutMs a
+        // post-timeout RETRY enforces with no extension — genuinely different from (and smaller than) the
+        // ~2× effective ceiling a FIRST attempt's own one-time auto-extend can reach — see
+        // describeGateProximity's "WHICH CEILING" doc. A bare "% of budget" is ambiguous between two
+        // numbers that differ by ~2×; this spells out which.
+        const proximityNote = outcome.ok && outcome.value.passed && outcome.value.gateProximity?.nearBudget
+          ? ` ⚠ gate budget proximity: step '${outcome.value.gateProximity.step}' used ${Math.round(outcome.value.gateProximity.fraction * 100)}% of its HARD ${gateTimeoutMs}ms gateCommandTimeoutMs retry ceiling (no auto-extend on a retry, card 24642c3d — a first attempt may run ~2× further while still producing output) — consider raising gateCommandTimeoutMs, splitting the suite, or investigating what got slower before it starts timing out.`
+          : "";
         const msg = outcome.ok
           ? (outcome.value.passed
-            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}${passDurationNote}.${passStepsLine}${currencyNote}`
+            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}${passDurationNote}.${passStepsLine}${currencyNote}${proximityNote}`
             : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${currencyNote}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's

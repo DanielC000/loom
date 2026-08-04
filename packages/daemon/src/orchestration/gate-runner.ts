@@ -475,6 +475,154 @@ export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | u
 }
 
 /**
+ * Card 3407caad: how close a step's `durationMs` came to consuming its own `gateCommandTimeoutMs`
+ * budget — a WARN-BEFORE-BREACH signal, distinct from `gateExtended`/`anyExtended` (card 9f6598dd),
+ * which only ever tells you a run ALREADY breached it (consumed its one-time auto-extend). This fires
+ * earlier: a step can be well on its way to needing that extend, or to a hard timeout on a project with
+ * `gateRetry` disabled, while still comfortably PASSING today — the whole point per the card's DoD is a
+ * signal visible on a passing run, not just a failing one.
+ *
+ * ⛔⛔ WHICH CEILING THIS IS A FRACTION OF (manager review, card 3407caad — folded in, not a restart):
+ * there are TWO different ceilings a step can be measured against, and they differ by ~2×:
+ *   - a FIRST attempt's EFFECTIVE ceiling, once its one-time output-gated auto-extend is counted, is
+ *     `gateCommandTimeoutMs` PLUS one more full `timeoutMs` window (`GATE_EXTEND_IDLE_MS`'s own doc) —
+ *     roughly 2× `gateCommandTimeoutMs`, while the step keeps producing output.
+ *   - a RETRY after a timeout runs `allowExtend:false` (card 24642c3d, deliberate — stacking two "one
+ *     more chance" mechanisms would push the worst case to ~4×) — a HARD `gateCommandTimeoutMs`, no net.
+ * This function's `fraction` is ALWAYS `durationMs / gateCommandTimeoutMs` — the RAW configured value,
+ * i.e. the SMALLER, HARD retry ceiling, never the ~2× first-attempt-with-extension allowance. That is
+ * the ceiling that actually bites: a step comfortably inside its first attempt's effective budget (it
+ * extended once and still passed) can be structurally doomed on a retry, which gets no such net — so
+ * `fraction` reads as "how close to the ceiling a RETRY would enforce", not "how close to what THIS run
+ * was actually allowed". A `fraction` over `1.0` means exactly that: this step already needed more than
+ * the hard ceiling to finish (it survived only because it was a first attempt and got the one-time
+ * extend) — worth surfacing even though the run passed, because a subsequent retry of the SAME step
+ * would have no such reprieve. Every caller-facing rendering of `fraction`/`nearBudget` (nudge text, tool
+ * descriptions) must name this ceiling explicitly — "of budget" alone is genuinely ambiguous between two
+ * numbers that differ by ~2×, and removing that ambiguity is the whole point of the signal.
+ *
+ * COMPOSES WITH, DOES NOT DUPLICATE, card 73a847f5: that card already skips a doomed retry (a timeout
+ * that already consumed its auto-extend "reports budget-exceeded" and never re-runs, because a hard-
+ * bounded rerun provably cannot pass) — but it fires AT THE MOMENT OF FAILURE, after the fact. This
+ * signal is the pre-emptive counterpart: it fires WHILE THE GATE IS STILL GREEN, before there is
+ * anything to skip a retry for.
+ *
+ * ⚠️ NOT the same comparison {@link formatGateStepsDiagnostic}'s own doc warns never to make. That
+ * warning is about NOT inferring correctness/thoroughness from a step's absolute duration (a
+ * silently-skipped step finishes EARLY, which is load-variable noise, not a signal). This function never
+ * looks at that axis at all — it compares a step's duration against the fixed, absolute
+ * `gateCommandTimeoutMs` ceiling every project already enforces, which is an operational capacity
+ * question ("how much of the allotted runway is left"), not a correctness one. The two are orthogonal;
+ * this does not license comparing {@link formatGateStepsDiagnostic}'s own numbers against each other or
+ * an "expected" range for any OTHER purpose.
+ *
+ * THE THRESHOLD (`GATE_PROXIMITY_THRESHOLD`) — stamped number · condition · population · instrument ·
+ * as-of, TWO INDEPENDENT SYSTEMS, deliberately NOT averaged or compared against each other (different
+ * suites, different budgets, no transfer function — only the SHAPE below is meant to transfer):
+ *   - Loom's own gate, a REAL measured WORST-STEP reading (manager review, card 3407caad, 2026-08-04 —
+ *     supersedes an earlier revision of this doc that called the worst-step axis unmeasured on this
+ *     repo): merge op `4e7e4123` (card `23471268`) settled with steps `pnpm build 3s · pnpm --filter
+ *     @loom/daemon test:daemon 18m14s`. NUMBER: the worst step (the test step) ≈1,094s against the
+ *     per-step 1,800,000ms `gateCommandTimeoutMs` ⇒ ~61%. CONDITION: a real merge gate, Windows host,
+ *     daemon gate cap 2. POPULATION: 650 hermetic daemon test files, runner pool size 2 — ⚠️ the field
+ *     that matters most here, since it MOVES (grows) over time with zero change to this threshold, which
+ *     is the whole reason the threshold needs headroom rather than tracking today's number exactly.
+ *     INSTRUMENT: the settled `gate_status` record + the `[loom:merge-done]` steps line, as read and
+ *     reported by the manager (a worker-scoped `gate_status` call cannot see another session's op, so
+ *     this reading could not be independently re-verified from this session) — that steps line is
+ *     SECOND-ROUNDED; do NOT difference it against a separately-read ms-precise `totalDurationMs`, which
+ *     measures the WHOLE OP (worktree prep + union-merge + gate + squash), not this one step — two
+ *     different instruments measuring different things, never subtract one from the other. AS-OF:
+ *     2026-08-04. This single reading (n=1) sits inside the ~47%-63% WHOLE-GATE band this doc previously
+ *     cited from the card's own kickoff (build+test end-to-end, ~14-19 real minutes) — because `pnpm
+ *     build` is only ~3s here, whole-gate (~1,097s) and worst-step (~1,094s) differ by ~0.3% on THIS
+ *     project, so that earlier whole-gate figure was, in substance, already close to the worst-step axis.
+ *     That coincidence is project-specific, not structural — a project whose build step is heavier would
+ *     see the two axes diverge for real — so this reading is recorded as its own real,
+ *     separately-instrumented data point rather than treated as proof the two axes are interchangeable in
+ *     general.
+ *   - A peer project's own gate: 60.4% · 65.4% · 73.1% · 76.6% of its configured 700,000ms
+ *     `gateCommandTimeoutMs` — its OWN test STEP measured against its OWN budget (n=4 healthy runs), per
+ *     manager review on this same card, 2026-08-04.
+ * ⇒ BOTH systems independently sit in a HIGH band (Loom ~61%, the peer up to 76.6%) as their NORMAL,
+ * HEALTHY state — that STRUCTURAL convergence, never either system's MAGNITUDE, is what does real work
+ * here: it argues a single GLOBAL constant is the wrong SHAPE in the first place, because two real systems
+ * already show meaningfully different healthy-state ceilings, so a threshold tuned close to either one's
+ * own steady state would fire on ROUTINE healthy runs on THAT system. ⛔ This structural point does NOT
+ * license using the peer's 76.6% as a magnitude 0.85 itself must clear — a DIFFERENT budget (700,000ms vs.
+ * Loom's own 1,800,000ms), a different suite, a different host, no transfer function, exactly as the
+ * no-averaging/no-comparison rule above already says; anchoring a Loom constant on another system's own
+ * number would be the exact thing that rule forbids, caught in manager review on this same card,
+ * 2026-08-04 (see [[the-qualifier-dies-in-the-summary-label]] in project memory for the general pattern:
+ * a rule stated correctly can still die three paragraphs later, in the sentence that actually gets acted
+ * on). **0.85 is anchored SOLELY on Loom's OWN measured worst-step reading above (~61%) — ~24 points of
+ * headroom, comfortably quiet through Loom's own healthy runs.** The peer's numbers are kept, stamped and
+ * attributed, purely as the SECOND independent system that makes the STRUCTURAL argument (a per-project
+ * override may eventually be warranted) more than a one-system anecdote — not as evidence for 0.85's own
+ * value. On top of Loom's own measured margin, the true margin is worse than that single reading alone
+ * suggests: (a) a sibling project's suite can run real-ingest tests against Loom's own live corpus, so ITS
+ * margin erodes as this repo grows with zero change to its own code, and (b) worker doctrine defaults a
+ * worker's OWN DoD self-check to running tests directly rather than through `run_gate`, so up to
+ * `maxConcurrentWorkers` semaphore-INVISIBLE test lanes can be competing with an admitted gate at the same
+ * moment, invisible to the reading above. Both push real-world contention higher than what a single
+ * admitted-gate reading can ever show — so a threshold "tuned" tighter against only what's currently
+ * visible would UNDERSTATE true risk, not overstate it — while still leaving real warning room before the
+ * HARD retry ceiling this fraction is measured against (see the ceiling doc above).
+ * ⚠️ LIMITATION, NAMED RATHER THAN SILENTLY ACCEPTED: this is currently ONE GLOBAL constant, not a
+ * per-project config value. Loom's own POPULATION (650 test files) is exactly the kind of number that
+ * grows over time and erodes this margin with zero code change on either side — a project whose own
+ * worst-step ceiling runs hotter than either system measured here (or whose build step is heavy enough
+ * that whole-gate and worst-step meaningfully diverge, unlike the ~0.3% coincidence on Loom today) could
+ * need a project-specific override this card does not build.
+ */
+export const GATE_PROXIMITY_THRESHOLD = 0.85;
+
+/** {@link describeGateProximity}'s result — `undefined` at the CALL SITE (never constructed here) means
+ *  "nothing to report" (no gate spawned: a gateless project, or a reused self-check — the same
+ *  "undefined ≠ false" discipline `gateExtended` already follows, see its own doc). Once a real gate DID
+ *  spawn, this is always populated (never itself `undefined`) — `nearBudget:false` is the honest "ran,
+ *  checked, comfortably under budget" answer, not an omission. */
+export interface GateProximity {
+  /** `true` only when `fraction >= GATE_PROXIMITY_THRESHOLD` for the worst (highest-fraction) step. */
+  nearBudget: boolean;
+  /** The step whose `durationMs` came closest to `gateCommandTimeoutMs`, by fraction — present alongside
+   *  `nearBudget:false` too, so a caller can see how close the closest step actually came. */
+  step: string;
+  /** `durationMs / gateCommandTimeoutMs` for `step`, rounded to 2 decimals, measured against the RAW
+   *  configured `gateCommandTimeoutMs` — the HARD ceiling a post-timeout retry gets NO auto-extend
+   *  against (card 24642c3d), never the ~2× effective ceiling a FIRST attempt's one-time auto-extend can
+   *  reach (see {@link describeGateProximity}'s own doc, "WHICH CEILING" section). Can exceed `1` — that
+   *  means this step already needed more than the hard ceiling to finish (it survived only because it
+   *  was a first attempt and consumed its one-time extend); a retry of the same step would have no such
+   *  net. */
+  fraction: number;
+}
+
+/**
+ * Card 3407caad: the worst (highest-fraction) step's proximity to `gateCommandTimeoutMs`, across a real
+ * gate run's `steps`. `undefined` when `steps` is `undefined`/empty (no gate spawned) OR when every step's
+ * `durationMs` is `null` (no timed step to compare — should not happen in practice, but this stays an
+ * honest-null rather than a fabricated `nearBudget:false`) — see {@link GateProximity}'s own doc for why
+ * that distinction matters to a caller. `gateTimeoutMs` is the SAME raw, per-step HARD ceiling every step
+ * in `steps` was actually run against (each gate step gets the full budget, never a divided share — see
+ * `runGateSequential`'s own doc) — see this function's own "WHICH CEILING" doc above for why the HARD
+ * ceiling, not a first attempt's ~2× effective one, is the correct denominator — so one shared
+ * denominator is correct for every entry.
+ */
+export function describeGateProximity(steps: GateStepDuration[] | undefined, gateTimeoutMs: number): GateProximity | undefined {
+  if (!steps || steps.length === 0) return undefined;
+  let worstStep: string | undefined;
+  let worstFraction = -1;
+  for (const s of steps) {
+    if (s.durationMs == null) continue;
+    const fraction = s.durationMs / gateTimeoutMs;
+    if (fraction > worstFraction) { worstFraction = fraction; worstStep = s.step; }
+  }
+  if (worstStep == null) return undefined;
+  return { nearBudget: worstFraction >= GATE_PROXIMITY_THRESHOLD, step: worstStep, fraction: Math.round(worstFraction * 100) / 100 };
+}
+
+/**
  * Run a (possibly `&&`-chained) `gateCommand` as SEPARATE sequential child processes instead of one
  * `&&`-chained shell invocation — so memory frees BETWEEN steps (a shared footprint across
  * lint+test+build was OOM-killing a worker's gate, exit 137). Preserves `&&` short-circuit semantics
