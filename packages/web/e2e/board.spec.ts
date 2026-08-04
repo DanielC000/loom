@@ -198,6 +198,61 @@ test("editing a card's title in the drawer reflects on the board and in the stor
     .toBe(updated);
 });
 
+// Card 0b36702e — a stale drawer save must warn, not silently clobber. The drawer captures the version
+// it LOADED and sends it on Save; if something else (an agent, here simulated via a raw REST call
+// holding the correct baseVersion) wrote the body first, the drawer's own stale save now 409s and shows
+// a conflict banner instead of overwriting that edit — and Reload lets the human pick up the fresh
+// content and re-save cleanly with zero further friction.
+test("a stale drawer save shows a conflict instead of clobbering a concurrent edit, and Reload clears it", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-conflict-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  const title = uniq("conflict-card");
+  const task = await loomDaemon.createTask(project.id, { title, body: "Original body", columnKey: "todo" });
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+  await cardInLane(page, "To Do", title).click();
+
+  const drawerBody = page.locator("textarea");
+  await expect(drawerBody).toHaveValue("Original body");
+
+  // An "agent" writes the body while the drawer sits open — a real POST holding the CORRECT version
+  // (1, the freshly-created card's own), exactly what tasks_update would do.
+  const agentWrite = await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title, body: "Agent's concurrent edit", baseVersion: 1 }),
+  });
+  expect(agentWrite.ok).toBeTruthy();
+
+  // The human, unaware, edits the now-stale drawer content and hits Save.
+  await drawerBody.fill("Human's stale edit, composed against the OLD body");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  // Observable #1: a conflict banner appears — not a silent overwrite.
+  const conflictBanner = page.getByText(/this card changed while you had it open/i);
+  await expect(conflictBanner).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reload", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Overwrite anyway", exact: true })).toBeVisible();
+  // Observable #2: the agent's edit is UNTOUCHED in the store — the stale save never landed.
+  await expect
+    .poll(async () => (await (await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`)).json() as { body: string }).body)
+    .toBe("Agent's concurrent edit");
+
+  // Reload: adopts the fresh (agent's) content into the drawer and clears the banner.
+  await page.getByRole("button", { name: "Reload", exact: true }).click();
+  await expect(drawerBody).toHaveValue("Agent's concurrent edit");
+  await expect(conflictBanner).toHaveCount(0);
+
+  // A fresh edit now saves cleanly — the reload re-armed the baseline, so no more friction.
+  await drawerBody.fill("Human's edit, made AFTER reloading the fresh content");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(conflictBanner).toHaveCount(0);
+  await expect
+    .poll(async () => (await (await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`)).json() as { body: string }).body)
+    .toBe("Human's edit, made AFTER reloading the fresh content");
+});
+
 test("a held card shows as held, and releasing the hold in the drawer clears it", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`board-held-${Date.now()}`);
   await pinActiveProject(page, project.id);

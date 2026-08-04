@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
 import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, type TaskUpdateConflictError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
 import { useOpenRequest, RequestTypeTag } from "../components/requests";
@@ -72,12 +72,16 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     onError: () => { /* surfaced inline by NewTask via create.error */ },
   });
   // Edit a task's title/description/priority/held/deferred from the detail drawer (same store the MCP tools read/write).
+  // `baseVersion` (card 0b36702e) rides along on a content (title/body) save — the drawer sends the
+  // version it LOADED, so a stale save (an agent wrote the body while the drawer was open) 409s instead
+  // of silently clobbering it. Omitting it (the drawer's "overwrite anyway" retry) writes blind.
   const edit = useMutation({
     // Inline-only (the drawer renders saveError beside Save). The repoKey retarget refusal is a
     // paragraph of reasoning about worktrees — it belongs next to the picker, not in a modal the user
-    // must dismiss before they can act on it.
+    // must dismiss before they can act on it. A version conflict is ALSO inline for the same reason —
+    // it's a decision to make right next to the fields it affects, not a blocking modal.
     meta: { inlineError: true },
-    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null } }) => api.updateTask(id, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null; baseVersion?: number } }) => api.updateTask(id, patch),
     // Invalidate BOTH the board list and this card's own lazy-fetched detail (a done card's body query,
     // below) — a save must never leave the detail cache holding the pre-edit body on next open.
     onSuccess: (_r, { id }) => {
@@ -191,7 +195,8 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
-          saveError={edit.error ? (edit.error as Error).message : null}
+          saveError={edit.error as TaskUpdateConflictError | null}
+          onDismissConflict={() => edit.reset()}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? (del.error as Error).message : null} />
       )}
@@ -642,8 +647,8 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, saving, saveError, onDelete, deleting, deleteError }:
-  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null }) => void; saving: boolean; saveError: string | null;
+function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null; baseVersion?: number }) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
@@ -662,6 +667,24 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
   const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task)
     || held !== (task.held ?? false) || deferred !== (task.deferred ?? false)
     || (repoKey || null) !== (task.repoKey ?? null);
+  // Card 0b36702e: the version this drawer instance actually LOADED — captured ONCE (this initializer
+  // runs only at mount, since `key={task.id}` on the caller never remounts this component for the same
+  // card), never re-derived from a later prop refresh. This is deliberate: `task` is a prop, so if we
+  // read `task.version` again at save time instead of trusting this captured value, a save-time re-read
+  // would always match itself and the whole conflict check would be a no-op — exactly the bug this card
+  // exists to fix (see §COMPANION in the card body for a shipped specimen of that exact mistake).
+  const [loadedVersion, setLoadedVersion] = useState(task.version);
+  // Once local edits match the server's last-known row again (a save just completed and the board
+  // refetched `task`), adopt its new version as the baseline — this is what lets a SECOND save in the
+  // same sitting use the version the FIRST save just produced, instead of spuriously conflicting with
+  // its own prior write. Never fires while `dirty` (mid-edit, or sitting on an unresolved conflict whose
+  // fields intentionally still differ from the stale `task` prop — see the Reload handler below, which
+  // sets loadedVersion directly instead of relying on this effect).
+  useEffect(() => {
+    if (!dirty) setLoadedVersion(task.version);
+  }, [task.version, dirty]);
+  // The fresh task the server returned alongside a 409 — null unless the last save attempt conflicted.
+  const saveConflict = saveError?.conflict ? (saveError.current ?? null) : null;
   // Guard the three close paths (backdrop / Esc / ✕) against silently discarding unsaved edits. When dirty,
   // a close request arms an in-drawer "Discard unsaved changes?" confirm (mirroring the delete two-step)
   // instead of closing; when clean it closes immediately, zero extra friction.
@@ -920,12 +943,39 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
           <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({
             title, body, priority, held, deferred,
             ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
+            // baseVersion (card 0b36702e): the version THIS drawer loaded, never re-fetched at save time —
+            // see loadedVersion's own doc above for why that distinction is the entire fix.
+            baseVersion: loadedVersion,
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
-          {saveError && (
-            <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError}</span>
+          {saveError && !saveConflict && (
+            <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
+          )}
+          {/* Card 0b36702e's "detect-and-warn" remedy: a stale save doesn't clobber — it surfaces the fresh
+              server row and lets the human choose. Reload adopts the fresh row (discarding local edits) and
+              re-arms the baseline for a clean re-save; Overwrite anyway keeps the local edits and re-saves
+              WITHOUT baseVersion, the human's explicit override (same blind write the route always did
+              before this card — see api.updateTask's own doc for why omitting it means "write blind"). */}
+          {saveConflict && (
+            <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%",
+              padding: "6px 8px", borderRadius: 4, background: color.panel2, border: `1px solid ${color.amber}` }}>
+              <span style={{ flex: 1, color: color.amber, fontSize: 12, fontFamily: font.mono }}>
+                This card changed while you had it open — reload to see the latest, or overwrite anyway.
+              </span>
+              <Button onClick={() => {
+                setTitle(saveConflict.title); setBody(saveConflict.body ?? "");
+                setPriority(prio(saveConflict)); setHeld(saveConflict.held ?? false);
+                setDeferred(saveConflict.deferred ?? false); setRepoKey(saveConflict.repoKey ?? "");
+                setLoadedVersion(saveConflict.version);
+                onDismissConflict();
+              }}>Reload</Button>
+              <Button variant="danger" onClick={() => onSave({
+                title, body, priority, held, deferred,
+                ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
+              })}>Overwrite anyway</Button>
+            </div>
           )}
           {/* Destructive delete, pushed to the right and visually separated from Save. Two-step confirm. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>

@@ -926,7 +926,16 @@ const BOARD_REACH_SLUG = "board-reach";
  *  one-pending-per-(session,route,capability) semantics. */
 type PendingBoardWrite =
   | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority; grantBacked: boolean }
-  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean; grantBacked: boolean }
+  | {
+      action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean; grantBacked: boolean;
+      /**
+       * Card 0b36702e — the task's `version` at PROPOSE time, captured here so the eventual CONFIRM call
+       * (a separate handler invocation, possibly minutes later) gates its title/body write against the
+       * version the owner's edit was actually composed against, not whatever the task happens to be at
+       * confirm time. See `applyPatch`'s call sites below for why this closes the CAS gate's real window.
+       */
+      baseVersion: number;
+    }
   | { action: "relocate"; taskId: string; toProject: string; fromProject: string };
 const pendingBoardWrites = new Map<string, PendingBoardWrite>();
 
@@ -1427,20 +1436,26 @@ const BOARD_REACH: CompanionCapability = {
           && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string));
         const grantAllows = !cfgAllows && !verbatimOk && ctx.attest.hasAuthoredContentGrant(ctx.sessionId, task.projectId);
         const contentIsVerbatim = cfgAllows || verbatimOk || grantAllows;
-        const applyPatch = async (): Promise<{ error: string } | { updated: Task | TaskUpdateAck }> => {
+        // Card 0b36702e (closes d0978321's own §COMPANION residual — see this function's `PendingBoardWrite`
+        // doc): `versionForGate` MUST be the version the owner's edit was actually composed against, NOT a
+        // fresh re-read at write time — a save-time fetch always matches itself and makes the CAS gate a
+        // no-op. The two call sites below pass different things and that difference IS the fix:
+        //  - the low-friction DIRECT-COMMIT path (no propose/confirm at all) passes `task.version`, read at
+        //    the top of THIS SAME invocation — propose and commit are the same call here, so "just read" and
+        //    "composed against" are the same instant. Nothing to carry.
+        //  - the CONFIRM branch passes `pending.baseVersion`, captured at PROPOSE time (a strictly EARLIER
+        //    invocation) — never `task.version` re-read at confirm time, which is what silently defeated the
+        //    gate before this card (see the incident this card's §COMPANION documents).
+        const applyPatch = async (versionForGate: number): Promise<{ error: string } | { updated: Task | TaskUpdateAck }> => {
           const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
           if (hasTitle) patch.title = normalizedTitle;
           if (hasBody) patch.body = normalizedBody;
           if (columnKey !== undefined) patch.columnKey = columnKey;
           if (priority !== undefined) patch.priority = priority;
           if (held !== undefined) patch.held = held;
-          // Card d0978321: title/body writes are now gated on baseVersion === the task's current version.
-          // `task` was read FRESH at the top of THIS SAME handler invocation (both the propose call and the
-          // later confirm call re-run the handler from scratch — see this function's own doc), so its
-          // `.version` is always the version immediately preceding this write, across the propose→confirm
-          // round trip too — no extra plumbing needed. Threaded unconditionally (harmless when
-          // title/body are both absent, since that patch is never gated).
-          const result = await updateProjectTask(db, task.projectId, id, patch, undefined, task.version);
+          // Threaded unconditionally (harmless when title/body are both absent, since that patch is never
+          // gated — see updateProjectTask's own touchesContent check).
+          const result = await updateProjectTask(db, task.projectId, id, patch, undefined, versionForGate);
           return "error" in result ? { error: result.error } : { updated: result };
         };
 
@@ -1450,7 +1465,7 @@ const BOARD_REACH: CompanionCapability = {
           if (!contentIsVerbatim) {
             return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
-          const result = await applyPatch();
+          const result = await applyPatch(task.version);
           if ("error" in result) return ok({ error: result.error });
           if (grantAllows) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, task.projectId);
           const updated = result.updated;
@@ -1472,7 +1487,10 @@ const BOARD_REACH: CompanionCapability = {
           ) {
             return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
           }
-          const result = await applyPatch();
+          // `pending.baseVersion` — NOT `task.version` — see applyPatch's own doc for why: `task` here was
+          // re-read fresh at the top of THIS confirm invocation, which is exactly the stale-check-that-can-
+          // never-fire bug this card fixes.
+          const result = await applyPatch(pending.baseVersion);
           if ("error" in result) return ok({ error: result.error });
           // See board_create's own confirm-branch doc for why this reads `pending.grantBacked` (frozen
           // at propose time) rather than recomputing `grantAllows` against THIS turn's owner text (the
@@ -1512,7 +1530,9 @@ const BOARD_REACH: CompanionCapability = {
         if (!delivered) {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
-        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held, grantBacked: grantAllows });
+        // baseVersion captured HERE, at propose time (card 0b36702e) — see PendingBoardWrite's own doc for
+        // why the confirm branch reads this back instead of re-reading `task.version` fresh.
+        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held, grantBacked: grantAllows, baseVersion: task.version });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );

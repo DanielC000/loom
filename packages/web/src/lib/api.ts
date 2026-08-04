@@ -227,6 +227,37 @@ async function patchProject(url: string, body: unknown): Promise<ProjectPatchRes
   return r.json() as Promise<ProjectPatchResult>;
 }
 
+// An Error from a task title/body write (POST /api/tasks/:id) that ALSO carries the server's structured
+// 409 conflict body (card 0b36702e) — `conflict:true` + `current` (the task as it stands right now,
+// full body included) — so the board drawer can render "this card changed while you had it open" and
+// offer reload/overwrite-anyway instead of a bare thrown-string error. Absent (both fields undefined) on
+// any other failure (a 400 validation error, a 404, a plain network failure) — check `conflict` before
+// trusting `current`.
+export interface TaskUpdateConflictError extends Error { conflict?: true; current?: Task; }
+
+// POST /api/tasks/:id — see api.updateTask's own doc for the `baseVersion` contract. Mirrors postErr's
+// verbatim-`{error}`-surfacing convention, PLUS lifts `conflict`/`current` onto the thrown Error (same
+// pattern as patchProject's `liveSessions` above) so a 409 carries the fresh task, not just a message.
+async function updateTaskReq(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">> & { baseVersion?: number }): Promise<{ ok: boolean }> {
+  const r = await fetch(`/api/tasks/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
+  if (!r.ok) {
+    let msg = `/api/tasks/${id} -> ${r.status}`;
+    let conflict: true | undefined;
+    let current: Task | undefined;
+    try {
+      const j = (await r.json()) as { error?: string; conflict?: true; current?: Task };
+      if (j?.error) msg = j.error;
+      if (j?.conflict) conflict = true;
+      if (j?.current) current = j.current;
+    } catch { /* non-JSON body */ }
+    const e = new Error(msg) as TaskUpdateConflictError;
+    if (conflict) e.conflict = conflict;
+    if (current) e.current = current;
+    throw e;
+  }
+  return r.json() as Promise<{ ok: boolean }>;
+}
+
 // PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is
 // strict zod, so a rejected override comes back 400 with a readable reason the Settings UI shows verbatim.
 async function patch<T>(url: string, body: unknown): Promise<T> {
@@ -500,8 +531,13 @@ export const api = {
   // the registered ones) and `checkTaskRepoKeyRebind` (fails CLOSED while any session ever bound to this
   // task still holds a worktree or an undeleted branch — a retarget then would gate against a repo the
   // worktree doesn't live in). "-> 400" would hide both.
-  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>) =>
-    postErr<{ ok: boolean }>(`/api/tasks/${id}`, patch),
+  // `baseVersion` (card 0b36702e) is OPTIONAL: pass the version the caller LOADED the task at (never
+  // re-fetched at save time — a save-time fetch always matches itself and makes the check a no-op) to
+  // gate a title/body write against a concurrent edit (most likely an agent's). Omit it to write blind,
+  // same as before this card — the drawer's "overwrite anyway" escape hatch after a conflict. A stale
+  // baseVersion 409s with a structured conflict the drawer surfaces (see updateTaskReq below).
+  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">> & { baseVersion?: number }) =>
+    updateTaskReq(id, patch),
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
   // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.
   deleteTask: (id: string) => delErr<{ ok: boolean }>(`/api/tasks/${id}`),

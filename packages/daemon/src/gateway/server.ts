@@ -4588,7 +4588,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP task tools read/write, so UI and agent never diverge).
   app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">>;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">> & { baseVersion?: number };
     // heldBy is NEVER client-suppliable — that's this whole fix's central invariant (card 9b0373c0). Unlike
     // priority/held/deferred, this raw REST body is NOT schema-validated the way the MCP tools' zod input is,
     // so a bare `{heldBy:"agent"}` POST (no `held` key) would otherwise flow straight through to
@@ -4599,6 +4599,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     if (b.held !== undefined && typeof b.held !== "boolean") return reply.code(400).send({ error: "held must be a boolean" });
     if (b.deferred !== undefined && typeof b.deferred !== "boolean") return reply.code(400).send({ error: "deferred must be a boolean" });
+    // Card 0b36702e: `baseVersion` is OPTIONAL here, unlike the agent-facing surfaces (d0978321), where an
+    // omitted base on an existing row is rejected outright. The human keeps override authority — see the
+    // gate below for why omission is deliberately NOT treated as staleness on this route.
+    if (b.baseVersion !== undefined && typeof b.baseVersion !== "number") return reply.code(400).send({ error: "baseVersion must be a number" });
+    const baseVersion = b.baseVersion;
+    delete b.baseVersion;
     // Resolve the task ONCE, up front — a bogus id must 404, not silently validate repoKey against an
     // empty "no project" registry and return a misleading "no registered repos" error (code-review catch:
     // the OLD `getProject(getTask(id)?.projectId ?? "")` ran with no existence check at all).
@@ -4639,16 +4645,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // later agent clear attempt on a human-set hold has something to check against.
     const prev = b.held !== undefined ? deps.db.getTask(id) : undefined;
     if (b.held !== undefined) b.heldBy = b.held ? "human" : null;
-    // Card d0978321: this human-only REST route deliberately does NOT require baseVersion for a title/body
-    // write — same trust posture as the held-clear exemption above (human is the top authority; the agent
-    // MCP surfaces get the CAS gate, this route doesn't). This is not a hole for the incident the card
-    // exists to fix: db.updateTask still BUMPS `version` whenever this write touches title/body, so a LATER
-    // agent write holding a now-stale baseVersion is still correctly rejected — the gate is asymmetric BY
-    // DESIGN (a human edit here can clobber an agent's unread baseVersion; an agent can never clobber a
-    // human this way). The residual — a board drawer open on stale content when the human hits save — is a
-    // real, separate gap (the drawer has no version concept of its own yet) and is intentionally NOT this
-    // card's scope; it needs a web-UI change, not a daemon one.
-    deps.db.updateTask(id, b);
+    // Card 0b36702e (closes d0978321's deliberately-scoped-out residual): a title/body write on this
+    // human-only route is now OPTIONALLY CAS-gated on `baseVersion` — the "detect-and-warn" remedy. Unlike
+    // the agent-facing gate (d0978321), the human keeps override authority: an OMITTED baseVersion still
+    // writes BLIND, exactly as before this card (the escape hatch a drawer's own "overwrite anyway" uses).
+    // A SENT baseVersion that no longer matches the row's current version is rejected with a 409 naming the
+    // current task instead of silently overwriting it — turning the accident (a stale drawer clobbering a
+    // newer edit) into a visible decision. The drawer captures the version it LOADED at open time and sends
+    // it on every save; a fresh mismatch there means something else (most likely an agent) wrote title/body
+    // in between. Per d0978321, `version` only ever advances on a title/body write, so a field-only patch
+    // (kanban drag: columnKey+position) never reaches this gate regardless of whether baseVersion was sent.
+    const touchesContent = b.title !== undefined || b.body !== undefined;
+    if (touchesContent && baseVersion !== undefined) {
+      const result = deps.db.updateTaskChecked(id, b, baseVersion);
+      if (!result.ok) {
+        if ("notFound" in result) return reply.code(404).send({ error: "task not found" });
+        return reply.code(409).send({
+          error: "this card's title/body changed since you loaded it — reload to see the latest, or overwrite anyway",
+          conflict: true,
+          current: result.current,
+        });
+      }
+    } else {
+      deps.db.updateTask(id, b);
+    }
     // Audit trail twin of the agent-side clear event (mcp/tasks.ts `updateProjectTask`) — a human clear
     // is always allowed, but still worth a durable record alongside an agent clear.
     if (b.held === false && prev?.held === true) {

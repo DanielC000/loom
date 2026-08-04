@@ -54,6 +54,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { updateProjectTask } = await import("../dist/mcp/tasks.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -355,13 +356,17 @@ try {
     db.close();
   }
 
-  // ============ board_update: title/body edit round-trip survives the version CAS gate (card d0978321) ============
-  // tasks_update's title/body writes now require baseVersion (optimistic concurrency, card d0978321).
-  // board_update has no version concept of its own — it works ONLY because `task` (and so `task.version`)
-  // is read FRESH at the top of the handler on EVERY invocation, including the eventual confirm call, so
-  // the version it threads through as baseVersion is always the one immediately preceding the actual
-  // write. This test pins that invariant instead of trusting it asserted: if it were wrong, EVERY
-  // companion title/body edit would break the moment this ships, silently, in the owner's own chat.
+  // ============ board_update: title/body edit round-trip survives the version CAS gate (card d0978321,
+  // fixed for real by card 0b36702e) ============
+  // tasks_update's title/body writes require baseVersion (optimistic concurrency, card d0978321).
+  // board_update carries `task.version` through as that baseVersion — but WHICH version matters. Before
+  // 0b36702e, the confirm branch re-read `task.version` FRESH at the top of the SAME invocation that
+  // performs the write, microseconds before it — so the value it threaded through was always current and
+  // the CAS could never reject a companion write, silently. 0b36702e fixed this: the version is now
+  // captured at PROPOSE time (`PendingBoardWrite.baseVersion`) and carried through unchanged to confirm.
+  // In THIS test nothing writes between propose and confirm, so the outcome (applies, version+1) is
+  // unchanged from before the fix — proving the fix didn't regress the common, uncontested path. The
+  // NEXT test below is what actually exercises the fix: an interleaving write between propose and confirm.
   {
     const db = tmpDb();
     const proj = "proj-content-update";
@@ -393,7 +398,56 @@ try {
     const task = db.getTask("t-content");
     check("content confirm: title persisted", task.title === "New title");
     check("content confirm: body persisted", task.body === "New body");
-    check("content confirm: version advanced by exactly 1 (content changed exactly once, gate never rejected the confirm's own fresh read)", task.version === versionBeforePropose + 1);
+    check("content confirm: version advanced by exactly 1 (content changed exactly once, the propose-time baseVersion still matched at confirm)", task.version === versionBeforePropose + 1);
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ board_update: an agent write LANDING BETWEEN propose and confirm is now caught (card
+  // 0b36702e — §COMPANION) ============
+  // THE BUG THIS PROVES FIXED: before 0b36702e, the confirm branch re-read `task.version` fresh at write
+  // time, so it always matched whatever was currently in the DB — the CAS gate could never reject a
+  // companion write, no matter what happened in between. This test interleaves a real agent write
+  // (updateProjectTask, the exact same call tasks_update makes) between propose and confirm and proves
+  // the confirm is now REJECTED — using the version captured at PROPOSE time — instead of silently
+  // overwriting the agent's edit with prose composed against the stale pre-interleave content.
+  {
+    const db = tmpDb();
+    const proj = "proj-interleave";
+    seedProject(db, proj, "Interleave");
+    const companionSess = "companion-interleave";
+    seedSession(db, companionSess, proj, "assistant");
+    seedTask(db, "t-interleave", proj, { title: "Old title", body: "Old body" });
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act",
+      config: { friction: "per-action" },
+    });
+    const pty = makeFakePty("the owner said: retitle it Owner's title and set the body to Owner's body");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const versionAtPropose = db.getTask("t-interleave").version;
+    const proposed = await call(client, "board_update", { id: "t-interleave", title: "Owner's title", body: "Owner's body" });
+    check("interleave: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+
+    // An agent writes the body WHILE the owner's confirmation is still outstanding — holding the SAME
+    // version the companion captured at propose, so this write itself succeeds and bumps the version.
+    const agentWrite = await updateProjectTask(db, proj, "t-interleave", { body: "Agent's concurrent edit" }, { sessionId: "agent-sess" }, versionAtPropose);
+    check("interleave: the interleaving agent write succeeds", !agentWrite.error);
+    check("interleave: version bumped by the agent write", db.getTask("t-interleave").version === versionAtPropose + 1);
+
+    // The owner now confirms the ORIGINAL proposal — composed against the pre-interleave content.
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const confirmed = await call(client, "board_update", { id: "t-interleave", title: "Owner's title", body: "Owner's body" });
+    check("interleave: THE FIX — confirm is REJECTED (stale propose-time baseVersion), not 'updated'", confirmed.status !== "updated");
+    check("interleave: confirm reports an error naming the conflict", typeof confirmed.error === "string");
+    const task = db.getTask("t-interleave");
+    check("interleave: the agent's edit SURVIVES — never clobbered by the owner's stale-composed prose", task.body === "Agent's concurrent edit");
+    check("interleave: title also unchanged (whole-write reject, same as updateProjectTask's own gate)", task.title === "Old title");
+    check("interleave: version unchanged by the rejected confirm", task.version === versionAtPropose + 1);
 
     await client.close();
     db.close();
