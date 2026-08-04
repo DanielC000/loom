@@ -6764,7 +6764,10 @@ export class SessionService {
   platformEscalate(
     managerSessionId: string,
     input: { title: string; detail: string; severity?: string },
-  ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus; deduped?: boolean } {
+  ): {
+    taskId: string; projectId: string; deliveryStatus: DeliveryStatus; deduped?: boolean;
+    appended?: boolean; created?: boolean; linkedTaskId?: string; possiblyRelatedTaskIds?: string[];
+  } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
@@ -6802,6 +6805,9 @@ export class SessionService {
     const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
     const key = norm(input.title);
     const severity = (input.severity ?? "").trim() || "unspecified";
+    const origin = this.db.getProject(caller.projectId);
+    const originName = origin?.name ?? caller.projectId;
+    const now = new Date().toISOString();
     let reuseTaskId: string | undefined;
     for (const e of this.db.listEscalationsForProject(caller.projectId)) {
       const filedTitle = (e.detail?.title as string | undefined) ?? "";
@@ -6810,7 +6816,12 @@ export class SessionService {
       if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
         const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
         if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
-          return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true };
+          // Mode A fix (card 9315ddf9): this used to return here with the new `detail` silently
+          // dropped — a reader watching the card saw only whatever was there before. Append it as an
+          // attributed, timestamped section so the evidence is never lost, without touching (let alone
+          // clobbering) a Lead's own triage note or any prior report already on the body.
+          this.appendEscalationDetail(existingTask, managerSessionId, originName, severity, input.detail, now);
+          return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true, appended: true };
         }
         // Higher severity than what's on file for this still-open task: stop scanning (this IS the
         // authoritative current state for the title) and fall through to file a fresh event against it.
@@ -6819,13 +6830,48 @@ export class SessionService {
       }
     }
 
-    const origin = this.db.getProject(caller.projectId);
-    const originName = origin?.name ?? caller.projectId;
-    const now = new Date().toISOString();
     let taskId: string;
+    let created = false;
+    let appended = false;
+    let linkedTaskId: string | undefined;
+    let possiblyRelatedTaskIds: string[] | undefined;
     if (reuseTaskId) {
       taskId = reuseTaskId;
+      // Same Mode A gap as the dedup branch above: a severity bump used to reuse the task and file a
+      // fresh (higher-severity) event WITHOUT ever writing the new detail to the body — the Lead got a
+      // high-severity nudge with no payload behind it (the second half of card 9315ddf9). Append here too.
+      const reusedTask = this.db.getTask(taskId);
+      if (reusedTask) {
+        this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now);
+        appended = true;
+      }
     } else {
+      // Mode B fix (card 9315ddf9): no still-open escalation matches this title, so we're about to mint
+      // a brand-new card — the shape that silently forked a finding when a reporter reasonably retitled
+      // a follow-up to describe new evidence. Before minting, look for other still-open escalation(s)
+      // this SAME manager session has filed in this project under a DIFFERENT title — the natural
+      // signature of "same investigation, retitled follow-up." Auto-link ONLY when there is EXACTLY ONE
+      // candidate: two or more is genuinely ambiguous, and a wrong guess (silently relating two distinct
+      // findings) is the fragmentation bug running in reverse — worse than leaving it unlinked-but-
+      // reported. Mirrors the board's own project_task_create dupe guard (cards 0bd5aff5/e13c6087):
+      // never silently merge, never silently drop — surface it and let the reporter/Lead decide.
+      // ⚠️ DELIBERATELY session-scoped, not project-scoped — widening to "same origin project" would
+      // make nearly every open escalation a candidate, so `candidates.length > 1` would be the common
+      // case and this would auto-link almost nothing anyway, just noisily. The unstated cost of that
+      // choice: managers on this project recycle constantly, and a recycled successor gets a NEW
+      // managerSessionId — so a retitled follow-up filed by a SUCCESSOR manager (not the same session
+      // that filed the original) matches ZERO candidates here and mints an unlinked card, the exact
+      // fork this fix exists to prevent, just across a recycle boundary instead of within one session.
+      // That case is left to the reporter (or the Lead, via `escalation_status`) rather than covered
+      // automatically — a project-wide scan would be too broad to auto-link safely.
+      const candidateTaskIds = new Set<string>();
+      for (const e of this.db.listEscalationsForProject(caller.projectId)) {
+        if (e.managerSessionId !== managerSessionId || !e.taskId) continue;
+        const t = this.db.getTask(e.taskId);
+        if (t && this.classifyEscalationStatus(home.id, t.columnKey) !== "resolved") candidateTaskIds.add(e.taskId);
+      }
+      const candidates = [...candidateTaskIds];
+
       const body = [
         "**Escalated by a project manager** (manager→Platform upward channel).",
         "",
@@ -6852,6 +6898,21 @@ export class SessionService {
       };
       this.db.insertTask(task);
       taskId = task.id;
+      created = true;
+
+      const soleCandidate = candidates.length === 1 ? candidates[0] : undefined;
+      if (soleCandidate) {
+        linkedTaskId = soleCandidate;
+        const priorTask = this.db.getTask(soleCandidate);
+        if (priorTask) {
+          const backNote = `Related to: ${taskId} (a follow-up escalation from this same manager session under a new title)`;
+          this.db.updateTask(priorTask.id, { body: priorTask.body ? `${priorTask.body}\n\n${backNote}` : backNote });
+          const forwardNote = `\n\nRelated to: ${linkedTaskId} (a still-open escalation from this same manager session under a different title)`;
+          this.db.updateTask(taskId, { body: `${body}${forwardNote}` });
+        }
+      } else if (candidates.length > 1) {
+        possiblyRelatedTaskIds = candidates;
+      }
     }
     this.db.appendEvent({
       id: randomUUID(), ts: now,
@@ -6882,7 +6943,13 @@ export class SessionService {
         try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
       }
     }
-    return { taskId, projectId: home.id, deliveryStatus };
+    return {
+      taskId, projectId: home.id, deliveryStatus,
+      ...(created ? { created: true } : {}),
+      ...(appended ? { appended: true } : {}),
+      ...(linkedTaskId ? { linkedTaskId } : {}),
+      ...(possiblyRelatedTaskIds ? { possiblyRelatedTaskIds } : {}),
+    };
   }
 
   /** Total order over `platform_escalate` severities (unknown/omitted ranks lowest) — used by the
@@ -6891,6 +6958,28 @@ export class SessionService {
   private escalationSeverityRank(severity: string): number {
     const RANK: Record<string, number> = { unspecified: 0, low: 1, medium: 2, high: 3, critical: 4 };
     return RANK[severity] ?? 0;
+  }
+
+  /**
+   * Card 9315ddf9 — appends a timestamped, attributed detail section to an escalation task's body,
+   * NEVER replacing existing content. Used every time `platformEscalate` reuses a still-open task
+   * instead of filing a new one (same-title dedup, or a severity bump) — both paths used to come back
+   * as "success" while the new evidence silently vanished. An append-only section means a Lead's own
+   * triage note (which REPLACES the body when filed) and any prior report already there both survive.
+   */
+  private appendEscalationDetail(
+    task: Task, managerSessionId: string, originName: string, severity: string, detail: string, now: string,
+  ): void {
+    const section = [
+      "",
+      "",
+      `## Re-escalation — ${now}`,
+      `- **From:** ${originName} manager session \`${managerSessionId}\``,
+      `- **Severity:** ${severity}`,
+      "",
+      detail,
+    ].join("\n");
+    this.db.updateTask(task.id, { body: `${task.body ?? ""}${section}` });
   }
 
   /**
