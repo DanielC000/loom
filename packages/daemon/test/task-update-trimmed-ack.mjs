@@ -50,12 +50,17 @@ try {
     "id" in reprioritized && "title" in reprioritized && "columnKey" in reprioritized && "priority" in reprioritized &&
     "position" in reprioritized && "held" in reprioritized && "deferred" in reprioritized && "updatedAt" in reprioritized);
 
-  // (3) a patch that DOES pass body returns the FULL task, body included.
-  const bodyEdit = await updateProjectTask(db, "projA", card.id, { body: "a deliberately edited body" });
+  // (3) a patch that DOES pass body returns the FULL task, body included. Card d0978321: a body write now
+  // requires baseVersion — pass the card's CURRENT version (read fresh, mirroring how a real caller would
+  // read tasks_get right before composing an edit); the CAS mechanics themselves are covered in full by
+  // task-version-guard.mjs, this file stays scoped to the trimmed-ack SHAPE.
+  const preEditVersion = db.getTask(card.id).version;
+  const bodyEdit = await updateProjectTask(db, "projA", card.id, { body: "a deliberately edited body" }, undefined, preEditVersion);
   check("(3) body-editing update: no error", !bodyEdit.error);
   check("(3) body-editing update: returns the FULL task, body included", bodyEdit.body === "a deliberately edited body");
   check("(3) body-editing update: still carries the small fields too", bodyEdit.id === card.id && bodyEdit.columnKey === "review" && bodyEdit.priority === "p0");
   check("(3) body-editing update: persisted", db.getTask(card.id).body === "a deliberately edited body");
+  check("(3) body-editing update: version advanced by exactly 1 (content changed)", bodyEdit.version === preEditVersion + 1);
 
   db.close();
 } finally {

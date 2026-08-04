@@ -4578,7 +4578,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const task: Task = {
       id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
       columnKey, position: Date.now(),
-      priority: b.priority ?? "p2", repoKey, createdAt: now, updatedAt: now,
+      priority: b.priority ?? "p2", repoKey, createdAt: now, updatedAt: now, version: 1,
     };
     deps.db.insertTask(task);
     return reply.code(201).send(task);
@@ -4639,6 +4639,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // later agent clear attempt on a human-set hold has something to check against.
     const prev = b.held !== undefined ? deps.db.getTask(id) : undefined;
     if (b.held !== undefined) b.heldBy = b.held ? "human" : null;
+    // Card d0978321: this human-only REST route deliberately does NOT require baseVersion for a title/body
+    // write — same trust posture as the held-clear exemption above (human is the top authority; the agent
+    // MCP surfaces get the CAS gate, this route doesn't). This is not a hole for the incident the card
+    // exists to fix: db.updateTask still BUMPS `version` whenever this write touches title/body, so a LATER
+    // agent write holding a now-stale baseVersion is still correctly rejected — the gate is asymmetric BY
+    // DESIGN (a human edit here can clobber an agent's unread baseVersion; an agent can never clobber a
+    // human this way). The residual — a board drawer open on stale content when the human hits save — is a
+    // real, separate gap (the drawer has no version concept of its own yet) and is intentionally NOT this
+    // card's scope; it needs a web-UI change, not a daemon one.
     deps.db.updateTask(id, b);
     // Audit trail twin of the agent-side clear event (mcp/tasks.ts `updateProjectTask`) — a human clear
     // is always allowed, but still worth a durable record alongside an agent clear.

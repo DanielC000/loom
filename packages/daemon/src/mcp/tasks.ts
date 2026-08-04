@@ -518,6 +518,7 @@ export function createProjectTask(
     repoKey,
     createdAt: now,
     updatedAt: now,
+    version: 1,
   };
   db.insertTask(task);
   return task;
@@ -632,9 +633,22 @@ export function createProjectTaskChecked(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "version"> & {
   changed: string[];
 };
+
+/**
+ * {@link updateProjectTask}'s rejection shape for a stale-or-omitted `baseVersion` on a title/body write
+ * (card d0978321) — mirrors `memory_write`'s `MemoryWriteConflict` exactly, same error text, same
+ * "return the current record so the caller can reconcile" contract: one idiom for the same concept
+ * across both stores. `current` is the raw current task (not merged/requests-enriched — the caller
+ * already has read access via `tasks_get`/`getProjectTask` if it wants that).
+ */
+export interface TaskUpdateConflict {
+  error: string;
+  conflict: true;
+  current: Task;
+}
 
 /**
  * The calling agent session's identity, threaded through {@link updateProjectTask} to (a) stamp the
@@ -658,7 +672,13 @@ export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId">>,
   actor?: TaskUpdateActor,
-): Promise<Task | TaskUpdateAck | { error: string }> {
+  /**
+   * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
+   * `tasks_update` response), REQUIRED to write `title`/`body` on an EXISTING task; irrelevant for
+   * field-only patches (see the gate below). Mirrors `memory_write`'s `baseVersion` exactly.
+   */
+  baseVersion?: number,
+): Promise<Task | TaskUpdateAck | { error: string } | TaskUpdateConflict> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
@@ -748,7 +768,29 @@ export async function updateProjectTask(
     }
   }
   const dbPatch = heldByPatch !== undefined ? { ...patch, heldBy: heldByPatch } : patch;
-  db.updateTask(owned.id, dbPatch);
+  // Optimistic-concurrency gate (card d0978321): a title/body write is the ONLY thing gated — a
+  // column/priority/held/deferred/repoKey/deferredUntilTaskId-only patch (the common board-repair case)
+  // still needs no baseVersion at all, unaffected by anything below. `patch` (not `dbPatch`) is checked:
+  // `heldByPatch` never adds title/body, so the two are equivalent here, but `patch` is the caller's own
+  // intent, which is what this gate is actually about.
+  const touchesContent = patch.title !== undefined || patch.body !== undefined;
+  let updated: Task;
+  if (touchesContent) {
+    const result = db.updateTaskChecked(owned.id, dbPatch, baseVersion);
+    if (!result.ok) {
+      if ("notFound" in result) return { error: "task not found (deleted concurrently)" };
+      return {
+        error: "this task's title/body changed since you last read it (or you never read it) — re-read it " +
+          "(tasks_get) and retry with the current version as baseVersion, merging your change into the current body",
+        conflict: true,
+        current: result.current,
+      };
+    }
+    updated = result.task;
+  } else {
+    db.updateTask(owned.id, dbPatch);
+    updated = { ...owned, ...dbPatch, updatedAt: new Date().toISOString() };
+  }
   // Audit trail: a real clear just went through. Only reachable here for an AGENT-set hold — a
   // human-set hold already returned above, so this fires on the DoD's "agent-set-then-agent-clear"
   // path, never on a refused clear.
@@ -759,13 +801,12 @@ export async function updateProjectTask(
       detail: { clearedBy: "agent", previousHeldBy: owned.heldBy ?? null },
     });
   }
-  const updated = { ...owned, ...dbPatch, updatedAt: new Date().toISOString() };
   // A patch that doesn't touch `body` doesn't need it echoed back — trim to the small fields. A patch
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, version } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, version, changed: Object.keys(patch) };
   }
   return updated;
 }

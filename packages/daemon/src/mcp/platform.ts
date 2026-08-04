@@ -1958,7 +1958,15 @@ export class PlatformMcpRouter {
           "error}` and does NOT block the other ids; nothing is transactional, and the overall call still " +
           "returns ok even when some entries carry an error. Returns one result per id, in the given order: " +
           "`{taskId, task}` (the ack/full row updateProjectTask would return) on success, `{taskId, error}` " +
-          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped.",
+          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped.\n" +
+          "OPTIMISTIC CONCURRENCY (card d0978321): on the single-`taskId` path, writing `title` and/or `body` " +
+          "on an existing task REQUIRES `baseVersion` — the `version` you last read for it (project_task_get/ " +
+          "a prior project_task_update response). A stale-or-omitted `baseVersion` on a title/body write is " +
+          "REJECTED with {error, conflict:true, current} instead of overwriting — re-read and retry, merging " +
+          "your change into the current body (mirrors the in-project tasks_update / memory_write exactly). " +
+          "Every other field needs no baseVersion. `version` advances ONLY when title/body actually change — " +
+          "a field-only move (columnKey/priority/held/deferred/repoKey) leaves it unchanged. `baseVersion` is " +
+          "meaningless (and ignored) on the `taskIds` batch path, since that path already refuses title/body outright.",
         inputSchema: strictShape({
           projectId: z.string(),
           taskId: z.string().optional(),
@@ -1971,11 +1979,12 @@ export class PlatformMcpRouter {
           held: z.boolean().optional(),
           deferred: z.boolean().optional(),
           repoKey: z.string().nullable().optional(),
+          baseVersion: z.number().optional(),
         }),
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
-      async ({ projectId, taskId, taskIds, ...patch }) => {
+      async ({ projectId, taskId, taskIds, baseVersion, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
@@ -1997,7 +2006,7 @@ export class PlatformMcpRouter {
           }));
           return ok(results);
         }
-        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor));
+        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion));
       },
     );
 

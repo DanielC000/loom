@@ -1530,6 +1530,21 @@ export interface Task {
   mergedVerification?: "content" | "pathset" | "trailer-only" | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Card d0978321 — optimistic-concurrency CAS token, mirroring {@link ProjectMemoryEntry.version}
+   * (same monotonic-INTEGER rationale: never derived from `updatedAt`, which can collide across two
+   * distinct writes on a coarse clock). `tasks_update`/`project_task_update` require `baseVersion` to
+   * match this before writing `title`/`body`; a stale-or-omitted base is rejected with the current task
+   * returned, so the caller can reconcile (mirrors `memory_write` exactly).
+   *
+   * ⚠️ UNLIKE `ProjectMemoryEntry.version` — which bumps on every write, because a memory note IS its
+   * content — this ADVANCES ONLY WHEN `title` OR `body` ACTUALLY CHANGES. A field-only move (columnKey,
+   * priority, held, deferred, position, repoKey, deferredUntilTaskId — including the read-time
+   * deferred-auto-clear write-through) leaves it untouched. Do NOT read an unchanged `version` across two
+   * reads as "the card is unchanged" — it only means "the title/body haven't changed"; the card may have
+   * moved column, changed priority, been held, or auto-cleared its deferral in between.
+   */
+  version: number;
 }
 
 /**

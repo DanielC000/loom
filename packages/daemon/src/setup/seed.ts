@@ -167,7 +167,7 @@ export function seedSetupHome(db: Db): string[] {
   SETUP_CHECKLIST.forEach((card, i) => {
     const task: Task = {
       id: randomUUID(), projectId: project.id, title: card.title, body: card.body,
-      columnKey: landing, position: i, priority: "p2", createdAt: now, updatedAt: now,
+      columnKey: landing, position: i, priority: "p2", createdAt: now, updatedAt: now, version: 1,
     };
     db.insertTask(task);
   });

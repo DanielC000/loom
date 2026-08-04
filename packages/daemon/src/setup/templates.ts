@@ -165,6 +165,7 @@ export function applyWorkflowTemplate(db: Db, template: WorkflowTemplate, projec
       priority: "p2",
       createdAt: now,
       updatedAt: now,
+      version: 1,
     };
     db.insertTask(task);
     return task;

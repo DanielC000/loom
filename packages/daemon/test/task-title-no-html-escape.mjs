@@ -36,9 +36,10 @@ try {
   check("(a) stored body reads back byte-identical", reread.body === "See `Partial<T>` & `A & B`.");
   check("(a) stored title contains a literal '<', never '&lt;'", reread.title.includes("<id>") && !reread.title.includes("&lt;"));
 
-  // (b) updateProjectTask: patching a title/body with the same characters is equally unescaped.
+  // (b) updateProjectTask: patching a title/body with the same characters is equally unescaped. Card
+  // d0978321: a title/body write now requires baseVersion — pass the freshly-created card's version.
   const quoteTitle = `fix(web): guard the "A & B" <Partial> case`;
-  const updated = await updateProjectTask(db, "projA", created.id, { title: quoteTitle, body: 'quotes: " and \' and & too' });
+  const updated = await updateProjectTask(db, "projA", created.id, { title: quoteTitle, body: 'quotes: " and \' and & too' }, undefined, created.version);
   check("(b) updateProjectTask returns the patched title unescaped", updated.title === quoteTitle);
   const reread2 = db.getTask(created.id);
   check("(b) stored title after update reads back byte-identical", reread2.title === quoteTitle);

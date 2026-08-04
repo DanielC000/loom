@@ -355,6 +355,50 @@ try {
     db.close();
   }
 
+  // ============ board_update: title/body edit round-trip survives the version CAS gate (card d0978321) ============
+  // tasks_update's title/body writes now require baseVersion (optimistic concurrency, card d0978321).
+  // board_update has no version concept of its own — it works ONLY because `task` (and so `task.version`)
+  // is read FRESH at the top of the handler on EVERY invocation, including the eventual confirm call, so
+  // the version it threads through as baseVersion is always the one immediately preceding the actual
+  // write. This test pins that invariant instead of trusting it asserted: if it were wrong, EVERY
+  // companion title/body edit would break the moment this ships, silently, in the owner's own chat.
+  {
+    const db = tmpDb();
+    const proj = "proj-content-update";
+    seedProject(db, proj, "Content update");
+    const companionSess = "companion-content-update";
+    seedSession(db, companionSess, proj, "assistant");
+    seedTask(db, "t-content", proj, { title: "Old title", body: "Old body" });
+    // Pin per-action friction (same reasoning as the columnKey/priority round-trip test above) so this
+    // test exercises the propose→confirm machinery unconditionally, not a warm-trust-window shortcut.
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act",
+      config: { friction: "per-action" },
+    });
+    const pty = makeFakePty("the owner said: retitle it New title and set the body to New body");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const versionBeforePropose = db.getTask("t-content").version;
+    const proposed = await call(client, "board_update", { id: "t-content", title: "New title", body: "New body" });
+    check("content propose: succeeds", proposed.status === "proposed");
+    check("content propose: card is UNCHANGED (nothing applies on propose)", db.getTask("t-content").title === "Old title" && db.getTask("t-content").body === "Old body");
+    check("content propose: version unchanged by the propose call itself", db.getTask("t-content").version === versionBeforePropose);
+
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const updated = await call(client, "board_update", { id: "t-content", title: "New title", body: "New body" });
+    check("content confirm: APPLIES across the propose→confirm round-trip despite the version CAS gate", updated.status === "updated");
+    const task = db.getTask("t-content");
+    check("content confirm: title persisted", task.title === "New title");
+    check("content confirm: body persisted", task.body === "New body");
+    check("content confirm: version advanced by exactly 1 (content changed exactly once, gate never rejected the confirm's own fresh read)", task.version === versionBeforePropose + 1);
+
+    await client.close();
+    db.close();
+  }
+
   // ============ board_update: held flag round-trip ============
   {
     const db = tmpDb();

@@ -144,8 +144,9 @@ try {
     check("(A10) repoKey still UNCHANGED", db.getTask(workerCreated.id)?.repoKey === "svc-a");
 
     // (A11) control: the SAME worker CAN still update a field repoKey-adjacent (title) — the guard is
-    // repoKey-specific, not a blanket worker tasks_update lockout.
-    const workerTitleOk = await asWorker.call("tasks_update", { id: workerCreated.id, title: "Worker Can Still Rename" });
+    // repoKey-specific, not a blanket worker tasks_update lockout. Card d0978321: a title write now needs
+    // baseVersion — read the card's current version first (unrelated to the repoKey guard this block tests).
+    const workerTitleOk = await asWorker.call("tasks_update", { id: workerCreated.id, title: "Worker Can Still Rename", baseVersion: db.getTask(workerCreated.id)?.version });
     check("(A11) control: a worker's tasks_update WITHOUT repoKey still succeeds", !workerTitleOk.error && db.getTask(workerCreated.id)?.title === "Worker Can Still Rename");
 
     await asWorker.client.close();

@@ -1586,6 +1586,11 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // base-schema index (mirrors `deferred_until_task_id`'s pattern, not `deferred`'s dual base+
   // migration one — this column never existed in CREATE TABLE, so there is nothing to index there).
   deferred_stuck: "INTEGER NOT NULL DEFAULT 0",
+  // Card d0978321 — optimistic-concurrency CAS token for title/body writes, exact mirror of
+  // PROJECT_MEMORY_ADDED_COLUMNS's own `version` entry below. NOT NULL + constant DEFAULT 1 backfills
+  // every legacy row to version 1 in place, the same starting point a brand-new row gets — see
+  // Task.version's own doc for why it advances ONLY on a title/body change, not on every write.
+  version: "INTEGER NOT NULL DEFAULT 1",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -5371,10 +5376,49 @@ export class Db {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
-    const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
+    // Card d0978321: `version` is a CONTENT counter, not a row counter — it advances only when this patch
+    // actually touches title/body (see Task.version's own doc for why: bumping on every field-only move
+    // would make a body-composer's baseVersion go stale from an unrelated column/priority/held/deferred
+    // write, spuriously rejecting a healthy concurrent edit that never touched the prose at all). This is
+    // the ONLY place `version` is ever written — BLIND (no CAS check here, mirrors upsertProjectMemory
+    // staying blind while upsertProjectMemoryChecked below gates); every caller of this method (the
+    // deferred-state write-through, the back-note append, the human REST route, ship-state writes, column
+    // repair) still correctly bumps it when it happens to touch title/body, which is exactly what lets a
+    // LATER stale agent write get caught by updateTaskChecked even though THIS write itself wasn't gated.
+    const touchesContent = patch.title !== undefined || patch.body !== undefined;
+    const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck WHERE id=@id",
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, version=@version WHERE id=@id",
     ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null, deferredStuck: next.deferredStuck ? 1 : 0 });
+  }
+  /**
+   * Optimistic-concurrency-guarded wrapper around {@link updateTask} (card d0978321) — mirrors
+   * `upsertProjectMemoryChecked`'s exact shape: wrapped in one `db.transaction()` so the read-current +
+   * conditional-write stays atomic, compares `baseVersion` against the row's CURRENT `version` (a stale
+   * OR omitted base against an existing row is rejected — omission is deliberately treated the same as
+   * staleness, same reasoning as memory: an update to an EXISTING row with no base at all is
+   * indistinguishable from a blind clobber), and returns `{ok:false, current}` (the row as it stands
+   * right now) instead of writing, so the caller can reconcile/merge and retry with the fresh version.
+   *
+   * The CALLER (mcp/tasks.ts `updateProjectTask`) decides WHEN to reach for this instead of the plain,
+   * blind `updateTask` above — exactly when the patch touches `title`/`body` (DoD: field-only moves must
+   * never be gated). This function itself has no opinion on that; it always gates against whatever
+   * `baseVersion` it's given, using `updateTask`'s own bump-on-content-change rule to decide whether the
+   * version actually needed to match.
+   */
+  updateTaskChecked(
+    id: string,
+    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck">>,
+    baseVersion: number | undefined,
+  ): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } {
+    const run = this.db.transaction((): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } => {
+      const existing = this.getTask(id);
+      if (!existing) return { ok: false, notFound: true };
+      if (existing.version !== baseVersion) return { ok: false, current: existing };
+      this.updateTask(id, patch);
+      return { ok: true, task: this.getTask(id)! };
+    });
+    return run();
   }
   /**
    * Write-through cache-fill for a task's ship-state (card 1eebc46a) — used ONLY by the drawer's lazy
@@ -7095,6 +7139,7 @@ function toTask(r0: unknown): Task {
     mergedDate: (r.merged_date as string | null) ?? null,
     mergedVerification: (r.merged_verification as Task["mergedVerification"]) ?? null,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+    version: (r.version as number) ?? 1,
   };
 }
 function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {

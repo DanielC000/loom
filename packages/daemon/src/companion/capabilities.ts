@@ -1434,7 +1434,13 @@ const BOARD_REACH: CompanionCapability = {
           if (columnKey !== undefined) patch.columnKey = columnKey;
           if (priority !== undefined) patch.priority = priority;
           if (held !== undefined) patch.held = held;
-          const result = await updateProjectTask(db, task.projectId, id, patch);
+          // Card d0978321: title/body writes are now gated on baseVersion === the task's current version.
+          // `task` was read FRESH at the top of THIS SAME handler invocation (both the propose call and the
+          // later confirm call re-run the handler from scratch — see this function's own doc), so its
+          // `.version` is always the version immediately preceding this write, across the propose→confirm
+          // round trip too — no extra plumbing needed. Threaded unconditionally (harmless when
+          // title/body are both absent, since that patch is never gated).
+          const result = await updateProjectTask(db, task.projectId, id, patch, undefined, task.version);
           return "error" in result ? { error: result.error } : { updated: result };
         };
 

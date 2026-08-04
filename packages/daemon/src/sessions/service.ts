@@ -6561,6 +6561,7 @@ export class SessionService {
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
       updatedAt: now,
+      version: 1,
     };
     this.db.insertTask(task);
     this.db.appendEvent({
@@ -6736,6 +6737,7 @@ export class SessionService {
         priority: DEFAULT_TASK_PRIORITY,
         createdAt: now,
         updatedAt: now,
+        version: 1,
       };
       this.db.insertTask(task);
       taskId = task.id;
@@ -6873,6 +6875,7 @@ export class SessionService {
         priority: DEFAULT_TASK_PRIORITY,
         createdAt: now,
         updatedAt: now,
+        version: 1,
       };
       this.db.insertTask(task);
       result = { deliveryStatus: "boarded", taskId: task.id };
@@ -7000,6 +7003,7 @@ export class SessionService {
         priority: DEFAULT_TASK_PRIORITY,
         createdAt: now,
         updatedAt: now,
+        version: 1,
       };
       this.db.insertTask(task);
       result = { deliveryStatus: "boarded", taskId: task.id };
@@ -7141,6 +7145,7 @@ export class SessionService {
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
       updatedAt: now,
+      version: 1,
     };
     this.db.insertTask(task);
     this.db.appendEvent({
@@ -7208,6 +7213,7 @@ export class SessionService {
       priority: DEFAULT_TASK_PRIORITY,
       createdAt: now,
       updatedAt: now,
+      version: 1,
     };
     this.db.insertTask(task);
     // CONFINED best-effort live nudge to the user's home operator so a filed suggestion actually reaches an
