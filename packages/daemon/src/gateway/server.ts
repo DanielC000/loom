@@ -5221,7 +5221,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(201).send(term);
   });
   // Kill a shell terminal (the tile's close/kill button). Hard kill — a shell has no graceful resumable
-  // stop like a Claude session; pty.kill tears down the tree (node-pty Job Object, no orphans). The
+  // stop like a Claude session; pty.kill tears down the tree (node-pty's conpty kill path walks
+  // _getConsoleProcessList() and kills each pid — not a Job Object, node-pty@1.1.0 has none — with
+  // Loom's own reapOrphanedDescendants at onExit as the backstop for anything that escapes it). The
   // onExit handler then drops it from the live map. Idempotent (a no-op if already gone).
   app.delete("/api/terminals/:id", async (req) => {
     deps.pty.stop((req.params as { id: string }).id, "hard");

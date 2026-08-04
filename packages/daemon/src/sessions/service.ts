@@ -9536,7 +9536,8 @@ export class SessionService {
   /**
    * Stop ANY session by id (loom-platform `session_stop`; the cross-project analogue of
    * POST /api/sessions/:id/stop). graceful (Ctrl-C ×2, clean, default) | hard (pty.kill) — both
-   * resumable + orphan-free (node-pty Job Object). Unlike stopWorker this is NOT parent-scoped: the
+   * resumable + orphan-free (node-pty's conpty kill path walking _getConsoleProcessList() — not a Job
+   * Object, node-pty@1.1.0 has none). Unlike stopWorker this is NOT parent-scoped: the
    * platform-lead is human-equivalent, above the manager/worker tree. Also reused, unmodified, as the
    * STOP half of the companion session-control ACT lever (card 305a54fb, `session_stop`) —
    * scope/roleFilter/Primitive-A enforcement live entirely in the lever (companion/capabilities.ts); this
@@ -10017,7 +10018,8 @@ export class SessionService {
   /**
    * Best-effort worktree-path-scoped process sweep for a worker being stopped (card 3564fd1e — the reap
    * gap: `stopWorker`/`killAllWorkers` used to do nothing beyond `pty.stop()`, which only kills the
-   * worker's own pty tree — Job Object on Windows / node-pty's own containment on POSIX — plus, on exit,
+   * worker's own pty tree — node-pty's conpty kill path walking _getConsoleProcessList() on Windows (not
+   * a Job Object, node-pty@1.1.0 has none) / node-pty's own containment on POSIX — plus, on exit,
    * `reapOrphanedDescendants`'s PID-tree walk, which only catches a survivor still parented under that
    * tree. Anything that already detached/re-parented away from it entirely (the same gap
    * `reapProcessesRootedInWorktree` exists to close for worktree removal and the pre-gate sweep) was never

@@ -2905,7 +2905,8 @@ export function detectDefaultShell(): string {
 
 /**
  * Best-effort reap of any descendant process a torn-down pty's root process leaves behind — the backstop
- * for a child that ESCAPES node-pty's own orphan-free containment (Job Object on Windows / process-group
+ * for a child that ESCAPES node-pty's own orphan-free containment (its conpty kill path walking
+ * _getConsoleProcessList() on Windows — not a Job Object, node-pty@1.1.0 has none — / a process-group
  * kill on POSIX) by detaching into its own process group/session — e.g. a `pnpm dev` vite dev-server the
  * agent backgrounds via its own Bash tool while verifying UI work (Web-Designer/QA workers), which then
  * outlives the session and walks the port range (board card 621ef252 — six stale vite servers observed).
@@ -7243,7 +7244,7 @@ export class PtyHost {
     // during a deliberate stop serves no purpose. See Live.submitGeneration.
     live.submitGeneration++;
     if (mode === "hard") {
-      live.pty.kill(); // TerminateProcess on Windows; node-pty Job Object kills the tree (no orphans)
+      live.pty.kill(); // TerminateProcess on Windows; node-pty's conpty kill path walks _getConsoleProcessList() to kill the tree (not a Job Object — node-pty@1.1.0 has none)
       return;
     }
     // graceful: double Ctrl-C exits an IDLE claude (resumable, clean) — and for an idle session this is
@@ -7261,7 +7262,8 @@ export class PtyHost {
    * the way to `exited`, so a graceful stop ALWAYS terminates and never leaves a "stopped" session live.
    *   • Stage 2 (RETRY): still alive → the turn has unwound to an idle prompt; re-send the exit sequence.
    *   • Stage 3 (KILL): STILL alive at the hard bound → a wedged turn that ignores Ctrl-C; hard-kill the
-   *     pty (Job Object, orphan-free). This is the backstop that makes "graceful" deterministic.
+   *     pty (node-pty's conpty kill path, orphan-free — not a Job Object, node-pty@1.1.0 has none). This
+   *     is the backstop that makes "graceful" deterministic.
    * Every timer captures the SAME `live` and guards on `live.alive`, so once the pty exits (or its Live is
    * REPLACED by a resume's fresh spawn — the old object keeps alive=false forever) each timer is an inert
    * no-op. It therefore can NEVER kill a resumed session, and an IDLE stop (exited on stage 1) runs neither

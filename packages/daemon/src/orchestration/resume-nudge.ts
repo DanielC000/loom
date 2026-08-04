@@ -12,9 +12,10 @@
  *   per the card's accepted fallback we NOTE the reset so the agent re-Reads intentionally before editing.
  *
  *   IN-FLIGHT BACKGROUND SHELLS KILLED (PL Auditor finding a305669e) — a `--resume` is a NEW engine process
- *   attached to a NEW pty; the OLD pty (and everything node-pty's orphan-free containment (Job Object /
- *   process-group) was keeping alive under it — including any `run_in_background` Bash shells the agent had
- *   started) dies with it. This is OS-level process-tree teardown, not a Loom choice, and applies to EVERY
+ *   attached to a NEW pty; the OLD pty (and everything node-pty's orphan-free containment — its conpty kill
+ *   path walking _getConsoleProcessList() on Windows, a process-group kill on POSIX; not a Job Object,
+ *   node-pty@1.1.0 has none — was keeping alive under it — including any `run_in_background` Bash shells the
+ *   agent had started) dies with it. This is OS-level process-tree teardown, not a Loom choice, and applies to EVERY
  *   live session torn down by the restart/crash — not just the one that caused it. There is no daemon API
  *   into the engine's background-task registry, so checkpointing/draining an arbitrary running shell across
  *   the gap is infeasible; per the same accepted-fallback shape as the file-read note, we NOTE the kill so
