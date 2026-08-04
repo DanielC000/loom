@@ -2840,8 +2840,17 @@ export class OrchestrationMcpRouter {
           "total, limit, offset, nextOffset} — `items` is newest-first; each row is {id, gateType " +
           "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"), passed " +
           "(the same outcome as a plain boolean — `outcome===\"pass\"`), durationMs, gateCap, " +
-          "concurrentGates, concurrentGatesMax, endedAt, failingTest, taskId, branch, workerLabel, " +
+          "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName}. " +
+          "⚠️ THIS TOOL IS THE INDEX, NOT THE DETAIL SURFACE (card 3aec1df6): a `gateType:\"merge\"` row's " +
+          "`failingTest` is `null` on EVERY row, pass or fail — a merge run's failure diagnostic " +
+          "(`failingTest`/`phase`/`stderrTail`/`outputTail`) is never carried on the event this history " +
+          "reads, by construction. To diagnose a rejected merge, take that row's `opId` and call " +
+          "`gate_status(opId)` — it DOES carry the full `gateDetail`/`outputTail` for a settled merge op. A " +
+          "`\"worker\"` row's `failingTest` IS populated directly (a worker self-check embeds it inline), so " +
+          "no pivot is needed there; its `opId` is `null` for the identical reason. `opId` is also `null` " +
+          "for a `\"deploy\"` row (no `pending_gate_ops` op) and for any row recorded before this field " +
+          "shipped. " +
           "⚠️ `concurrentGates` vs `concurrentGatesMax` — DO NOT CONFUSE THESE, they answer DIFFERENT " +
           "questions: `concurrentGates` is a SNAPSHOT AT ADMISSION ONLY — \"how many gates were admitted " +
           "together the instant this one started\" — and says NOTHING about a second gate joining 30s " +

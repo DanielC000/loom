@@ -1352,7 +1352,22 @@ export interface GateHistoryRow {
   durationMs: number | null;
   /** ISO timestamp the run settled. */
   endedAt: string;
+  /** ⚠️ Card 3aec1df6: for a `gateType:"merge"` row this is `failingTest: null` BY CONSTRUCTION, on EVERY
+   *  row, pass or fail — a merge gate's own `build_gate`/`build_gate_retry` event never carries a failing
+   *  test/output tail at all (that diagnostic is written to a separate `merge_rejected` event this history
+   *  read doesn't include). This is NOT a data-quality gap to fix here: `gate_history` is the settled-run
+   *  INDEX (outcome/duration/concurrency trend across many rows); the full diagnostic — `failingTest` AND
+   *  `phase`/`stderrTail`/`outputTail` — lives behind `gate_status(opId)`, using THIS row's own `opId`
+   *  field (below), and IS populated there for a settled merge op. Populated (non-null) for a `"worker"`
+   *  row's failure — a worker self-check's own event embeds `failingTest` directly, so no pivot is needed. */
   failingTest: string | null;
+  /** Card 3aec1df6 — the reachability key `gate_history` was missing entirely: feed this to `gate_status`
+   *  for the full diagnostic (`gateDetail.failingTest`/`gateDetail.stderrTail`/`outputTail`) a null
+   *  `failingTest` above doesn't carry. `null` for a row recorded before this field shipped, for a
+   *  `"deploy"` row (never stamped it — deploys don't mint a `pending_gate_ops` op the same way), and for a
+   *  `"worker"` row (also never stamped — moot, since a worker-gate row's OWN event already carries
+   *  `failingTest` inline, so no pivot is needed there). Populated only for `gateType:"merge"`. */
+  opId: string | null;
   /** `outcome === "pass"` — a plain boolean sibling of `outcome` (card 753d9911: agent-facing consumers
    *  asked for a pass/fail flag rather than deriving it from the outcome enum themselves). A `false` row
    *  is exactly the rejected-run case that carries `durationMs` too (recorded unconditionally, before any

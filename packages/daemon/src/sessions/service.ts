@@ -2942,14 +2942,19 @@ export class SessionService {
    * `passed`/`cancelled`/`reason`/`durationMs`/`validatedHead`/`headWarning`/`steps`/`outputTail`/
    * `gateDetail` — essentially what `run_gate` itself would have returned inline, had it not degraded to
    * pending. Every field is OMITTED (not `null`/`false`) when there's nothing recorded — a legacy row (from
-   * before this card), a `"merge"` row (this card does not touch merge-kind verdict population — see
-   * `confirmWorkerMergeTracked`'s own `onSettle`, unchanged), a non-`"settled"` state, or a corrupt/
-   * unparseable stored payload (fails closed to "nothing recorded", never a throw — see
-   * `Db.toPendingGateOp`'s own try/catch). This is now the ONE exception to "this tool never reports a
-   * pass/fail outcome itself" — narrowly, for a settled worker gate with a verdict on file; the
-   * `[loom:gate-*]` nudge stays the primary, unprompted delivery, this is the queryable recovery path for
-   * a caller that missed it or wants to re-check. The **"merge"** kind is UNCHANGED: `gate_status` on a
-   * settled merge op still never reports pass/fail/rejected — rely on the `[loom:merge-*]` nudge for that.
+   * before either card below), a non-`"settled"` state, or a corrupt/unparseable stored payload (fails
+   * closed to "nothing recorded", never a throw — see `Db.toPendingGateOp`'s own try/catch). This is now the
+   * ONE exception to "this tool never reports a pass/fail outcome itself" — narrowly, for a settled gate
+   * (worker OR, since below, merge) with a verdict on file; the `[loom:gate-*]`/`[loom:merge-*]` nudge stays
+   * the primary, unprompted delivery, this is the queryable recovery path for a caller that missed it or
+   * wants to re-check. ⚠️ CORRECTED (card 3aec1df6 — the prior wording here read "the 'merge' kind is
+   * UNCHANGED: gate_status on a settled merge op still never reports pass/fail/rejected", which stopped
+   * being true the moment card 9f6598dd shipped and was never updated to say so): a settled `"merge"` row
+   * gets the SAME spread, via `deriveMergeGateVerdict` (`confirmWorkerMergeTracked`'s own `onSettle`) —
+   * `gate_status(opId)` on a rejected merge DOES carry `gateDetail.failingTest`/`gateDetail.stderrTail`/
+   * `outputTail` today. This is the surface `gate_history`'s own `opId` field (card 3aec1df6) exists to let
+   * a caller reach — `gate_history` itself intentionally still reads `failingTest: null` for every merge
+   * row (see `GateHistoryRow.failingTest`'s own doc for why), by design: it is the index, this is the detail.
    *
    * FOUR TERMINAL "not live, not found" outcomes now, not three — `never_existed` alone is not enough
    * once a scoped caller exists (see below): `"never_existed"` is a POSITIVE assertion the id was NEVER
@@ -10601,8 +10606,13 @@ export class SessionService {
       // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
       // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
       concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+      // Card 3aec1df6: stamp `opId` on the durable event (here and on the retry sibling below) so a
+      // `gate_history` row can name the SAME op `gate_status(opId)` would return full diagnostics for —
+      // this event's own detail never carries `failingTest`/`outputTail` (see the rejection block below,
+      // which records those on the SEPARATE `merge_rejected` event `GATE_HISTORY_KINDS` excludes), so
+      // `opId` is the only reachability path `gate_history` has to that detail.
       evt("build_gate", {
-        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+        opId: thisOpId, passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
         ...(gateRan ? {} : { reused: true, reusedOpId }),
       });
       if (gateRan) {
@@ -10685,7 +10695,7 @@ export class SessionService {
           throw err;
         }
         concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+        evt("build_gate_retry", { opId: thisOpId, passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
         }

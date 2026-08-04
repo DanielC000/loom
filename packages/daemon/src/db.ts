@@ -5908,10 +5908,12 @@ export class Db {
    *  or surfaced-pending; see its own doc for why this must be unconditional, not gated on surfacedPending
    *  the way the completion-nudge push is). NEVER fires for an op an `evictDeadOwner()` call force-removed
    *  (that op's late settle, if it ever happens, fails the identity guard and never reaches here).
-   *  `verdict` (card 4c5bf820, OPTIONAL — the "merge" onSettle call site omits it, unchanged from before
-   *  this card, so a merge row's `verdict`/`verdict_payload_json` stay NULL exactly as today) persists the
-   *  terminal result so `gate_status` can read it back without the completion nudge being the only carrier
-   *  — see {@link PendingGateOpVerdictKind}/{@link PendingGateOpVerdict}'s own docs for the shape. */
+   *  `verdict` (card 4c5bf820, OPTIONAL — as of THAT card the "merge" onSettle call site omitted it, so a
+   *  merge row's `verdict`/`verdict_payload_json` stayed NULL; card 9f6598dd later widened the "merge"
+   *  onSettle call site to pass one too via `deriveMergeGateVerdict` — see that function's own doc — so a
+   *  merge row now persists a real verdict here just like a "gate" row does) persists the terminal result
+   *  so `gate_status` can read it back without the completion nudge being the only carrier — see
+   *  {@link PendingGateOpVerdictKind}/{@link PendingGateOpVerdict}'s own docs for the shape. */
   settlePendingGateOp(opId: string, verdict?: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict }): void {
     if (!verdict) {
       this.db.prepare("UPDATE pending_gate_ops SET state = 'settled' WHERE op_id = ?").run(opId);
@@ -7129,6 +7131,12 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   }
   const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
   const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
+  // Card 3aec1df6 — the reachability key: `worker_gate`/`deploy` detail_json never carried an opId (nothing
+  // needed one — their own failure detail is already inline, see `failingTest` above), but `build_gate`/
+  // `build_gate_retry` now stamp `opId` explicitly (service.ts's two `evt("build_gate"...)` call sites) so
+  // a null-`failingTest` merge row can still be resolved to its full diagnostic via `gate_status(opId)`.
+  // `null` for any row recorded before this field shipped, or for a kind that never stamps it.
+  const opId = typeof detail.opId === "string" ? detail.opId : null;
   const outcome = gateOutcomeFromDetail(detail);
   const gateCap = typeof detail.gateCap === "number" ? detail.gateCap : null;
   const concurrentGates = typeof detail.concurrentGates === "number" ? detail.concurrentGates : null;
@@ -7148,6 +7156,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     durationMs,
     endedAt: r.ts,
     failingTest,
+    opId,
     passed: outcome === "pass",
     gateCap,
     concurrentGates,
