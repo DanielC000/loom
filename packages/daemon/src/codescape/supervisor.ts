@@ -41,8 +41,35 @@ const OUTPUT_TAIL_BYTES = 4096;
 const DEFAULT_INGEST_TIMEOUT_MS = 120_000;
 /** Bound (ms) for the fast control-plane calls (register/drop/overlay). */
 const DEFAULT_REGISTER_TIMEOUT_MS = 10_000;
-/** Bound (ms) for reingest-main — CONTRACT: needs a client timeout >=30s (blocks ~9-11s + serializes). */
-const DEFAULT_REINGEST_TIMEOUT_MS = 45_000;
+/**
+ * Bound (ms) for reingest-main. AS-OF 2026-08-04 against Codescape sha `439e65f`: endpoint blocking
+ * time (client fetch issue -> response, covering `getWarmProject` + queue wait + `ingestRepo`) measured
+ * BIMODAL — ~13-19s warm, ~24-29s cold (a cold reingest rebuilds the same ts-morph `Project` as
+ * {@link DEFAULT_INGEST_TIMEOUT_MS}'s initial ingest) — which mode fires is not a property of the
+ * request; it depends on what another tenant last touched. The prior "blocks ~9-11s" figure this bound
+ * was derived from was never re-measured and was off by 2.5-3x.
+ *
+ * CORPUS: presumed the Loom repo (the project this reingest-main call re-indexes — see
+ * `service.ts` `fireCodescapeReingest`), but the exact corpus sha/commit and a size proxy (file count or
+ * similar) were NOT recorded alongside the timing figures above and could not be recovered after the
+ * fact. Ingest time scales with corpus size, not just tool version, so these figures are NOT safely
+ * comparable once this repo has grown materially past whatever size it was at measurement time — an
+ * unpinned population, stated honestly, rather than silently omitted.
+ *
+ * Aligned to {@link DEFAULT_INGEST_TIMEOUT_MS} (120s) rather than re-deriving a tighter number: the call
+ * ({@link CodescapeSupervisor.reingestMain}) is fire-and-forget from a caller that never awaits it (see
+ * `service.ts` `fireCodescapeReingest`), and codescape's own route has no cancellation wiring — our abort
+ * closes only OUR socket, their ingest runs to completion regardless. So a tight bound buys us nothing by
+ * being tight: it only decides whether we're still listening when the (server-side unobserved either way)
+ * answer arrives. Sizing around SURVIVAL of a single mode invites exactly this staleness; sizing around
+ * OBSERVABILITY of the slower mode does not. The tail beyond the measured range is UNMEASURED on this
+ * host — this is a floor on the sample maximum, not a proven ceiling.
+ *
+ * A liveness/progress-based bound (indifferent to which mode fires) would be the more principled SHAPE,
+ * but codescape's reingest-main route reports no partial progress to key off, and building one is out of
+ * this fix's scope (our client half only) — flagged as a follow-up, not attempted here.
+ */
+const DEFAULT_REINGEST_TIMEOUT_MS = 120_000;
 /**
  * Bounded backoff (ms) between restart attempts after `serve` dies — increasing, never a tight loop.
  * Exhausting the array without a "healthy run" resetting it (see `healthyRunMs`) means the supervisor
@@ -1350,7 +1377,11 @@ export class CodescapeSupervisor {
     return this.request("POST", `/project/${encodeURIComponent(projectId)}/worktree`, info, this.registerTimeoutMs);
   }
 
-  /** `POST /project/<id>/reingest-main` — bounded at >=30s per CONTRACT (blocks ~9-11s + serializes). */
+  /**
+   * `POST /project/<id>/reingest-main` — bounded at {@link DEFAULT_REINGEST_TIMEOUT_MS} (see that
+   * constant's doc for the measured warm/cold blocking times, as-of stamp, and why the bound is sized
+   * around observability rather than survival).
+   */
   async reingestMain(projectId: string): Promise<CodescapeRequestResult> {
     return this.request("POST", `/project/${encodeURIComponent(projectId)}/reingest-main`, undefined, this.reingestTimeoutMs);
   }
