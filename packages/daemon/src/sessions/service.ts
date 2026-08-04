@@ -10262,7 +10262,23 @@ export class SessionService {
       // the manager never even sees that a transient kill happened, and execution falls through to the
       // normal squash-merge below exactly as if the gate had been green the first time.
       let gateRetried = false;
-      if (!gateResult.passed && orchestration.gateRetry.enabled && classifyGateFailure(gateResult) !== "genuine") {
+      // BUDGET-EXCEEDED SHORT-CIRCUIT (card 73a847f5): a timeout that already consumed its one output-gated
+      // auto-extend (`anyExtended` — card 24642c3d) cannot pass this retry, which always runs
+      // `allowExtend:false` (see that flag's own comment a few lines below) — a hard-bounded rerun of a run
+      // that only survived its FIRST attempt because of the net it no longer has. Yet running it anyway
+      // burns up to a full `gateTimeoutMs` of this daemon's shared, capped GateSemaphore lane (a co-tenant
+      // may be queued behind it) to reach a foregone conclusion, then reports a generic "gate failed" that
+      // recruits the wrong fix. Skip ONLY this exact precondition — a "kill" classification, or a "timeout"
+      // that never got to extend, are both untouched and still retry exactly as before; the existing
+      // no-extension rationale for the retry ITSELF (the 4x-worst-case reasoning below) is unchanged.
+      // ⚠️ NOT "don't re-fire a failed merge": a manager re-firing `worker_merge_confirm` mints a brand-new
+      // op — a new FIRST attempt with its own full budget, including its own one auto-extend — and is
+      // completely unaffected by this skip. See the wording below and card 73a847f5's "READ THIS FIRST" for
+      // why that distinction is spelled out explicitly rather than left implicit (a peer manager already
+      // misread this exact card's title as the broader claim).
+      const gateRetrySkippedFutile = !gateResult.passed && orchestration.gateRetry.enabled
+        && classifyGateFailure(gateResult) === "timeout" && anyExtended;
+      if (!gateResult.passed && orchestration.gateRetry.enabled && classifyGateFailure(gateResult) !== "genuine" && !gateRetrySkippedFutile) {
         gateRetried = true;
         evt("build_gate_retry_attempt", { priorClass: classifyGateFailure(gateResult) });
         await new Promise((resolve) => setTimeout(resolve, orchestration.gateRetry.settleMs));
@@ -10341,13 +10357,22 @@ export class SessionService {
         // "likely OOM" would misdirect a manager diagnosing a real bug. The "(possibly OOM/resource)" hint
         // is appended ONLY for SIGKILL — the signal an OOM-killer/cgroup limit actually sends.
         const finalClass = classifyGateFailure(gateResult);
+        // Card 73a847f5: the skipped-as-futile case gets its OWN wording, distinct from both a real retry
+        // outcome and the generic "auto-retry disabled" (which covers the unrelated case of the retry
+        // feature being turned off entirely). Names WHICH retry this is about (the internal, automatic,
+        // post-timeout one) and states plainly that a manager re-fire is a different, unaffected thing — see
+        // DoD-5: no wording here may be sayable as a bare "the retry is futile".
         const retryOutcome = gateRetried
           ? "retried once, still failed"
-          : (finalClass !== "genuine" ? "auto-retry disabled" : undefined);
+          : gateRetrySkippedFutile
+            ? "the automatic internal post-timeout retry was skipped: it already consumed its one auto-extend on the first attempt, so a hard-bounded rerun could not have passed either — this is a budget-exceeded report, not a generic gate failure; re-running worker_merge_confirm starts a brand-new attempt with its own full budget and is unaffected"
+            : (finalClass !== "genuine" ? "auto-retry disabled" : undefined);
         const headline = finalClass === "kill"
           ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""} — ${retryOutcome}`
           : finalClass === "timeout"
-            ? `gate timed out (possibly resource-starved under load) — ${retryOutcome}`
+            ? (gateRetrySkippedFutile
+              ? `gate exceeded its timeout budget — ${retryOutcome}`
+              : `gate timed out (possibly resource-starved under load) — ${retryOutcome}`)
             : "build gate failed";
         const phase = classifyGatePhase(gateResult.failedStep);
         // INJECTION HYGIENE (CR e926d258 Minor, folded in on card bcba83a1): strip C0 control chars incl.
@@ -10415,6 +10440,12 @@ export class SessionService {
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
           gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+          // Card 73a847f5: distinct from `retried:false` alone — this is SPECIFICALLY the case where the
+          // internal post-timeout retry was skipped as provably futile (timeout + extension already
+          // consumed), not "retry disabled" or "not retry-eligible". Lets a forensics read of
+          // orchestration_events tell the three `retried:false` shapes apart without re-deriving them from
+          // `killClass`/`timedOut` each time.
+          ...(gateRetrySkippedFutile ? { retrySkippedFutile: true } : {}),
           ...(suppressed ? { suppressed: true } : {}),
         });
         // Card 522cf573 DoD 3: correlate this settled op's gate output to its opId in the daemon's own

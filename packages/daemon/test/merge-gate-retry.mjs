@@ -28,6 +28,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) INJECTION HYGIENE END-TO-END — a REAL failing gate step whose output contains ANSI color codes and
 //       a literal bracketed-paste terminator (`\x1b[201~`) never reaches the manager's pty with a raw ESC
 //       byte in it, via the real (non-injected) runGateSequential/confirmWorkerMerge path.
+//   (F) BUDGET-EXCEEDED SHORT-CIRCUIT (card 73a847f5) — a timeout that already consumed its ONE auto-extend
+//       gets ZERO retry attempts (a hard-bounded `allowExtend:false` rerun of that exact run could not pass
+//       either); `reason` reports the budget-exceeded skip by name, distinct from a generic gate failure,
+//       and states plainly that a manager re-firing `worker_merge_confirm` is a separate, unaffected thing.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-retry.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -226,6 +230,52 @@ try {
     })());
   }
 
+  // ── (F) BUDGET-EXCEEDED SHORT-CIRCUIT (card 73a847f5) — a timeout that already consumed its ONE ─────
+  // auto-extend cannot pass a hard-bounded (`allowExtend:false`) rerun, so the retry is skipped entirely
+  // instead of burning a second full gate run to reach a foregone conclusion. Distinguishes this from (C)
+  // above (a timeout that never got to extend still DOES retry) and from (A)/(B) (a "kill" classification
+  // is untouched regardless of `anyExtended`) — this is the third, load-bearing arm: without it, a change
+  // that broke the retry outright (rather than just skipping the futile case) would look identical to this
+  // test passing.
+  {
+    const F = mk("f", "feature-f.txt");
+    makeRepo(F);
+    const db = new Db(); dbs.push(db);
+    const enqueued = [];
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin(...args) { enqueued.push(args); } };
+    let calls = 0;
+    const fakeGate = async (...args) => {
+      calls++;
+      const hooks = args[7];
+      hooks?.onExtend?.(); // this (first and only) attempt already consumed its one auto-extend
+      return { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: null, failedTimedOut: true, outputTail: "" };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
+    F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${F.file}"`, { cwd: worktreePath });
+    seed(db, F, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
+    check("(F) exactly ONE gate call — a timeout that already extended never gets a retry", calls === 1);
+    check("(F) merged:false", confirm.merged === false);
+    check("(F) reason reports budget-exceeded, not a generic 'gate timed out' / 'build gate failed'",
+      confirm.reason.includes("gate exceeded its timeout budget"));
+    check("(F) reason names WHICH retry (internal/automatic/post-timeout) rather than a bare 'the retry is futile'",
+      confirm.reason.includes("internal post-timeout retry"));
+    check("(F) reason states a manager re-fire of worker_merge_confirm is unaffected",
+      confirm.reason.includes("worker_merge_confirm") && /unaffected/i.test(confirm.reason));
+    check("(F) NO build_gate_retry_attempt event fired — the retry itself never ran", eventsOfKind(db, F.mgrId, "build_gate_retry_attempt").length === 0);
+    check("(F) NO build_gate_retry event fired", eventsOfKind(db, F.mgrId, "build_gate_retry").length === 0);
+    check("(F) merge_rejected carries killClass:'timeout', retried:false, retrySkippedFutile:true", (() => {
+      const evs = eventsOfKind(db, F.mgrId, "merge_rejected");
+      return evs.length === 1 && evs[0].detail?.killClass === "timeout" && evs[0].detail?.retried === false && evs[0].detail?.retrySkippedFutile === true;
+    })());
+    check("(F) worktree RETAINED (fail-closed)", fs.existsSync(F.worktreePath));
+    check("(F) task NOT moved to done", db.getTask(F.taskId).columnKey !== "done");
+  }
+
   // ── (E) INJECTION HYGIENE END-TO-END — REAL gate step, real runGateSequential, no injected runGate ──
   {
     const E = mk("e", "feature-e.txt");
@@ -269,6 +319,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a transient-kill classification (an OOM/SIGKILL, or the daemon's own gate timeout) is auto-retried ONCE and absorbed silently on a pass, reported with distinct classification wording on a still-failing retry, a genuine non-zero exit is NEVER retried and keeps the flat back-compat string, and a real gate step's ANSI/bracketed-paste-terminator output never reaches the manager's pty with a raw ESC byte."
+  ? "\n✅ ALL PASS — a transient-kill classification (an OOM/SIGKILL, or the daemon's own gate timeout) is auto-retried ONCE and absorbed silently on a pass, reported with distinct classification wording on a still-failing retry, a genuine non-zero exit is NEVER retried and keeps the flat back-compat string, a timeout that already consumed its one auto-extend gets ZERO retry attempts and a distinct budget-exceeded report instead, and a real gate step's ANSI/bracketed-paste-terminator output never reaches the manager's pty with a raw ESC byte."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
