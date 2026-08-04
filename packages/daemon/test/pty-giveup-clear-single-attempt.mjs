@@ -120,34 +120,44 @@ try {
 
   // Card 3ce3fa39: give-up at attempt===1 now STILL marks the composer possibly-dirty (the `attempt > 1`
   // gate this file used to test is gone — see the header). Drive the requeued entry's own redrain (past
-  // the pinned-small hold) and prove the deferred clear-prefix force-closes safely on its own before
-  // backspacing, even though NO re-assert ever ran for the original attempt===1 give-up.
+  // the pinned-small hold) — card b9b8f8db: this redrain REDELIVERS the identical give-up'd message
+  // (giveUpGen already set), so it retries ONLY the Enter — but the PASTE-OPEN safety this file exists to
+  // guard is STILL exercised: the Enter-only path still writes its own force-close reassert (unconditionally,
+  // not proxied by attempt count) before firing Enter, even though no re-assert ever ran for the original
+  // attempt===1 give-up.
   const busyLenBeforeRedrain = busyLog[SID].length;
+  const writesBeforeRedrain = written().length;
   await sleep(HOLD_WAIT);
   host.reconcile();
   const t1 = Date.now();
+  // This polls (bounded, observed) for busy to fall back to false a SECOND time, i.e. for the redrain's own
+  // give-up cycle to fully finish. submit()'s clear-prefix branch decision (repaste-vs-Enter-only) is made,
+  // and any resulting backspace bytes are written, SYNCHRONOUSLY inside the single submit() call
+  // reconcile() triggers at the top of this redrain — nothing async can add a LATER backspace for this same
+  // generation, so the negative check below is settled the instant this poll observes the give-up cycle
+  // complete, not a guess about whether "not yet" == "never".
   while (!(busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === false) && Date.now() - t1 < 15_000) {
+    // TIMING-GUARD-SAFE: fully-awaited-completion — see the comment block immediately above this loop.
     await sleep(20);
   }
   check("the redrain (attempt===1 again, MAX_ATTEMPTS=1) also gave up — busy fell back to false a second time",
     busyLog[SID].at(-1) === false);
-  check(`STRUCTURAL FIX: the redrain's own submit() carried the deferred clear-prefix — exactly ${TEXT.length} backspaces written`,
-    backspaceCount() === TEXT.length);
+  check("card b9b8f8db: the SAME-message redrain writes ZERO backspaces — no clear-prefix at all",
+    backspaceCount() === 0);
+  check("card b9b8f8db: the body was pasted exactly ONCE — the redrain never re-pastes it",
+    written().split(TEXT).length - 1 === 1);
   const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
-  const secondBodyStart = written().indexOf(TEXT, firstBodyEnd);
-  const firstBackspaceIdx = written().indexOf(BACKSPACE);
-  check("sanity: the redrain genuinely re-pasted the body a second time", secondBodyStart > firstBodyEnd);
-  check("the backspace burst sits AFTER the first (abandoned, attempt===1) paste and BEFORE the redrain's own paste",
-    firstBackspaceIdx > firstBodyEnd && firstBackspaceIdx < secondBodyStart);
-  const reassertIdx = written().lastIndexOf(BRACKET_PASTE_START + BRACKET_PASTE_END, firstBackspaceIdx);
-  check("PASTE-OPEN SAFETY, now structural: a force-close reassert precedes the backspace burst even though attempt===1 never sent one of its own",
-    reassertIdx > firstBodyEnd && reassertIdx < firstBackspaceIdx);
+  check("sanity: the redrain still wrote NEW bytes (a real second Enter attempt, not a no-op)",
+    written().length > writesBeforeRedrain);
+  const reassertIdx = written().indexOf(BRACKET_PASTE_START + BRACKET_PASTE_END, firstBodyEnd);
+  check("PASTE-OPEN SAFETY, still structural on the Enter-only path: a force-close reassert precedes the redrain's "
+    + "Enter even though attempt===1 never sent one of its own", reassertIdx > firstBodyEnd);
 } finally {
   try { host.stop("sess-giveup-single-attempt", "hard"); } catch { /* ignore */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — with SUBMIT_MAX_ATTEMPTS=1, give-up recovers busy and marks the composer possibly-dirty (no immediate clear, deferred regardless of attempt count); the redrain's own submit() force-closes and backspaces safely even though no paste-reassert ever ran for the original attempt===1 give-up — the ee082fbb CR residual-risk guard now holds structurally, not via an attempt-count proxy."
+  ? "\n✅ ALL PASS — with SUBMIT_MAX_ATTEMPTS=1, give-up recovers busy and marks the composer possibly-dirty (no immediate clear, deferred regardless of attempt count). Card b9b8f8db: the redrain REDELIVERS the identical give-up'd message, so it retries ONLY the Enter — zero backspaces, zero re-paste — but still force-closes any dangling paste bracket first (unconditionally, not proxied by attempt count), even though no paste-reassert ever ran for the original attempt===1 give-up — the ee082fbb CR residual-risk guard still holds structurally."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

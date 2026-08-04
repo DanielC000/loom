@@ -182,16 +182,28 @@ try {
       requeueLinesFor(SID).length === 1);
 
     // Card 73d5c34a: no confirming hook is coming in this suite — wait past the pinned-small hold, then
-    // reconcile again to actually redrain the now-eligible restored entry. THIS redrain's own submit() is
-    // where the deferred clear-prefix (card 3ce3fa39) now actually fires — before its own paste.
+    // reconcile again to actually redrain the now-eligible restored entry.
+    //
+    // Card b9b8f8db (the composer-runaway fix): this redrain REDELIVERS the identical restored message
+    // (giveUpGen already set by requeueGiveUpOrigin) — submit() now retries ONLY the Enter for that case,
+    // never re-pasting the body. So the deferred clear-prefix (card 3ce3fa39) does NOT fire here any more —
+    // that's the fix: the "restore, then unconditionally backspace+repaste on every redrain" shape is
+    // exactly what compounded the composer without bound. The restore is still proven LIVE via busy
+    // re-arming (a real second attempt happened), just never via a second physical paste.
+    const busyLenBeforeRestoreRedrain = busyLog[SID].length;
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — this sleep only waits for the KNOWN-required hold
+    // precondition to expire (the restored entry is structurally ineligible to drain before then); both
+    // negative checks below run SYNCHRONOUSLY right after host.reconcile(), with no further await in
+    // between — submit()'s clear-prefix branch decision (repaste-vs-Enter-only) and any resulting backspace
+    // bytes are decided/written synchronously inside that single reconcile()->submit() call.
     await sleep(HOLD_WAIT);
     host.reconcile();
-    check("(1) THE RESTORE IS LIVE: the restored text was actually re-submitted to the pty a second time",
-      bodyOccurrences() === beforeHeal + 1); // beforeHeal already counts the original (suppressed) submit; +1 is the restore-redrain
-    check("(1) busy re-armed from the restore's own redrain (proves it wasn't just queued and forgotten)",
-      busyLog[SID].at(-1) === true);
-    check(`(1) THE DEFERRED CLEAR: the restore's own redrain carried the clear-prefix — exactly ${TEXT.length} backspaces written`,
-      backspaceCount() === TEXT.length);
+    check("(1) THE RESTORE IS LIVE: busy re-armed for a genuine second attempt (the restored entry actually redrained)",
+      busyLog[SID].length > busyLenBeforeRestoreRedrain && busyLog[SID].at(-1) === true);
+    check("(1) card b9b8f8db: the restored text was NEVER re-pasted — body occurrence count is unchanged from before the redrain",
+      bodyOccurrences() === beforeHeal);
+    check("(1) card b9b8f8db: the restore's own redrain writes ZERO backspaces — no clear-prefix at all",
+      backspaceCount() === 0);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -235,12 +247,20 @@ try {
     check("(2) THE FIX applies on the busyStaleMs path too: the give-up restore mechanism fired",
       requeueLinesFor(SID).length === 1);
 
+    // Card b9b8f8db: same fix on this path too — the restore's own redrain is an Enter-only redelivery.
+    const busyLenBeforeRestoreRedrain2 = busyLog[SID].length;
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — same reasoning as scenario (1)'s identical site above:
+    // this sleep only waits for the hold precondition to expire; the negative checks below run
+    // SYNCHRONOUSLY right after host.reconcile(), and submit()'s clear-prefix branch decision is made
+    // synchronously inside that same call.
     await sleep(HOLD_WAIT);
     host.reconcile();
-    check("(2) THE RESTORE IS LIVE on the busyStaleMs path too: re-submitted to the pty a second time",
-      bodyOccurrences2() === beforeHeal2 + 1);
-    check(`(2) THE DEFERRED CLEAR on the busyStaleMs path too: exactly ${SECOND_TEXT.length} backspaces written by the restore's own redrain`,
-      backspaceCount() === SECOND_TEXT.length);
+    check("(2) THE RESTORE IS LIVE on the busyStaleMs path too: busy re-armed for a genuine second attempt",
+      busyLog[SID].length > busyLenBeforeRestoreRedrain2 && busyLog[SID].at(-1) === true);
+    check("(2) card b9b8f8db: the restored text was NEVER re-pasted on the busyStaleMs path either",
+      bodyOccurrences2() === beforeHeal2);
+    check("(2) card b9b8f8db: the restore's own redrain writes ZERO backspaces on the busyStaleMs path too",
+      backspaceCount() === 0);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -288,6 +308,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (marks an orphaned composer left by a false suppression possibly-dirty — WITHOUT double-counting a suppression that already self-marked at give-up time — AND restores the cleared text to pending for real redelivery, on both the first-turn and later-turn stale paths; the restore's own next redrain carries the deferred clear-prefix) without ever touching a session that legitimately went on to submit."
+  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (marks an orphaned composer left by a false suppression possibly-dirty — WITHOUT double-counting a suppression that already self-marked at give-up time — AND restores the cleared text to pending for real redelivery, on both the first-turn and later-turn stale paths). Card b9b8f8db: the restore's own next redrain is a redelivery of the identical message, so it retries ONLY the Enter — zero backspaces, zero re-paste, on either stale path — closing the composer-runaway bug at its own source; and none of this ever touches a session that legitimately went on to submit."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

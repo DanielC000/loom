@@ -218,8 +218,12 @@ try {
       exhaustedLog[SID]?.length === 1);
     check("(H1) BOUNDED: the kickoff is finally gone from pending — handed to onGiveUpExhausted, not looping forever",
       host.getPendingEntries(SID).length === 0);
-    check("(H1) the kickoff body was written to the pty exactly twice (one per cycle — a real second attempt, not a no-op)",
-      bodyCount(KICKOFF) === 2);
+    // Card b9b8f8db: cycle 2 is a redelivery of the SAME already-attempted message (giveUpGen set by
+    // cycle 1's own requeue) — submit() now retries ONLY the Enter for that case, never re-pasting the
+    // body (the composer-runaway fix). So the body lands physically ONCE, not once per cycle; a REAL
+    // second Enter attempt still happens (proven by the two separate GIVE-UP RECOVERY logs above).
+    check("(H1) the kickoff body was written to the pty exactly ONCE — cycle 2 retried only the Enter, per card b9b8f8db",
+      bodyCount(KICKOFF) === 1);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 

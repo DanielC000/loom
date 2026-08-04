@@ -222,15 +222,17 @@ try {
     // Cycle 2: the re-submitted turn ALSO never confirms — this is its SECOND failure, so with
     // LOOM_GIVE_UP_REQUEUE_LIMIT=1 it must be dropped for real this time (no infinite requeue loop).
     await waitUntil(() => busyLog[SID].at(-1) === false);
-    check("(1) cycle 2: a full second round of attempts was actually written (genuine re-submit, not a no-op)",
+    check("(1) cycle 2: a full second round of Enter attempts was actually written (a genuine second try, not a no-op)",
       entryCount() === MAX_ATTEMPTS * 2);
-    check("(1) cycle 2: the message body was written to the pty TWICE (actually re-delivered, not just re-counted)",
-      bodyCount(TEXT) === 2);
-    // Card 78e4b3f2 — THE FIX ITSELF: cycle 2's write is a genuine re-delivery of a message whose first
-    // write was never confirmed — it must now be FRAMED as a possible duplicate, so the recipient (reading
-    // an indistinguishable byte-identical resend before this fix) can tell it apart from new direction.
-    check("(1) card 78e4b3f2: the RETRIED write IS framed as a possible duplicate",
-      written().includes(POSSIBLE_DUP_PREFIX) && bodyCount(`${POSSIBLE_DUP_PREFIX}`) === 1);
+    // Card b9b8f8db (the composer-runaway fix): cycle 2 is a REDELIVERY of the SAME give-up'd message
+    // (giveUpGen already set) — submit() now retries ONLY the Enter for that case, never re-pasting the
+    // body. So the body lands physically ONCE, not once per cycle — the mechanism card 78e4b3f2 built
+    // (framing a genuine re-delivery as a possible duplicate) is consequently never exercised for THIS
+    // case any more either: there is no second physical write left to frame.
+    check("(1) card b9b8f8db: the message body was written to the pty exactly ONCE — cycle 2 retried the Enter only",
+      bodyCount(TEXT) === 1);
+    check("(1) card b9b8f8db: no possible-duplicate-tagged write ever appears — nothing was re-pasted to tag",
+      !written().includes(POSSIBLE_DUP_PREFIX));
     check("(1) BOUNDED: the message is finally gone from pending — requeue budget exhausted, dropped for real",
       host.getPendingEntries(SID).length === 0);
     // Sanity: a further reconcile tick (the ONLY thing that would pick up a requeued message) is a genuine
@@ -273,10 +275,22 @@ try {
     // Wait past TEXT1's card 73d5c34a hold first (no confirming hook is coming) so it's eligible again —
     // otherwise this reconcile would correctly skip the still-held TEXT1 and drain TEXT2 instead (that
     // no-stall behavior is pty-giveup-hold-until-confirmed.mjs's own scenario, not this suite's).
+    const busyLenBeforeRedrain = busyLog[SID].length;
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — this sleep only waits for the KNOWN-required hold
+    // precondition to expire (TEXT1's requeued entry is structurally ineligible to drain before then); the
+    // negative half of the check below (`!written().includes(TEXT2)`) runs SYNCHRONOUSLY right after
+    // host.reconcile(), with no further await in between — drainPending's one-per-turn "agent" selection
+    // and submit()'s own clear-prefix branch decision both happen synchronously inside that single
+    // reconcile() call, so TEXT2 (queued behind TEXT1, never selected this reconcile) cannot appear later
+    // as a result of anything this call started.
     await sleep(HOLD_WAIT);
     host.reconcile();
-    check("(2) ORDERING: draining resubmits TEXT1 (not TEXT2) — its body appears a SECOND time",
-      written().split(TEXT1).length - 1 === 2 && !written().includes(TEXT2));
+    check("(2) ORDERING: draining redelivers TEXT1, not TEXT2 — busy re-armed for a fresh redrain and TEXT2 stays untouched",
+      busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === true && !written().includes(TEXT2));
+    // Card b9b8f8db: TEXT1's redrain is a redelivery of the SAME give-up'd message (giveUpGen already set),
+    // so it retries ONLY the Enter — its body still appears exactly ONCE, not twice.
+    check("(2) card b9b8f8db: TEXT1's redrain retried the Enter only — its body still appears exactly ONCE",
+      written().split(TEXT1).length - 1 === 1);
 
     // TEXT1's re-drained submit ALSO fails a second time (LOOM_GIVE_UP_REQUEUE_LIMIT=1) — it's finally
     // dropped for real, and TEXT2 (which was never touched) should now be the only thing left to drain.
@@ -286,8 +300,8 @@ try {
     host.reconcile();
     await waitUntil(() => written().includes(TEXT2));
     check("(2) TEXT2 finally drains normally (untouched by the whole TEXT1 episode)", written().includes(TEXT2));
-    check("(2) TEXT1 was never re-submitted a THIRD time (its own requeue budget was exhausted, not TEXT2's)",
-      written().split(TEXT1).length - 1 === 2);
+    check("(2) TEXT1's body was never re-pasted at all beyond its ORIGINAL single write (its own requeue budget was exhausted, not TEXT2's)",
+      written().split(TEXT1).length - 1 === 1);
   }
 
   // ===================== (3) a SUPPRESSED (false-negative) give-up never requeues anything — can't ========
@@ -472,13 +486,18 @@ try {
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === KICKOFF);
 
     // Reconcile (the real daemon's periodic tick, simulated directly) drains the requeued kickoff — proving
-    // genuine recovery, not just presence in the queue.
+    // genuine recovery, not just presence in the queue. Card b9b8f8db: this redrain REDELIVERS the
+    // identical give-up'd kickoff (giveUpGen already set), so it retries ONLY the Enter — a real second
+    // attempt (proven via busy re-arming and the pending entry actually draining), but never a second
+    // physical paste of the body.
+    const busyLenBeforeRedrain = busyLog[SID].length;
     await sleep(HOLD_WAIT);
     host.reconcile();
-    check("(6) reconcile drained the requeued kickoff: busy re-armed", busyLog[SID].at(-1) === true);
-    await waitUntil(() => bodyCount(KICKOFF) === 2);
-    check("(6) the kickoff was actually RE-DELIVERED (written to the pty a second time), not just re-queued",
-      bodyCount(KICKOFF) === 2);
+    check("(6) reconcile drained the requeued kickoff: busy re-armed for a genuine second attempt",
+      busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === true);
+    await waitUntil(() => host.getPendingEntries(SID).length === 0);
+    check("(6) card b9b8f8db: the kickoff body was written to the pty exactly ONCE — the redrain retried the Enter only",
+      bodyCount(KICKOFF) === 1);
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }

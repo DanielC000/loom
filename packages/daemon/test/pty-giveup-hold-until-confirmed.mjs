@@ -219,12 +219,20 @@ try {
 
     // Wait past the bounded hold with STILL no confirming hook ever arriving — the silent-drop protection
     // (card 441499ee) must still recover the message: the NEXT reconcile tick now drains it for real.
+    // Card b9b8f8db: this redrain REDELIVERS the identical give-up'd message (giveUpGen already set), so it
+    // retries ONLY the Enter — a genuine second delivery attempt, but never a second physical paste.
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — this sleep only waits for the KNOWN-required hold
+    // precondition to expire (the entry is structurally ineligible to drain before then); the negative
+    // check below runs SYNCHRONOUSLY right after host.reconcile() with no further await in between.
+    // submit()'s clear-prefix branch decision (repaste-vs-Enter-only) and any resulting backspace bytes are
+    // decided/written synchronously inside that same reconcile()->submit() call, so nothing async could
+    // still add a backspace after this point that the check might miss.
     await sleep(HOLD_MS + 100);
     host.reconcile();
     check("(3) THE BACKSTOP: the hold expired with no confirmation — busy re-armed (genuinely re-delivered)",
       busyLog[SID].at(-1) === true);
-    check("(3) THE BACKSTOP: the body was written a second time (actually re-delivered, not just re-counted)",
-      bodyCount(TEXT) === 2);
+    check("(3) card b9b8f8db: the body was written exactly ONCE — the backstop retried the Enter only, never re-pasted",
+      bodyCount(TEXT) === 1);
     check("(3) pending is now empty (the requeued entry was drained, not left behind)",
       host.getPendingEntries(SID).length === 0);
 
@@ -234,9 +242,14 @@ try {
     check("(3) BOUNDED: after the second failure the message is dropped for real, not held/requeued again",
       host.getPendingEntries(SID).length === 0);
     host.reconcile();
+    // TIMING-GUARD-SAFE: fully-awaited-completion — the precondition this sanity check rests on (pending is
+    // EMPTY) was already OBSERVED, not guessed, by the check immediately above; reconcile() with an empty
+    // pending queue is a structural no-op (drainPending returns early on pending.length===0), so nothing
+    // could add a new write after this point no matter how long this sleep runs — it's margin on an
+    // already-settled state, not a race against a pending event.
     await sleep(VERIFY_TIMEOUT * 2);
-    check("(3) sanity: still exactly 2 delivery attempts after another reconcile tick — no runaway loop",
-      bodyCount(TEXT) === 2);
+    check("(3) sanity: still exactly ONE physical body write after another reconcile tick — no runaway loop",
+      bodyCount(TEXT) === 1);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 

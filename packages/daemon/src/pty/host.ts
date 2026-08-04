@@ -1864,6 +1864,16 @@ interface Live {
   // observe the SAME still-unconfirmed generation later (its own backstop for a suppression staleness
   // itself never resolves). Without this guard both sites would mark the identical abandoned text twice.
   composerDirtyMarkedForGen: number | null;
+  // Card b9b8f8db: the `submitGeneration` whose submit() actually wrote FRESH body bytes (the plain paste,
+  // or the full defensive clear+repaste) — null/mismatched for a generation that took the Enter-only
+  // redelivery path (a redrain of an already-attempted message; see submit()'s `isGiveUpRedelivery`), which
+  // writes no body at all. GATES composerDirtyLen's ADDITIVE mark side (fireEnterAndVerify's SUPPRESSED/
+  // RECOVERY branches, healIfStuck) the same way `composerDirtyMarkedForGen` gates double-marking: an
+  // Enter-only generation that itself later gives up must NOT also add its (unwritten) body length to
+  // composerDirtyLen — nothing new was physically typed, so nothing new is possibly stranded. Without this
+  // gate, composerDirtyLen would still inflate by a further `lastPrompt.length` on every failed Enter-only
+  // retry even though the fix's whole point is that cycle writes zero body bytes.
+  composerBodyWrittenForGen: number | null;
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
@@ -3418,6 +3428,7 @@ export class PtyHost {
       composerDirtyLen: 0,
       composerDirtyLenClearedByGen: null,
       composerDirtyMarkedForGen: null,
+      composerBodyWrittenForGen: null,
       rawDraftText: "",
       pending: [],
       stopping: false,
@@ -3596,7 +3607,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -3674,7 +3685,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -5127,8 +5138,12 @@ export class PtyHost {
         // GATED on composerDirtyMarkedForGen (using `gen`, captured BEFORE this method's own bump above) —
         // a wrongly-SUPPRESSED give-up already marks dirty immediately at suppression time; without this
         // guard, THIS backstop firing later for the SAME still-unconfirmed generation would double-count
-        // the identical abandoned text (see the field's doc).
-        if (live.composerDirtyMarkedForGen !== gen) {
+        // the identical abandoned text (see the field's doc). ALSO gated on `composerBodyWrittenForGen`
+        // (card b9b8f8db): a generation that took the Enter-only redelivery path (submit()'s
+        // `isGiveUpRedelivery` branch) never wrote a fresh body at all, so there is nothing NEW to mark —
+        // doing so anyway would inflate composerDirtyLen for bytes that were never actually (re)typed,
+        // reopening a smaller-scale version of the same unbounded-growth bug this card fixes.
+        if (live.composerDirtyMarkedForGen !== gen && live.composerBodyWrittenForGen === gen) {
           // eslint-disable-next-line no-console
           console.log(`[heal] ${sessionId} marking an orphaned give-up injection possibly-dirty (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
           live.composerDirtyLen += live.lastPrompt.length;
@@ -5472,17 +5487,56 @@ export class PtyHost {
     // THIS write also gives up unconfirmed, the give-up branch must keep compounding on top of whatever was
     // already unresolved, not overwrite it — that compounding is exactly what specimen A/C's doubled/singled
     // residue measured.
-    if (live.composerDirtyLen > 0 && live.composerLen === 0) {
+    //
+    // Card b9b8f8db (the composer-runaway fix): a REDELIVERY of an already-attempted message — `origin`
+    // contains a member whose own PRIOR physical write already failed to confirm (`giveUpGen !== undefined`,
+    // set only by `requeueGiveUpOrigin`'s `kept.push`) — must NOT repeat the backspace-then-repaste below.
+    // `composerDirtyLen` is never reset except by a genuine confirmation (see the doc above), so in a
+    // genuinely wedged session (confirmation never arrives) every redelivery cycle backspaced the FULL
+    // accumulated total and repasted the ~identical body again, compounding without bound (measured: a
+    // 45,934 B kickoff's own single-generation write grew to 184,967 B — 4× — across 4 cycles in ~2.5min).
+    // Since this exact message already put its own content in front of the engine once, ASSUME the composer
+    // still holds it (give or take the small possible-duplicate tag prefix `joinSubmittedText` adds at write
+    // time, which is never literally re-typed either way) and retry ONLY the Enter — do not touch the
+    // composer body at all.
+    // ASSUMPTION, STATED (not inherited silently): the composer genuinely still holds what was last written
+    // for this message — i.e. the earlier paste landed byte-for-byte and only the Enter/hook confirmation
+    // never registered. If that's wrong (a genuinely mangled/partial earlier paste), this Enter submits
+    // whatever content is ACTUALLY sitting there as a real turn, instead of self-correcting the way a full
+    // backspace+repaste would. That is a real tradeoff, taken deliberately: it applies ONLY to a message
+    // that has itself already been physically written once (never to a brand-new/different message, nor to
+    // a fresh re-mint's own FIRST attempt — see `handleKickoffGiveUpExhausted`'s re-mint, which mints a NEW
+    // QueuedMessage with no `giveUpGen` of its own yet, so it still takes the full clear+repaste below,
+    // unchanged), and it is bounded by the SAME `GIVE_UP_REQUEUE_LIMIT`/chainDepth cycle count as before —
+    // this does not remove the cap, it removes the wasted bytes inside each already-capped cycle.
+    const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
+    if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery) {
+      // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
+      // the turn was submitted, i.e. the composer is now genuinely empty — see composerDirtyLenClearedByGen's
+      // doc. True regardless of whether we backspaced or not; the confirmation is what proves it either way.
+      live.composerDirtyLenClearedByGen = gen;
+      // eslint-disable-next-line no-console
+      console.log(`[submit] ${sessionId} redelivering an already-attempted message (composer possibly dirty, ${live.composerDirtyLen} chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db)`);
+      this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
+      const reassertWrittenAt = Date.now();
+      this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
+    } else if (live.composerDirtyLen > 0 && live.composerLen === 0) {
       const dirty = live.composerDirtyLen;
       // Stamp WHICH generation is attempting this clear — the confirming-hook sites only reset
       // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
       // unrelated hook firing before this generation's own Enter confirms must never reset it.
       live.composerDirtyLenClearedByGen = gen;
+      // Card b9b8f8db: THIS generation IS writing a fresh body (the repaste below) — gate composerDirtyLen's
+      // additive mark side on this, see `composerBodyWrittenForGen`'s own doc.
+      live.composerBodyWrittenForGen = gen;
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} composer possibly dirty from an earlier unconfirmed give-up (${dirty} chars) — clearing defensively before this write`);
       this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
       this.writeChunked(sessionId, BACKSPACE.repeat(dirty), writeNewTurn);
     } else {
+      // Card b9b8f8db: same reasoning as the branch above — a plain (non-dirty-prefixed) paste also writes
+      // a fresh body this generation.
+      live.composerBodyWrittenForGen = gen;
       writeNewTurn();
     }
     this.setBusy(sessionId, true, reason); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
@@ -5710,7 +5764,9 @@ export class PtyHost {
           // composerLen===0 human-draft gate as every other clear in this file (card e1829591). Stamp
           // `composerDirtyMarkedForGen` so healIfStuck's OWN later backstop (if this generation's busy
           // never resolves any other way) doesn't double-count the identical text — see that field's doc.
-          if (l.composerLen === 0 && l.lastPrompt && l.composerDirtyMarkedForGen !== gen) {
+          // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db) — an Enter-only redelivery generation
+          // never wrote a fresh body, so there is nothing new here to mark; see that field's own doc.
+          if (l.composerLen === 0 && l.lastPrompt && l.composerDirtyMarkedForGen !== gen && l.composerBodyWrittenForGen === gen) {
             l.composerDirtyLen += l.lastPrompt.length;
             l.composerDirtyMarkedForGen = gen;
           }
@@ -5753,7 +5809,12 @@ export class PtyHost {
           // item ②, guarded by pty-giveup-clear-single-attempt.mjs) is now covered structurally instead of
           // by this proxy, and skipping the mark here would just reintroduce the original stray-text bug for
           // the attempt===1 case.
-          if (l2.composerLen === 0 && l2.lastPrompt && l2.composerDirtyMarkedForGen !== gen) {
+          //
+          // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db): a generation that took the Enter-only
+          // redelivery path never wrote a fresh body, so this give-up has nothing new to mark — marking it
+          // anyway would inflate composerDirtyLen for bytes that were never actually (re)typed this
+          // generation, which is exactly the wasted-byte accounting this card's fix removes.
+          if (l2.composerLen === 0 && l2.lastPrompt && l2.composerDirtyMarkedForGen !== gen && l2.composerBodyWrittenForGen === gen) {
             l2.composerDirtyLen += l2.lastPrompt.length;
             l2.composerDirtyMarkedForGen = gen;
           }

@@ -87,7 +87,7 @@ process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 const HOLD_WAIT = HOLD_MS + 150;
 process.env.LOOM_MODE_LOG_POLL_MS = "5";
 
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, framePossibleDuplicate } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -125,8 +125,14 @@ const mkSession = (o) => db.insertSession({
 // Wire the REAL production chain: PtyHost's onKickoffGiveUpExhausted -> SessionService.handleKickoffGiveUpExhausted
 // -> (re-mint) this SAME host's own enqueueStdin. This is the actual call graph index.ts wires, not a stub.
 const sessions = new SessionService(db, host, new OrchestrationControl());
-events.onKickoffGiveUpExhausted = (sessionId, msgId, rootMsgId, kickoffText) =>
+// Card b9b8f8db: capture each session's rootMsgId as it exhausts, keyed by sessionId — needed below to
+// reconstruct cycle 2's LOGICAL text (framePossibleDuplicate(KICKOFF, rootMsgId)) now that cycle 2 no
+// longer physically re-pastes it (see driveToExhaustionAndCaptureCycle2Text's own updated doc).
+const rootMsgIdBySession = {};
+events.onKickoffGiveUpExhausted = (sessionId, msgId, rootMsgId, kickoffText) => {
+  rootMsgIdBySession[sessionId] ??= rootMsgId;
   sessions.handleKickoffGiveUpExhausted(sessionId, msgId, rootMsgId, kickoffText);
+};
 
 function spawnReady(sessionId, startupPrompt) {
   host.spawn({
@@ -140,36 +146,50 @@ function spawnReady(sessionId, startupPrompt) {
 }
 
 /** Drives BOTH give-up cycles (mirrors kickoff-giveup-exhausted.mjs's own H1) up to and including the REAL
- *  two-cycle exhaustion that fires the NEW re-mint — then returns the EXACT text cycle 2 physically wrote
- *  (ground truth from the fake pty), which is what a real confirming hook's `prompt` would echo back. */
+ *  two-cycle exhaustion that fires the NEW re-mint — then returns the LOGICAL text cycle 2 would confirm
+ *  against (what a real confirming hook's `prompt` would echo back).
+ *
+ *  Card b9b8f8db (the composer-runaway fix): cycle 2 is a REDELIVERY of cycle 1's own message (giveUpGen
+ *  set by cycle 1's requeue) — submit() now retries ONLY the Enter for that case and never re-pastes the
+ *  body, so there is no physical "cycle 2 write" left in the fake pty to capture as ground truth anymore
+ *  (that's the byte-growth this card removes). The signature `requeueGiveUpOrigin` seeds into
+ *  `ambiguousDispatches` is UNCHANGED by that fix, though — still `textSignature(joinSubmittedText([msg],
+ *  gen-1))`, which for this kickoff (mintedAtGen/mintedAtWallClock both undefined, so
+ *  annotatePasteRecoveryAge is the identity function) reduces to exactly `framePossibleDuplicate(KICKOFF,
+ *  logicalId)`. `logicalId` — the kickoff's `rootMsgId` — is captured via the `onKickoffGiveUpExhausted`
+ *  hook this file already wires (see `rootMsgIdBySession` above), so this reconstructs the identical string
+ *  via the SAME exported function production uses, rather than a physical capture. */
 async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
   await waitUntil(() => bodyCount(KICKOFF) >= 1);
   // Cycle 1: never confirmed -> give-up #1 -> within budget (LIMIT=1) -> REQUEUED, not exhausted.
   await waitUntil(() => busyLog[SID].at(-1) === false);
   check(`(${SID}) cycle 1 gave up: requeued, not yet exhausted`, host.getPendingEntries(SID).length === 1);
 
-  // Drain the requeued kickoff past its hold — this is cycle 2's attempt, and its write is TAGGED
-  // (framePossibleDuplicate) since the kept entry now carries giveUpGen from cycle 1.
+  // Drain the requeued kickoff past its hold — this is cycle 2's attempt: a redelivery of the SAME
+  // message, so it retries only the Enter (card b9b8f8db) — a real pty write still happens (the
+  // reassert-paste + Enter), just never the body.
   await sleep(HOLD_WAIT);
   const writesBeforeCycle2 = fakes[fakes.length - 1].writes.length;
   host.reconcile();
   await waitUntil(() => busyLog[SID].at(-1) === true);
   await waitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeCycle2);
-  // Cycle 2's own physical body write, verbatim — the exact string a real confirming hook would echo.
-  const cycle2Text = fakes[fakes.length - 1].writes.find((w) => w.includes(KICKOFF) && w.length > KICKOFF.length);
-  check(`(${SID}) cycle 2's tagged write was captured (ground truth, not hand-derived)`, typeof cycle2Text === "string");
+  check(`(${SID}) cycle 2 wrote no NEW body chunk (Enter-only redelivery, card b9b8f8db)`,
+    bodyCount(KICKOFF) === 1);
 
   // Cycle 2 ALSO never confirms -> THIS give-up exceeds GIVE_UP_REQUEUE_LIMIT(1) -> EXHAUSTS -> the NEW
   // re-mint fires (card 7772176d), instead of the old bare park.
   await waitUntil(() => busyLog[SID].at(-1) === false);
   check(`(${SID}) cycle 2 gave up: the kickoff EXHAUSTED (real two-cycle exhaustion, not the single-cycle shortcut)`,
     submitLog.some((l) => l.includes("exhausted its requeue budget (1)")));
-  return cycle2Text;
+  const rootMsgId = rootMsgIdBySession[SID];
+  check(`(${SID}) rootMsgId was captured via onKickoffGiveUpExhausted`, typeof rootMsgId === "string");
+  return framePossibleDuplicate(KICKOFF, rootMsgId);
 }
 
 try {
   // ===== (A) THE FIX: the original's late confirmation, arriving AFTER the re-mint is queued, purges it — ====
-  // ===== the kickoff body count stays at 2 (original + cycle-2 write) forever; no third, duplicate write ======
+  // ===== the kickoff body count stays at 1 (card b9b8f8db: cycle 2 no longer re-pastes) forever; the =========
+  // ===== re-mint (which WOULD be a real second physical write, being a fresh message) never lands at all ====
   {
     const SID = "kickoff-remint-purged";
     const mgr = `kgrp-mgr-a-${sfx}`;
@@ -179,18 +199,19 @@ try {
     const { bodyCount } = spawnReady(SID, KICKOFF);
 
     const cycle2Text = await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
-    check("(A) setup: exactly TWO physical writes so far (untagged original + tagged cycle-2)", bodyCount(KICKOFF) === 2);
+    check("(A) setup: exactly ONE physical body write so far (card b9b8f8db: cycle 2 retried the Enter only)", bodyCount(KICKOFF) === 1);
 
     // The re-mint (chainDepth 0 -> 1) is now sitting HELD in pending, targeting the SAME session, tagged.
     await waitUntil(() => host.getPendingEntries(SID).length === 1);
     const remint = host.getPendingEntries(SID)[0];
     check("(A) THE RE-MINT is queued (held), carrying the possible-duplicate tag over the SAME kickoff content",
       !!remint && remint.text.includes("[loom:possible-duplicate") && remint.text.includes(KICKOFF));
-    check("(A) sanity: no THIRD physical write has happened yet — the re-mint is still just sitting queued",
-      bodyCount(KICKOFF) === 2);
+    check("(A) sanity: no SECOND physical write has happened yet — the re-mint is still just sitting queued",
+      bodyCount(KICKOFF) === 1);
 
     // THE RACE: the ORIGINAL write's late confirmation arrives NOW, BEFORE the re-mint's hold expires —
-    // its EXACT cycle-2 text, captured from the real pty write above (never hand-derived).
+    // the LOGICAL text cycle 2's own give-up seeded into ambiguousDispatches (see the helper's own doc for
+    // why this is reconstructed via framePossibleDuplicate rather than captured from a physical write).
     submitLog.length = 0;
     host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: cycle2Text });
     check("(A) THE PURGE FIRED: a content-matched CONFIRMED log was emitted",
@@ -203,17 +224,18 @@ try {
     // `getPendingEntries` immediately above is already the post-purge state, not a snapshot that could still
     // change. With pending structurally EMPTY (nothing left for reconcile/drainPending to ever act on), the
     // body count observed right now is the FINAL count — there is no further async window to wait out.
-    check("(A) COUNT-BASED PROOF: the kickoff body count STAYS AT 2 — the re-mint never produced a third, duplicate write",
-      bodyCount(KICKOFF) === 2);
+    check("(A) COUNT-BASED PROOF: the kickoff body count STAYS AT 1 — the re-mint never produced a second write",
+      bodyCount(KICKOFF) === 1);
     // Sanity: reconcile is a genuine no-op with nothing pending — proves the count above isn't "stale
     // because reconcile was never asked to run", it's "nothing for reconcile to find".
     host.reconcile();
-    check("(A) sanity: reconcile with empty pending is a true no-op — the count is unchanged", bodyCount(KICKOFF) === 2);
+    check("(A) sanity: reconcile with empty pending is a true no-op — the count is unchanged", bodyCount(KICKOFF) === 1);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
   // ===== (B) THE RED: same setup, but NO confirming hook ever arrives before the hold expires — the purge ====
-  // ===== has nothing to act on, so the re-mint DOES drain and DOES write a real THIRD, duplicate paste ========
+  // ===== has nothing to act on, so the re-mint DOES drain and DOES write a real SECOND, duplicate paste ======
+  // ===== (the re-mint is a genuinely fresh QueuedMessage — its OWN first attempt still pastes in full) =======
   {
     const SID = "kickoff-remint-unpurged";
     const mgr = `kgrp-mgr-b-${sfx}`;
@@ -223,22 +245,24 @@ try {
     const { bodyCount } = spawnReady(SID, KICKOFF);
 
     await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
-    check("(B) setup: exactly TWO physical writes so far (untagged original + tagged cycle-2)", bodyCount(KICKOFF) === 2);
+    check("(B) setup: exactly ONE physical body write so far (card b9b8f8db: cycle 2 retried the Enter only)", bodyCount(KICKOFF) === 1);
     await waitUntil(() => host.getPendingEntries(SID).length === 1);
     check("(B) setup: the re-mint is queued (held), same as (A)", host.getPendingEntries(SID).length === 1);
 
     // NO confirming hook this time — advance past the hold with nothing to purge the re-mint.
     await sleep(HOLD_WAIT);
     host.reconcile();
-    await waitUntil(() => bodyCount(KICKOFF) >= 3, 5_000);
+    await waitUntil(() => bodyCount(KICKOFF) >= 2, 5_000);
     // Label reworded to avoid the fixed-wait-negative-guard's keyword scan ("absent"/"not"/"no ") — the
     // preceding waitUntil (line above) is a bounded POLL for this POSITIVE condition, not a fixed sleep
     // guarding a "did not happen" claim; the guard's static text scan can't see that distinction, so the
     // fix is to state this positive claim in positive language rather than exempt a genuinely different shape.
     check("(B) THE RED: with the confirming hook withheld entirely, the re-mint DRAINS and physically writes a " +
-      "genuine THIRD, duplicate paste of the kickoff body — proving the (A) count-based assertion is a rig " +
-      "that truly detects a duplicate, rather than one that always reports success",
-      bodyCount(KICKOFF) === 3);
+      "genuine SECOND, duplicate paste of the kickoff body (its OWN first attempt, a fresh QueuedMessage, " +
+      "still pastes in full — card b9b8f8db's Enter-only path applies only to an already-attempted message) " +
+      "— proving the (A) count-based assertion is a rig that truly detects a duplicate, rather than one that " +
+      "always reports success",
+      bodyCount(KICKOFF) === 2);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -252,8 +276,9 @@ console.log(failures === 0
     "is what the existing content-match purge (card 4a0af485) keys on, proven end to end against the REAL " +
     "PtyHost (not a SessionService-level stub) — an original kickoff that confirms LATE, after its re-mint " +
     "is already queued, has that re-mint PURGED before it can ever drain, so the kickoff body count never " +
-    "goes past 2 (A). The SAME two-cycle setup with no confirming hook (the purge has nothing to act on) " +
-    "DOES produce a real third, duplicate write (B) — proving the count-based assertion in (A) is a rig " +
-    "that can genuinely detect a duplicate, not one that vacuously reports success."
+    "goes past 1 (A; card b9b8f8db's Enter-only redelivery means cycle 2 itself never re-pastes). The SAME " +
+    "two-cycle setup with no confirming hook (the purge has nothing to act on) DOES produce a real second, " +
+    "duplicate write from the re-mint's own first attempt (B) — proving the count-based assertion in (A) is " +
+    "a rig that can genuinely detect a duplicate, not one that vacuously reports success."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

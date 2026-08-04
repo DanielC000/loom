@@ -33,6 +33,17 @@
 // RIGHT moment (deferred to the next write, not at give-up time) IFF composerLen===0, and never touches the
 // pty while a human draft is present. The real-engine half is the probe above.
 //
+// Card b9b8f8db (the composer-runaway fix) NARROWS this: the deferred clear-prefix above (force-close +
+// exact-Backspace + full repaste) still fires for a message arriving after a give-up that is NOT itself a
+// redelivery of the SAME message (see the NEW "different message" scenario below) — but a redrain that IS
+// redelivering the identical give-up'd message (`giveUpGen` already set) now retries ONLY the Enter and
+// never re-pastes the body at all. That's what stopped the composer runaway: composerDirtyLen is never
+// reset except by confirmation, so a genuinely wedged session used to backspace+repaste the FULL
+// accumulated total on EVERY redelivery cycle, compounding without bound. Scenarios (1) and (4) below are
+// updated to prove the NEW no-repaste behavior for this exact (same-message) case; the NEW "different
+// message" scenario proves the original clear-prefix mechanism is still exercised for the case it's still
+// needed for.
+//
 // RUN (no daemon needed): node test/pty-giveup-clear.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon, run `pnpm build`.
 import fs from "node:fs";
@@ -135,10 +146,12 @@ function spawnReady(sessionId) {
 
 try {
   // ===================== (1) composer-clean give-up → DEFERRED: marked possibly-dirty, NOT cleared here; ===
-  // ===================== the requeued entry's own next redrain carries the clear-prefix before its paste ==
+  // ===================== card b9b8f8db: the requeued entry's own next redrain is a redelivery of the ======
+  // ===================== SAME message (giveUpGen already set) — it retries ONLY the Enter, no clear, no ====
+  // ===================== repaste, so the body physically lands exactly ONCE, never twice ====================
   {
     const SID = "sess-giveup-clean";
-    const TEXT = "STRANDED_REPORT_BODY"; // 20 chars — the exact count the deferred clear must un-type
+    const TEXT = "STRANDED_REPORT_BODY";
     const { written, backspaceCount } = spawnReady(SID);
     const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
@@ -153,34 +166,61 @@ try {
       backspaceCount() === 0);
 
     // Card 441499ee/73d5c34a: give-up requeued TEXT at the front of pending, HELD from drain for
-    // GIVE_UP_HOLD_MS. Wait past the (pinned-small) hold, then drive the redrain directly — this redrain IS
-    // "the next submit" that must now carry the deferred clear-prefix before its own paste.
+    // GIVE_UP_HOLD_MS. Wait past the (pinned-small) hold, then drive the redrain directly — this redrain is
+    // a REDELIVERY of the identical give-up'd message (card b9b8f8db), so it must retry only the Enter.
     const busyLenBeforeRedrain = busyLog[SID].length;
+    const writesBeforeRedrain = written().length;
     await sleep(HOLD_WAIT);
     host.reconcile();
     const t1 = Date.now();
+    // Polls (bounded, observed) for busy to fall back to false a SECOND time, i.e. for the redrain's own
+    // give-up cycle to fully finish. submit()'s clear-prefix branch decision (repaste-vs-Enter-only) and
+    // any resulting backspace bytes are decided/written SYNCHRONOUSLY inside the single submit() call
+    // reconcile() triggers — nothing async can add a LATER backspace for this same generation, so the
+    // negative checks below are settled the instant this poll observes the give-up cycle complete.
     while (!(busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === false) && Date.now() - t1 < GIVE_UP_POLL_TIMEOUT_MS) {
+      // TIMING-GUARD-SAFE: fully-awaited-completion — see the comment block immediately above this loop.
       await sleep(GIVE_UP_POLL_MS);
     }
-    check("(1) the redrain itself also gave up (nothing in this harness ever confirms) — the deferred clear fired regardless",
+    check("(1) the redrain itself also gave up (nothing in this harness ever confirms) — the redelivery still recovers busy",
       busyLog[SID].at(-1) === false);
-    check(`(1) DEFERRED CLEAR: exactly ${TEXT.length} backspaces were written — by the REDRAIN, not by give-up itself`,
-      backspaceCount() === TEXT.length);
-    // The redrained paste is the SAME text (a requeue re-sends the identical original) — TEXT now occurs
-    // twice in the write stream (the abandoned first attempt, then the redrain). The backspace burst must
-    // sit strictly BETWEEN those two occurrences: after the first paste's own retry noise, before the
-    // second (redrained) paste begins.
-    const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
-    const secondBodyStart = written().indexOf(TEXT, firstBodyEnd);
-    const firstBackspaceIdx = written().indexOf(BACKSPACE);
-    check("(1) sanity: the redrain genuinely re-pasted the body a second time", secondBodyStart > firstBodyEnd);
-    check("(1) the backspace burst sits AFTER the first (abandoned) paste and BEFORE the redrain's own paste",
-      firstBackspaceIdx > firstBodyEnd && firstBackspaceIdx < secondBodyStart);
-    // A force-close reassert (fresh zero-length START+END) must precede the backspaces, closing any paste
-    // left open by the abandoned write before the raw \x7f bytes can be safely interpreted as edits.
-    const reassertIdx = written().lastIndexOf(BRACKET_PASTE_START + BRACKET_PASTE_END, firstBackspaceIdx);
-    check("(1) a force-close paste-reassert precedes the backspace burst",
-      reassertIdx > firstBodyEnd && reassertIdx < firstBackspaceIdx);
+    check("(1) card b9b8f8db: the SAME-message redrain never writes a backspace at all — no clear-prefix, ever",
+      backspaceCount() === 0);
+    check("(1) card b9b8f8db: the body was pasted exactly ONCE — the redrain never re-pastes it",
+      written().split(TEXT).length - 1 === 1);
+    // The redrain still DID write something (a force-close reassert + a fresh Enter attempt) — confirming
+    // this is a genuine second physical attempt, not a no-op that silently skipped retrying altogether.
+    check("(1) sanity: the redrain still wrote NEW bytes (a real second Enter attempt, not a no-op)",
+      written().length > writesBeforeRedrain);
+  }
+
+  // ===================== (1b) card b9b8f8db, NEW: a DIFFERENT message arriving with composerDirtyLen>0 ======
+  // ===================== (not a redelivery of the SAME give-up'd message) still gets the FULL, ORIGINAL ====
+  // ===================== clear-prefix (force-close + exact-Backspace + full repaste) — the narrowing above ==
+  // ===================== applies ONLY to a same-message redelivery, never to a genuinely new/different one ==
+  {
+    const SID = "sess-giveup-then-different";
+    const TEXT = "FIRST_STRANDED_BODY";
+    const OTHER = "A_GENUINELY_DIFFERENT_LATER_MESSAGE";
+    const { written, backspaceCount } = spawnReady(SID);
+    const t0 = Date.now();
+    host.enqueueStdin(SID, TEXT);
+    await waitForBusyFalse(SID, t0);
+    check("(1b) setup: the first message gave up and left composerDirtyLen dirty", backspaceCount() === 0);
+
+    // Enqueue a DIFFERENT message right away (before TEXT's own redelivery hold expires). `live.busy` is
+    // already false (the give-up recovered it) and OTHER carries no give-up hold of its own, so it takes
+    // enqueueStdin's IMMEDIATE path — a brand-new synthetic origin entry with no `giveUpGen`, submitted
+    // straight away without ever touching TEXT's still-held, still-queued entry. This is exactly the
+    // "something genuinely new needs to go out while stale dirt sits in the composer" case.
+    const r2 = host.enqueueStdin(SID, OTHER);
+    check("(1b) setup: the different message was accepted (queued or delivered)", r2.delivered === true || r2.queued === true);
+    const t1 = Date.now();
+    await waitForBusyFalse(SID, t1);
+    check("(1b) THE ORIGINAL MECHANISM STILL APPLIES: the different message's own submit still wrote the full "
+      + "exact-count Backspace clear-prefix before its paste", backspaceCount() === TEXT.length);
+    check("(1b) THE ORIGINAL MECHANISM STILL APPLIES: the different message's body was pasted in full",
+      written().includes(OTHER));
   }
 
   // ===================== (2) HUMAN-DRAFT SAFETY: composer-dirty give-up → NEVER cleared =====================
@@ -223,19 +263,20 @@ try {
       backspaceCount() === 0);
   }
 
-  // ===================== (4) LARGE possibly-dirty amount → the deferred clear-prefix's multi-chunk burst ===
-  // ===================== lands COMPLETELY and IN ORDER before the redrain's own paste, and busy (already ==
-  // ===================== true synchronously at submit()'s own start — card M1) blocks a concurrent enqueue
-  // ===================== from interleaving mid-burst (the race card ee082fbb CR item ① originally guarded,
-  // ===================== now against the NEW deferred-clear write site instead of give-up's old one) ======
+  // ===================== (4) LARGE possibly-dirty amount, card b9b8f8db retargeting: a same-message redrain ==
+  // ===================== no longer writes ANY burst (proven directly below) — the multi-chunk burst-lands- ===
+  // ===================== completely-and-in-order + busy-blocks-a-concurrent-enqueue race this scenario was ===
+  // ===================== built to guard STILL applies, but only for a DIFFERENT message arriving while a ====
+  // ===================== large amount sits possibly-dirty (mirrors (1b), at a size that spans many chunks) ==
   // writeChunked (host.ts) is only SYNCHRONOUS up to PTY_WRITE_CHUNK_BYTES (1024, not env-overridable) — a
-  // larger burst spans multiple 8ms-apart ticks. Give-up itself no longer writes any burst at all under
-  // card 3ce3fa39 (busy clears synchronously, no writeChunked to race) — the burst now lives entirely
-  // inside the NEXT submit(), which sets busy=true synchronously BEFORE kicking off the (non-blocking)
-  // clear-prefix + paste chain, so a concurrent enqueue can never land mid-burst.
+  // larger burst spans multiple 8ms-apart ticks. Give-up itself never writes any burst at all (card 3ce3fa39
+  // — busy clears synchronously, no writeChunked to race); the burst only ever lives inside a submit() that
+  // sets busy=true synchronously BEFORE kicking off the (non-blocking) clear-prefix + paste chain, so a
+  // concurrent enqueue can never land mid-burst.
   {
     const SID = "sess-giveup-large";
     const TEXT = "X".repeat(50 * 1024); // 50 chunks of 1024 — several event-loop ticks worth of burst
+    const OTHER = "A_GENUINELY_DIFFERENT_LATER_MESSAGE";
     const { written, backspaceCount } = spawnReady(SID);
     const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
@@ -245,43 +286,63 @@ try {
     check("(4) give-up eventually recovered busy (bounded poll didn't time out)", busyLog[SID].at(-1) === false);
     check("(4) DEFERRED: give-up itself never writes the (large) burst", backspaceCount() === 0);
 
-    const busyLenBeforeRedrain = busyLog[SID].length;
+    // Card b9b8f8db, PROVEN DIRECTLY: redriving TEXT itself (a same-message redelivery, giveUpGen already
+    // set) writes NO burst at all — past its hold, a reconcile() only retries the Enter.
+    const busyLenBeforeSameMsgRedrain = busyLog[SID].length;
     await sleep(HOLD_WAIT);
-    host.reconcile(); // drives the redrain — its submit() now carries the large deferred clear-prefix
-    // Immediately (same synchronous continuation as reconcile() returning — no await between) try to
-    // enqueue a THIRD, unrelated message: busy is already true (set synchronously at submit()'s own start,
-    // card M1) the instant reconcile() returns, so this must queue rather than interleave into the
-    // still-draining clear-prefix/paste chunks on the pty's FIFO.
+    host.reconcile();
+    const tSame = Date.now();
+    // Polls (bounded, observed) for busy to fall back to false a SECOND time, i.e. for this redrain's own
+    // give-up cycle to fully finish. submit()'s clear-prefix branch decision and any resulting
+    // backspace/repaste bytes are decided/written SYNCHRONOUSLY inside the single submit() call
+    // reconcile() triggers — nothing async can add a LATER backspace/repaste for this same generation, so
+    // the negative checks below are settled the instant this poll observes the give-up cycle complete.
+    while (!(busyLog[SID].length > busyLenBeforeSameMsgRedrain && busyLog[SID].at(-1) === false) && Date.now() - tSame < GIVE_UP_POLL_TIMEOUT_MS) {
+      // TIMING-GUARD-SAFE: fully-awaited-completion — see the comment block immediately above this loop.
+      await sleep(GIVE_UP_POLL_MS);
+    }
+    check("(4) card b9b8f8db: the SAME-message (large) redrain writes ZERO backspaces — this is the fix",
+      backspaceCount() === 0);
+    check("(4) card b9b8f8db: the SAME-message redrain never re-pastes the large body either",
+      written().split(TEXT).length - 1 === 1);
+
+    // NOW the race this scenario still needs to guard: a DIFFERENT message arrives while `composerDirtyLen`
+    // is still the full 50KB — its submit() carries the full, multi-chunk clear-prefix (busy=false, so this
+    // takes enqueueStdin's IMMEDIATE path, exactly like (1b)).
+    const t1 = Date.now();
+    const rOther = host.enqueueStdin(SID, OTHER);
+    check("(4) the different message was delivered immediately (busy was false)", rOther.delivered === true);
+    // Immediately (same synchronous continuation — no await between) try to enqueue a THIRD, unrelated
+    // message: busy is already true (set synchronously at submit()'s own start, card M1) the instant the
+    // call above returns, so this must queue rather than interleave into the still-draining clear-prefix/
+    // paste chunks on the pty's FIFO.
     const r3 = host.enqueueStdin(SID, "UNRELATED_THIRD_MESSAGE");
     check("(4) a message enqueued WHILE the large clear-prefix is still draining is queued, not delivered immediately",
       r3.delivered === false);
 
-    const t1 = Date.now();
-    while (!(busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === false) && Date.now() - t1 < GIVE_UP_POLL_TIMEOUT_MS) {
-      await sleep(GIVE_UP_POLL_MS);
-    }
-    check("(4) the redrain itself also gave up (harness never confirms) — busy fell back to false again",
+    await waitForBusyFalse(SID, t1);
+    check("(4) the different message's own attempt also gave up (harness never confirms) — busy fell back to false again",
       busyLog[SID].at(-1) === false);
     check(`(4) the FULL burst landed: exactly ${TEXT.length} backspaces written despite spanning many chunks`,
       backspaceCount() === TEXT.length);
     const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
-    const secondBodyStart = written().indexOf(TEXT, firstBodyEnd);
-    check("(4) sanity: the redrain genuinely re-pasted the body a second time", secondBodyStart > firstBodyEnd);
-    check("(4) the full burst lands strictly BEFORE the redrain's own (second) paste begins",
-      written().indexOf(BACKSPACE) > firstBodyEnd && written().lastIndexOf(BACKSPACE) < secondBodyStart);
+    const otherStart = written().indexOf(OTHER);
+    check("(4) sanity: the different message's own body was pasted", otherStart > firstBodyEnd);
+    check("(4) the full burst lands strictly BEFORE the different message's own paste begins",
+      written().indexOf(BACKSPACE) > firstBodyEnd && written().lastIndexOf(BACKSPACE) < otherStart);
     // Sanity: this is a MULTI-chunk burst (proves the ordering assertion above is actually exercising the
     // race window this test guards, not trivially passing because the whole burst fit in one sync chunk).
     check("(4) sanity: the burst genuinely spanned multiple chunks (TEXT exceeds one PTY_WRITE_CHUNK_BYTES)",
       TEXT.length > 1024);
   }
 } finally {
-  for (const sid of ["sess-giveup-clean", "sess-giveup-dirty", "sess-confirmed-no-giveup", "sess-giveup-large"]) {
+  for (const sid of ["sess-giveup-clean", "sess-giveup-then-different", "sess-giveup-dirty", "sess-confirmed-no-giveup", "sess-giveup-large"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — give-up marks the composer possibly-dirty instead of clearing immediately; the NEXT submit (not give-up itself) issues the exact-count Backspace burst, force-closed first, IFF composerLen===0 (a human draft mid-retry is NEVER touched); a normally-confirmed turn never triggers a clear; a large deferred burst lands fully and in order, with busy blocking any concurrent enqueue from interleaving mid-burst."
+  ? "\n✅ ALL PASS — give-up marks the composer possibly-dirty instead of clearing immediately. Card b9b8f8db: a redrain that REDELIVERS the identical give-up'd message now retries ONLY the Enter — zero backspaces, zero re-paste, regardless of size (1, 4) — closing the composer-runaway bug. The ORIGINAL clear-prefix mechanism (force-close + exact-count Backspace + full repaste, IFF composerLen===0) still fires, unchanged, for a genuinely DIFFERENT message arriving while composerDirtyLen>0 (1b, 4) — a human draft mid-retry is still NEVER touched (2); a normally-confirmed turn never triggers a clear (3); and a large deferred burst for a different message still lands fully and in order, with busy blocking any concurrent enqueue from interleaving mid-burst (4)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

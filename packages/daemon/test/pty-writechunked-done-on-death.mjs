@@ -17,6 +17,13 @@
 // reintroduced — `writeNewTurn` deferred what used to be submit()'s own always-synchronous-and-therefore-
 // always-alive first write into an async `done` callback that can now fire post-death).
 //
+// Card b9b8f8db RETARGETED which redrain produces the burst: a redrain that REDELIVERS the identical
+// give-up'd message (giveUpGen already set) now retries ONLY the Enter — no clear-prefix burst at all
+// (that's the fix for the composer-runaway bug; see pty-giveup-clear.mjs scenario (1)). The full
+// clear-prefix burst this test needs to kill mid-way through still fires, unchanged, for a genuinely
+// DIFFERENT message arriving while composerDirtyLen>0 — so this test now drives THAT case instead of
+// TEXT's own redrain (mirrors pty-giveup-clear.mjs scenario (4)'s own identical retargeting).
+//
 // FALSIFIES on pre-fix-of-THIS-card code: removing `writeNewTurn`'s own `if (!l?.alive) return;` guard
 // reproduces a stray post-death `ptyWrite` call (verified by hand against that gap during development).
 //
@@ -110,6 +117,7 @@ function spawnReady(sessionId) {
 const SID = "sess-writechunked-death-midburst";
 try {
   const TEXT = "X".repeat(50 * 1024); // large enough to span many chunks — see pty-giveup-clear.mjs scenario (4)
+  const OTHER = "A_GENUINELY_DIFFERENT_LATER_MESSAGE"; // card b9b8f8db: only a DIFFERENT message still gets the full burst
   const { fake, backspaceCount } = spawnReady(SID);
   const r = host.enqueueStdin(SID, TEXT);
   check("setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
@@ -121,11 +129,14 @@ try {
   check("give-up recovered busy", busyLog[SID].at(-1) === false);
   check("card 3ce3fa39: no backspace yet — give-up itself never writes the burst", backspaceCount() === 0);
 
-  // Wait past the (pinned-small) hold, then drive the redrain directly. This redrain's OWN submit() now
-  // carries the deferred clear-prefix — a large multi-chunk Backspace burst threaded through
-  // writeChunked's `done` into `writeNewTurn` (which then writes the REAL paste).
-  await sleep(HOLD_WAIT);
-  host.reconcile();
+  // Card b9b8f8db: enqueue a DIFFERENT message rather than redriving TEXT itself — TEXT's own redrain
+  // (a redelivery of the SAME give-up'd message) now retries only the Enter and writes no burst at all
+  // (the fix). `composerDirtyLen` is still TEXT.length from the give-up above, and busy is false, so OTHER
+  // takes enqueueStdin's IMMEDIATE path with a brand-new synthetic origin (no giveUpGen) — the ORIGINAL,
+  // unchanged clear-prefix mechanism: force-close, then a large multi-chunk Backspace burst threaded
+  // through writeChunked's `done` into `writeNewTurn` (which then writes OTHER's own real paste).
+  const rOther = host.enqueueStdin(SID, OTHER);
+  check("setup: the different message was delivered immediately (busy was false)", rOther.delivered === true);
 
   // Wait for the clear-prefix burst to actually START, then kill the pty PARTWAY through it.
   const startDeadline = Date.now() + 15_000;
