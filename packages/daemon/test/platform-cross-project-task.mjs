@@ -345,10 +345,12 @@ try {
   db.insertProject({ id: "pBulk", name: "Bulk", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
   const BULK = DEFAULT_TASK_SUMMARY_CAP + 5;
   // body is a short, non-empty filler — this section tests PAGINATION/capping, not the NDJSON
-  // inline-vs-spill threshold (SPILL_INLINE_BUDGET_CHARS, spill.ts), so keep well clear of it: a
-  // heavier body here (there is no assertion on body CONTENT below) would push the in-project
-  // tasks_list capped(100)-row NDJSON text over budget and silently switch it to the spill-pointer
-  // shape, which this section's plain-array assertions don't expect.
+  // inline-vs-spill threshold (SPILL_INLINE_BUDGET_CHARS, spill.ts). It used to matter to stay clear of
+  // that threshold (a heavier body would silently switch the in-project tasks_list response to the
+  // spill-pointer shape); the `ndjson()` helper above is now spill-AWARE (follows `rowsFile` when
+  // present), so this section's assertions hold either way — but the body stays short regardless, since
+  // there's still no assertion on body CONTENT below and a short filler keeps this section's intent
+  // (pagination, not payload size) legible.
   for (let i = 0; i < BULK; i++) {
     db.insertTask({ id: `bulk-${i}`, projectId: "pBulk", title: `b${i}`, body: "x", columnKey: "backlog", position: i, priority: "p2", createdAt: now, updatedAt: now });
   }
@@ -385,8 +387,20 @@ try {
   const ipClient = new Client({ name: "xtask-inproj", version: "0" });
   await ipClient.connect(ipT);
   // tasks_list returns NEWLINE-DELIMITED JSON (one task per line, card dc647ae2 part A) — not a JSON
-  // array — so it stays Read/grep-pageable even if a wide window spills to a file; parse it line-by-line.
-  const ndjson = (res) => res.content[0].text.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  // array — so it stays Read/grep-pageable even if a wide window spills to a file (okLinesSpillable,
+  // mirrors tasks-list-ndjson-spill.mjs's own read convention): below SPILL_INLINE_BUDGET_CHARS the text
+  // IS the bare NDJSON; above it, the text is a single `{rowsFile,...}` pointer object instead, and the
+  // real rows live at `rowsFile`. Follow the pointer when present so this section's row-count assertions
+  // hold regardless of how close a given row count sits to that budget (row size grows over time as the
+  // Task schema grows — card 0d4bc3f0 added `deferredItems` and pushed the 100-105-row responses here
+  // from comfortably inline to just over budget).
+  const ndjson = (res) => {
+    const text = res.content[0].text;
+    let parsedPointer;
+    try { parsedPointer = JSON.parse(text); } catch { parsedPointer = null; }
+    const spilledText = parsedPointer && typeof parsedPointer.rowsFile === "string" ? fs.readFileSync(parsedPointer.rowsFile, "utf8") : text;
+    return spilledText.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  };
   const ipList = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true } }));
   check(`(5) in-project tasks_list default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${ipList.length})`, ipList.length === DEFAULT_TASK_SUMMARY_CAP);
   const ipPaged = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 } }));

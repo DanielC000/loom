@@ -1399,6 +1399,37 @@ export type TaskPriority = "p0" | "p1" | "p2" | "p3";
 /** The default priority for a new / un-prioritized task (Normal). */
 export const DEFAULT_TASK_PRIORITY: TaskPriority = "p2";
 
+/**
+ * Card 0d4bc3f0 (board-hygiene): the lifecycle of ONE hand-off recorded in {@link Task.deferredItems}.
+ * `"open"` (the create-time default, `tasks_defer_item`) means nobody has yet said whether it landed.
+ * `"acknowledged"`/`"declined"` are both terminal, human-legible outcomes an agent stamps explicitly via
+ * `tasks_defer_item_ack` — Loom never infers either from anything else the recipient card does (a merge,
+ * a column move, a close), so a hand-off that's genuinely dropped stays `"open"` forever instead of being
+ * silently read as "handled" just because time passed.
+ */
+export type DeferredItemStatus = "open" | "acknowledged" | "declined";
+
+/**
+ * One entry of `Task.deferredItems` (card 0d4bc3f0) — a DoD sub-item this card deferred onto ANOTHER
+ * card, recorded structurally instead of living only in `Related:` prose a later rescope can silently
+ * overwrite (the defect this card fixes: a hand-off that only exists in prose evaporates the instant
+ * anyone rewrites the DoD around it — see the card body's own "drop 2" for a rescope that happened while
+ * the person doing it was reading a report about exactly this failure mode). `id` addresses this ONE
+ * entry for a later {@link DeferredItemStatus} update; `toTaskId` is the FULL id of the receiving task,
+ * resolved at write time (mirrors `Task.deferredUntilTaskId`'s own normalization — never a raw
+ * caller-supplied prefix, so a read never has to re-resolve one). Written by `tasks_defer_item`
+ * (mcp/tasks.ts `deferTaskItem`) — never a raw `tasks_update` patch field, so an append can never race a
+ * concurrent one into a lost update (see that function's own doc).
+ */
+export interface DeferredItem {
+  id: string;
+  text: string;
+  toTaskId: string;
+  status: DeferredItemStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Task {
   id: TaskId;
   projectId: ProjectId;
@@ -1518,6 +1549,32 @@ export interface Task {
    * set) — that route's release condition is the named blocker task itself.
    */
   deferredReason?: string | null;
+  /**
+   * Card 0d4bc3f0 — sub-items THIS card's own DoD deferred onto ANOTHER card, recorded structurally (see
+   * {@link DeferredItem}'s own doc) alongside — never instead of — a `Related:`/prose note in the body.
+   * Default `[]`/absent: BEHAVIOR is unchanged for the overwhelming majority of cards that never defer
+   * anything — this is NOT byte-identical-to-today at the serialized-row level, though: the always-present
+   * `[]` adds a small constant (~19 bytes as `"deferredItems":[]`) to EVERY full Task row, which measurably
+   * ate into the NDJSON inline-vs-spill headroom (SPILL_INLINE_BUDGET_CHARS, spill.ts) on the two tests
+   * closest to that budget (`platform-cross-project-task.mjs`'s bulk-pagination section, `mcp-scope.mjs`'s
+   * tool-list assertion) when this field shipped. Deliberately NOT omit-when-empty (a uniform always-
+   * present array is the more predictable consumer shape, and the cost lands only on full-body reads —
+   * `TaskSummary`/tasks_list's hot path stays clean, verified by `task-summary-inline-capacity.mjs`) — the
+   * next field that erodes spill headroom should cost bytes here again, not dodge measurement by omitting
+   * itself. Written ONLY via the dedicated `tasks_defer_item`/`tasks_defer_item_ack` tools
+   * (mcp/tasks.ts `deferTaskItem`/`updateDeferredItemStatus`) — never a raw `tasks_update` patch field;
+   * see `deferTaskItem`'s own doc for why an append needs its own choke point rather than a client-
+   * constructed full-array replace. This is the OUTBOUND view (what this card handed to others); the
+   * INBOUND view — "what has been handed to THIS card and not yet acknowledged" — is a different,
+   * DERIVED thing computed at read time by scanning every OTHER task's own `deferredItems` for an entry
+   * whose `toTaskId` names this card: see `TaskWithRequests.incomingDeferredItems` (mcp/tasks.ts
+   * `getProjectTask`), surfaced by `tasks_get` the same way `requests` already is — so a card can be on
+   * the RECEIVING end of a hand-off without ever having been told the donor's id in advance. THIS is the
+   * mechanism that makes a dropped hand-off detectable (card DoD-4): reading the recipient's OWN card
+   * surfaces a still-`"open"` item structurally, instead of requiring anyone to go re-read the donor
+   * card's prose to notice nothing ever answered it.
+   */
+  deferredItems?: DeferredItem[];
   /**
    * Multi-repo epic 49136451, phase 1: which of the project's registry repos this card targets —
    * a key into `Project.repos`, or `null`/absent (the default) meaning the project's PRIMARY repo

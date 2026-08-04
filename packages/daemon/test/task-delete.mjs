@@ -108,13 +108,17 @@ try {
 
     const workerNames = await listToolNames("sWorkerD");
     const taskToolNames = workerNames.filter((n) => n.startsWith("task"));
-    check("D: the REAL registered task/tasks_* surface (worker role) is exactly the 6 known tools (create/get/list/update + the task_request_* read pair, card 988bb585)",
-      JSON.stringify([...taskToolNames].sort()) === JSON.stringify(["task_request_get", "task_requests_list", "tasks_create", "tasks_get", "tasks_list", "tasks_update"]));
+    // Card 0d4bc3f0 added tasks_defer_item/tasks_defer_item_ack (the structured deferred-hand-off surface)
+    // alongside tasks_create/tasks_update in the SAME role-conditional block — 8 known tools now, not 6.
+    check("D: the REAL registered task/tasks_* surface (worker role) is exactly the 8 known tools (create/get/list/update + defer_item/defer_item_ack + the task_request_* read pair, cards 988bb585/0d4bc3f0)",
+      JSON.stringify([...taskToolNames].sort()) === JSON.stringify(["task_request_get", "task_requests_list", "tasks_create", "tasks_defer_item", "tasks_defer_item_ack", "tasks_get", "tasks_list", "tasks_update"]));
     check("D: NO registered tool name (worker role) mentions delete/remove/destroy", !workerNames.some((n) => /delete|remove|destroy/i.test(n)));
 
     const assistantNames = await listToolNames("sAssistD");
-    check("D: assistant role omits tasks_create/tasks_update (card 0784e5cb) and still exposes no delete tool",
-      !assistantNames.includes("tasks_create") && !assistantNames.includes("tasks_update") && !assistantNames.some((n) => /delete|remove|destroy/i.test(n)));
+    check("D: assistant role omits tasks_create/tasks_update/tasks_defer_item/tasks_defer_item_ack (cards 0784e5cb/0d4bc3f0) and still exposes no delete tool",
+      !assistantNames.includes("tasks_create") && !assistantNames.includes("tasks_update") &&
+      !assistantNames.includes("tasks_defer_item") && !assistantNames.includes("tasks_defer_item_ack") &&
+      !assistantNames.some((n) => /delete|remove|destroy/i.test(n)));
   }
   check("D: tasks MCP module exports NO delete function",
     Object.keys(tasksMod).every((k) => !/delete/i.test(k)));

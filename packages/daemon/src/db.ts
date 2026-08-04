@@ -72,6 +72,7 @@ import type {
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
+  DeferredItem, DeferredItemStatus,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
   RepoRegistryEntry, PlatformConfigHistoryEntry, ProjectConfigHistoryEntry,
 } from "@loom/shared";
@@ -1594,6 +1595,13 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // (updateProjectTask, mcp/tasks.ts) — never a raw pass-through DB write.
   deferred_at: "TEXT",
   deferred_reason: "TEXT",
+  // Card 0d4bc3f0 — structured hand-off list (JSON array of DeferredItem); see Task.deferredItems's own
+  // doc. Nullable, no DEFAULT (mirrors held_by/repo_key/deferred_until_task_id): every legacy row
+  // backfills to NULL, read as "[]" by toTask() below — byte-identical to a card that has never deferred
+  // anything, which is exactly what a pre-existing row's true history is (this mechanism didn't exist
+  // yet, so there is nothing real to backfill FROM — never invented, mirrors deferred_at/deferred_reason's
+  // own "never fabricate provenance" rule).
+  deferred_items: "TEXT",
   // Card d0978321 — optimistic-concurrency CAS token for title/body writes, exact mirror of
   // PROJECT_MEMORY_ADDED_COLUMNS's own `version` entry below. NOT NULL + constant DEFAULT 1 backfills
   // every legacy row to version 1 in place, the same starting point a brand-new row gets — see
@@ -5370,9 +5378,9 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck,deferred_at,deferred_reason)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck,@deferredAt,@deferredReason)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck,deferred_at,deferred_reason,deferred_items)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck,@deferredAt,@deferredReason,@deferredItems)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []) }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -5433,6 +5441,49 @@ export class Db {
       return { ok: true, task: this.getTask(id)! };
     });
     return run();
+  }
+  /**
+   * Append a new outbound {@link DeferredItem} to a task's `deferredItems` array (card 0d4bc3f0) — the
+   * ONE write path for a hand-off, so every stored entry is well-formed (fresh id/timestamps, `status:
+   * "open"`) rather than a client-constructed array the caller could get wrong. Synchronous
+   * read-mutate-write in one call, no `await` between the read and the write — nothing else can
+   * interleave (better-sqlite3 + Node's single-threaded event loop give this the same atomicity
+   * {@link updateTask}'s own blind read-then-write already relies on, without needing a transaction
+   * wrapper). Bumps `updated_at` (a real content change) but deliberately NOT `version` — that CAS token
+   * gates title/body only (see Task.version's own doc); a deferred-item append is a field-only change by
+   * that same convention, so it must never spuriously invalidate someone else's in-flight title/body edit.
+   * Returns the newly-created item, or `undefined` if the task doesn't exist (deleted concurrently).
+   */
+  appendDeferredItem(taskId: string, input: { text: string; toTaskId: string }): DeferredItem | undefined {
+    const cur = this.db.prepare("SELECT deferred_items FROM tasks WHERE id = ?").get(taskId) as { deferred_items: string | null } | undefined;
+    if (!cur) return undefined;
+    let items: DeferredItem[];
+    try { items = JSON.parse(cur.deferred_items || "[]") as DeferredItem[]; } catch { items = []; }
+    const now = new Date().toISOString();
+    const item: DeferredItem = { id: randomUUID(), text: input.text, toTaskId: input.toTaskId, status: "open", createdAt: now, updatedAt: now };
+    items.push(item);
+    this.db.prepare("UPDATE tasks SET deferred_items = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(items), now, taskId);
+    return item;
+  }
+  /**
+   * Flip ONE {@link DeferredItem}'s `status` on a task's `deferredItems` array (card 0d4bc3f0) — the
+   * acknowledge/decline/reopen write, addressed by the item's own `id` (never an array index, which would
+   * shift under a concurrent append). Same synchronous read-mutate-write atomicity as
+   * {@link appendDeferredItem} — see its own doc. Returns the updated item, `{error}` if `itemId` doesn't
+   * match any entry on this task, or `undefined` if the task itself doesn't exist.
+   */
+  setDeferredItemStatus(taskId: string, itemId: string, status: DeferredItemStatus): DeferredItem | { error: string } | undefined {
+    const cur = this.db.prepare("SELECT deferred_items FROM tasks WHERE id = ?").get(taskId) as { deferred_items: string | null } | undefined;
+    if (!cur) return undefined;
+    let items: DeferredItem[];
+    try { items = JSON.parse(cur.deferred_items || "[]") as DeferredItem[]; } catch { items = []; }
+    const idx = items.findIndex((it) => it.id === itemId);
+    if (idx === -1) return { error: `no deferred item "${itemId}" on task ${taskId}` };
+    const now = new Date().toISOString();
+    const updated: DeferredItem = { ...items[idx]!, status, updatedAt: now };
+    items[idx] = updated;
+    this.db.prepare("UPDATE tasks SET deferred_items = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(items), now, taskId);
+    return updated;
   }
   /**
    * Write-through cache-fill for a task's ship-state (card 1eebc46a) — used ONLY by the drawer's lazy
@@ -7148,6 +7199,11 @@ function toTask(r0: unknown): Task {
     deferredStuck: (r.deferred_stuck as number | null) === 1,
     deferredAt: (r.deferred_at as string | null) ?? null,
     deferredReason: (r.deferred_reason as string | null) ?? null,
+    // Card 0d4bc3f0 — legacy/never-deferred rows read `deferred_items` as NULL; parse failure (a
+    // corrupted blob) degrades to [] rather than throwing, same fail-safe posture as tags parsing below.
+    deferredItems: (() => {
+      try { return JSON.parse((r.deferred_items as string | null) || "[]") as Task["deferredItems"]; } catch { return []; }
+    })(),
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     mergedSha: (r.merged_sha as string | null) ?? null,

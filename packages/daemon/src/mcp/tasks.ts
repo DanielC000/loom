@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask } from "@loom/shared";
+import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask, DeferredItem, DeferredItemStatus } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
@@ -389,7 +389,7 @@ export interface TaskRequestsSummary {
 }
 
 /** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary };
+export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary };
 
 function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
   // Each bucket is derived EXPLICITLY by state — never `total - pending` (that silently mis-groups any
@@ -405,6 +405,105 @@ function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
     pending, answered, cancelled,
     items: questions.map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state })),
   };
+}
+
+/**
+ * ONE hand-off {@link getProjectTask}'s `incomingDeferredItems` surfaces on the RECEIVING task (card
+ * 0d4bc3f0) — the same entry a donor task stores in its own `deferredItems`, re-presented from the other
+ * end plus which task it came from, so the recipient never has to already know the donor's id.
+ */
+export interface IncomingDeferredItem {
+  itemId: string;
+  text: string;
+  status: DeferredItemStatus;
+  fromTaskId: string;
+  fromTaskTitle: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * {@link getProjectTask}/tasks_get's INBOUND deferred-items summary (card 0d4bc3f0) — mirrors
+ * {@link TaskRequestsSummary}'s shape/placement exactly: every {@link DeferredItem} ANY task on this
+ * board has recorded with `toTaskId` naming THIS one, regardless of that donor task's own state (open,
+ * in progress, or already closed) — a donor that closed without ever getting an "acknowledged"/"declined"
+ * answer is exactly the drop this mechanism exists to make visible, so a closed donor is never filtered
+ * out here. `open` is the count that matters for detectability (DoD-4): a card reading its OWN
+ * `tasks_get` sees, structurally, every hand-off nobody has yet said anything about — no need to go
+ * re-read a donor card's prose to notice one was never answered.
+ */
+export interface IncomingDeferredItemsSummary {
+  total: number;
+  open: number;
+  acknowledged: number;
+  declined: number;
+  items: IncomingDeferredItem[];
+}
+
+/**
+ * Computed by scanning THIS project's OTHER tasks for a `deferredItems` entry whose `toTaskId` names
+ * `taskId` (card 0d4bc3f0) — there is no separate table to index by `toTaskId` the way `questions.task_id`
+ * backs {@link summarizeTaskRequests}; `deferredItems` lives ON the donor task by design (see
+ * `Task.deferredItems`'s own doc for why), so the inbound view is necessarily a project-wide scan rather
+ * than a targeted lookup. `db.listTasks(projectId)` is already the same per-project read
+ * `resolveProjectTaskId` performs for id-prefix resolution, so this costs one more in-memory pass over an
+ * already-fetched row set, not an extra DB round trip.
+ */
+function summarizeIncomingDeferredItems(db: Db, projectId: string, taskId: string): IncomingDeferredItemsSummary {
+  let open = 0, acknowledged = 0, declined = 0;
+  const items: IncomingDeferredItem[] = [];
+  for (const t of db.listTasks(projectId)) {
+    if (t.id === taskId || !t.deferredItems?.length) continue;
+    for (const it of t.deferredItems) {
+      if (it.toTaskId !== taskId) continue;
+      if (it.status === "open") open++;
+      else if (it.status === "acknowledged") acknowledged++;
+      else declined++;
+      items.push({ itemId: it.id, text: it.text, status: it.status, fromTaskId: t.id, fromTaskTitle: t.title, createdAt: it.createdAt, updatedAt: it.updatedAt });
+    }
+  }
+  return { total: items.length, open, acknowledged, declined, items };
+}
+
+/**
+ * Defer a sub-item from `fromTaskId` onto ANOTHER task on the same board (card 0d4bc3f0) — the structured
+ * hand-off `tasks_defer_item` writes, alongside (never instead of) a `Related:`/prose note in the body.
+ * `toTaskId` accepts the full id or an unambiguous 8-char prefix (mirrors `deferredUntilTaskId`), resolved
+ * to the full id before it's written so a later read never has to re-resolve a stale prefix. Rejects a
+ * self-reference (a card can't defer an item onto itself) and an id that doesn't resolve on this board —
+ * whole call rejected, nothing written, same convention as every other cross-task reference this surface
+ * validates (`deferredUntilTaskId`, `supersedes`/`relatedTo`).
+ */
+export function deferTaskItem(
+  db: Db, projectId: string, fromTaskId: string, input: { text: string; toTaskId: string },
+): DeferredItem | { error: string } {
+  const from = resolveProjectTaskId(db, projectId, fromTaskId);
+  if ("error" in from) return from;
+  const to = resolveProjectTaskId(db, projectId, input.toTaskId);
+  if ("error" in to) return { error: `toTaskId ${to.error}` };
+  if (to.id === from.id) return { error: "toTaskId cannot reference the task itself" };
+  const text = input.text.trim();
+  if (!text) return { error: "text is required" };
+  const item = db.appendDeferredItem(from.id, { text, toTaskId: to.id });
+  if (!item) return { error: "task not found (deleted concurrently)" };
+  return item;
+}
+
+/**
+ * Flip a deferred item's status (card 0d4bc3f0) — the acknowledge/decline/reopen write, addressed by the
+ * OWNING task's id (the donor that recorded it via `tasks_defer_item`) plus the item's own `id` (from that
+ * donor's own `tasks_get`, or from the RECEIVING task's `incomingDeferredItems.items[].itemId` +
+ * `fromTaskId` — either party can call this; nothing here checks WHICH task the caller currently holds).
+ * `taskId` accepts the full id or an unambiguous 8-char prefix.
+ */
+export function updateDeferredItemStatus(
+  db: Db, projectId: string, taskId: string, itemId: string, status: DeferredItemStatus,
+): DeferredItem | { error: string } {
+  const owned = resolveProjectTaskId(db, projectId, taskId);
+  if ("error" in owned) return owned;
+  const result = db.setDeferredItemStatus(owned.id, itemId, status);
+  if (!result) return { error: "task not found (deleted concurrently)" };
+  return result;
 }
 
 /**
@@ -435,6 +534,7 @@ export async function getProjectTask(
   return {
     ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
+    incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
   };
 }
 

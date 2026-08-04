@@ -93,13 +93,15 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
 export const ORCH_WORKER_TOOLS: readonly string[] = ["directive_status", "gate_queue", "gate_status", "my_context", "run_gate", "worker_report"];
 export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context", "notify_lead"];
 
-// loom-tasks: universal across every role except assistant (which loses the two write tools).
+// loom-tasks: universal across every role except assistant (which loses the four write tools — card
+// 0d4bc3f0's tasks_defer_item/tasks_defer_item_ack register in the SAME session?.role!=="assistant"
+// block as tasks_create/tasks_update in mcp/server.ts, so they share that role's exact carve-out).
 export const TASKS_UNIVERSAL_TOOLS: readonly string[] = [
   "memory_forget", "memory_list", "memory_read", "memory_write", "task_request_get",
-  "task_requests_list", "tasks_create", "tasks_get", "tasks_list", "tasks_update", "wake_cancel",
-  "wake_list", "wake_me",
+  "task_requests_list", "tasks_create", "tasks_defer_item", "tasks_defer_item_ack", "tasks_get",
+  "tasks_list", "tasks_update", "wake_cancel", "wake_list", "wake_me",
 ];
-export const TASKS_ASSISTANT_EXCLUDED_TOOLS: readonly string[] = ["tasks_create", "tasks_update"];
+export const TASKS_ASSISTANT_EXCLUDED_TOOLS: readonly string[] = ["tasks_create", "tasks_defer_item", "tasks_defer_item_ack", "tasks_update"];
 // Conditional on the resolved profile, not the role — see resolveKnownToolSurface.
 export const TASKS_VAULT_WRITE_TOOL = "vault_write";
 export const TASKS_AUTHENTICATED_REQUEST_TOOL = "authenticated_request";

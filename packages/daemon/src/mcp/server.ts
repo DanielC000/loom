@@ -8,7 +8,7 @@ import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
 import {
   listProjectTasks, getProjectTask, createProjectTaskChecked, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
-  listProjectTaskRequests, getProjectTaskRequest,
+  listProjectTaskRequests, getProjectTaskRequest, deferTaskItem, updateDeferredItemStatus,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
@@ -145,7 +145,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns `deferredStuck` (only meaningful while deferred:true) — see tasks_list's own description for the full contract; it's the same field. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list. Also returns `merged` — this card's git-derived ship state ({sha,date,verification?} of its squash-merge commit on this project's repo, else null). null means NOT PROVEN merged, never an authoritative 'never merged' — don't trust a stale handoff claiming this card is unbuilt without checking this first. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified.",
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns `deferredStuck` (only meaningful while deferred:true) — see tasks_list's own description for the full contract; it's the same field. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list. Also returns this card's OWN outbound `deferredItems` ([{id,text,toTaskId,status,createdAt,updatedAt}], card 0d4bc3f0) — sub-items THIS card's DoD deferred onto other cards via `tasks_defer_item` — AND `incomingDeferredItems` ({total,open,acknowledged,declined,items:[{itemId,text,status,fromTaskId,fromTaskTitle,createdAt,updatedAt}]}), the INBOUND view: every item ANY other card on this board has deferred onto THIS one, regardless of that donor card's own state. Read `incomingDeferredItems.open` before assuming a card with no obvious open work is actually idle — a hand-off nobody has acknowledged shows up here even if the donor card has already closed. Flip an item's status with `tasks_defer_item_ack`. Also returns `merged` — this card's git-derived ship state ({sha,date,verification?} of its squash-merge commit on this project's repo, else null). null means NOT PROVEN merged, never an authoritative 'never merged' — don't trust a stale handoff claiming this card is unbuilt without checking this first. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified.",
         inputSchema: strictShape({ id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() }),
       },
       async ({ id, taskId }) => {
@@ -254,6 +254,60 @@ export class TaskMcpRouter {
           // router can reach tasks_update, but must not be able to set repoKey (a dispatch decision) —
           // see updateProjectTask's own doc.
           return ok(await updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }, baseVersion));
+        },
+      );
+      server.registerTool(
+        "tasks_defer_item",
+        {
+          description:
+            "Card 0d4bc3f0 (board-hygiene): defer a DoD sub-item from THIS task onto ANOTHER task on the " +
+            "same board, recorded STRUCTURALLY instead of only in a `Related:`/prose note (write that too — " +
+            "this is additive, not a replacement). `id`/`taskId` (alias) is the DONOR task — the one whose " +
+            "DoD is deferring the item; `toTaskId` (full id or an unambiguous 8-char prefix, resolved to the " +
+            "full id before it's written) is the RECEIVING task. Rejects a self-reference and a `toTaskId` " +
+            "that doesn't resolve on this board — whole call rejected, nothing written. The new item starts " +
+            "`status:\"open\"` and is returned in full ({id,text,toTaskId,status,createdAt,updatedAt}); the " +
+            "RECEIVING task sees it show up in ITS OWN `tasks_get`'s `incomingDeferredItems` — that's the " +
+            "detectability mechanism: a card that never acknowledges a hand-off stays visibly `\"open\"` on " +
+            "a plain read of the recipient, instead of the hand-off evaporating into donor-card prose nobody " +
+            "is obligated to re-read. Flip the status later with `tasks_defer_item_ack`.",
+          inputSchema: strictShape({
+            id: z.string().optional(),
+            taskId: z.string().optional(),
+            toTaskId: z.string(),
+            text: z.string(),
+          }),
+        },
+        async ({ id, taskId, toTaskId, text }) => {
+          const resolvedId = resolveAlias(id, taskId);
+          if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
+          return ok(deferTaskItem(db, projectId, resolvedId, { text, toTaskId }));
+        },
+      );
+      server.registerTool(
+        "tasks_defer_item_ack",
+        {
+          description:
+            "Card 0d4bc3f0: flip ONE deferred item's status — acknowledge it landed in the recipient's " +
+            "scope, decline it (the donor changed its mind, or the recipient is explicitly not taking it " +
+            "on), or reopen it back to \"open\". `id`/`taskId` (alias) is the DONOR task that RECORDED the " +
+            "item (via `tasks_defer_item`) — the one whose `deferredItems` array actually holds it, NOT " +
+            "necessarily the task you're currently working; `itemId` is the item's own id, found on the " +
+            "donor's own `tasks_get` (`deferredItems[].id`) or on the RECEIVING task's `tasks_get` " +
+            "(`incomingDeferredItems.items[].itemId` — same items array carries the matching `fromTaskId` " +
+            "to pass as `id` here). Either party may call this. Returns the updated item, or {error} if " +
+            "`itemId` doesn't match any entry on that task.",
+          inputSchema: strictShape({
+            id: z.string().optional(),
+            taskId: z.string().optional(),
+            itemId: z.string(),
+            status: z.enum(["open", "acknowledged", "declined"]),
+          }),
+        },
+        async ({ id, taskId, itemId, status }) => {
+          const resolvedId = resolveAlias(id, taskId);
+          if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
+          return ok(updateDeferredItemStatus(db, projectId, resolvedId, itemId, status));
         },
       );
     }
