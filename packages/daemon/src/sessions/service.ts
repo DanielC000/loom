@@ -129,6 +129,15 @@ export interface GateQueueEntry {
   extended: boolean;
   /** 1-based position among queued waiters; null for a running entry. */
   queuePosition: number | null;
+  /** Card 92e960d1 — see {@link GateSnapshotEntry.repoContended}'s own doc (mirrored verbatim here): while
+   *  `queued`, whether this entry's per-repo MERGE-admission guard is currently a reason it isn't admitted
+   *  — another `merge`-kind gate for the SAME repo is already running. Before this field, a queued merge
+   *  with a visibly free `cap` slot had no explanation available at all; this names the new one
+   *  specifically (it does NOT cover the older, separate per-worktree guard, card 8d585277 — a queued
+   *  entry can still be worktree-blocked with this reading `false`). Always `false` while running, and
+   *  for anything that isn't a `merge`-kind gate. Present for EVERY entry regardless of project — same
+   *  cross-project visibility as `idleMs`/`extended` above, since it reveals nothing beyond a boolean. */
+  repoContended: boolean;
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
@@ -3104,6 +3113,7 @@ export class SessionService {
         idleMs: e.lastOutputAt != null ? Date.now() - e.lastOutputAt : null,
         extended: e.extended,
         queuePosition: e.queuePosition,
+        repoContended: e.repoContended,
         // Computed unconditionally, identically for own- and foreign-project entries, BEFORE the
         // callerProjectId branch below — same visibility as idleMs/extended, never scoped by caller
         // (card 33aa0291: a foreign read must fail this exact same way an own read would at the same
@@ -10128,7 +10138,13 @@ export class SessionService {
       // (both bind to this worker's worktree) — this is what makes the structural per-worktree exclusivity
       // guard actually serialize a merge gate against that worker's still-running self-check, closing the
       // EPERM double-op class regardless of whether the auto-supersede-on-merge cancel already fired.
-      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId, worktreePath };
+      // repoPath (card 92e960d1): the SAME canonical repo `repoPath` resolved above (via
+      // resolveRepoByKey(project, worker.repoKey), NOT project.repoPath — a multi-repo project's OTHER
+      // registered repos must never be cross-serialized against this one) — this is what makes the
+      // structural per-repo merge-admission guard refuse to admit a SECOND same-repo merge gate
+      // concurrently, queueing it instead of letting both race to squash. See GateDescriptor.repoPath's
+      // own doc for the full mechanism and its deliberate limits.
+      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId, worktreePath, repoPath };
       let gateStartedAt = Date.now();
       // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the semaphore's own active-run count at the instant
       // THIS run was admitted (i.e. including itself) — read inside the `fn` callback so it reflects

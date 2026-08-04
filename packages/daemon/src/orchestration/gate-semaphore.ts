@@ -45,6 +45,17 @@
  * how verifiably, is entirely up to what `fn` does with the signal it's handed; this class has no
  * process-level knowledge at all. See `SessionService.cancelGateOp`/`runWorkerGate` for where the actual
  * kill + verified-death tagging happens.
+ *
+ * PER-REPO MERGE ADMISSION (card 92e960d1): a SECOND, narrower exclusivity guard alongside the
+ * per-worktree one above — `descriptor.repoPath` (set ONLY on a `merge`-kind descriptor, by
+ * `confirmWorkerMerge`) gates admission via `activeMergeRepos`, so two `merge`-kind gates targeting the
+ * SAME canonical repo can never both be RUNNING at once, regardless of `cap`/tier — closing the class
+ * where two same-repo merges race concurrently, one guaranteed to burn a full gate run before aborting at
+ * squash (canonical main is a single shared resource; see `mergeBranchLocked`'s `requireCanonicalHead`
+ * re-check in git/worktrees.ts). Composes with the worktree guard and the priority queue exactly the same
+ * way that guard already does (`mergeRepoFree`, alongside `worktreeFree`, in `acquire`/`grantNext`) — a
+ * `worker`/`deploy` gate is structurally unaffected (see `mergeRepoFree`'s own doc), and two merges on
+ * DIFFERENT repos are never cross-serialized.
  */
 
 import type { GateType } from "@loom/shared";
@@ -93,6 +104,33 @@ export interface GateDescriptor {
    * worktree-less ops must co-run at cap headroom).
    */
   worktreePath?: string | null;
+  /**
+   * Card 92e960d1: the CANONICAL repo path this MERGE gate targets — set ONLY at the merge-gate call
+   * site (`confirmWorkerMerge`, resolved via `resolveRepoByKey(project, worker.repoKey).path`, never a
+   * bare `projectId`, so two DIFFERENT repos registered on the same multi-repo project are never
+   * cross-serialized). NEVER set on a `worker`-kind (`runWorkerGate`) or `deploy`-kind
+   * (`deployOwnProject`) descriptor — see {@link GateSemaphore.mergeRepoFree}'s own doc for why those two
+   * gate types are structurally unaffected by this field regardless.
+   *
+   * THE HAZARD THIS CLOSES: two `merge`-kind gates admitted concurrently for the SAME repo race to
+   * squash — at most one lands (canonical main is a single shared resource), and the other burns its
+   * full gate run before `mergeBranchLocked`'s `requireCanonicalHead` re-check (git/worktrees.ts) fails
+   * closed and aborts it. This field is what lets the semaphore refuse to ADMIT the second one at all,
+   * queueing it instead — see {@link GateSemaphore.mergeRepoFree}/`activeMergeRepos`.
+   *
+   * ⚠️ NOT a fix for the second merge's own odds of landing: its `gateBaseMainHead` (the union-merge's
+   * captured main sha) is fixed BEFORE it ever reaches this semaphore, so if the FIRST same-repo merge
+   * lands while the second is queued, the second's captured base is already stale by the time it's
+   * admitted — it still runs its own gate and then still self-aborts via the same fail-closed check,
+   * needing a manager re-confirm exactly as it does today under ordinary cap-driven queueing (see
+   * `merge-gate-reuse.mjs` tests (K)/(L), unmodified by this field). The throughput this buys is: no
+   * more SIMULTANEOUS double-lane loss, and the other cap lane stays free for unrelated cross-project
+   * work during the first merge's run — not a guarantee the second same-repo merge lands on its first
+   * pass. Re-deriving `gateBaseMainHead` at admission (rather than at union-merge time) would close that
+   * remaining gap — deliberately OUT OF SCOPE here; it touches union-merge timing on the merge path and
+   * belongs in its own card.
+   */
+  repoPath?: string | null;
 }
 
 /** One live gate run in the snapshot — a `GateDescriptor` enriched with its lane phase + timing. */
@@ -136,6 +174,22 @@ export interface GateSnapshotEntry {
    *  start of every new step in a multi-step `gateCommand`, mirroring `runGateStep`'s own per-step
    *  `extended` flag exactly — this is per-STEP state, not a whole-run total. Always `false` while queued. */
   extended: boolean;
+  /**
+   * Card 92e960d1: while `phase:"queued"`, whether THIS entry's per-repo merge-admission guard (see
+   * {@link GateDescriptor.repoPath}/{@link GateSemaphore.mergeRepoFree}) is CURRENTLY the reason (or one
+   * of the reasons — cap contention can hold simultaneously) it isn't admitted: another `merge`-kind gate
+   * for the same repo is already RUNNING. Always `false` while `phase:"running"` (nothing is blocking an
+   * already-admitted entry) and always `false` for a non-merge or repoPath-less descriptor. A LIVE,
+   * point-in-time read — recomputed fresh on every `snapshot()` call, never cached at enqueue time, so it
+   * can flip between two reads of the same still-queued entry as sibling ops settle (e.g. a second
+   * same-repo waiter queued behind this one gets admitted first, freeing the repo before this one is).
+   * Named for exactly ONE cause: before card 92e960d1, "queued" only ever meant cap contention (or the
+   * pre-existing per-worktree guard, card 8d585277 — this field does NOT cover that one, only the
+   * repo-level guard this card added) — without this, a caller reading `gate_queue` with a free cap slot
+   * and a queued merge would see something that looks like a bug instead of the new, deliberate
+   * repo-exclusivity wait.
+   */
+  repoContended: boolean;
 }
 
 /** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
@@ -228,6 +282,14 @@ export class GateSemaphore {
    *  worktree-less run never touches this set at all, which is exactly what keeps `undefined` from ever
    *  behaving like a shared group (see `GateDescriptor.worktreePath`'s own doc). */
   private readonly activeWorktrees = new Set<string>();
+  /** Card 92e960d1: the set of canonical repo paths currently held by a RUNNING (admitted) `merge`-kind
+   *  entry — the structural per-repo merge-admission guard. Only ever populated/consulted for a `merge`
+   *  descriptor carrying a non-null `repoPath` (see every read/write site below, all guarded via
+   *  {@link mergeRepoFree}) — a `worker`/`deploy` gate, or a `merge` gate with no `repoPath`, never
+   *  touches this set at all. Deliberately SEPARATE from {@link activeWorktrees}: a worktree identifies
+   *  one worker's own checkout, a repo path identifies the shared canonical repo two DIFFERENT workers'
+   *  merges can both target — the two guards protect different resources and compose independently. */
+  private readonly activeMergeRepos = new Set<string>();
   // Live metadata registry, keyed by a per-run id. Iteration order is enqueue order; the snapshot re-orders
   // queued entries by (priority, enqueuedAt) to match the real admission order below.
   private readonly registry = new Map<string, RegistryEntry>();
@@ -248,14 +310,32 @@ export class GateSemaphore {
     return wt == null || !this.activeWorktrees.has(wt);
   }
 
+  /** Card 92e960d1: true when `entry` is free to be admitted RIGHT NOW with respect to the per-repo
+   *  MERGE-admission guard alone — mirrors {@link worktreeFree}'s shape exactly, one level narrower in
+   *  scope. Returns `true` immediately (never blocking) for anything that isn't itself a `merge`-kind
+   *  descriptor with a `repoPath` — this is the STRUCTURAL half of "worker/deploy gates are out of
+   *  scope" (DoD-2): even a future call site that accidentally sets `repoPath` on a `worker`/`deploy`
+   *  descriptor has zero effect here, because the gateType check runs first. Does not consider
+   *  `cap`/`active`/worktree — callers combine this with those separately, same composition
+   *  {@link acquire}/{@link grantNext} already use for `worktreeFree`. */
+  private mergeRepoFree(entry: RegistryEntry): boolean {
+    if (entry.descriptor.gateType !== "merge") return true;
+    const rp = entry.descriptor.repoPath;
+    return rp == null || !this.activeMergeRepos.has(rp);
+  }
+
   /** Actually admit `entry`: stamps `startedAt`, bumps `active`, and — for a worktree-bound descriptor
-   *  only — claims its worktree in {@link activeWorktrees}. The one and only place either mutation
-   *  happens, shared by the immediate fast path and a queued waiter's eventual grant. */
+   *  only — claims its worktree in {@link activeWorktrees}; and — for a `merge`-kind descriptor carrying
+   *  a `repoPath` — claims its repo in {@link activeMergeRepos} (card 92e960d1). The one and only place
+   *  either mutation happens, shared by the immediate fast path and a queued waiter's eventual grant. */
   private admit(entry: RegistryEntry): void {
     this.active++;
     entry.startedAt = Date.now();
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.add(wt);
+    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+      this.activeMergeRepos.add(entry.descriptor.repoPath);
+    }
     // Card c6750500: an admission is the ONLY event that can raise `active` — a release only ever lowers
     // it — so it's the only place a running entry's max-over-run can change. Bump EVERY currently-running
     // entry (this newly-admitted one included, since it's already in `registry` with `startedAt` set
@@ -273,7 +353,7 @@ export class GateSemaphore {
    *  worktree-blocked waiter is later found and admitted once its worktree frees up, out of arrival
    *  order if necessary. */
   private acquire(cap: number, priority: GatePriority, entry: RegistryEntry): Promise<AcquireOutcome> {
-    if (this.active < cap && this.worktreeFree(entry)) {
+    if (this.active < cap && this.worktreeFree(entry) && this.mergeRepoFree(entry)) {
       this.admit(entry);
       return Promise.resolve({ admitted: true });
     }
@@ -289,28 +369,33 @@ export class GateSemaphore {
   }
 
   /** Release a held slot (identified by the SAME entry `runExclusive` admitted, so its worktree — if any
-   *  — can be freed from {@link activeWorktrees} too), then hand the freed slot to the next ELIGIBLE
-   *  waiter via {@link grantNext}. */
+   *  — can be freed from {@link activeWorktrees}, and its repo — if any, card 92e960d1 — from
+   *  {@link activeMergeRepos}), then hand the freed slot to the next ELIGIBLE waiter via
+   *  {@link grantNext}. */
   private release(entry: RegistryEntry): void {
     this.active--;
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.delete(wt);
+    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+      this.activeMergeRepos.delete(entry.descriptor.repoPath);
+    }
     this.grantNext();
   }
 
   /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before touching
    *  `lowWaiters`, same as before card 8d585277, but WITHIN a tier this no longer blindly `.shift()`s the
    *  head: it scans for the first waiter whose worktree (if any) isn't STILL held by some other running
-   *  entry, skipping past a worktree-blocked head-of-line waiter to admit a later, eligible one instead —
-   *  the mechanism that makes the per-worktree guard compose with the existing priority queue rather than
-   *  deadlocking behind it. A worktree-less waiter is never skipped by this check (see `worktreeFree`).
-   *  Grants at most one waiter per call, matching `release()`'s own one-slot-freed contract — unchanged
-   *  from before this card. */
+   *  entry AND whose repo (if any, card 92e960d1 — a `merge` gate only) isn't STILL held by some other
+   *  running merge, skipping past a blocked head-of-line waiter to admit a later, eligible one instead —
+   *  the mechanism that makes the per-worktree AND per-repo guards compose with the existing priority
+   *  queue rather than deadlocking behind it. A worktree-less/repo-less waiter is never skipped by either
+   *  check (see `worktreeFree`/`mergeRepoFree`). Grants at most one waiter per call, matching `release()`'s
+   *  own one-slot-freed contract — unchanged from before this card. */
   private grantNext(): void {
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       for (let i = 0; i < tier.length; i++) {
         const w = tier[i]!;
-        if (!this.worktreeFree(w.entry)) continue;
+        if (!this.worktreeFree(w.entry) || !this.mergeRepoFree(w.entry)) continue;
         tier.splice(i, 1);
         w.grant();
         return;
@@ -511,6 +596,9 @@ export class GateSemaphore {
       opId: e.descriptor.opId ?? null,
       lastOutputAt: e.lastOutputAt,
       extended: e.extended,
+      // Card 92e960d1: LIVE, recomputed here (never cached at enqueue time) — see the field's own doc for
+      // why. Always false while running (nothing blocks an already-admitted entry).
+      repoContended: phase === "queued" && !this.mergeRepoFree(e),
     });
     const entries: GateSnapshotEntry[] = [
       ...running.map((e) => toEntry(e, "running", null)),

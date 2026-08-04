@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -31,7 +32,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { GateSemaphore } = await import("../dist/orchestration/gate-semaphore.js");
+const { GateSemaphore, GateCancelledError } = await import("../dist/orchestration/gate-semaphore.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -119,6 +120,156 @@ const worktrees = [];
     check("(unit, throw) a queued gate is admitted after the holder throws (lane freed in finally)",
       a === "threw" && b === "admitted-after-throw");
     check("(unit, throw) registry empty after the throw + queued both settle", sem4.snapshot().entries.length === 0);
+  }
+}
+
+// ── PER-REPO MERGE-ADMISSION GUARD (card 92e960d1): two `merge`-kind gates for the SAME repo must never
+// both be RUNNING at once, regardless of `cap` headroom — closing the class where two same-repo merges
+// race to squash and one is guaranteed to burn a full gate run before `mergeBranchLocked`'s
+// `requireCanonicalHead` re-check fail-closed-aborts it. Two DIFFERENT repos, and two non-`merge` gate
+// types sharing a repoPath, must stay fully concurrent — the guard is scoped narrowly on purpose
+// (DoD-2/DoD-3), and a leaked hold would PERMANENTLY deadlock every future merge on that repo (no
+// timeout, no self-heal), so the release path gets exhaustive coverage across every terminal shape.
+{
+  const mergeDesc = (id, repoPath) => ({ gateType: "merge", projectId: `proj-${id}`, sessionId: `sess-${id}`, repoPath });
+
+  // (a) SAME repoPath, cap 2 (real headroom on `active`): the second merge must be QUEUED, not admitted
+  // concurrently — proving this is the REPO guard, not just cap contention.
+  //
+  // Uses assertNeverWithControl (_timing-guard.mjs), not a bare fixed wait: a prior draft of this test
+  // proved `!secondStarted` true SYNCHRONOUSLY, immediately after `pSecond` was assigned, reasoning that
+  // `acquire()`'s admission decision is synchronous — TRUE, but irrelevant to what this assertion needs:
+  // `fn` invocation is deferred at least one MICROTASK past `await acquire()` regardless of which branch
+  // admitted it, so `secondStarted` reads false at that instant whether the guard blocks it or not. Proven
+  // empirically: temporarily neutering `mergeRepoFree` to `return true` unconditionally left that
+  // synchronous check GREEN even though the second merge was now (wrongly) admitted immediately — the
+  // exact vacuous-pass shape the fixed-wait guard exists to catch, just reached by a different path than
+  // an insufficient sleep. `assertNeverWithControl` requires a `positiveControl` that proves the SAME
+  // observation window CAN catch a real start before trusting a negative result from it — using an
+  // UNRELATED (different repo, different semaphore instance, different flag) merge to arm that proof, so
+  // it never shares state with the real scenario under test.
+  {
+    const sem = new GateSemaphore();
+    let releaseHolder;
+    const holder = () => new Promise((res) => { releaseHolder = res; });
+    const pHolder = sem.runExclusive(2, mergeDesc("h", "/repo/shared"), () => holder());
+    check("(repo-mutex, a) the holder admits immediately (cap headroom, repo free — synchronous fast path)", sem.snapshot().active === 1);
+    let secondStarted = false;
+    const pSecond = sem.runExclusive(2, mergeDesc("s", "/repo/shared"), async () => { secondStarted = true; return "second"; });
+    check("(repo-mutex, a) cap has real headroom (1 active out of cap 2)", sem.snapshot().active === 1);
+    check("(repo-mutex, a) the queue genuinely holds the second merge", sem.snapshot().queued === 1);
+    const queuedEntry = sem.snapshot().entries.find((e) => e.phase === "queued");
+    check("(repo-mutex, a) the queued entry is visibly repoContended (not a silent, unexplained wait)",
+      !!queuedEntry && queuedEntry.repoContended === true);
+
+    const REPO_MUTEX_WINDOW_MS = 150; // generous relative to a plain in-memory admission decision
+    const neverStarted = await assertNeverWithControl({
+      label: "(repo-mutex, a) the SECOND same-repo merge never starts while the first holds the repo",
+      check: () => secondStarted,
+      windowMs: REPO_MUTEX_WINDOW_MS,
+      positiveControl: async () => {
+        const controlSem = new GateSemaphore();
+        let controlStarted = false;
+        const pControl = controlSem.runExclusive(2, mergeDesc("ctrl", "/repo/different"), async () => { controlStarted = true; return "control"; });
+        const observed = await observeOnce({ check: () => controlStarted, windowMs: REPO_MUTEX_WINDOW_MS });
+        await pControl; // let the control's own op settle cleanly before returning
+        return observed;
+      },
+    });
+    check("(repo-mutex, a) the SECOND same-repo merge PROVABLY did not start — the SAME window just proved (via the control) capable of catching a real start", neverStarted);
+
+    // By now `assertNeverWithControl` has consumed a real observation window, so the holder's `fn` (which
+    // assigns `releaseHolder`) has long since run — no poll needed here, unlike the earlier draft.
+    releaseHolder("first");
+    const [r1, r2] = await Promise.all([pHolder, pSecond]);
+    check("(repo-mutex, a) both eventually settle once the first releases", r1 === "first" && r2 === "second");
+  }
+
+  // (b) DIFFERENT repoPath, cap 2: both merges run TRULY concurrently — the positive control's other
+  // half (a fix that just serializes everything would fail this).
+  {
+    const sem = new GateSemaphore();
+    let active = 0, maxActive = 0;
+    const task = async () => { active++; maxActive = Math.max(maxActive, active); await sleep(60); active--; return "ok"; };
+    const [r1, r2] = await Promise.all([
+      sem.runExclusive(2, mergeDesc("x", "/repo/one"), task),
+      sem.runExclusive(2, mergeDesc("y", "/repo/two"), task),
+    ]);
+    check("(repo-mutex, b) two DIFFERENT repos run truly concurrently (not cross-serialized)", maxActive === 2);
+    check("(repo-mutex, b) both settle", r1 === "ok" && r2 === "ok");
+  }
+
+  // (c) worker/deploy gateTypes sharing a repoPath are STRUCTURALLY unaffected (DoD-2) — even with
+  // repoPath deliberately set on a non-merge descriptor here, mergeRepoFree() is gateType-gated FIRST,
+  // so this is belt-and-braces, not merely "no current call site sets it there".
+  {
+    const sem = new GateSemaphore();
+    let active = 0, maxActive = 0;
+    const task = async () => { active++; maxActive = Math.max(maxActive, active); await sleep(60); active--; return "ok"; };
+    const workerDesc = { gateType: "worker", projectId: "p", sessionId: "s1", repoPath: "/repo/shared" };
+    const deployDesc = { gateType: "deploy", projectId: "p", sessionId: "s2", repoPath: "/repo/shared" };
+    const [r1, r2] = await Promise.all([sem.runExclusive(2, workerDesc, task), sem.runExclusive(2, deployDesc, task)]);
+    check("(repo-mutex, c) worker+deploy sharing a repoPath still run concurrently — guard is merge-only", maxActive === 2);
+    check("(repo-mutex, c) both settle", r1 === "ok" && r2 === "ok");
+  }
+
+  // (d) RELEASE-PATH EXHAUSTIVENESS — a leaked `activeMergeRepos` entry would PERMANENTLY deadlock every
+  // future merge on that repo. Prove every terminal path frees it, via the ONLY externally-observable
+  // proof available (no direct access to the private Set): a FRESH same-repo merge admits near-instantly
+  // afterward — if anything were still (incorrectly) held, this probe would itself hang/queue.
+  const repoFreedAfter = async (sem, repoPath) => {
+    const started = Date.now();
+    await sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: `probe-${Date.now()}`, repoPath }, async () => "probe");
+    return Date.now() - started < 200;
+  };
+
+  // (d1) clean resolve
+  {
+    const sem = new GateSemaphore();
+    await sem.runExclusive(2, mergeDesc("d1", "/repo/d1"), async () => "ok");
+    check("(repo-mutex, d1) a clean resolve frees the repo hold", await repoFreedAfter(sem, "/repo/d1"));
+  }
+  // (d2) a throwing fn (a real runner exception/kill/timeout all look the same here)
+  {
+    const sem = new GateSemaphore();
+    await sem.runExclusive(2, mergeDesc("d2", "/repo/d2"), async () => { throw new Error("boom"); }).catch(() => {});
+    check("(repo-mutex, d2) a throwing fn still frees the repo hold", await repoFreedAfter(sem, "/repo/d2"));
+  }
+  // (d3) withdrawn while QUEUED (zero process risk by construction — fn never invoked)
+  {
+    const sem = new GateSemaphore();
+    let releaseHolder;
+    const holder = () => new Promise((res) => { releaseHolder = res; });
+    const pHolder = sem.runExclusive(1, mergeDesc("d3h", "/repo/d3"), () => holder());
+    await sleep(20);
+    const pQueued = sem.runExclusive(1, mergeDesc("d3q", "/repo/d3"), async () => "should-not-run").catch((e) => e);
+    await sleep(20);
+    const queuedId = sem.snapshot().entries.find((e) => e.phase === "queued")?.id;
+    check("(repo-mutex, d3) precondition: a queued entry exists to cancel", !!queuedId);
+    check("(repo-mutex, d3) cancelQueued reports success", sem.cancelQueued(queuedId, "manual", "test-cancel") === true);
+    const qResult = await pQueued;
+    check("(repo-mutex, d3) the withdrawn waiter rejects with GateCancelledError, never ran", qResult instanceof GateCancelledError);
+    releaseHolder("first");
+    await pHolder;
+    check("(repo-mutex, d3) the repo hold frees cleanly once the still-running holder releases (queued-cancel never touched it)",
+      await repoFreedAfter(sem, "/repo/d3"));
+  }
+  // (d4) asked to stop while RUNNING (fn honors the abort signal by throwing — mirrors how a real gate
+  // step's runner reacts to `cancelRunning`)
+  {
+    const sem = new GateSemaphore();
+    const p = sem.runExclusive(1, mergeDesc("d4", "/repo/d4"), async (_startedAt, cancelSignal) => {
+      await new Promise((_resolve, reject) => {
+        cancelSignal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }).catch((e) => e);
+    await sleep(20); // let it genuinely admit
+    const runningId = sem.snapshot().entries.find((e) => e.phase === "running")?.id;
+    check("(repo-mutex, d4) precondition: a running entry exists to cancel", !!runningId);
+    check("(repo-mutex, d4) cancelRunning reports it asked a live entry", sem.cancelRunning(runningId, "test-abort") === true);
+    const result = await p;
+    check("(repo-mutex, d4) the running fn actually threw on abort", result instanceof Error && result.message === "aborted");
+    check("(repo-mutex, d4) an aborted-then-thrown run still frees the repo hold", await repoFreedAfter(sem, "/repo/d4"));
   }
 }
 

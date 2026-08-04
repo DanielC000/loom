@@ -282,7 +282,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
         "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
         "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
-        "queuePosition} — " +
+        "queuePosition, repoContended} — " +
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
         "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
         "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
@@ -311,6 +311,15 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
         "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
         "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
+        "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`-kind entry whose target " +
+        "repo is currently held by another RUNNING merge gate (card 92e960d1's per-repo merge-admission " +
+        "guard — at most one merge gate per canonical repo runs at once, so two same-repo merges never " +
+        "race to squash and burn a gate run each) — a queued merge can show this `true` even while `cap` " +
+        "has a free lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
+        "means this specific guard isn't why it's queued (still possibly `cap`, or the older, separate " +
+        "per-worktree guard from card 8d585277, which this field does NOT report on). Always `false` " +
+        "while `running` or for a non-`merge` entry. It's a LIVE read, recomputed on every call — it can " +
+        "flip on a still-queued entry as sibling ops settle. " +
         "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
         "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
         "dying, leaving an orphan the registry no longer tracks. So an OWN-project entry with a `branch` " +
