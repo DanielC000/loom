@@ -6207,6 +6207,34 @@ export class SessionService {
    * signature collides with another live give-up batch never reaches this method, so it will NOT produce a
    * `[loom:redelivery-confirmed]` notice. That gap is stated in the parked notice itself (hedged as "MAY
    * follow up", never "will") precisely so its absence is never misread as proof of non-delivery.
+   *
+   * ⚠️ CARD 7f47991e — THE SIGNAL BEHIND THIS NOTICE ATTESTS AN OUTCOME, NOT A CAUSE. `latencyMs` (and the
+   * "CONFIRMED" it reflects) comes ENTIRELY from `purgeConfirmedGiveUpRequeue`'s content-hash match against
+   * `hook.prompt` — the text Claude Code's own `UserPromptSubmit` hook reports it received (see that
+   * method's doc, and the hook's own handling in `pty/host.ts`'s `deliverHook`). That hook fires identically
+   * for EVERY turn regardless of what pressed Enter — a Loom-issued `submit()`, the engine resubmitting a
+   * still-composed write on its own, OR a human manually pressing Enter on a stuck composer. **It proves
+   * WHAT text reached the engine and WHEN, never WHO or WHAT triggered the keystroke that submitted it.**
+   * The ONE mechanism in this file that DOES attribute a turn to a human (`Live.pendingRawOwnerSubmit`,
+   * populated only by `writeStdin`'s raw-terminal relay) is NOT wired to this signal, and would not help
+   * even if it were: it only captures text the human typed THROUGH that raw channel and accumulated in
+   * `Live.rawDraftText`. A parked message's text was written by Loom's own `ptyWrite`, not through
+   * `writeStdin`, so `rawDraftText` stays empty; a human who presses a bare Enter on that already-composed
+   * text produces `nextRawDraftState`'s `submitted:null` (its `text.length > 0` guard fails), so
+   * `pendingRawOwnerSubmit` never even fires for exactly this scenario. There is therefore no code path,
+   * wired or unwired, that lets this notice tell a genuine engine self-heal apart from a human keystroke —
+   * the notice below must say so, not imply "Loom's retry landed."
+   *
+   * ⚠️ A THIRD CANDIDATE, surfaced by a manager's in-vivo report during this card's own implementation
+   * (worker `c500e7e3`'s stuck-then-recovered turn): the RECIPIENT of this notice is the very sender who
+   * may, in the meantime, have ALSO sent a fresh `worker_message`/`worker_redirect` to the same session —
+   * itself a Loom-driven `submit()`, indistinguishable from an automatic give-up retry by this same
+   * content-match signal. That manager could only rule its own action out because `worker_message`
+   * happened to return `delivered:false, reason:"held"` with a `busyForMs` that proved the turn had
+   * already started before the message was even sent — a trace that will NOT exist in general. So this
+   * notice's "cause unknown" must include the sender's own later action, not only "Loom automatically" vs.
+   * "a human" — a sender who just re-drove the session is the one reader most tempted to credit their own
+   * intervention for a turn their intervention may not have caused.
    */
   handleGiveUpConfirmed(sessionId: string, logicalId: string, latencyMs: number): void {
     const events = this.db.listEventsForWorker(sessionId);
@@ -6221,9 +6249,14 @@ export class SessionService {
     const senderSession = this.db.getSession(sender);
     if (!senderSession) return;
     const note =
-      `[loom:redelivery-confirmed] good news — the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}), ` +
-      `which was PARKED earlier, has now been CONFIRMED delivered: the engine proved the turn actually ran, ~${Math.round(latencyMs / 1000)}s ` +
-      `after Loom wrote it. Loom's own retry budget gave up before the engine did — no action needed on your end.`;
+      `[loom:redelivery-confirmed] the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}), ` +
+      `which was PARKED earlier, has now been CONFIRMED delivered: the engine proved a turn ran with matching content ` +
+      `~${Math.round(latencyMs / 1000)}s after Loom wrote it. ⚠️ This confirms the TURN RAN — it does NOT establish WHY. ` +
+      `The only evidence behind this notice is a content match on what the engine reports it received, which proves ` +
+      `WHAT text landed and WHEN, not WHO or WHAT submitted it. Loom's own retry may have landed late, a human may ` +
+      `have submitted it manually (e.g. pressed Enter on a stuck composer), OR a worker_message/worker_redirect YOU ` +
+      `sent afterward may be what actually freed it — this notice cannot tell any of the three apart, including ` +
+      `your own subsequent action. If none of these match what you expect, treat it as a possible f91c8634 specimen.`;
     try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId: gaveUpTaskId, kind: "warning" }); } catch { /* best-effort — the confirmed-after-park audit event above still stands regardless */ }
   }
 

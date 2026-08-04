@@ -443,6 +443,21 @@ try {
     check("(9) CONFIRMED-AFTER-PARK: exactly one new event + one new notice (not a flood)",
       db.listEventsForWorker(wkr).length === eventsBeforeConfirm + 1 &&
       pty.sent.filter((s) => s.id === mgr).length === mgrSentBeforeConfirm + 1);
+    // Card 7f47991e: the notice attests a TURN RAN, never WHY — it must no longer imply "Loom's own retry
+    // landed" (the specific clause that read as self-healing and turned a possible human-rescue specimen
+    // into a non-event), and must say PLAINLY that it cannot tell a genuine self-heal apart from a human
+    // manually pressing Enter on a stuck composer, OR the sender's own later worker_message/worker_redirect
+    // (a real in-vivo specimen from a peer manager, captured mid-implementation — see handleGiveUpConfirmed's
+    // own doc for the full incident: that manager could only rule its own re-drive out because of an
+    // unusual delivered:false/busyForMs trace that won't exist in general).
+    check("(7f47991e) the old 'no action needed on your end' self-healing implication is GONE",
+      !!confirmedNote && !/no action needed/i.test(confirmedNote));
+    check("(7f47991e) the notice explicitly states it confirms the TURN RAN, not WHY",
+      !!confirmedNote && /does NOT establish WHY/.test(confirmedNote));
+    check("(7f47991e) the notice names all THREE candidate causes it cannot distinguish between (Loom's own retry, a human, or the sender's own re-drive)",
+      !!confirmedNote && /Loom's own retry may have landed/.test(confirmedNote) && /human may/i.test(confirmedNote) &&
+      /worker_message\/worker_redirect YOU\s+sent afterward/.test(confirmedNote));
+    console.log(`\n--- (9) [loom:redelivery-confirmed] notice — POSITIVE CONTROL ---\n${confirmedNote}\n`);
 
     // ===== NEGATIVE CONTROL: a confirmation for a chain that was only RE-MINTED, never PARKED, must be a =====
     // ===== SILENT NO-OP — proves this method actually discriminates rather than notifying on every confirm ===
