@@ -9603,28 +9603,50 @@ export class SessionService {
    *  - the branch's work is already reachable from main — reuses the SAME ancestry check the ALREADY_MERGED
    *    path derives from ({@link findLandedSquashCommit}'s deterministic `Loom-Worker-Branch` trailer scan),
    *    not a second one, or
-   *  - an IDENTICAL rejection (same worker + reason) was already recorded for this task — de-dupe, so a
-   *    stale re-run reproducing the same failure doesn't notify twice.
+   *  - an IDENTICAL rejection (same worker + reason + SHA — see DISCRIMINATOR below) was already recorded
+   *    for this task — de-dupe, so a stale re-run reproducing the same failure doesn't notify twice.
    * FAILS SAFE throughout: any read/git error is treated as "not resolved yet" (never suppress a genuine
    * first notification on a flaky check).
+   *
+   * DISCRIMINATOR (card e21c756a): the third bullet used to key ONLY on `worker + reason`, so a SECOND,
+   * genuinely distinct op on the same worker that happened to reject with the same generic reason string
+   * (e.g. `"gate"`) had its push silently swallowed — the manager was never told about a real, separate
+   * failure. The obvious-looking fix — key on `opId` instead — is WRONG: `confirmWorkerMergeTracked`'s own
+   * `PendingOpRegistry.attach()` mints a genuinely FRESH `opId` for a retry of the exact SAME situation
+   * whenever its identity-gated verdict cache misses for a reason that has nothing to do with new work —
+   * e.g. a transient git-ref read failure, or `forceRemoveWorktree`'s deliberate cache bypass (see
+   * `confirmWorkerMergeTracked`'s own `verdictIdentity`/`bypassRetained` doc) — and `merge-reject-notify-
+   * suppress.mjs` scenario (D) calls `confirmWorkerMerge` directly (bypassing that registry entirely, so
+   * EVERY call mints its own random `opId`) to prove that two calls reproducing the identical rejection for
+   * the identical commit must still notify only ONCE. Keying on `opId` would fail that: same commit, same
+   * reason, different `opId` ⇒ wrongly treated as distinct.
+   * The actual discriminator is WHAT COMMIT WAS BEING VALIDATED: {@link getWorktreeLatestNonMergeSha} (the
+   * SAME "did real new work land" signal the gate-timeout circuit breaker already uses, immediately above)
+   * — invariant to the pre-gate union-merge, so it doesn't move just because canonical main advanced, but
+   * DOES move the moment the worker pushes a genuine new commit. Two rejections for the same worker + same
+   * reason + same sha are the SAME underlying situation (retry, re-poll, a re-mint with a fresh opId) ⇒
+   * suppress; a sha mismatch is genuinely distinct new work rejecting again ⇒ notify. A failed sha read
+   * (`null`) never matches — including against a prior `null` — so a flaky/unreadable worktree always fails
+   * toward notifying, never toward suppressing.
    */
   private async shouldSuppressMergeReject(
-    workerSessionId: string, taskId: string | null, branch: string, repoPath: string, reason: string,
-  ): Promise<boolean> {
+    workerSessionId: string, taskId: string | null, branch: string, repoPath: string, worktreePath: string, reason: string,
+  ): Promise<{ suppress: boolean; sha: string | null }> {
     if (taskId) {
       const task = this.db.getTask(taskId);
       if (task) {
         const terminalKey = this.columnKeyForProjectRole(task.projectId, "terminal");
-        if (terminalKey && task.columnKey === terminalKey) return true;
+        if (terminalKey && task.columnKey === terminalKey) return { suppress: true, sha: null };
       }
     }
-    if (await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs })) return true;
+    if (await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs })) return { suppress: true, sha: null };
+    const sha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
     try {
       const already = this.db.listEventsForWorker(workerSessionId)
-        .some((e) => e.kind === "merge_rejected" && e.detail?.reason === reason);
-      if (already) return true;
+        .some((e) => e.kind === "merge_rejected" && e.detail?.reason === reason && sha != null && e.detail?.sha === sha);
+      if (already) return { suppress: true, sha };
     } catch { /* fail safe: a dedupe-read error must not suppress a genuine first notification */ }
-    return false;
+    return { suppress: false, sha };
   }
 
   /**
@@ -9951,8 +9973,8 @@ export class SessionService {
     // call records, and BEFORE that evt() call runs, so the dedupe check only ever sees PRIOR invocations'
     // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
     // notification).
-    const rejectNotify = async (reason: string, msg: string) => {
-      const suppressed = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, reason);
+    const rejectNotify = async (reason: string, msg: string): Promise<{ suppressed: boolean; sha: string | null }> => {
+      const { suppress: suppressed, sha } = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, worktreePath, reason);
       if (!suppressed) {
         // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
         // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
@@ -9972,7 +9994,7 @@ export class SessionService {
           if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, thisOpId);
         } catch { /* manager not live; wakes deliberately left untouched */ }
       }
-      return suppressed;
+      return { suppressed, sha };
     };
 
     // BACKSTOP (BEFORE the gate/merge): refuse if the worker's commits are STRANDED on a self-created
@@ -9986,8 +10008,8 @@ export class SessionService {
       // Card 522cf573 DoD 4: squash phase never reached — this refusal fires BEFORE the gate or the squash
       // itself ever runs.
       const detailText = `STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; squash phase never reached, canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`;
-      const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
+      const { suppressed, sha } = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "stranded", sha, strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
@@ -10174,8 +10196,8 @@ export class SessionService {
           // Card 522cf573 DoD 4: squash phase never reached — the union-merge (a pre-gate step) failed
           // before the gate or the squash itself ever ran.
           const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained.`;
-          const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-          evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
+          const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+          evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
           return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId };
         }
         // GATE-BASE CAPTURE (card eda70da6): `union.mainSha` is the canonical main tip THIS union-merge
@@ -10238,8 +10260,8 @@ export class SessionService {
         // Card 522cf573 DoD 4: squash phase never reached — the breaker short-circuits BEFORE spawning
         // another gate at all, let alone reaching the squash.
         const detailText = `${msg}; squash phase never reached, canonical repo untouched, worktree retained.`;
-        const suppressed = await rejectNotify("gate_timeout_circuit_broken", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-        evt("merge_rejected", { reason: "gate_timeout_circuit_broken", ...(suppressed ? { suppressed: true } : {}) });
+        const { suppressed, sha } = await rejectNotify("gate_timeout_circuit_broken", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "gate_timeout_circuit_broken", sha, ...(suppressed ? { suppressed: true } : {}) });
         return {
           merged: false, reason: msg, detailText,
           gateDetail: { timedOut: true, circuitBroken: true },
@@ -10498,8 +10520,8 @@ export class SessionService {
           ? " (canonical main advanced while this merge waited in the gate queue, and the advance conflicts with this branch's own content — re-confirm once resolved.)"
           : " (an admission-time re-union with canonical main, which had moved during the queue wait, failed for a reason unrelated to a content conflict — see the error above; this may be a transient git/filesystem issue, not necessarily main's advance itself.)";
         const detailText = `${err.why}; squash phase never reached, canonical repo untouched, worktree retained.${cause}`;
-        const suppressed = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-        evt("merge_rejected", { reason: err.failReason, ...(suppressed ? { suppressed: true } : {}) });
+        const { suppressed, sha } = await rejectNotify(err.failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: err.failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: err.why, detailText, notified: !suppressed, opId: thisOpId };
       };
       let gateResult: GateSequentialResult;
@@ -10763,9 +10785,9 @@ export class SessionService {
         // IDENTICAL detail, by construction. The gate runs strictly before the squash, so squash phase never
         // reached is always true here.
         const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}`;
-        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        const { suppressed, sha } = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
-          reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
+          reason: "gate", sha, phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
           gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
@@ -10829,8 +10851,8 @@ export class SessionService {
         // Card 522cf573 DoD 4: caught INSIDE mergeBranch's own lock before it touches anything — squash
         // was never attempted.
         const detailText = `${why}; squash phase aborted before writing — canonical repo AND worktree untouched — just re-run worker_merge_confirm.`;
-        const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-        evt("merge_rejected", { reason: "gate_base_invalidated", ...(suppressed ? { suppressed: true } : {}) });
+        const { suppressed, sha } = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "gate_base_invalidated", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
@@ -10839,8 +10861,8 @@ export class SessionService {
       // reached its commit step — mergeBranchLocked resets/cleans any staged residue before returning, so
       // no commit ever lands on a rejection here.
       const detailText = `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
-      const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-      evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
+      const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
@@ -10858,8 +10880,8 @@ export class SessionService {
         if (reported) {
           // Card 522cf573 DoD 4: the squash STAGED nothing (0 diff) — no commit was ever made.
           const detailText = `ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge (squash staged nothing, no commit made, canonical repo untouched). RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`;
-          const suppressed = await rejectNotify("orphaned_zero_ahead", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-          evt("merge_rejected", { reason: "orphaned_zero_ahead", reportedState: reported, ...(suppressed ? { suppressed: true } : {}) });
+          const { suppressed, sha } = await rejectNotify("orphaned_zero_ahead", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+          evt("merge_rejected", { reason: "orphaned_zero_ahead", sha, reportedState: reported, ...(suppressed ? { suppressed: true } : {}) });
           return {
             merged: false,
             reason: `orphaned work: assigned branch '${branch}' is 0 commits ahead of main but the worker reported ${reported} — the committed work is not on the branch (likely committed straight to main); recover the commit onto '${branch}' before merging`,
@@ -10877,8 +10899,8 @@ export class SessionService {
         // why the worker produced no change, task stays in review) but soft — no alarm.
         // Card 522cf573 DoD 4: same as above — squash staged nothing, no commit made.
         const detailText = "STAGE_EMPTY_RETRY: the branch has no diff to merge (squash staged nothing, no commit made); canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.";
-        const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
-        evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
+        const { suppressed, sha } = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+        evt("merge_rejected", { reason: "stage_empty", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the

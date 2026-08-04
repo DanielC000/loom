@@ -23,6 +23,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) SUPPRESSED — the task's card is already in the terminal (Done) lane: notify suppressed.
 //   (D) DE-DUPE: two confirmWorkerMerge calls reproducing the SAME rejection (a client-timeout retry
 //       re-running the whole op from scratch) notify exactly ONCE, not twice.
+//   (E) card e21c756a — DISTINCT-OP POSITIVE CONTROL: two confirmWorkerMerge calls on the SAME worker
+//       that reject with the IDENTICAL generic reason string ("gate") but for TWO DIFFERENT commits (the
+//       worker pushed a new commit between calls, still failing the gate) must notify TWICE — the old
+//       worker+reason-only dedupe key would wrongly swallow the second, genuinely distinct rejection.
 //
 // Also proves the `notified` field (card 9eea3901 — the async double-notify fix) is threaded correctly
 // on EVERY rejection return: `notified: !suppressed` on each of (A)/(B)/(C)/(D) above, so
@@ -83,6 +87,7 @@ const A = mk("a", "feat-a.txt"); // (A) genuine reject: not merged, not done →
 const B = mk("b", "feat-b.txt"); // (B) suppressed: branch already reachable from main
 const C = mk("c", "feat-c.txt"); // (C) suppressed: card already Done
 const D = mk("d", "feat-d.txt"); // (D) de-dupe: 2 identical calls → ONE notify
+const E = mk("e", "feat-e.txt"); // (E) distinct-op positive control: 2 calls, same reason, DIFFERENT commit → TWO notifies
 
 try {
   // ── (A) BASELINE: gate fails, task not Done, branch not merged → notify DOES fire ──────────────────
@@ -159,9 +164,33 @@ try {
     check("(D) notified:true on the FIRST call (rich notify fired), notified:false on the SECOND (de-duped)",
       confirmD1.notified === true && confirmD2.notified === false);
   }
+  // ── (E) card e21c756a: two DISTINCT ops on one worker, SAME reason, DIFFERENT commit → TWO notifies ──
+  makeRepo(E);
+  {
+    const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
+    fs.writeFileSync(path.join(worktreePath, E.file), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${E.file}"`, { cwd: worktreePath });
+    E.worktreePath = worktreePath; E.branch = branch;
+    seed(E, FAIL_GATE);
+
+    const confirmE1 = await sessions.confirmWorkerMerge(E.mgrId, E.workerId); // op 1: commit #1, gate fails
+    // The worker pushes a NEW commit — still fails the SAME gate for the SAME generic "gate" reason, but
+    // this is a genuinely distinct op validating different work, not a stale retry of the first.
+    fs.writeFileSync(path.join(worktreePath, "feat-e-2.txt"), "more work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-e-2.txt"`, { cwd: worktreePath });
+    const confirmE2 = await sessions.confirmWorkerMerge(E.mgrId, E.workerId); // op 2: commit #2, gate fails again
+
+    check("(E) both calls report merged:false", confirmE1.merged === false && confirmE2.merged === false);
+    check("(E) notify delivered TWICE — the second commit's rejection is NOT a stale echo of the first",
+      notifyCount(E.mgrId) === 2);
+    check("(E) TWO merge_rejected events recorded, NEITHER marked suppressed",
+      mergeRejectedEvents(E.mgrId).length === 2 && mergeRejectedEvents(E.mgrId).every((ev) => !ev.detail?.suppressed));
+    check("(E) notified:true on BOTH calls (distinct ops, neither reconciled away)",
+      confirmE1.notified === true && confirmE2.notified === true);
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C, D]) {
+  for (const p of [A, B, C, D, E]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
