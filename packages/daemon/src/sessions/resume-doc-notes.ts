@@ -51,15 +51,31 @@ export function resolveResumeDocPath(vaultPath: string, filenameOverride?: strin
  * {@link RESUME_DOC_WARN_BYTES}, else `""`. NEVER throws: a missing file (nothing written yet), a
  * permission error, or a locked file all resolve to "nothing to warn about" — this runs on both a
  * spawn-composition path and a periodic watcher tick, neither of which may ever fail on a stat error.
+ *
+ * Card f17c5a76 — reported by another Loom project: the note used to carry ONLY the
+ * measurement itself, with no timestamp of when that measurement was taken. A recipient could not tell a
+ * fresh reading from one that had gone stale sitting in a busy-gated/coalesced delivery queue or a
+ * paste-recovery re-injection — both of which can widen the gap between "when this was stat'd" and "when
+ * you're actually reading it" arbitrarily. `now` (default `Date.now()`, injectable for deterministic
+ * tests — mirrors `ResumeDocWatcher.tick`'s own `now` param) is stamped into the note as `measured-at`,
+ * DISTINCT from whatever send/delivery timestamp the surrounding transport may show. Deliberately NOT
+ * suppressed when stale (a silent drop is its own silent decision that loses the signal entirely) —
+ * instead the note tells the recipient how to tell staleness apart from a fresh reading and how to
+ * recover cheaply (re-check the doc's own current size) rather than trusting the number blindly.
  */
-export function resumeDocSizeWarning(absPath: string): string {
+export function resumeDocSizeWarning(absPath: string, now: number = Date.now()): string {
   try {
     const stat = fs.statSync(absPath);
     if (stat.size < RESUME_DOC_WARN_BYTES) return "";
     const kb = Math.round(stat.size / 1024);
+    const measuredAt = new Date(now).toISOString();
     return (
-      `[loom:resume-doc-size] Your resume doc (\`${absPath}\`) is ~${kb}KB, nearing the harness ` +
-      `Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
+      `[loom:resume-doc-size] Your resume doc (\`${absPath}\`) was ~${kb}KB as of ${measuredAt} ` +
+      `(measured-at — NOT this message's send time; a delayed or re-injected delivery can widen the gap ` +
+      `between the two, so don't assume the two are close together). If you rotated, or otherwise ` +
+      `changed this doc, at or after that timestamp, this number is stale — re-check the doc's own ` +
+      `current size yourself (cheap) before acting on it. Otherwise, treat it as current: it's nearing ` +
+      `the harness Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
       `your doctrine's size budget. **Do NOT Read this file first to rotate it** — a Read that gets ` +
       `cap-truncated does not satisfy the Write tool's "read it first" guard, and you'll be stuck (don't ` +
       `fall into a delete-then-rewrite or scratchpad-copy workaround to get around that). Instead: ` +

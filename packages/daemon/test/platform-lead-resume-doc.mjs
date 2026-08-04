@@ -206,6 +206,8 @@ try {
   const sizeNotes = composeResumeDocOperationalNotes(home4, doc4);
   check("(4) an oversized doc ⇒ the size-warning note fires", sizeNotes.includes("[loom:resume-doc-size]"));
   check("(4) the size-warning note names the doc's own path", sizeNotes.includes(doc4));
+  // Card f17c5a76: the note carries a MEASURED-AT stamp (ISO 8601), distinct from send-time.
+  check("(4) the size-warning note carries a measured-at ISO-8601 timestamp, distinct from send-time", /measured-at/i.test(sizeNotes) && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(sizeNotes));
   fs.writeFileSync(doc4, "# Platform Lead Resume\n\nSTATE: nothing notable.\n"); // shrink back down
 
   // A fresher sibling (another lineage's file) ⇒ the staleness note fires and points at it.

@@ -215,6 +215,9 @@ try {
   check("(3e) the size note tells the agent NOT to Read the file first to rotate it", /do not read this file first/i.test(noteOversized));
   check("(3e) the size note names the plain move commands (mv / Move-Item)", noteOversized.includes("mv") && noteOversized.includes("Move-Item"));
   check("(3e) the size note explains a Write to the vacated path needs no prior Read", /needs no prior read/i.test(noteOversized));
+  // Card f17c5a76: the note carries a MEASURED-AT stamp (ISO 8601), distinct from send-time — a
+  // recipient reading it after a delivery delay must be able to tell how old the measurement is.
+  check("(3e) the size note carries a measured-at ISO-8601 timestamp, distinct from send-time", /measured-at/i.test(noteOversized) && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(noteOversized));
   try { fs.rmSync(sizeVault, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (3f) card c1f2f095: composeManagerStartupPrompt honors a per-project

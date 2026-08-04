@@ -66,7 +66,9 @@ export class ResumeDocWatcher {
         // honoring this project's `orchestration.resumeDocFilename` override — one source of truth, so
         // this watcher can never check a different file than the one the manager was actually told about.
         const resumeDoc = resolveResumeDocPath(project.vaultPath, resolveConfig(project.config).orchestration.resumeDocFilename);
-        const note = resumeDocSizeWarning(resumeDoc);
+        // Pass this tick's own `now` through so the note's measured-at stamp matches the instant this
+        // tick actually stat'd the file, not a later Date.now() read at enqueue time (card f17c5a76).
+        const note = resumeDocSizeWarning(resumeDoc, now);
         if (!note) {
           // Under threshold (or the doc doesn't exist / can't be stat'd) — clear any stale cooldown so a
           // FUTURE regrowth past threshold nudges fresh instead of inheriting a stale cooldown window.

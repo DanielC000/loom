@@ -86,6 +86,36 @@ const resumeDocPath = (e) => path.join(e.vaultPath, "Orchestrator Log.md");
   cleanup(e);
 }
 
+// Card f17c5a76: the nudge carries a measured-at stamp DISTINCT from send-time — reported by a peer
+// Loom project as a defect (their notice's send-time timestamp didn't match when the size was actually
+// measured, so a stale reading was indistinguishable from a fresh one). tick(now) must stamp the note
+// with THAT SAME `now`, not a later Date.now() read at enqueue time — otherwise the stamp would just be
+// another send-time under a different name and would not fix anything.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-stamp");
+  fs.writeFileSync(resumeDocPath(e), "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
+  const t0 = 1_700_000_000_000; // arbitrary fixed instant
+  e.watcher.tick(t0);
+  const stamp = new Date(t0).toISOString();
+  check("measured-at: the nudge carries the tick's own instant as an ISO measured-at stamp", e.enqueued[0]?.text.includes(stamp));
+  check("measured-at: the note explicitly distinguishes measured-at from this message's send time", /measured-at/i.test(e.enqueued[0]?.text) && /not this message.s send time/i.test(e.enqueued[0]?.text));
+  check("measured-at: the note tells the recipient to re-check rather than trust a stale reading blindly", /re-check/i.test(e.enqueued[0]?.text));
+
+  // A LATER tick (different `now`, doc unchanged) must stamp a DIFFERENT measured-at — proving the
+  // value tracks the actual measurement instant rather than being a fixed/frozen string.
+  const e2 = makeEnv({ cooldownMs: 0 });
+  seedManager(e2, "mgr-stamp2");
+  fs.writeFileSync(resumeDocPath(e2), "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
+  const t1 = 1_700_000_000_000;
+  const t2 = 1_700_000_600_000; // 10 minutes later
+  e2.watcher.tick(t1);
+  e2.watcher.tick(t2);
+  check("measured-at: two ticks at different instants stamp two DIFFERENT measured-at values", e2.enqueued.length === 2 && e2.enqueued[0].text.includes(new Date(t1).toISOString()) && e2.enqueued[1].text.includes(new Date(t2).toISOString()) && !e2.enqueued[0].text.includes(new Date(t2).toISOString()));
+  cleanup(e);
+  cleanup(e2);
+}
+
 // Cooldown: a second tick shortly after does NOT re-nudge while still oversized.
 {
   const e = makeEnv({ cooldownMs: 30 * 60_000 });
