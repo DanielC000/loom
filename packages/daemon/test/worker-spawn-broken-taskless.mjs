@@ -95,10 +95,21 @@ function cleanup(e) {
   e.sessions.notifyManagerOfIdleWorker("wkr-t1");
   const broken = e.enqueued.find((x) => x.id === "mgr-t1" && /worker-spawn-broken/.test(x.text));
   check("(T1) taskless + engineSessionId:null → a [loom:worker-spawn-broken] nudge IS pushed (the gap this closes)", !!broken);
-  check("(T1) the nudge names the worker + points at re-drive (worker_message/recycle)",
-    !!broken && broken.text.includes("wkr-t1") && /worker_message/.test(broken.text));
+  check("(T1) the nudge names the worker", !!broken && broken.text.includes("wkr-t1"));
   check("(T1) the nudge has NO '(task ...)' mention (there is no task)", !!broken && !/\(task /.test(broken.text));
   check("(T1) the nudge is explicit this is NOT benign", !!broken && /NOT a benign/i.test(broken.text));
+  // Card 92902cc2: genuinely no engine session here → the "no engine session" cause IS true for this
+  // specimen — the fix conditions the clause, it doesn't delete it outright.
+  check("(T1) the cause correctly states no engine session was ever established (true for this specimen)",
+    !!broken && /no engine session was ever established/.test(broken.text));
+  check("(T1) does NOT claim it will not resolve on its own (card 6229dcc0's false clause, measured FALSE 2/2 — dropped)",
+    !!broken && !/will not resolve on its own/.test(broken.text));
+  // Card 92902cc2 DoD: report observed fields, not just a prose cause — a recipient can diagnose from them.
+  check("(T1) reports engineSessionId=none", !!broken && /engineSessionId=none/.test(broken.text));
+  // Card 92902cc2's remedy order (site A's shape, reused): don't recommend worker_message until verified.
+  check("(T1) does NOT recommend worker_message before verification (mirrors site A's remedy order)",
+    !!broken && /do NOT worker_message it/.test(broken.text));
+  check("(T1) points at worker_transcript as the decisive verify-first check", !!broken && /VERIFY FIRST via worker_transcript/.test(broken.text));
   check("(T1) exactly ONE nudge fires (no double-signal)", e.enqueued.filter((x) => x.id === "mgr-t1").length === 1);
   cleanup(e);
 }
@@ -153,12 +164,12 @@ function cleanup(e) {
 
   e.sessions.notifyManagerOfIdleWorker("wkr-t4");
   const broken = e.enqueued.find((x) => x.id === "mgr-t4" && /worker-spawn-broken/.test(x.text));
-  check("(T4) a TASKED worker's broken-spawn nudge still fires exactly as before", !!broken);
+  check("(T4) a TASKED worker's broken-spawn nudge still fires", !!broken);
   check("(T4) it still names the task (unlike the taskless case in T1)", !!broken && broken.text.includes("tk-t4") && /\(task /.test(broken.text));
   cleanup(e);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — notifyManagerOfIdleWorker now covers a TASKLESS worker's broken spawn (engineSessionId never established → [loom:worker-spawn-broken], no task mention, same redirect-race guard as tasked) AND its silent finish (engineSessionId set, never reported → [loom:worker-idle], card df48366b) — a taskless worker that has reported at least once draws no false alarm; a TASKED worker's existing broken-spawn coverage is byte-unaffected."
+  ? "\n✅ ALL PASS — notifyManagerOfIdleWorker now covers a TASKLESS worker's broken spawn (engineSessionId never established → [loom:worker-spawn-broken], no task mention, same redirect-race guard as tasked) AND its silent finish (engineSessionId set, never reported → [loom:worker-idle], card df48366b) — a taskless worker that has reported at least once draws no false alarm; a TASKED worker's existing broken-spawn coverage still fires (card 92902cc2 changed the notice's WORDING — cause now computed per-specimen instead of hardcoded — not whether it fires)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

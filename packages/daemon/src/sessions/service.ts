@@ -617,6 +617,47 @@ function giveUpConfirmationHedge(subject: string): string {
 }
 
 /**
+ * Card 92902cc2: `notifyManagerOfIdleWorker`'s [loom:worker-spawn-broken] notice — the SECOND, INDEPENDENT
+ * sender of this tag (the idle watchdog; site A is `handleKickoffGiveUpExhausted`, above). Unlike site A,
+ * this one is PERIODIC — it re-fires on every idle tick, not once — so unlike site A it must stay close to
+ * the original's length, not grow to match it; only restate what site A does NOT already cover.
+ *
+ * `classifyIdleWorker`'s `broken-spawn` kind has TWO structurally distinct triggers that both used to
+ * reach one hardcoded string here: `!engineSessionId` (genuinely no session — "no engine session was ever
+ * established" is TRUE) and `engineSessionId` SET but no turn ever started (a stranded-composer candidate
+ * — that clause is FALSE there). Computing the cause from the actual field, instead of asserting one
+ * unconditionally, is what makes the notice correct on BOTH triggers instead of only one — and it means a
+ * caller can never reintroduce the false clause by drifting past whatever gate it gets to today (e.g. the
+ * taskless branch's own `!w.engineSessionId` check, below): the builder itself never asserts what it
+ * hasn't read off `w`.
+ *
+ * `getComposerDirtyLen` is read via a `typeof` guard, not a plain call, for the SAME reason the rootMsgId
+ * join guard a few hundred lines below is (see that guard's own comment): `this.pty` is a concrete
+ * `PtyHost` in production (the method always exists there), but this codebase's test suite is full of
+ * hermetic PtyStub fakes that duck-type only the subset of the contract their own scenario needs — an
+ * unguarded call throws "not a function" on every stub that hasn't opted into this method.
+ *
+ * `composerDirtyLen` itself has a BLIND WINDOW even when read successfully: it is only set once Loom's own
+ * give-up/heal budget exhausts (tens of seconds) — the idle watchdog can fire inside that window, and
+ * `undefined`/`null` (not live in this process, or not yet set) is NOT proof the composer is clean. The
+ * notice states this explicitly rather than letting a `0`/`n/a` reading pass as a clean bill.
+ */
+function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
+  const composerDirtyLen = typeof pty.getComposerDirtyLen === "function" ? (pty.getComposerDirtyLen(w.id) ?? null) : null;
+  const cause = w.engineSessionId
+    ? "an engine session WAS established but never ran a turn — a stranded-composer candidate, not a missing session"
+    : "no engine session was ever established — the spawn kickoff never ran";
+  return `[loom:worker-spawn-broken] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn: ${cause}. ` +
+    `Observed (single point-in-time read): engineSessionId=${w.engineSessionId ?? "none"}, turnSeq=${w.turnSeq ?? 0} ` +
+    `(confirm via a second worker_status/worker_transcript read before treating this as settled — a lone reading can't rule out a race still resolving), ` +
+    `composerDirtyLen=${composerDirtyLen ?? "n/a"} (>0 confirms an unsent kickoff sitting in the composer; 0 or n/a does NOT rule that out — the ` +
+    `counter is only set once Loom's own retry budget exhausts, and n/a means not live in this process), resumability=${w.resumability}. ` +
+    `${giveUpConfirmationHedge("the kickoff")} This is NOT a benign idle park. VERIFY FIRST via worker_transcript before acting — until verified, ` +
+    `do NOT worker_message it (returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it; only if ` +
+    `worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
+}
+
+/**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
  * DELIBERATELY excludes `bypassPermissions` (disables the acceptEdits+allowlist sandbox a worker is
  * spawned into — an agent must never be able to escalate a worker out of it) and `default`/`unknown`.
@@ -8022,12 +8063,10 @@ export class SessionService {
     const w = this.db.getSession(workerSessionId);
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return;
 
-    const brokenSpawnMsg = `[loom:worker-spawn-broken] worker ${workerSessionId}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
-
     if (!w.taskId) {
       if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
       if (!w.engineSessionId) {
-        try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ }
+        try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
         return;
       }
       // It DID start a turn — has it EVER called worker_report? If not, it finished silently with no
@@ -8049,7 +8088,7 @@ export class SessionService {
     if (cls.kind === "not-evaluable" || cls.kind === "not-stranded" || cls.kind === "parked-gate") return;
 
     if (cls.kind === "broken-spawn") {
-      try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ }
+      try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
       return;
     }
 

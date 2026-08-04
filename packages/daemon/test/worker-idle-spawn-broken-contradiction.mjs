@@ -42,6 +42,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     suppression tested only against (A) would be indistinguishable from having simply broken the
 //     nudge outright; (B) is what proves it discriminates rather than just silences.
 //
+// Card 92902cc2 (2026-08-04): (A) and (C) below now ALSO serve as this card's positive control, BOTH
+// directions, for `notifyManagerOfIdleWorker`'s [loom:worker-spawn-broken] TEXT itself (a separate,
+// SECOND defect from THIS file's own (2281009d) fix above — that fix is about WHICH nudge fires; 92902cc2
+// is about whether the fired nudge's "no engine session was ever established" clause is TRUE). (A)'s
+// engineSessionId-SET/turnSeq-0 specimen — the exact state this notice used to mis-describe — now gets a
+// message that does NOT claim no session existed, names it a stranded-composer candidate instead, and
+// reports the observed fields (engineSessionId/turnSeq/composerDirtyLen/resumability) a recipient can
+// actually diagnose from. (C)'s genuinely engineSessionId-null specimen proves the fix CONDITIONS the
+// clause rather than deleting it: that specimen's "no engine session was ever established" claim is TRUE,
+// and the notice still states it. Both also confirm card 6229dcc0's "it will not resolve on its own"
+// clause (measured FALSE 2/2, a sibling defect on the SAME notice) is gone.
+//
 // RUN: pnpm build (from packages/daemon) then `node test/worker-idle-spawn-broken-contradiction.mjs`.
 import fs from "node:fs";
 import os from "node:os";
@@ -89,6 +101,10 @@ try {
 
     const enqueued = [];
     const firstTurnStarted = new Set();
+    // Card 92902cc2: composerDirtyLen is per-session settable — proves buildBrokenSpawnMsg's own
+    // >0/0/n/a branches (this stub DOES implement getComposerDirtyLen, unlike most others in this suite,
+    // so the `typeof` guard's "not implemented" fallback path is covered elsewhere, e.g. (C) below).
+    const composerDirtyLen = new Map();
     // Minimal contract-faithful pty stub: getPendingEntries empty (nothing queued), enqueueStdin records,
     // hasFirstTurnStarted is per-session settable — mirrors idle-worker-watcher.mjs's fake pty plus
     // kickoff-giveup-exhausted.mjs's PtyStub.setFirstTurnStarted, combined (the real classifyIdleWorker
@@ -98,9 +114,10 @@ try {
       enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; },
       getPendingEntries: () => [],
       hasFirstTurnStarted: (id) => firstTurnStarted.has(id),
+      getComposerDirtyLen: (id) => composerDirtyLen.get(id),
     };
     const sessions = new SessionService(db, pty, new OrchestrationControl());
-    return { db, projId, agentId, enqueued, firstTurnStarted, sessions };
+    return { db, projId, agentId, enqueued, firstTurnStarted, composerDirtyLen, sessions };
   }
   function seedManager(e, id) {
     e.db.insertSession({
@@ -131,6 +148,9 @@ try {
     seedWorker(e, "wkr-a", "mgr-a", "tk-a", { engineSessionId: engId }); // engineSessionId SET
     // hasFirstTurnStarted left false (default), and no transcript file written for engId — the exact
     // "SessionStart fired, turn 1 never ran" signature from card f91c8634's live specimens.
+    // Card 92902cc2's real specimen (worker eeb55037): composerDirtyLen == the stranded kickoff's own
+    // byte length — set a matching non-zero value here to exercise the notice's >0 branch for real.
+    e.composerDirtyLen.set("wkr-a", 45934);
 
     e.sessions.notifyManagerOfIdleWorker("wkr-a");
 
@@ -139,6 +159,20 @@ try {
     check("(A) spawn-broken condition: gets [loom:worker-spawn-broken]", spawnBroken.length === 1);
     check("(A) spawn-broken condition: does NOT ALSO get the contradictory [loom:worker-idle]", workerIdle.length === 0);
     check("(A) exactly ONE nudge total for this session (no double-fire)", e.enqueued.filter((x) => x.id === "mgr-a").length === 1);
+    // Card 92902cc2 — THE DEFECT ITSELF, POSITIVE CONTROL (direction 1 of 2): a stranded-composer
+    // specimen (engineSessionId SET, turnSeq 0, composerDirtyLen > 0) must NEVER see the notice claim no
+    // session existed — that clause is FALSE for exactly this specimen. RED against pre-fix code (the
+    // old hardcoded string asserted this unconditionally, on every broken-spawn specimen).
+    check("(A) DEFECT FIX: does NOT claim no engine session was ever established (false for THIS specimen)",
+      !!spawnBroken[0] && !/no engine session was ever established/.test(spawnBroken[0].text));
+    check("(A) instead names it a stranded-composer candidate", !!spawnBroken[0] && /stranded-composer candidate/.test(spawnBroken[0].text));
+    check("(A) reports the observed engineSessionId (present, not \"none\")",
+      !!spawnBroken[0] && spawnBroken[0].text.includes(`engineSessionId=${engId}`));
+    check("(A) reports turnSeq=0", !!spawnBroken[0] && /turnSeq=0\b/.test(spawnBroken[0].text));
+    check("(A) reports the non-zero composerDirtyLen (the >0 branch)", !!spawnBroken[0] && /composerDirtyLen=45934\b/.test(spawnBroken[0].text));
+    check("(A) reports resumability", !!spawnBroken[0] && /resumability=resumable/.test(spawnBroken[0].text));
+    check("(A) does NOT claim it will not resolve on its own (card 6229dcc0's false clause — dropped)",
+      !!spawnBroken[0] && !/will not resolve on its own/.test(spawnBroken[0].text));
   }
 
   // ============ (B) THE DISCRIMINATOR — an ORDINARY idle worker still gets [loom:worker-idle] exactly ====
@@ -176,6 +210,18 @@ try {
 
     const spawnBroken = e.enqueued.filter((x) => x.id === "mgr-c" && x.text.includes("[loom:worker-spawn-broken]"));
     check("(C) the pre-existing null-engineSessionId broken-spawn path is unregressed", spawnBroken.length === 1);
+    // Card 92902cc2 — POSITIVE CONTROL (direction 2 of 2): a GENUINELY session-less spawn must still
+    // report correctly — the fix conditions the clause, it doesn't blanket-delete it. Pairs with (A)'s
+    // stranded-composer specimen above to prove buildBrokenSpawnMsg discriminates rather than just
+    // flipping the claim.
+    check("(C) DOES correctly claim no engine session was ever established (true for THIS specimen)",
+      !!spawnBroken[0] && /no engine session was ever established/.test(spawnBroken[0].text));
+    check("(C) reports engineSessionId=none", !!spawnBroken[0] && spawnBroken[0].text.includes("engineSessionId=none"));
+    // No entry was ever set in e.composerDirtyLen for wkr-c → the stub returns undefined → the notice
+    // must read this as "n/a", NOT silently coerce to a false "0" (which would misleadingly imply the
+    // composer was checked and found clean).
+    check("(C) reports composerDirtyLen=n/a (not live in this process, not a false-clean 0)",
+      !!spawnBroken[0] && /composerDirtyLen=n\/a\b/.test(spawnBroken[0].text));
   }
 
 } finally {
@@ -183,6 +229,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card 2281009d: classifyIdleWorker's broken-spawn detection now also catches 'engineSessionId captured but turn 1 never started' (not just null engineSessionId), so notifyManagerOfIdleWorker no longer fires the contradictory [loom:worker-idle] alongside handleKickoffGiveUpExhausted's [loom:worker-spawn-broken] for the same never-started session (A). An ORDINARY idle worker that genuinely ran a turn but never reported STILL gets the plain [loom:worker-idle] nudge, completely unaffected (B) — the discriminator that proves this is a narrow carve-out, not a de-tuning. The original null-engineSessionId broken-spawn path is unregressed (C)."
+  ? "\n✅ ALL PASS — card 2281009d: classifyIdleWorker's broken-spawn detection now also catches 'engineSessionId captured but turn 1 never started' (not just null engineSessionId), so notifyManagerOfIdleWorker no longer fires the contradictory [loom:worker-idle] alongside handleKickoffGiveUpExhausted's [loom:worker-spawn-broken] for the same never-started session (A). An ORDINARY idle worker that genuinely ran a turn but never reported STILL gets the plain [loom:worker-idle] nudge, completely unaffected (B) — the discriminator that proves this is a narrow carve-out, not a de-tuning. The original null-engineSessionId broken-spawn path is unregressed (C). Card 92902cc2: the notice's own TEXT now discriminates too — (A)'s stranded-composer specimen no longer claims no session existed and instead reports the observed fields, while (C)'s genuinely session-less specimen still correctly makes that claim (positive control, both directions) — and neither specimen claims the notice 'will not resolve on its own' (card 6229dcc0's sibling false clause, also dropped)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

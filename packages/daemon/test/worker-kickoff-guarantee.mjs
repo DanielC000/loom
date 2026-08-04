@@ -410,8 +410,8 @@ try {
     e.sessions.notifyManagerOfIdleWorker("wkr-s1");
     const broken = e.enqueued.find((x) => x.id === "mgr-s1" && /worker-spawn-broken/.test(x.text));
     check("(S1) engineSessionId:null → a [loom:worker-spawn-broken] nudge is pushed", !!broken);
-    check("(S1) the broken-spawn nudge names the worker + task + points at re-drive (worker_message/recycle)",
-      !!broken && broken.text.includes("wkr-s1") && broken.text.includes("tk-s1") && /worker_message/.test(broken.text));
+    check("(S1) the broken-spawn nudge names the worker + task, and rules out worker_message until verified (card 92902cc2's site-A-modeled remedy order)",
+      !!broken && broken.text.includes("wkr-s1") && broken.text.includes("tk-s1") && /do NOT worker_message it/.test(broken.text));
     check("(S1) the broken-spawn nudge does NOT use the benign worker-idle framing", !!broken && !/worker-idle/.test(broken.text));
     check("(S1) the broken-spawn nudge is explicit this is NOT benign", !!broken && /NOT a benign/i.test(broken.text));
     check("(S1) exactly ONE nudge fires (no double-signal)", e.enqueued.filter((x) => x.id === "mgr-s1").length === 1);
