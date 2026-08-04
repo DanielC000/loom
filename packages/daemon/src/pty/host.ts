@@ -7187,6 +7187,42 @@ export class PtyHost {
     return this.live.get(sessionId)?.composerDirtyLen;
   }
 
+  /** Card a33a72f7: milliseconds elapsed since the CURRENT generation's first Enter write
+   *  (`Live.currentGenFirstWrittenAt`), for as long as that write remains unconfirmed
+   *  (`!Live.enterConfirmed`) — a PURELY ADDITIVE read of two fields `fireEnterAndVerify`/the
+   *  `UserPromptSubmit` hook already maintain for `latencyMs` logging; nothing here writes, times out, or
+   *  changes when Loom gives up. Exists to close the blind window named on this card: `composerDirtyLen`
+   *  (above) only ever becomes non-zero once a give-up/heal-if-stuck actually FIRES — `FIRST_TURN_STALE_MS`
+   *  (30s) or `GIVE_UP_HOLD_MS` (20s) plus retry time after the write — so a manager glancing at a worker in
+   *  THAT window sees a `0` indistinguishable from a genuinely clean composer. This getter has no such
+   *  floor: it reads non-null the INSTANT a write is outstanding and keeps counting every ms after.
+   *
+   *  Returns `undefined` if the session isn't live in this process (mirrors `getComposerDirtyLen`'s own
+   *  undefined-vs-0 discipline). Returns `null` if nothing is currently outstanding — either no submit()
+   *  has ever run, or the current generation already confirmed (`enterConfirmed === true`); these two are
+   *  NOT distinguished from each other, deliberately: no manager decision turns on telling them apart, and
+   *  conflating them costs nothing extra bad, unlike the ambiguity documented below.
+   *
+   *  ⚠️ WHAT THIS DOES NOT DISTINGUISH — read alongside `composerDirtyLen`, not instead of it:
+   *  a non-null reading means ONLY "the current generation's Enter has been written and no confirming hook
+   *  has landed for it yet." It stays non-null identically whether Loom is still WITHIN its own give-up
+   *  budget (still retrying, or in `awaitGiveUpConfirmSettle`'s short window) OR has ALREADY given up for
+   *  this exact generation (`fireEnterAndVerify`'s GIVE-UP RECOVERY/SUPPRESSED branches touch neither
+   *  `enterConfirmed` nor `currentGenFirstWrittenAt` — only `composerDirtyLen`) — give-up firing does not
+   *  make this field go null. So a large `unconfirmedDeliveryMs` alone never proves "still trying" vs.
+   *  "already gave up, outcome still unknown" for THIS generation — cross-check `composerDirtyLen`: zero
+   *  there while this reads non-null is the ONE case unambiguously new information ("in flight, this
+   *  session has never given up at all yet"); non-zero there is ambiguous (may be THIS generation's own
+   *  give-up, or stale residue from an earlier, already-superseded generation still awaiting its own
+   *  confirm-driven clear — see `composerDirtyLen`'s doc). Together the two are still strictly MORE
+   *  informative than either alone, which is the entire point of adding this rather than reworking that. */
+  getPendingConfirmMs(sessionId: string): number | null | undefined {
+    const live = this.live.get(sessionId);
+    if (!live) return undefined;
+    if (live.enterConfirmed || live.currentGenFirstWrittenAt === null) return null;
+    return Date.now() - live.currentGenFirstWrittenAt;
+  }
+
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on
    *  the first `UserPromptSubmit` hook, see that field's own doc). Card 00bd3b4a: the discriminator
    *  `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before treating an exhausted kickoff
