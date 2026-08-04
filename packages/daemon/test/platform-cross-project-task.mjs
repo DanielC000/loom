@@ -249,8 +249,10 @@ try {
     batchPartial.find((r) => r.taskId === b2.id)?.error === undefined);
 
   // Prefix resolution works PER-ID inside a batch (mirrors the single-id path's id-prefix resolution).
+  // deferredReason is REQUIRED alongside deferred:true here since card c90e9525 — this router has no
+  // deferredUntilTaskId, so deferred:true always lands on the manual (reason-required) path.
   const b1Prefix = b1.id.slice(0, 8);
-  const batchPrefix = await call("project_task_update", { projectId: "pTarget", taskIds: [b1Prefix], deferred: true });
+  const batchPrefix = await call("project_task_update", { projectId: "pTarget", taskIds: [b1Prefix], deferred: true, deferredReason: "cross-project batch test deferral" });
   check("(4b) batch move resolves an 8-char id-prefix per-id", batchPrefix[0].taskId === b1Prefix && !batchPrefix[0].error);
   check("(4b) the prefix-resolved batch move persisted", db.getTask(b1.id).deferred === true);
 
@@ -342,8 +344,13 @@ try {
   // ===================== (5) bounded-read pagination + a measured cap =====================
   db.insertProject({ id: "pBulk", name: "Bulk", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
   const BULK = DEFAULT_TASK_SUMMARY_CAP + 5;
+  // body is a short, non-empty filler — this section tests PAGINATION/capping, not the NDJSON
+  // inline-vs-spill threshold (SPILL_INLINE_BUDGET_CHARS, spill.ts), so keep well clear of it: a
+  // heavier body here (there is no assertion on body CONTENT below) would push the in-project
+  // tasks_list capped(100)-row NDJSON text over budget and silently switch it to the spill-pointer
+  // shape, which this section's plain-array assertions don't expect.
   for (let i = 0; i < BULK; i++) {
-    db.insertTask({ id: `bulk-${i}`, projectId: "pBulk", title: `b${i}`, body: "x".repeat(40), columnKey: "backlog", position: i, priority: "p2", createdAt: now, updatedAt: now });
+    db.insertTask({ id: `bulk-${i}`, projectId: "pBulk", title: `b${i}`, body: "x", columnKey: "backlog", position: i, priority: "p2", createdAt: now, updatedAt: now });
   }
   // Unit: listProjectTasks honors offset/limit (pure slicing).
   const sliced = await listProjectTasks(db, "pBulk", { limit: 10, offset: 5 });

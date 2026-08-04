@@ -65,7 +65,9 @@ try {
   check("(2) raw DB row confirms deferredUntilTaskId persisted null, not just in the response", rawAfterClear.deferredUntilTaskId === null);
 
   // --- step 3: manager RE-DEFERS for an unrelated reason, touching only `deferred` ---
-  const redeferResult = await updateProjectTask(db, "pRepo", dependent.id, { deferred: true });
+  // deferredReason is REQUIRED here since card c90e9525: this re-defer lands on the manual path
+  // (deferredUntilTaskId is null post-auto-clear), and a manual deferral with no reason is now refused.
+  const redeferResult = await updateProjectTask(db, "pRepo", dependent.id, { deferred: true, deferredReason: "re-deferred for an unrelated reason" });
   check("(3) re-defer succeeds (no error)", !("error" in redeferResult));
   const rawAfterRedefer = db.getTask(dependent.id);
   check("(3) re-defer persisted deferred:true", rawAfterRedefer.deferred === true);

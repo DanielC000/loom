@@ -99,9 +99,24 @@ function seedCard(e, columnKey) {
 // Seed one card with an explicit title (for the owner-held/HOLD discount test) and optional `held`/
 // `deferred` flags (deferred: card 77d33266 — the manager's own sequencing marker, discounted the
 // same way as held).
+// deferredReason is stamped whenever deferred:true (mirrors what the real tasks_update guard, card
+// c90e9525, now REQUIRES for a manual deferral) — this helper is used throughout the file to test the
+// PRE-EXISTING held/deferred discount mechanic, which is orthogonal to whether a reason is recorded; a
+// deliberately UNDOCUMENTED (no-reason) deferral is exercised separately via seedDeferred, below, in
+// the (1j) section that tests card c90e9525's own new behavior.
 function seedTitled(e, columnKey, title, held = false, deferred = false) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
-    title, body: "", columnKey, held, deferred, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+    title, body: "", columnKey, held, deferred, deferredReason: deferred ? "test-seeded deferral reason" : null,
+    position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+}
+// Seed a card with the full MANUAL-deferral field set (card c90e9525) — deferredReason/deferredAt/
+// deferredStuck/deferredUntilTaskId all explicitly controllable, unlike seedTitled (which only ever
+// carries held/deferred). Returns the inserted task's id.
+function seedDeferred(e, columnKey, { title = "deferred card", held = false, deferredReason = null, deferredAt = null, deferredStuck = false, deferredUntilTaskId = null } = {}) {
+  const id = `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`;
+  e.db.insertTask({ id, projectId: e.projId, title, body: "", columnKey, held, deferred: true,
+    deferredReason, deferredAt, deferredStuck, deferredUntilTaskId, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+  return id;
 }
 // Seed a connected owner Request (question) on a task — the same taskId->questions linkage tasks_get's
 // connected-requests summary / task_requests_list use. sessionId must be a live row (FK) — pass the
@@ -454,6 +469,109 @@ const DROPPED_BOARD = {
   const text = e.enqueued[0]?.text ?? "";
   check("(1i) the held card's title is NOT named", !text.includes("owner-held decision"));
   check("(1i) the genuine card's title IS named", text.includes("fix(web): genuine actionable task"));
+  cleanup(e);
+}
+
+// ===== (1j) card c90e9525 — an UNDOCUMENTED manual deferral (deferred:true, no deferredUntilTaskId, no =====
+// ===== deferredReason — the legacy/pre-guard shape) is surfaced, low-key, bundled into the SAME nudge; =====
+// ===== a DOCUMENTED one (has a reason) stays fully quiet, exactly like today, however old it is. =====
+{
+  // POSITIVE: an undocumented manual deferral as the SOLE open card breaks the "everything discounted"
+  // silent-skip and DOES fire a nudge naming it — proving the quiet-forever defect this card fixes.
+  const e = makeEnv();
+  seedManager(e, "mgr-undoc-deferred");
+  const id = seedDeferred(e, "todo", { title: "an old parked epic", deferredReason: null });
+  e.watcher.tick(NOW);
+  check("(1j) an undocumented manual deferral as the sole card DOES fire a nudge (not swallowed forever)",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-undoc-deferred");
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1j) the nudge mentions the undocumented-deferral count", /1 manually-deferred card/.test(text));
+  check("(1j) the nudge names the specific card's id", text.includes(id.slice(0, 8)));
+  check("(1j) the nudge points at HOW to silence it permanently (tasks_update deferredReason)", text.includes("deferredReason"));
+  check("(1j) the nudge does NOT report it as actionable work (0 actionable)", text.includes("0 actionable"));
+  cleanup(e);
+}
+{
+  // NEGATIVE CONTROL — a DOCUMENTED manual deferral (a real reason recorded) as the sole open card stays
+  // FULLY QUIET — no nudge at all, exactly the pre-existing behavior. Age is irrelevant (deferredAt here
+  // is far in the past) — a recorded reason is what silences this, never a date threshold (the card's own
+  // §WHAT THE DEFECT ACTUALLY IS: age alone cannot tell a legitimately long-parked epic from a forgotten
+  // one).
+  const e = makeEnv();
+  seedManager(e, "mgr-documented-deferred");
+  seedDeferred(e, "todo", { title: "owner-gated, upstream release wait", deferredReason: "waiting on upstream v2 release", deferredAt: minutesAgo(60 * 24 * 400) });
+  e.watcher.tick(NOW);
+  check("(1j) a DOCUMENTED manual deferral (has a reason), however old, → NO nudge at all", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // NEGATIVE CONTROL — held:true wins independently: an undocumented deferral that's ALSO held stays quiet.
+  const e = makeEnv();
+  seedManager(e, "mgr-undoc-held");
+  seedDeferred(e, "todo", { title: "held AND undocumented-deferred", held: true, deferredReason: null });
+  e.watcher.tick(NOW);
+  check("(1j) held:true silences an undocumented deferral too (held is an independent full discount)", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // NEGATIVE CONTROL — a review-column card that's also an undocumented manual deferral: the nudge fires
+  // (review-lane cards always keep the nudge alive — see (1f)), but the SUFFIX must not mention it — the
+  // review-lane discount applies to this new axis too, independently of why the nudge itself fired.
+  const e = makeEnv();
+  seedManager(e, "mgr-undoc-review");
+  seedDeferred(e, "review", { title: "in review AND undocumented-deferred", deferredReason: null });
+  e.watcher.tick(NOW);
+  check("(1j) a review-lane card still keeps the nudge alive (go merge it)", e.enqueued.length === 1);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1j) but a review-lane undocumented deferral is NOT named in the deferral suffix", !/manually-deferred card/.test(text));
+  cleanup(e);
+}
+{
+  // NEGATIVE CONTROL — an excludeFromIdleWatchdog-lane card that's also an undocumented manual deferral,
+  // as the sole open card → fully quiet (the lane already fully discounts it; nothing else to nudge for).
+  const e = makeEnv({ projectConfig: DROPPED_BOARD });
+  seedManager(e, "mgr-undoc-dropped");
+  seedDeferred(e, "dropped", { title: "dropped AND undocumented-deferred", deferredReason: null });
+  e.watcher.tick(NOW);
+  check("(1j) an excludeFromIdleWatchdog-lane undocumented deferral, sole card → NO nudge", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // NEGATIVE CONTROL — a card with a PENDING connected owner Request that's also an undocumented manual
+  // deferral, as the sole open card → fully quiet (blocked on the owner, same as any other pending-request card).
+  const e = makeEnv();
+  seedManager(e, "mgr-undoc-pending");
+  const id = seedDeferred(e, "todo", { title: "pending-request AND undocumented-deferred", deferredReason: null });
+  seedQuestion(e, "mgr-undoc-pending", id, "pending");
+  e.watcher.tick(NOW);
+  check("(1j) a pending-Request undocumented deferral, sole card → NO nudge", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // A route-(a) STUCK deferral (deferredStuck:true, no reason — reason is only meaningful for the manual
+  // route) is NOT double-reported through the new "undocumented" suffix — it's already fully actionable
+  // (counted + named) through the EXISTING deferredStuck→openCards path (card 93669813), so it must not
+  // ALSO appear in the low-key deferral suffix (that would report the same card through two channels).
+  const e = makeEnv();
+  seedManager(e, "mgr-stuck-not-double-reported");
+  const id = seedDeferred(e, "todo", { title: "stuck route-a deferral", deferredUntilTaskId: "00000000-0000-0000-0000-000000000000", deferredStuck: true, deferredReason: null });
+  e.watcher.tick(NOW);
+  check("(1j) a STUCK deferral is counted as actionable (openCards), not via the undocumented suffix",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("1 actionable") && e.enqueued[0].text.includes(id.slice(0, 8)));
+  check("(1j) it is NOT ALSO named in the low-key deferral suffix (no double-report)", !/manually-deferred card/.test(e.enqueued[0].text));
+  cleanup(e);
+}
+{
+  // MIXED — a genuine actionable card + an undocumented deferral together: the nudge fires (it would have
+  // anyway for the actionable card), and the suffix still correctly names the undocumented deferral.
+  const e = makeEnv();
+  seedManager(e, "mgr-undoc-mixed");
+  seedTitled(e, "todo", "fix(web): real actionable task", false, false);
+  const id = seedDeferred(e, "todo", { title: "an old parked epic", deferredReason: null });
+  e.watcher.tick(NOW);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1j) mixed: nudges for the genuine actionable card", e.enqueued.length === 1 && text.includes("1 actionable"));
+  check("(1j) mixed: the undocumented deferral is STILL flagged in the suffix", /1 manually-deferred card/.test(text) && text.includes(id.slice(0, 8)));
   cleanup(e);
 }
 

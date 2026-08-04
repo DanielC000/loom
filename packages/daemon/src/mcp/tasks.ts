@@ -29,7 +29,7 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
  *  manager triaging the board sees WHY a card is deferred without a per-card tasks_get — `deferred` was
  *  not previously in this summary at all; adding it here is scoped to what this card needs (`held` stays
  *  out, a separate pre-existing gap, not this card's concern). */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck">;
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason">;
 
 /**
  * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
@@ -185,6 +185,13 @@ export async function resolveDeferredEffective(
  * plain "deferred with no blocker" path (never auto-clears, see resolveDeferredEffective) unless the
  * caller explicitly names a NEW blocker. A `stuckChanged`-only write (deferred stays true) leaves
  * `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it stuck.
+ *
+ * Card c90e9525: an `autoCleared` transition ALSO nulls `deferredAt`/`deferredReason` in the same write —
+ * once `deferred` flips false, a stale reason/date left behind would misdescribe a card that is no longer
+ * deferred at all. This is NOT new auto-clear logic for a MANUAL deferral (the card's DoD-1 forbids that);
+ * it only extends the ALREADY-EXISTING route-(a) auto-clear (card 93669813, unrelated to this card's own
+ * scope) to also clear the two fields it happens to share a write with — a manual deferral is never
+ * auto-cleared by anything, so this branch is unreachable for one.
  */
 function persistDeferredStateBestEffort(
   db: Db, taskId: string, state: Pick<ResolvedDeferredState, "autoCleared" | "stuck" | "stuckChanged">,
@@ -192,7 +199,7 @@ function persistDeferredStateBestEffort(
   if (!state.autoCleared && !state.stuckChanged) return;
   try {
     const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
-      ? { deferred: false, deferredUntilTaskId: null, deferredStuck: false }
+      ? { deferred: false, deferredUntilTaskId: null, deferredStuck: false, deferredAt: null, deferredReason: null }
       : { deferredStuck: state.stuck };
     db.updateTask(taskId, patch);
   } catch (e) {
@@ -247,6 +254,7 @@ export interface ListTasksOptions {
 export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
   deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck === true,
+  deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null,
 });
 
 /**
@@ -633,7 +641,7 @@ export function createProjectTaskChecked(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "version"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "deferredAt" | "deferredReason" | "version"> & {
   changed: string[];
 };
 
@@ -670,7 +678,7 @@ export interface TaskUpdateActor {
 
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason">>,
   actor?: TaskUpdateActor,
   /**
    * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
@@ -741,6 +749,43 @@ export async function updateProjectTask(
     if ("error" in blocker) return { error: `deferredUntilTaskId ${blocker.error}` };
     patch = { ...patch, deferredUntilTaskId: blocker.id };
   }
+  // Manual-deferral self-explaining guard (card c90e9525) — whole-patch-reject, same convention as the
+  // guards above: `deferred` is a stored verdict with no reason/date attached is exactly the defect this
+  // card fixes, so a write that would LEAVE the card manually deferred (deferred:true, no
+  // deferredUntilTaskId — route (a) has its own release condition, the named blocker task, and is
+  // untouched here) with no reason recorded either before or after this patch is refused outright. A date
+  // alone would not satisfy this (the card's own DoD-1 is explicit) — hence a REASON is the thing gated,
+  // never just a timestamp. `deferredAt` is never a caller-suppliable field (not in this function's patch
+  // type) — it is stamped SERVER-SIDE only, below, so it can never be forged to a false start time.
+  const resultingDeferred = patch.deferred !== undefined ? patch.deferred === true : owned.deferred === true;
+  const resultingDeferredUntilTaskId = patch.deferredUntilTaskId !== undefined ? patch.deferredUntilTaskId : (owned.deferredUntilTaskId ?? null);
+  const isManualDeferral = resultingDeferred && resultingDeferredUntilTaskId == null;
+  let deferredReasonPatch: string | null | undefined;
+  if (patch.deferredReason !== undefined) {
+    const trimmed = patch.deferredReason == null ? null : patch.deferredReason.trim();
+    deferredReasonPatch = trimmed && trimmed.length > 0 ? trimmed : null;
+  }
+  if (patch.deferred === false) {
+    // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
+    deferredReasonPatch = null;
+  } else if (isManualDeferral) {
+    const resultingReason = deferredReasonPatch !== undefined ? deferredReasonPatch : (owned.deferredReason ?? null);
+    if (!resultingReason) {
+      return { error: "a manual deferral (deferred:true with no deferredUntilTaskId) needs a reason — pass deferredReason explaining why it's parked and what would release it, so a future reader can tell it apart from a forgotten card" };
+    }
+  }
+  // deferredAt: the instant a manual deferral starts documenting itself — a fresh false→true transition,
+  // or the first time real provenance lands on a legacy row that predates these columns (owned.deferredAt
+  // is still null). Never touched on a later edit that only updates the reason text on an already-dated
+  // row — updatedAt already tracks "last touched"; this field means "since when has it actually been
+  // deferred" (see Task.deferredAt's own doc for why updatedAt can't serve that role), so it stays put.
+  let deferredAtPatch: string | null | undefined;
+  if (patch.deferred === false) {
+    deferredAtPatch = null;
+  } else if (isManualDeferral && (owned.deferred !== true || !owned.deferredAt)) {
+    deferredAtPatch = new Date().toISOString();
+  }
+  if (deferredReasonPatch !== undefined) patch = { ...patch, deferredReason: deferredReasonPatch };
   // held-clear guard (card 9b0373c0, Platform-Audit bb23d15a): this function is the ONE choke point both
   // agent-facing task-update surfaces share — the in-project `tasks_update` AND the Lead's cross-project
   // `project_task_update` (mcp/platform.ts) — reachable ONLY from an agent MCP session; the human-only
@@ -767,7 +812,11 @@ export async function updateProjectTask(
       heldByPatch = owned.held === true && owned.heldBy === "human" ? "human" : "agent";
     }
   }
-  const dbPatch = heldByPatch !== undefined ? { ...patch, heldBy: heldByPatch } : patch;
+  const dbPatch0 = heldByPatch !== undefined ? { ...patch, heldBy: heldByPatch } : patch;
+  // deferredAt is stamped/reset SERVER-SIDE only (computed above) — merged into the DB write here, never
+  // into `patch` itself, so it can never leak into the caller-echoed `changed` list (mirrors heldByPatch's
+  // own exclusion from `patch` for the same reason).
+  const dbPatch = deferredAtPatch !== undefined ? { ...dbPatch0, deferredAt: deferredAtPatch } : dbPatch0;
   // Optimistic-concurrency gate (card d0978321): a title/body write is the ONLY thing gated — a
   // column/priority/held/deferred/repoKey/deferredUntilTaskId-only patch (the common board-repair case)
   // still needs no baseVersion at all, unaffected by anything below. `patch` (not `dbPatch`) is checked:
@@ -805,8 +854,8 @@ export async function updateProjectTask(
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, version } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, version, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, updatedAt, version } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, updatedAt, version, changed: Object.keys(patch) };
   }
   return updated;
 }

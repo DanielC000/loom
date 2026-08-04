@@ -150,8 +150,11 @@ try {
   check("(6) a dangling blocker reference degrades to STAYS deferred (never silently drops it)", got4?.deferred === true);
 
   // --- (7) omitting deferredUntilTaskId entirely stays byte-identical to today ---
+  // deferredReason is REQUIRED here since card c90e9525: a manual deferral (no deferredUntilTaskId) with
+  // no reason is now refused at set time — see task-manual-deferral-reason.mjs for that guard's own
+  // coverage; this test's own concern (a blocker-less deferral never auto-clears) is orthogonal to it.
   const plainDeferred = createProjectTask(db, "pRepo", { title: "plain deferred, no blocker" });
-  await updateProjectTask(db, "pRepo", plainDeferred.id, { deferred: true });
+  await updateProjectTask(db, "pRepo", plainDeferred.id, { deferred: true, deferredReason: "owner-gated, no blocker card" });
   // Land a totally unrelated commit — proves an unrelated merge can never affect a blocker-less deferral.
   git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "chore: unrelated landing"`);
   const got7 = await getProjectTask(db, "pRepo", plainDeferred.id);

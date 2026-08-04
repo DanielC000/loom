@@ -1934,7 +1934,11 @@ export class PlatformMcpRouter {
           "written, not even other fields in the same patch), same as the in-project tasks_update: only the " +
           "owner can release their own hold, via the board UI. deferred? (a manager's own " +
           "sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but " +
-          "unlike held it never blocks worker_spawn; omit to leave it untouched). repoKey? (multi-repo epic) " +
+          "unlike held it never blocks worker_spawn; omit to leave it untouched). deferred:true on THIS route " +
+          "always lands on the MANUAL path (this router has no deferredUntilTaskId) — card c90e9525: it REQUIRES " +
+          "deferredReason (a short string: why it's parked and what would release it), refused otherwise (whole " +
+          "patch rejected, nothing written) so a cross-project deferral can never go byte-identical-to-forgotten. " +
+          "repoKey? (multi-repo epic) " +
           "re-targets the card to a different entry in the destination project's `repos` registry, or " +
           "null/\"primary\" to reset it to that project's primary repo — an unknown key is REFUSED (whole patch " +
           "rejected, nothing written), same convention as an unknown columnKey. Reuses the SAME backing path + " +
@@ -1951,7 +1955,7 @@ export class PlatformMcpRouter {
           "passing both or neither is an error. `title`/`body` are REJECTED alongside `taskIds` (whole call " +
           "rejected, nothing written) — applying one literal title/body string identically across many " +
           "different cards is never intentional; edit those one card at a time via `taskId`. Every other " +
-          "field (columnKey/position/priority/held/deferred/repoKey) IS batchable. Mirrors agent_clone_batch's " +
+          "field (columnKey/position/priority/held/deferred/deferredReason/repoKey) IS batchable. Mirrors agent_clone_batch's " +
           "convention EXACTLY: each id is resolved and updated INDEPENDENTLY through this SAME backing path " +
           "— its own prefix resolution, its own column-existence/held-clear/repoKey-authority guards — so a " +
           "bad id (unknown, ambiguous, wrong project, a refused held-clear) surfaces its own `{taskId, " +
@@ -1978,6 +1982,7 @@ export class PlatformMcpRouter {
           priority: prioritySchema.optional(),
           held: z.boolean().optional(),
           deferred: z.boolean().optional(),
+          deferredReason: z.string().nullable().optional(),
           repoKey: z.string().nullable().optional(),
           baseVersion: z.number().optional(),
         }),

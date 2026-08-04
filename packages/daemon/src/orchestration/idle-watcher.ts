@@ -368,14 +368,41 @@ export class IdleWatcher {
       // skip below, or a done-and-awaiting-merge worker's card would silently stop nudging its manager to
       // go merge it (regression risk on the existing worker-report → review-lane → idle-nudge coverage).
       const hasReviewCards = nonTerminal.some((t) => t.columnKey === reviewKey);
+      // Card c90e9525: a MANUAL deferral (deferred:true, no deferredUntilTaskId — route (a) has its own
+      // self-explaining release condition, the named blocker task, and is excluded here) with NO
+      // `deferredReason` recorded is exactly the byte-identical "parked-by-design vs. forgotten" defect
+      // this card fixes — the `updateProjectTask` guard (mcp/tasks.ts) refuses to CREATE one going
+      // forward, so this set is bounded to legacy rows that predate that guard, and it SHRINKS to zero as
+      // each one is backfilled with a reason via tasks_update. Chosen surfacing behavior: NOT a new nag
+      // cadence of its own — it rides the SAME idle-nudge cadence/throttle already gated above (only
+      // reached once a manager is ALREADY idle past its configured idleNudgeMinutes), so a documented
+      // (has a reason) deferral, however old, is NEVER mentioned here — "reason recorded" is the quiet
+      // signal, not age (the card's own §WHAT THE DEFECT ACTUALLY IS is explicit that age alone cannot
+      // tell a legitimately long-parked epic from a forgotten card). Same discount axes as `openCards`
+      // MINUS the deferred exclusion itself (held/review/excluded-lane/platform-parked/pending-request
+      // still silence it — those are independent "nothing to do" signals, not this one).
+      const undocumentedManualDeferrals = nonTerminal.filter((t) =>
+        t.held !== true
+        && t.deferred === true
+        && t.deferredUntilTaskId == null
+        && t.deferredStuck !== true
+        && !t.deferredReason
+        && t.columnKey !== reviewKey
+        && !excludedColumnKeys.has(t.columnKey)
+        && !(isPlatform && t.columnKey === parkedKey)
+        && !hasPendingQuestion(t.id),
+      );
       // If EVERY non-terminal card is non-actionable (held/deferred/pending-request — ≥1 exists, 0
       // genuinely-actionable) AND there's no review-lane card to merge AND no genuinely-stranded worker to
-      // check on either, the manager has nothing it can action and no way to clear the gate → skip silently
-      // instead of deadlock-nudging. A truly empty board (no cards at all) still nudges — the manager should
-      // `idle_report 'done'`. But board card b9d479b0: a live STRANDED worker is independently actionable
-      // (check on it / worker_message it) even when every OTHER card is non-actionable — don't let this skip
-      // re-silence exactly the manager that should be checking on its stranded worker.
-      if (strandedWorkers.length === 0 && !hasReviewCards && nonTerminal.length > 0 && openCards.length === 0) continue;
+      // check on either AND no undocumented manual deferral to flag, the manager has nothing it can action
+      // and no way to clear the gate → skip silently instead of deadlock-nudging. A truly empty board (no
+      // cards at all) still nudges — the manager should `idle_report 'done'`. But board card b9d479b0: a
+      // live STRANDED worker is independently actionable (check on it / worker_message it) even when every
+      // OTHER card is non-actionable — don't let this skip re-silence exactly the manager that should be
+      // checking on its stranded worker. The undocumented-deferral case is the SAME shape: it must not be
+      // swallowed by this skip either, or a board that's ENTIRELY undocumented-deferred cards would never
+      // once get flagged (card c90e9525's central defect, reproduced inside this very skip if left out).
+      if (strandedWorkers.length === 0 && !hasReviewCards && nonTerminal.length > 0 && openCards.length === 0 && undocumentedManualDeferrals.length === 0) continue;
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's
@@ -410,10 +437,20 @@ export class IdleWatcher {
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
           `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
           `decision/credential/access? File a Request via question_ask instead. Resume the loop if appropriate.`;
+      // Card c90e9525: a low-key, non-nagging mention of any undocumented manual deferral — bundled into
+      // whichever nudge already fired above for OTHER reasons (or, via the skip guard above, the ONLY
+      // reason this nudge fired at all). Never phrased as actionable work or a request to un-defer
+      // anything (DoD-1: never auto-clear) — just "here's what would silence this permanently".
+      const deferralIds = undocumentedManualDeferrals.slice(0, ACTIONABLE_LIST_CAP).map((t) => t.id.slice(0, 8)).join(", ");
+      const undocumentedDeferralSuffix = undocumentedManualDeferrals.length === 0
+        ? ""
+        : ` (Also: ${undocumentedManualDeferrals.length} manually-deferred card(s) have no reason recorded — legacy, ` +
+          `predates this field, not actionable — add one via tasks_update(deferredReason:...) to silence this ` +
+          `permanently: ${deferralIds}${undocumentedManualDeferrals.length > ACTIONABLE_LIST_CAP ? `, +${undocumentedManualDeferrals.length - ACTIONABLE_LIST_CAP} more` : ""}.)`;
       // Card a193398f: append the bounded-recheck hint to the MANAGER branches only (they cite the
       // openTodos/stranded/live-worker counts this hint refers to) — the platform (Lead) branch above
       // doesn't surface those counts, so the hint wouldn't make sense appended there.
-      const finalMsg = isPlatform ? msg : msg + IDLE_NUDGE_BOUNDED_HINT;
+      const finalMsg = isPlatform ? msg + undocumentedDeferralSuffix : msg + undocumentedDeferralSuffix + IDLE_NUDGE_BOUNDED_HINT;
       try { pty.enqueueStdin(m.id, finalMsg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console

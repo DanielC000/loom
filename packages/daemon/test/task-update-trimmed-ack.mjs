@@ -39,16 +39,19 @@ try {
   check("(1) columnKey-only update: `changed` names the patched field", Array.isArray(moved.changed) && moved.changed.includes("columnKey") && moved.changed.length === 1);
   check("(1) columnKey-only update: persisted to the DB", db.getTask(card.id).columnKey === "review" && db.getTask(card.id).body.length === 400);
 
-  // (2) priority/held/deferred-only patch: same trimmed shape.
-  const reprioritized = await updateProjectTask(db, "projA", card.id, { priority: "p0", held: true, deferred: true });
+  // (2) priority/held/deferred-only patch: same trimmed shape. deferredReason is REQUIRED alongside
+  // deferred:true since card c90e9525 — a manual deferral (no deferredUntilTaskId) with no reason is
+  // now refused at set time; see task-manual-deferral-reason.mjs for that guard's own coverage.
+  const reprioritized = await updateProjectTask(db, "projA", card.id, { priority: "p0", held: true, deferred: true, deferredReason: "board-repair test deferral" });
   check("(2) priority/held/deferred-only update: body key is ABSENT", !("body" in reprioritized));
   check("(2) priority/held/deferred-only update: fields applied", reprioritized.priority === "p0" && reprioritized.held === true && reprioritized.deferred === true);
-  check("(2) `changed` names all three patched fields", ["priority", "held", "deferred"].every((k) => reprioritized.changed.includes(k)) && reprioritized.changed.length === 3);
+  check("(2) `changed` names all four patched fields", ["priority", "held", "deferred", "deferredReason"].every((k) => reprioritized.changed.includes(k)) && reprioritized.changed.length === 4);
 
   // (4) the trimmed ack is a superset-compatible task-ish object: every small field present.
   check("(4) trimmed ack carries the full small-field set",
     "id" in reprioritized && "title" in reprioritized && "columnKey" in reprioritized && "priority" in reprioritized &&
-    "position" in reprioritized && "held" in reprioritized && "deferred" in reprioritized && "updatedAt" in reprioritized);
+    "position" in reprioritized && "held" in reprioritized && "deferred" in reprioritized && "updatedAt" in reprioritized &&
+    "deferredAt" in reprioritized && "deferredReason" in reprioritized);
 
   // (3) a patch that DOES pass body returns the FULL task, body included. Card d0978321: a body write now
   // requires baseVersion — pass the card's CURRENT version (read fresh, mirroring how a real caller would

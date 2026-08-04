@@ -1586,6 +1586,14 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // base-schema index (mirrors `deferred_until_task_id`'s pattern, not `deferred`'s dual base+
   // migration one — this column never existed in CREATE TABLE, so there is nothing to index there).
   deferred_stuck: "INTEGER NOT NULL DEFAULT 0",
+  // Card c90e9525 — MANUAL-deferral self-explaining pair (see Task.deferredAt/Task.deferredReason's own
+  // docs). Both nullable, no DEFAULT (mirrors held_by/repo_key/deferred_until_task_id): every legacy row
+  // backfills to NULL on both — there is no true start time or reason to recover for a pre-existing
+  // deferral, and the migration must never invent one (card DoD-4). NULL reads as "not recorded", not as
+  // a stated reason. Stamped/required server-side only at the ONE agent-facing choke point
+  // (updateProjectTask, mcp/tasks.ts) — never a raw pass-through DB write.
+  deferred_at: "TEXT",
+  deferred_reason: "TEXT",
   // Card d0978321 — optimistic-concurrency CAS token for title/body writes, exact mirror of
   // PROJECT_MEMORY_ADDED_COLUMNS's own `version` entry below. NOT NULL + constant DEFAULT 1 backfills
   // every legacy row to version 1 in place, the same starting point a brand-new row gets — see
@@ -5356,9 +5364,9 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0 }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck,deferred_at,deferred_reason)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck,@deferredAt,@deferredReason)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -5372,7 +5380,7 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
@@ -5388,8 +5396,8 @@ export class Db {
     const touchesContent = patch.title !== undefined || patch.body !== undefined;
     const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, version=@version WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null, deferredStuck: next.deferredStuck ? 1 : 0 });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, version=@version WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null, deferredStuck: next.deferredStuck ? 1 : 0, deferredAt: next.deferredAt ?? null, deferredReason: next.deferredReason ?? null });
   }
   /**
    * Optimistic-concurrency-guarded wrapper around {@link updateTask} (card d0978321) — mirrors
@@ -5408,7 +5416,7 @@ export class Db {
    */
   updateTaskChecked(
     id: string,
-    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck">>,
+    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason">>,
     baseVersion: number | undefined,
   ): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } {
     const run = this.db.transaction((): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } => {
@@ -7132,6 +7140,8 @@ function toTask(r0: unknown): Task {
     deferred: (r.deferred as number) === 1,
     deferredUntilTaskId: (r.deferred_until_task_id as string | null) ?? null,
     deferredStuck: (r.deferred_stuck as number | null) === 1,
+    deferredAt: (r.deferred_at as string | null) ?? null,
+    deferredReason: (r.deferred_reason as string | null) ?? null,
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     mergedSha: (r.merged_sha as string | null) ?? null,
