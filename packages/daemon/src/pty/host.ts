@@ -97,6 +97,62 @@ function textSignature(text: string): { len: number; hash: string } {
 }
 
 /**
+ * Card c2c750a9: how many of the most-recent WRITTEN submissions `Live.recentWrittenTurns` retains per
+ * session, oldest-first, for the composer-accumulation detector below. Small and bounded — the hash-
+ * confirmed specimen this detector was built from (card 736de9c0) needed only 3 (current + 2 preceding);
+ * this leaves headroom without letting the ring (and the per-check concatenation cost) grow unbounded.
+ */
+const COMPOSER_ACCUM_WINDOW = 8;
+
+/**
+ * Card c2c750a9 — the CONSUMING half of card 736de9c0's hash-confirmed finding: the engine's
+ * UserPromptSubmit hook can report back the composer's whole accumulated buffer (everything written
+ * since the composer last genuinely cleared), not just the current turn's own text, when a clear is
+ * silently missed between submissions. `[prompt-echo]` (below) already logs every field this needs on
+ * every submission — this function is the first thing that actually READS it.
+ *
+ * TWO STAGES, deliberately kept separate (736de9c0's own counterexample: `A+B+C` and `C+A+B` share length
+ * 11105 but hash `1136780e` vs `687d2824` — a sum cannot pin ordering, only a hash can):
+ *   TRIGGER     — `reportedLen` equals the SUM of the current write's length plus one-or-more IMMEDIATELY-
+ *                 PRECEDING writes' lengths (a contiguous suffix of `window`, which is oldest-first and
+ *                 always ends with the current submission's own entry).
+ *   CONFIRMATION — `fnv1a32` of those same payloads' TEXT, concatenated in that same gen order, BARE (no
+ *                 separator bytes), equals `reportedHash`. Only a length-AND-order match is a genuine
+ *                 accumulation; a length-only match (same total, different order/content) is refused here
+ *                 — see the reorder counterexample above.
+ * Tries the SMALLEST span first (k=2 upward) and returns the first CONFIRMED (hash-matching) span it
+ * finds; if none confirm, returns the smallest span whose SUM matched anyway (`confirmed: false`) so a
+ * caller can tell "no candidate at all" apart from "a candidate existed and the hash refused it" — the
+ * exact distinction card c2c750a9's DoD requires demonstrating.
+ *
+ * ⚠️ COVERAGE LIMIT this function cannot lift (state in any caller's own log/report too, per the card):
+ * `[prompt-echo]` fires only at the NEXT write — an accumulation with no SUBSEQUENT submission on that
+ * session emits nothing and is structurally invisible here. Scope every claim this produces to
+ * "accumulation detectable at the next write", never "duplicates detected" (card 736de9c0's own limit).
+ * Also out of scope by construction: this compares SUBMITTED-TURN text (`live.lastPrompt` / `hook.prompt`,
+ * already fully decoded), never raw `[pty-write]` byte chunks — so the give-up clear's
+ * `BACKSPACE.repeat(N)` false-signature class (content-identical by construction, see `ptyWrite`'s own
+ * doc) never reaches this comparison at all; it doesn't need excluding here because it was never included.
+ */
+function detectComposerAccumulation(
+  reportedLen: number,
+  reportedHash: string,
+  window: ReadonlyArray<{ gen: number; text: string }>,
+): { confirmed: boolean; spanGens: number[]; sumOfWrittenLens: number; concatenatedHash: string } | null {
+  let bestUnconfirmed: { spanGens: number[]; sumOfWrittenLens: number; concatenatedHash: string } | null = null;
+  for (let k = 2; k <= window.length; k++) {
+    const span = window.slice(window.length - k);
+    const sum = span.reduce((s, e) => s + e.text.length, 0);
+    if (sum !== reportedLen) continue;
+    const concatenatedHash = fnv1a32(span.map((e) => e.text).join(""));
+    const spanGens = span.map((e) => e.gen);
+    if (concatenatedHash === reportedHash) return { confirmed: true, spanGens, sumOfWrittenLens: sum, concatenatedHash };
+    if (!bestUnconfirmed) bestUnconfirmed = { spanGens, sumOfWrittenLens: sum, concatenatedHash };
+  }
+  return bestUnconfirmed ? { confirmed: false, ...bestUnconfirmed } : null;
+}
+
+/**
  * Card 78e4b3f2 — the RECIPIENT-side half of duplicate legibility (the sender-side half, card 417cea0a,
  * is the `[loom:redelivery-parked]`/`[loom:redelivery-confirmed]` notices above). Duplicate-over-loss
  * (`bc0774c4`) stays exactly as it is — this does not reduce or gate a single re-delivery — it only marks
@@ -2068,6 +2124,16 @@ interface Live {
   // turn's own current-turn owner-auth (Primitive A) plus the trust window/confirm round-trip — the
   // widened quote-source never substitutes for either of those.
   recentOwnerTurns: string[];
+  // Card c2c750a9: a BOUNDED, oldest-first ring of the last `COMPOSER_ACCUM_WINDOW` submitted turns'
+  // (`gen`, text) — pushed once per `submit()` call, at the same point `gen` itself is minted, so it
+  // always ends with the CURRENT submission by the time `[prompt-echo]` reads it later. Feeds
+  // `detectComposerAccumulation`'s window (see that function's own doc for the two-stage sum+hash design
+  // it exists to serve). Deliberately keyed on `gen`, never `seq` — `gen` is per-Live (reset on every
+  // fresh spawn/resume, never persisted), so this needs no separate per-boot-epoch bookkeeping. Storing
+  // full TEXT (not just a length+hash signature like `ambiguousDispatches`) is intentional here: the
+  // detector's CONFIRMATION stage must hash the actual concatenation in gen order, which a signature alone
+  // cannot reconstruct — bounded to a handful of entries, this is cheap.
+  recentWrittenTurns: { gen: number; text: string }[];
   // Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
   // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route only — null for a
   // DM route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own
@@ -3463,6 +3529,7 @@ export class PtyHost {
       activeTurnOwnerText: null,
       lastPromptOwnerText: null,
       recentOwnerTurns: [],
+      recentWrittenTurns: [],
       activeTurnSenderId: null,
       lastPromptSenderId: null,
       activeTurnProactive: false,
@@ -3619,7 +3686,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -3697,7 +3764,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -4194,6 +4261,23 @@ export class PtyHost {
               const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
+              // Card c2c750a9: the sum+hash composer-accumulation detector — CONSUMES the very fields
+              // [prompt-echo]/[prompt-mismatch] already log, on every mismatch, rather than adding a new
+              // signal. Two DISTINCT outcomes, logged under two DISTINCT tags on purpose (never conflate
+              // them — that is the whole point of keeping the two stages separate, see
+              // detectComposerAccumulation's own doc for the reorder counterexample this guards against):
+              // CONFIRMED (sum AND hash both match, in gen order) is a real accumulation; a sum-only match
+              // whose hash confirmation REFUSES is a coincidence (same total length, different content or
+              // order) that must never be reported as one, but is still worth a quiet trace of what the
+              // trigger stage alone would have flagged.
+              const accumulation = detectComposerAccumulation(reported.length, sigReported.hash, live.recentWrittenTurns);
+              if (accumulation?.confirmed) {
+                // eslint-disable-next-line no-console
+                console.log(`[composer-accumulation] ${sessionId} CONFIRMED gen=${live.submitGeneration} spanGens=${JSON.stringify(accumulation.spanGens)} sumOfWrittenLens=${accumulation.sumOfWrittenLens} reportedLen=${reported.length} concatenatedHash=${accumulation.concatenatedHash} — the engine reported back everything Loom wrote since the composer last genuinely cleared (Loom wrote each of these EXACTLY ONCE — this is not a redelivery, see card 736de9c0). LIMIT: detectable only because THIS write caught the residual — an accumulation with no later write on this session is structurally invisible to this detector.`);
+              } else if (accumulation && !accumulation.confirmed) {
+                // eslint-disable-next-line no-console
+                console.log(`[composer-accumulation-candidate] ${sessionId} sum-matched but hash confirmation REFUSED gen=${live.submitGeneration} spanGens=${JSON.stringify(accumulation.spanGens)} sumOfWrittenLens=${accumulation.sumOfWrittenLens} reportedLen=${reported.length} concatenatedHash=${accumulation.concatenatedHash} reportedHash=${sigReported.hash} — same total length as a candidate accumulation span, but the content/order doesn't match; NOT reported as [composer-accumulation].`);
+              }
             }
           }
         }
@@ -5447,6 +5531,13 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
+    // Card c2c750a9: record THIS generation's own (gen, text) into the composer-accumulation window —
+    // once per submit() call (never per Enter-retry, which re-fires without a new submit()), so the ring
+    // always holds exactly one entry per generation, oldest-first, ending with this one. Must happen here
+    // (not later) so a late/async writeChunked failure still leaves the entry in place — the accumulation
+    // this detects is about what the COMPOSER received, not whether the write later succeeded.
+    live.recentWrittenTurns.push({ gen, text });
+    if (live.recentWrittenTurns.length > COMPOSER_ACCUM_WINDOW) live.recentWrittenTurns.shift();
     // Card 4a0af485: reset for THIS fresh generation — stamped for real by `fireEnterAndVerify`'s first
     // attempt once the actual Enter write happens (not here — this is only the paste, not the Enter yet).
     live.currentGenFirstWrittenAt = null;
