@@ -1580,6 +1580,12 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // byte-identical-to-today case (see Task.deferredUntilTaskId's own doc for the read-time auto-clear
   // this drives). No base-schema index or constraint references this column.
   deferred_until_task_id: "TEXT",
+  // Card 93669813 — derived-but-persisted "this deferral's blocker can no longer be shown to
+  // resolve" signal; see Task.deferredStuck's own doc. NOT NULL + constant DEFAULT 0 backfills every
+  // legacy row to "not stuck" in place (mirrors `deferred`'s own column) — added-columns only, no
+  // base-schema index (mirrors `deferred_until_task_id`'s pattern, not `deferred`'s dual base+
+  // migration one — this column never existed in CREATE TABLE, so there is nothing to index there).
+  deferred_stuck: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -5345,9 +5351,9 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0 }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -5361,14 +5367,14 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null, deferredStuck: next.deferredStuck ? 1 : 0 });
   }
   /**
    * Write-through cache-fill for a task's ship-state (card 1eebc46a) — used ONLY by the drawer's lazy
@@ -7081,6 +7087,7 @@ function toTask(r0: unknown): Task {
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
     deferredUntilTaskId: (r.deferred_until_task_id as string | null) ?? null,
+    deferredStuck: (r.deferred_stuck as number | null) === 1,
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     mergedSha: (r.merged_sha as string | null) ?? null,

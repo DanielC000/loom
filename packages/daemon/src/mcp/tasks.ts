@@ -29,7 +29,7 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
  *  manager triaging the board sees WHY a card is deferred without a per-card tasks_get — `deferred` was
  *  not previously in this summary at all; adding it here is scoped to what this card needs (`held` stays
  *  out, a separate pre-existing gap, not this card's concern). */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId">;
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck">;
 
 /**
  * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
@@ -84,14 +84,19 @@ export async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Ta
 }
 
 /**
- * {@link resolveDeferredEffective}'s return: the EFFECTIVE `deferred` value a read should present, plus
- * whether that differs from the raw stored row (`autoCleared`) — a caller uses `autoCleared` to decide
- * whether a write-through persist is warranted (see that function's own doc for why this must be a
- * true→false TRANSITION guard, not an unconditional write on every read).
+ * {@link resolveDeferredEffective}'s return: the EFFECTIVE `deferred`/`deferredStuck` values a read
+ * should present, plus whether either differs from the raw stored row (`autoCleared`/`stuckChanged`) —
+ * a caller uses those to decide whether a write-through persist is warranted (see that function's own
+ * doc for why this must be a genuine-TRANSITION guard, not an unconditional write on every read).
  */
 export interface ResolvedDeferredState {
   deferred: boolean;
   autoCleared: boolean;
+  /** Card 93669813 — see {@link Task.deferredStuck}'s own doc. Always `false` while `deferred` is `false`. */
+  stuck: boolean;
+  /** Whether `stuck` differs from the row's raw persisted `deferredStuck` — gates the write-through, same
+   *  genuine-transition guard as `autoCleared` (fires on stuck→unstuck too, e.g. a reopened blocker). */
+  stuckChanged: boolean;
 }
 
 /**
@@ -109,46 +114,89 @@ export interface ResolvedDeferredState {
  * not on every subsequent read of an already-cleared row — an unconditional write-on-every-read would
  * write-storm every deferred card on every `tasks_list` poll and needlessly bump `updatedAt` repeatedly.
  *
- * `includeMerged:false` (the companion board's latency-sensitive skip) and a missing/cross-project/
- * dangling blocker (deleted since being validly set, or somehow not on this project — the set-time guard
- * in {@link updateProjectTask} prevents the latter going forward, but a read must still degrade safely
- * for data written before that guard, or a blocker deleted afterward) both fall through to "stays
- * deferred, no clear" — never throws, never silently drops the card's deferred state.
+ * A missing/cross-project/dangling blocker (deleted since being validly set, or somehow not on this
+ * project — the set-time guard in {@link updateProjectTask} prevents the latter going forward, but a
+ * read must still degrade safely for data written before that guard, or a blocker deleted afterward)
+ * falls through to "stays deferred, no clear" — never throws, never silently drops the card's deferred
+ * state.
+ *
+ * Card 93669813 — ALSO derives `stuck` (see {@link Task.deferredStuck}'s own doc for the full contract
+ * and its deliberate fail-toward-visible false-positive route): `true` when the blocker is unreachable
+ * (missing / cross-project — the same dangling case above) OR when it's sitting in the project's
+ * `terminal`-role column while `merged` is still null (closed without ever producing a squash commit —
+ * the doctrine-sanctioned 0-commit `done` outcome). `stuck` never flips `deferred` itself; it rides the
+ * SAME blocker lookup and merged-state resolution already done for the auto-clear check above, so it
+ * costs nothing extra when `deferred` is about to auto-clear anyway (that path returns `stuck:false`,
+ * since a merged blocker was never stuck).
+ *
+ * ⚠️ `includeMerged:false` (the companion board's latency-sensitive skip — {@link resolveMergedInfo}'s
+ * own doc) means the blocker's merged state was NEVER RESOLVED on THIS read: `stuck` is UNKNOWN here,
+ * not `false`. This is handled as its OWN branch, separate from `!raw`/`!deferredUntilTaskId` (those two
+ * ARE genuine "not stuck" determinations, independent of merged state, and correctly self-heal a stale
+ * persisted `deferredStuck`) — collapsing all three into one "return not-stuck" path would assert a
+ * measurement that was never taken, and the write-through below would then PERSIST that false assertion,
+ * silently clearing a genuinely-stuck card's flag the next time anything reads with `includeMerged:false`
+ * (review finding on card 93669813: the companion board's `listProjectTasks`/`getProjectTask` calls do
+ * exactly this — a routine companion board read must never be able to un-stick a stuck card). So the
+ * `includeMerged:false` branch PRESERVES whatever `stuck` was already persisted and reports
+ * `stuckChanged:false` unconditionally — never writes, whichever way the stored value happens to read.
  */
 export async function resolveDeferredEffective(
-  db: Db, projectId: string, task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId">, includeMerged: boolean,
+  db: Db, projectId: string, task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId" | "deferredStuck">, includeMerged: boolean,
 ): Promise<ResolvedDeferredState> {
   const raw = task.deferred === true;
-  if (!raw || !task.deferredUntilTaskId || !includeMerged) return { deferred: raw, autoCleared: false };
+  const rawStuck = task.deferredStuck === true;
+  // Genuine determinations, independent of merged state — deferred:false or a blocker-less deferral
+  // (a manual, owner/upstream-gated sequencing marker) are NEVER stuck. Self-heals a stale `deferredStuck`
+  // left over from a since-cleared or re-pointed deferral.
+  if (!raw || !task.deferredUntilTaskId) {
+    return { deferred: raw, autoCleared: false, stuck: false, stuckChanged: rawStuck !== false };
+  }
+  // UNMEASURED, not a determination — see this function's own doc. Preserve, never write.
+  if (!includeMerged) return { deferred: true, autoCleared: false, stuck: rawStuck, stuckChanged: false };
   const blocker = db.getTask(task.deferredUntilTaskId);
-  if (!blocker || blocker.projectId !== projectId) return { deferred: true, autoCleared: false };
+  if (!blocker || blocker.projectId !== projectId) {
+    return { deferred: true, autoCleared: false, stuck: true, stuckChanged: rawStuck !== true }; // dangling/cross-project blocker
+  }
   const { merged } = await resolveMergedInfo(db, projectId, blocker, true);
-  if (!merged) return { deferred: true, autoCleared: false };
-  return { deferred: false, autoCleared: true };
+  if (merged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false };
+  const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+  const terminalKey = columnKeyForRole(cols, "terminal");
+  const stuck = blocker.columnKey === terminalKey; // closed with no proven merge → stuck
+  return { deferred: true, autoCleared: false, stuck, stuckChanged: stuck !== rawStuck };
 }
 
 /**
- * Write-through persist for {@link resolveDeferredEffective}'s `autoCleared` transition — updates the
- * EXISTING `deferred` column to the derived truth (never a new column), so downstream consumers that
- * read `deferred` straight off the DB (the idle watchdog, `db.listTasks`) self-heal on the next read
- * that happens to pass through this MCP layer, without needing any knowledge of `deferredUntilTaskId`
- * themselves. Best-effort / NON-FATAL by design (card 793ac76d review): a board read must never fail or
- * alter its OWN result because this persist failed — the caller already computed the correct in-memory
- * value from `resolveDeferredEffective` and returns that regardless of whether this write lands.
+ * Write-through persist for {@link resolveDeferredEffective}'s `autoCleared`/`stuckChanged` transitions —
+ * updates the EXISTING `deferred`/`deferredStuck` columns to the derived truth (never a new cached flag
+ * beyond the persisted `deferredStuck` column itself), so downstream consumers that read them straight off
+ * the DB (the idle watchdog, `db.listTasks`) self-heal on the next read that happens to pass through this
+ * MCP layer, without needing any knowledge of `deferredUntilTaskId` themselves. Best-effort / NON-FATAL by
+ * design (card 793ac76d review): a board read must never fail or alter its OWN result because this persist
+ * failed — the caller already computed the correct in-memory value from `resolveDeferredEffective` and
+ * returns that regardless of whether this write lands.
  *
- * Also clears `deferredUntilTaskId` to `null` in the SAME write (card cf62c1ef) — once a named blocker's
- * merge has been observed and acted on, the companion field has served its purpose. Leaving it set was a
- * footgun: a LATER, unrelated `tasks_update(deferred:true)` (with no new `deferredUntilTaskId`) would
- * silently inherit the stale blocker reference, and since that blocker is already merged, the very next
- * read would auto-clear the manager's fresh, deliberate re-defer without ever reporting it. Clearing the
- * companion here means a re-defer always starts clean — it lands on the plain "deferred with no blocker"
- * path (never auto-clears, see resolveDeferredEffective) unless the caller explicitly names a NEW blocker.
+ * On an `autoCleared` transition, also clears `deferredUntilTaskId` to `null` in the SAME write (card
+ * cf62c1ef) — once a named blocker's merge has been observed and acted on, the companion field has served
+ * its purpose. Leaving it set was a footgun: a LATER, unrelated `tasks_update(deferred:true)` (with no new
+ * `deferredUntilTaskId`) would silently inherit the stale blocker reference, and since that blocker is
+ * already merged, the very next read would auto-clear the manager's fresh, deliberate re-defer without
+ * ever reporting it. Clearing the companion here means a re-defer always starts clean — it lands on the
+ * plain "deferred with no blocker" path (never auto-clears, see resolveDeferredEffective) unless the
+ * caller explicitly names a NEW blocker. A `stuckChanged`-only write (deferred stays true) leaves
+ * `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it stuck.
  */
-function persistDeferredAutoClearBestEffort(db: Db, taskId: string): void {
+function persistDeferredStateBestEffort(
+  db: Db, taskId: string, state: Pick<ResolvedDeferredState, "autoCleared" | "stuck" | "stuckChanged">,
+): void {
+  if (!state.autoCleared && !state.stuckChanged) return;
   try {
-    db.updateTask(taskId, { deferred: false, deferredUntilTaskId: null });
+    const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
+      ? { deferred: false, deferredUntilTaskId: null, deferredStuck: false }
+      : { deferredStuck: state.stuck };
+    db.updateTask(taskId, patch);
   } catch (e) {
-    console.warn(`[mcp/tasks] best-effort deferred auto-clear write failed for task ${taskId} (read result is unaffected):`, e);
+    console.warn(`[mcp/tasks] best-effort deferred/deferredStuck write-through failed for task ${taskId} (read result is unaffected):`, e);
   }
 }
 
@@ -198,7 +246,7 @@ export interface ListTasksOptions {
 /** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
 export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
-  deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null,
+  deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck === true,
 });
 
 /**
@@ -274,12 +322,12 @@ export async function listProjectTasks(
   const withMerged: TaskWithMerged[] = await Promise.all(
     tasks.map(async (t) => {
       const merged = (await resolveMergedInfo(db, projectId, t, includeMerged)).merged;
-      const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, t, includeMerged);
-      if (autoCleared) persistDeferredAutoClearBestEffort(db, t.id);
-      // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredAutoClearBestEffort) —
+      const { deferred, autoCleared, stuck, stuckChanged } = await resolveDeferredEffective(db, projectId, t, includeMerged);
+      persistDeferredStateBestEffort(db, t.id, { autoCleared, stuck, stuckChanged });
+      // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) —
       // mirror that in THIS response too, so the read that reports the clear never echoes a stale
       // non-null blocker id alongside deferred:false (card cf62c1ef).
-      return { ...t, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, merged };
+      return { ...t, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, deferredStuck: stuck, merged };
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
@@ -371,13 +419,13 @@ export async function getProjectTask(
   if ("error" in found) return found;
   const includeMerged = opts.includeMerged ?? true;
   const merged = (await resolveMergedInfo(db, projectId, found, includeMerged)).merged;
-  // Deferred auto-clear (card 793ac76d) — see resolveDeferredEffective's own doc.
-  const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, found, includeMerged);
-  if (autoCleared) persistDeferredAutoClearBestEffort(db, found.id);
-  // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredAutoClearBestEffort) — mirror
+  // Deferred auto-clear + stuck-visibility (card 793ac76d / 93669813) — see resolveDeferredEffective's own doc.
+  const { deferred, autoCleared, stuck, stuckChanged } = await resolveDeferredEffective(db, projectId, found, includeMerged);
+  persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged });
+  // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) — mirror
   // that here too, so this same read never echoes a stale non-null blocker id alongside deferred:false.
   return {
-    ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, merged,
+    ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
   };
 }

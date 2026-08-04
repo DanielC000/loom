@@ -1453,6 +1453,35 @@ export interface Task {
    */
   deferredUntilTaskId?: string | null;
   /**
+   * Card 93669813 — a DERIVED (but persisted, self-healing) signal that `deferred`'s own release
+   * condition ("until `deferredUntilTaskId` MERGES") can no longer be reached: the blocker is gone
+   * (deleted, or cross-project — a dangling reference), OR the blocker has already reached the
+   * project's `terminal`-role column while its `merged` is still null (the doctrine-sanctioned
+   * 0-commit `done` outcome — no squash commit ever lands, so `merged` never resolves). Meaningless
+   * while `deferred` is false.
+   *
+   * ⚠️ DOES NOT REDEFINE WHEN `deferred` CLEARS — `deferred` stays keyed on `merged` exactly as
+   * before (see `deferredUntilTaskId`'s own doc); a 0-commit close is a legitimate outcome and this
+   * field must never auto-clear `deferred`, only make the stuck state VISIBLE (previously: nothing
+   * surfaced it anywhere, and `deferred:true` is independently discounted from the idle watchdog's
+   * actionable count — see idle-watcher.ts — so the card was invisible in exactly the direction that
+   * would reveal the problem).
+   *
+   * ⚠️ `merged === null` has THREE causes per `getTaskMergedInfo`'s contract: never merged, landed
+   * outside the git scan window, or a git read failure — so a blocker sitting in the terminal column
+   * that genuinely DID ship (just outside the scan window, or during a transient git failure) can
+   * still read `deferredStuck:true`. This is a DELIBERATE fail-toward-VISIBLE choice, not a proof of
+   * unreachability: a card wrongly surfaced is noticed and dismissed in seconds, while a card wrongly
+   * hidden stays invisible forever (the original defect). Read this field as "cannot currently be
+   * SHOWN to have shipped, and its blocker has already closed" — never as "proven unreachable."
+   *
+   * Computed in `resolveDeferredEffective` (mcp/tasks.ts) off the SAME blocker + merged-state lookup
+   * already performed for the `deferred` auto-clear — no extra git call. Write-through persisted on a
+   * genuine transition only (mirrors `deferred`'s own auto-clear guard), so a raw-DB reader (the idle
+   * watchdog, `hasPendingBoardWork`) self-heals without knowing anything about `deferredUntilTaskId`.
+   */
+  deferredStuck?: boolean;
+  /**
    * Multi-repo epic 49136451, phase 1: which of the project's registry repos this card targets —
    * a key into `Project.repos`, or `null`/absent (the default) meaning the project's PRIMARY repo
    * (`repoPath`). One task = one repo (cross-repo atomic tasks are deliberately deferred — see the

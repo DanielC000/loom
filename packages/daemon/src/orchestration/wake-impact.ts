@@ -24,9 +24,12 @@ import type { RestartWakeImpact } from "./restart.js";
  * parked — is pending work a manager should drive; a held card is the owner's brake and `deferred` is
  * the manager's own sequencing marker, neither ever counts, in any column) AND is NOT in a column
  * flagged `excludeFromIdleWatchdog` (a genuine dead-end/parking lane, e.g. "Dropped" — discounted the
- * same way, without per-card `deferred:true` toil). Raw signal only — see {@link strandedBoardWork} for
- * whether it actually forces the restart nudge. Mirrors the idle-watcher's actionable-count definition
- * (orchestration/idle-watcher.ts) so the two stay consistent.
+ * same way, without per-card `deferred:true` toil). A STUCK deferral (card 93669813 — `deferredStuck`,
+ * see Task.deferredStuck's own doc) is the one exception: its blocker can no longer be shown to
+ * resolve, so it counts as actionable again rather than staying discounted forever. Raw signal only —
+ * see {@link strandedBoardWork} for whether it actually forces the restart nudge. Mirrors the
+ * idle-watcher's actionable-count definition (orchestration/idle-watcher.ts) so the two stay consistent
+ * — a divergence here would silently reopen the same invisibility bug in this second definition.
  */
 export function hasPendingBoardWork(db: Db, id: string): boolean {
   try {
@@ -38,7 +41,7 @@ export function hasPendingBoardWork(db: Db, id: string): boolean {
     const terminalKey = columnKeyForRole(cols, "terminal");
     const excludedColumnKeys = new Set(cols.filter((c) => c.excludeFromIdleWatchdog === true).map((c) => c.key));
     return db.listTasks(projectId).some(
-      (t) => t.columnKey !== terminalKey && !t.held && t.deferred !== true && !excludedColumnKeys.has(t.columnKey),
+      (t) => t.columnKey !== terminalKey && !t.held && (t.deferred !== true || t.deferredStuck === true) && !excludedColumnKeys.has(t.columnKey),
     );
   } catch {
     return true; // defensive: a board-read fault must never produce a false "no-op" stall

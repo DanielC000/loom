@@ -327,9 +327,15 @@ export class IdleWatcher {
       const pendingLegacyPrefixes = [...pendingQuestionTaskIds].filter((id) => id.length === 8);
       const hasPendingQuestion = (taskId: string): boolean =>
         pendingQuestionTaskIds.has(taskId) || pendingLegacyPrefixes.some((p) => taskId.startsWith(`${p}-`));
+      // Card 93669813: `deferred` alone no longer discounts a card whose deferral is STUCK — its
+      // blocker can no longer be shown to resolve (deleted, or closed 0-commit with no proven merge;
+      // see Task.deferredStuck's own doc) — a plain "still waiting on a live blocker" deferral is
+      // correctly discounted (t.deferred === true && t.deferredStuck !== true), but a stuck one is
+      // exactly the unreachable-forever state this card exists to stop hiding, so it counts as
+      // actionable again rather than silently pinning the board's "backlog drained" signal forever.
       const openCards = nonTerminal.filter((t) =>
         t.held !== true
-        && t.deferred !== true
+        && (t.deferred !== true || t.deferredStuck === true)
         && t.columnKey !== reviewKey
         && !excludedColumnKeys.has(t.columnKey)
         && !(isPlatform && t.columnKey === parkedKey)
@@ -344,7 +350,7 @@ export class IdleWatcher {
       const ACTIONABLE_LIST_CAP = 10;
       const actionableList = openCards
         .slice(0, ACTIONABLE_LIST_CAP)
-        .map((t) => `${t.id.slice(0, 8)} ${t.title} (held:${t.held === true}, deferred:${t.deferred === true})`)
+        .map((t) => `${t.id.slice(0, 8)} ${t.title} (held:${t.held === true}, deferred:${t.deferred === true}${t.deferredStuck === true ? " STUCK" : ""})`)
         .join("; ");
       const actionableSuffix = openCards.length === 0
         ? ""
