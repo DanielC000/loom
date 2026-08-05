@@ -254,8 +254,13 @@ export function composeProjectMemoryDigest(
   const restCap = Math.max(0, budgetTokens - relatedNeed);
   {
     const blocks: string[] = [];
+    // Card 91709c32 — every FLOOR note's block, fit or not, so the alarm below can report the tier's true
+    // total size instead of asserting an unmeasured per-note cause. `block` is already computed per `m`
+    // in this loop; captured here rather than re-calling `noteBlock`/`annotate` a second time.
+    const floorBlocks: string[] = [];
     for (const m of pinnedOrdered) {
       const block = noteBlock(m, annotate(m));
+      if (isNeverDrop(m)) floorBlocks.push(block);
       const candidate = ["## Pinned project memory (always included)", ...blocks, block].join(SECTION_SEP);
       const cap = isNeverDrop(m) ? budgetTokens : restCap;
       if (estimateTokens(candidate) > cap) {
@@ -279,8 +284,20 @@ export function composeProjectMemoryDigest(
     // undroppable was dropped" is an alarm about a broken guarantee, "the budget overflowed" is routine;
     // collapsing them would let the alarm arrive wearing the routine case's costume.
     if (droppedFloorKeys.length > 0) {
+      // Card 91709c32 — the drop condition is CUMULATIVE (the running `candidate` above, header + every
+      // already-accepted block + this note's own), never a per-note size test in isolation, so the alarm
+      // must report the OBSERVED fields (floor-tier total vs budget, how many fit) rather than assert a
+      // cause nothing computed — the class parent's fix shape (card 92902cc2 / a70ee7d). The prior text,
+      // "(their own size exceeds the budget)", is true only when the tier is a single oversized note; it
+      // is false in the ordinary case of many small notes whose SUM overflows (see the doc comment ~70
+      // lines above this block: "or the sum of several floor notes").
+      const floorTotalTokens = estimateTokens(
+        ["## Pinned project memory (always included)", ...floorBlocks].join(SECTION_SEP),
+      );
+      const floorFitCount = floorSorted.length - droppedFloorKeys.length;
       const alarmLine = `🚨 ALARM: ${droppedFloorKeys.length} note(s) tagged "${NEVER_DROP_TAG}" were STILL DROPPED ` +
-        `(their own size exceeds the budget) — this is a BROKEN GUARANTEE, not routine overflow: ${summarizeDroppedKeys(droppedFloorKeys)}`;
+        `— floor tier ≈ ${floorTotalTokens} tok vs budget ${budgetTokens} tok; ${floorFitCount} of ${floorSorted.length} fit ` +
+        `— this is a BROKEN GUARANTEE, not routine overflow: ${summarizeDroppedKeys(droppedFloorKeys)}`;
       pinnedSection = pinnedSection
         ? [pinnedSection, alarmLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", alarmLine].join(SECTION_SEP);

@@ -90,6 +90,12 @@ const mkEntry = ([key, textBytes, updatedAt], overrides = {}) => ({
   ...overrides,
 });
 
+// Card 91709c32 — replicates `noteBlock`'s exact rendering (not exported) so the alarm's reported
+// "floor tier ≈ N tok" can be checked against an INDEPENDENTLY computed total, not just re-derived from
+// the same source function it's meant to be verifying. Safe to inline here: every fixture entry in this
+// file uses `title: key` with no embedded whitespace, so `sanitizeTitle` is a no-op.
+const blockFor = (entry) => `### ${entry.title} (${entry.key})\n${entry.text.trim()}`;
+
 try {
   // ===================== 1. RED/GREEN discriminating control on the REAL live corpus =====================
   {
@@ -169,6 +175,36 @@ try {
       digest.indexOf("🚨 ALARM") !== digest.indexOf("⚠️"));
     check("(floor-overflow) the routine line does NOT also list the floor-tier's own dropped key (no double-reporting)",
       !digest.slice(digest.indexOf("⚠️")).includes("floor-b"));
+    // Card 91709c32 — the drop condition is CUMULATIVE (the running total across already-accepted floor
+    // blocks), so the alarm must report OBSERVED fields, never assert an unmeasured per-note cause. This is
+    // POSITIVE CONTROL (a): the floor tier's SUM overflows while each note individually is small enough to
+    // fit alone — the false "(their own size exceeds the budget)" clause would have been misleading here.
+    check("(floor-overflow) REGRESSION GUARD: the false per-note-size clause is gone",
+      !digest.includes("their own size exceeds the budget"));
+    const expectedFloorTotal = estimateTokens(
+      ["## Pinned project memory (always included)", blockFor(floorA), blockFor(floorB)].join("\n\n"),
+    );
+    check("(floor-overflow) the alarm reports the floor tier's TOTAL est tokens vs budget, computed independently of composeProjectMemoryDigest",
+      digest.includes(`floor tier ≈ ${expectedFloorTotal} tok vs budget ${tinyBudget} tok`));
+    check("(floor-overflow) the alarm reports how many floor notes fit vs the tier total (1 of 2 — the sum overflows, not any single note)",
+      digest.includes("1 of 2 fit"));
+  }
+
+  // ============ 4b. POSITIVE CONTROL (b): a genuinely SINGLE oversized floor note — still accurate ============
+  {
+    const soloFloor = mkEntry(["floor-solo-huge", 500, "2026-07-30T00:00:00.000Z"], { tags: [NEVER_DROP_TAG] });
+    const tinySoloBudget = 20; // smaller than even this one note's own rendered block
+    const { includedIds, droppedFloorKeys, digest } = composeProjectMemoryDigest([soloFloor], [], tinySoloBudget);
+    check("(floor-solo-oversize) the single floor note is dropped, not included",
+      droppedFloorKeys.includes("floor-solo-huge") && !includedIds.includes("id-floor-solo-huge"));
+    const expectedSoloTotal = estimateTokens(
+      ["## Pinned project memory (always included)", blockFor(soloFloor)].join("\n\n"),
+    );
+    check("(floor-solo-oversize) the alarm reports the note's own actual size (the single-note case where the OLD claim happened to be true)",
+      digest.includes(`floor tier ≈ ${expectedSoloTotal} tok vs budget ${tinySoloBudget} tok`));
+    check("(floor-solo-oversize) 0 of 1 fit", digest.includes("0 of 1 fit"));
+    check("(floor-solo-oversize) REGRESSION GUARD: the false per-note-size clause is not reintroduced here either",
+      !digest.includes("their own size exceeds the budget"));
   }
 
   // ===================== 5. deterministic tiebreak under equal timestamps =====================
