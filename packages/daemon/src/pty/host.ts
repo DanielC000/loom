@@ -1878,6 +1878,16 @@ interface Live {
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
   alive: boolean;
+  // Card bb3d9005 (S1): flips true SYNCHRONOUSLY at the same moment `live.pty.kill()` is issued — NOT
+  // at the async `'exit'` event, which is what `alive` itself waits for. The gap matters: node-pty's
+  // useConptyDll kill() path destroys `_inSocket` (a raw net.Socket with NO 'error' listener attached —
+  // only the OUT socket gets one) synchronously inside kill(), but the pty process can take tens of ms
+  // to actually exit, and `alive` stays true the whole time. A write reaching a destroyed `_inSocket`
+  // during that window throws an unhandled 'error' and crashes the WHOLE daemon (every live session,
+  // every project) — not just this one pty. Every write call site that re-checks aliveness immediately
+  // before calling `ptyWrite`/`writeChunked` must check `alive && !killed`, not `alive` alone. Never
+  // reset back to false (a fresh spawn/resume always gets a brand-new Live object, never a reused one).
+  killed: boolean;
   // Epoch ms when THIS pty process started — set once at creation for every kind. Distinct from the DB
   // session's createdAt (unchanged across a resume/recycle/upgrade): this is the CURRENT live process's
   // own start, so a resume/fork/recycle/companion-upgrade (all through createPty) each get a fresh value.
@@ -3520,6 +3530,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      killed: false,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       logBroken: false,
@@ -3707,6 +3718,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      killed: false,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       logBroken: false,
@@ -3787,6 +3799,7 @@ export class PtyHost {
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true,
+      killed: false,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       logBroken: false,
@@ -5620,12 +5633,14 @@ export class PtyHost {
       // defensive clear-prefix below — i.e. ASYNCHRONOUSLY, after the session may have died mid-burst
       // (writeChunked fires `done` on its not-alive path too — card 9ed20572). `ptyWrite` itself performs
       // no aliveness check (every caller is expected to), so skipping this guard would write to a dead pty.
+      // Card bb3d9005 (S1): `killed` too — `alive` alone stays true through the kill()→'exit' window
+      // (see Live.killed's own doc), which this async callback can land inside just as easily.
       const l = this.live.get(sessionId);
-      if (!l?.alive) return;
+      if (!l?.alive || l.killed) return;
       this.ptyWrite(sessionId, l, BRACKET_PASTE_START, "bracket-start");
       this.writeChunked(sessionId, text, () => {
         const l2 = this.live.get(sessionId);
-        if (!l2?.alive) return;
+        if (!l2?.alive || l2.killed) return;
         this.ptyWrite(sessionId, l2, BRACKET_PASTE_END, "bracket-end");
         const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
         setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
@@ -7208,13 +7223,17 @@ export class PtyHost {
     // Card 9ed20572: `done` must fire on EVERY exit path, including this not-alive one — a caller
     // (healIfStuck's give-up clear) threads `setBusy(false)` through it, and a skipped `done` here
     // would leave `busy` stuck forever if the session was already dead when the burst was scheduled.
-    if (!live?.alive) { done?.(); return; }
+    // Card bb3d9005 (S1): also treat `killed` as an exit path — `alive` alone stays true through the
+    // kill()→'exit' window (see Live.killed's own doc), and this is writeStdin's single choke point
+    // (a real human's raw keystrokes, deliberately ungated on busy/stopping), so it's directly reachable
+    // in that window.
+    if (!live?.alive || live.killed) { done?.(); return; }
     if (text.length === 0) { done?.(); return; }
     let i = 0;
     const step = (): void => {
       const l = this.live.get(sessionId);
-      // Same guarantee as above: the session died mid-burst — still fire `done` exactly once.
-      if (!l?.alive) { done?.(); return; }
+      // Same guarantee as above: the session died (or was killed) mid-burst — still fire `done` once.
+      if (!l?.alive || l.killed) { done?.(); return; }
       this.ptyWrite(sessionId, l, text.slice(i, i + PTY_WRITE_CHUNK_BYTES), "chunk");
       i += PTY_WRITE_CHUNK_BYTES;
       if (i >= text.length) { done?.(); return; }
@@ -7225,7 +7244,10 @@ export class PtyHost {
 
   repaint(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (live?.alive) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
+    // Card bb3d9005 (S1): `alive` alone stays true through the kill()→'exit' window — see Live.killed's
+    // doc. A viewer repaint landing in that window used to write to a destroyed socket and crash the
+    // whole daemon; `!live.killed` closes it.
+    if (live?.alive && !live.killed) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
   }
 
   stop(sessionId: string, mode: StopMode): void {
@@ -7244,6 +7266,9 @@ export class PtyHost {
     // during a deliberate stop serves no purpose. See Live.submitGeneration.
     live.submitGeneration++;
     if (mode === "hard") {
+      // Card bb3d9005 (S1): set BEFORE kill() — see Live.killed's own doc. `alive` won't flip to false
+      // until the async 'exit' event; `killed` closes the write-after-destroy race in that window.
+      live.killed = true;
       live.pty.kill(); // TerminateProcess on Windows; node-pty's conpty kill path walks _getConsoleProcessList() to kill the tree (not a Job Object — node-pty@1.1.0 has none)
       return;
     }
@@ -7252,7 +7277,11 @@ export class PtyHost {
     // has its turn INTERRUPTED by the two Ctrl-Cs and stays alive at an idle prompt (no Stop hook fires,
     // so busy stays stale) — escalateGracefulStop is what then drives it deterministically to exit.
     this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c");
-    setTimeout(() => { if (live.alive) this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
+    // Card bb3d9005 (S1): also check `killed` here — this delayed resend runs concurrently with
+    // escalateGracefulStop's own timers below, and ordinary setTimeout jitter can let it fire AFTER
+    // stage 3's kill() has already flipped `killed` true while `alive` is still true (measured: caught by
+    // this card's own regression test under real timer scheduling, not just reasoned about).
+    setTimeout(() => { if (live.alive && !live.killed) this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
     this.escalateGracefulStop(sessionId, live);
   }
 
@@ -7264,10 +7293,13 @@ export class PtyHost {
    *   • Stage 3 (KILL): STILL alive at the hard bound → a wedged turn that ignores Ctrl-C; hard-kill the
    *     pty (node-pty's conpty kill path, orphan-free — not a Job Object, node-pty@1.1.0 has none). This
    *     is the backstop that makes "graceful" deterministic.
-   * Every timer captures the SAME `live` and guards on `live.alive`, so once the pty exits (or its Live is
-   * REPLACED by a resume's fresh spawn — the old object keeps alive=false forever) each timer is an inert
-   * no-op. It therefore can NEVER kill a resumed session, and an IDLE stop (exited on stage 1) runs neither
-   * stage — its behaviour is unchanged. The pty.kill goes through the same orphan-free path as a hard stop.
+   * Every timer captures the SAME `live` and guards on `live.alive` (write-gating timers ALSO check
+   * `live.killed` — see Live.killed's own doc; card bb3d9005 S1 — since stage 3's kill() can fire while
+   * an earlier stage's own delayed resend is still pending, and ordinary setTimeout jitter offers no
+   * ordering guarantee between them), so once the pty exits (or its Live is REPLACED by a resume's fresh
+   * spawn — the old object keeps alive=false forever) each timer is an inert no-op. It therefore can
+   * NEVER kill a resumed session, and an IDLE stop (exited on stage 1) runs neither stage — its behaviour
+   * is unchanged. The pty.kill goes through the same orphan-free path as a hard stop.
    */
   private escalateGracefulStop(sessionId: string, live: Live): void {
     // Stage 2: the interrupt didn't exit the process → re-send the exit sequence from the idle prompt.
@@ -7276,13 +7308,16 @@ export class PtyHost {
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} graceful stop: still live after interrupt — re-sending exit sequence`);
       this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c");
-      setTimeout(() => { if (live.alive) this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
+      // Card bb3d9005 (S1): `killed` too — see the doc above this method.
+      setTimeout(() => { if (live.alive && !live.killed) this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
     }, GRACEFUL_STOP_RETRY_MS);
     // Stage 3: a turn that ignores Ctrl-C entirely must still die — bounded hard-kill escalation.
     setTimeout(() => {
       if (!live.alive) return;
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
+      // Card bb3d9005 (S1): same ordering as the hard-stop branch above — set BEFORE kill().
+      live.killed = true;
       live.pty.kill();
     }, GRACEFUL_STOP_KILL_MS);
   }

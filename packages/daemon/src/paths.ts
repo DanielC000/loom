@@ -269,6 +269,9 @@ export function isUsagePollerSuppressed(): boolean {
  * touching the load-bearing default spawn recipe (CLAUDE.md "do not regress"). Landing this capability and
  * flipping the production default are two separate decisions; this flag is only the first. Read at CALL
  * TIME (like `isLoomDev`) so a single test process can exercise both states.
+ * Card bb3d9005 (S4): when this flag is on, node-pty's native `LoadConptyDll` (conpty.cc) THROWS if the
+ * prebuilt `conpty\conpty.dll` isn't sitting next to the loaded `conpty.node` — a bad/incomplete install
+ * fails the spawn outright rather than silently falling back to the non-DLL path.
  */
 export function isPtyUseConptyDllEnabled(): boolean {
   return process.env.LOOM_PTY_USE_CONPTY_DLL === "1";
