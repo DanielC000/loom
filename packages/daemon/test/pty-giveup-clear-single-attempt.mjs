@@ -28,10 +28,6 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function sleepUntil(t0, targetMs) {
-  const remaining = targetMs - (Date.now() - t0);
-  if (remaining > 0) await sleep(remaining);
-}
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveupclear1-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -42,10 +38,9 @@ const MAX_ATTEMPTS = 1; // the degenerate config under test — give-up fires at
 // Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
 // bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
 // RECOVERY — nothing in this fake pty ever fires a confirming hook, so that wait always maxes out its
-// bound; giveUpAt() must account for it.
+// bound.
 const CONFIRM_SETTLE_POLL = 10;
 const CONFIRM_SETTLE_MAX_POLLS = 5;
-const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 // Card 3ce3fa39: the deferred clear rides the requeued entry's own next redrain, HELD from drain for
 // GIVE_UP_HOLD_MS pending a confirming hook (card 73d5c34a) — pinned small for this hermetic suite.
 const HOLD_MS = 10;
@@ -56,7 +51,6 @@ process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
-const giveUpAt = () => ENTER_DELAY + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -106,13 +100,20 @@ try {
   const SID = "sess-giveup-single-attempt";
   const TEXT = "STRANDED_AT_ATTEMPT_ONE";
   const { written, backspaceCount, entryCount } = spawnReady(SID);
-  const t0 = Date.now();
   const r = host.enqueueStdin(SID, TEXT);
   check("setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
   // Never confirm — give-up fires right after attempt 1's own verify window, with NO retry (and so no
-  // START+END re-assert) ever having run FOR THIS ATTEMPT.
-  await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+  // START+END re-assert) ever having run FOR THIS ATTEMPT. Card bbada785: poll (bounded, observed) for
+  // the give-up transition itself rather than sleeping a fixed budget past a computed worst-case deadline
+  // — a fixed absolute deadline racing a timer-driven transition is exactly the exposure this card is
+  // about. Nothing async can push busy back to true once give-up has fired, so the checks below are
+  // settled the instant the poll observes it, not a guess about whether "not yet" == "never".
+  const giveUpPollStart = Date.now();
+  while (busyLog[SID].at(-1) !== false && Date.now() - giveUpPollStart < 15_000) {
+    // TIMING-GUARD-SAFE: fully-awaited-completion — see the comment block immediately above this loop.
+    await sleep(20);
+  }
   check("exactly 1 Enter attempt was written (MAX_ATTEMPTS=1 — no retries)", entryCount() === 1);
   check("GIVE-UP RECOVERY: busy fell back to false", busyLog[SID].at(-1) === false);
   check("card 3ce3fa39: no clear at give-up time itself (deferred, regardless of attempt count)",
