@@ -1438,7 +1438,21 @@ export class OrchestrationMcpRouter {
             "parallelism — semaphore-admitted, so this is structurally safe), so you don't need to set that " +
             "env var). " +
             "Because it shares one budget with merge/deploy gates, a busy fleet MAY mean this call queues behind " +
-            "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
+            "another in-flight gate before it even starts — that's expected, not a hang. " +
+            "COST MODEL (card d2753f2a): this run and the gate `worker_merge_confirm` fires at merge time are " +
+            "structurally SEPARATE ops (different key in the daemon's pending-op registry) — a green result " +
+            "here is never consulted by, and never shrinks the cost of, that merge gate's own re-gate, which " +
+            "always runs for real regardless of this call (CLAUDE.md calls it the AUTHORITATIVE full-suite " +
+            "guarantee). Ordering this before requesting merge is still worth it for the reasons above — a " +
+            "bounded, semaphore-admitted self-check with real per-step diagnosis before you ask for merge — " +
+            "but it does NOT amortize or replace the merge gate's own cost. On a busy daemon (a non-empty " +
+            "`gate_queue`) the honest total for firing both is ~2 full gate runs end to end, not one reused " +
+            "one — observed: a 17m43s self-check here followed by its own queued merge gate cost roughly " +
+            "35 minutes of gate time for one card, with nothing shared between them. `worker_merge_confirm`'s " +
+            "OWN re-call verdict cache (a separate mechanism, for repeated confirm calls on the SAME branch) " +
+            "is real but structurally can't help here either whenever that branch was behind main at admission " +
+            "— see that tool's own description for the mechanism and the `supersededBy` signal that announces " +
+            "it. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_GATE_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
