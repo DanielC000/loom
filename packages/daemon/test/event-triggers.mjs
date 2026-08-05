@@ -56,6 +56,18 @@ const seedWakeTrigger = (e, id, over = {}) => {
     !EVENT_TRIGGER_EVENT_KINDS.some((k) => k.startsWith("task_") || k.startsWith("card_")));
 }
 
+// --- Card e955b5d8 decision: rate_limit_bailed IS eligible; its usage-limit-episode siblings are NOT ---
+{
+  check("decision: rate_limit_bailed (the abandoned-recovery terminal failure) IS in the allowlist",
+    EVENT_TRIGGER_EVENT_KINDS.includes("rate_limit_bailed"));
+  check("decision: the sibling usage-limit-episode MECHANICS stay OUT (default is no)",
+    !EVENT_TRIGGER_EVENT_KINDS.includes("rate_limit_resumed")
+    && !EVENT_TRIGGER_EVENT_KINDS.includes("rate_limit_recovered")
+    && !EVENT_TRIGGER_EVENT_KINDS.includes("usage_latch_armed")
+    && !EVENT_TRIGGER_EVENT_KINDS.includes("usage_latch_cleared")
+    && !EVENT_TRIGGER_EVENT_KINDS.includes("worker_spawn_usage_blocked"));
+}
+
 // --- Insert + get round-trip: every column survives, nullable columns stay null ---
 {
   const e = makeEnv();

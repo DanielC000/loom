@@ -129,6 +129,19 @@ try {
   } });
   check("CREATE: a case-mismatched eventKind is REJECTED (exact allowlist match only)", typoKind.statusCode === 400);
 
+  // Card e955b5d8 decision: rate_limit_bailed IS eligible (the usage-limit auto-resume give-up/bail) —
+  // proves the REST validator picks it up from EVENT_TRIGGER_EVENT_KINDS with no other code change.
+  // Its usage-limit-episode siblings (mechanics, not attention-worthy) stay OUT of the allowlist.
+  const bailed = await inject({ method: "POST", url: "/api/event-triggers", payload: {
+    eventKind: "rate_limit_bailed", mode: "spawn", agentId,
+  } });
+  check("CREATE (e955b5d8): rate_limit_bailed IS accepted -> 201", bailed.statusCode === 201);
+  await inject({ method: "DELETE", url: `/api/event-triggers/${JSON.parse(bailed.payload).id}` });
+  const resumedSibling = await inject({ method: "POST", url: "/api/event-triggers", payload: {
+    eventKind: "rate_limit_resumed", mode: "spawn", agentId,
+  } });
+  check("CREATE (e955b5d8): sibling rate_limit_resumed stays REJECTED (decided OUT, not just untried)", resumedSibling.statusCode === 400);
+
   // --- GET list ---
   const list = await inject({ method: "GET", url: "/api/event-triggers" });
   check("GET list: 200, includes the created trigger", list.statusCode === 200 && JSON.parse(list.payload).some((t) => t.id === trigger.id));

@@ -2287,6 +2287,15 @@ export interface PollJob {
  * and the REST validator (both deferred) will reuse — deliberately excludes card/task-lifecycle kinds
  * (task mutations emit no events today) and companion-internal mechanics (heartbeat/reminder/alert-push
  * — those are the companion's own watchers' output, not general orchestration lifecycle).
+ *
+ * DECISION (card e955b5d8, 2026-08-05): `rate_limit_bailed` is included, ALONE among the usage-limit
+ * kinds `33d5aef1` added. `session_rate_limited` (the park) was already here — a park is self-healing
+ * (the watcher resumes it), while a bail is the terminal failure where auto-resume was abandoned past
+ * its give-up deadline and the fleet silently stops recovering: the single most invisible/consequential
+ * case that card names. If the park is worth an automation waking someone for, the bail is worth it
+ * more. Its siblings — `rate_limit_resumed`, `rate_limit_recovered`, `usage_latch_armed`/`_cleared`,
+ * `worker_spawn_usage_blocked` — stay OUT: they are episode MECHANICS (routine resume/latch bookkeeping
+ * an operator doesn't need paged for), not attention-worthy signals. Don't add them without a fresh case.
  */
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
@@ -2295,7 +2304,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "idle_escalated", "idle_report",
   "context_escalated",
   "platform_escalate",
-  "session_rate_limited",
+  "session_rate_limited", "rate_limit_bailed",
   "schedule_fired", "poll_fired", "wake_fired",
 ] as const satisfies readonly OrchestrationEventKind[];
 export type EventTriggerEventKind = (typeof EVENT_TRIGGER_EVENT_KINDS)[number];

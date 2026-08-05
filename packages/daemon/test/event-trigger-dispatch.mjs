@@ -182,6 +182,26 @@ const emitEvent = (e, kind, managerSessionId, detail = {}, taskId = null, worker
   cleanupEnv(e);
 }
 
+// --- Card e955b5d8 DoD-3 (dispatcher-side half): rate_limit_bailed fires with NO dispatcher change,
+// because the dispatcher has no allowlist check of its own — it filters purely on the trigger row's
+// stored eventKind, matched against the real event's kind. NOTE (does not cover the allowlist DECISION):
+// this seeds the trigger directly at the db layer, bypassing REST's EVENT_TRIGGER_EVENT_KINDS gate, so it
+// passes identically whether or not rate_limit_bailed is allowlisted — it is not a discriminating test
+// for the yes/no decision (event-triggers-rest.mjs's CREATE test is). It only proves the dispatcher
+// itself needed no code change, per DoD-3. ---
+{
+  const e = makeEnv();
+  seedWakeTrigger(e, "trig-bailed", { eventKind: "rate_limit_bailed" });
+  emitEvent(e, "rate_limit_bailed", e.sessId, { deadline: "2026-08-05T00:00:00.000Z" });
+  await e.svc.tick(new Date());
+  check("rate_limit_bailed (e955b5d8): fires exactly once on a real matching event", e.enqueued.length === 1);
+  // Negative control: an unrelated sibling event never also fires this trigger.
+  emitEvent(e, "rate_limit_resumed", e.sessId, {});
+  await e.svc.tick(new Date());
+  check("rate_limit_bailed (e955b5d8): an unrelated sibling event does NOT also fire it", e.enqueued.length === 1);
+  cleanupEnv(e);
+}
+
 // --- Spawn fire: mode 'spawn' hands the trusted block as a kickoff to the injected spawn() fn ---
 {
   const e = makeEnv();
