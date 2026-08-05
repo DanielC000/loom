@@ -41,12 +41,34 @@ seedWorker("w-plain", "task-plain");     // a normal live worker, no pending op
 seedWorker("w-merging", "task-merging"); // a live worker with an in-flight merge (stubbed pendingMerge)
 seedWorker("w-done", "task-done");       // a worker that already reported done (awaitingReview true)
 db.appendEvent({ id: "ev-done", ts: now, managerSessionId: "mgr", workerSessionId: "w-done", taskId: "task-done", kind: "worker_report", detail: { status: "done", summary: "shipped" } });
+// card 008f33f1 — WAITING vs EXECUTING: two more merging workers, one genuinely admitted (gate actually
+// running), one genuinely QUEUED behind the daemon-global cap/a same-repo sibling (never admitted).
+// Both report the SAME PendingOpRegistry-level `state:"running"` (an op is in flight for this worker) —
+// `gatePhase` is the only thing that tells them apart without a second call.
+seedWorker("w-merging-queued", "task-merging-queued");
+seedWorker("w-merging-prep", "task-merging-prep"); // op minted, not yet submitted to the gate at all
 
 const PENDING_MERGE_VIEW = { opId: "op-merge-1", kind: "merge", key: "merge:w-merging", managerSessionId: "mgr", startedAt: now, state: "running" };
+const PENDING_MERGE_QUEUED_VIEW = { opId: "op-merge-queued", kind: "merge", key: "merge:w-merging-queued", managerSessionId: "mgr", startedAt: now, state: "running" };
+const PENDING_MERGE_PREP_VIEW = { opId: "op-merge-prep", kind: "merge", key: "merge:w-merging-prep", managerSessionId: "mgr", startedAt: now, state: "running" };
 const PENDING_SPAWN = { opId: "op-spawn-1", kind: "spawn", key: "spawn:task-spawning", managerSessionId: "mgr", startedAt: now, state: "running", taskId: "task-spawning" };
 
+const PENDING_MERGE_VIEWS = {
+  "w-merging": PENDING_MERGE_VIEW,
+  "w-merging-queued": PENDING_MERGE_QUEUED_VIEW,
+  "w-merging-prep": PENDING_MERGE_PREP_VIEW,
+};
+// The live GateSemaphore's own {"queued","running"} phase for each opId — op-merge-1 is genuinely
+// ADMITTED (this is the exact "positive control" the card's DoD-4 requires: a genuinely running merge
+// still reports "running"); op-merge-queued is registered but never admitted (this is the reported bug's
+// exact repro shape: PendingOpRegistry says "running", the live gate says queued); op-merge-prep hasn't
+// even reached the gate yet, so it's simply absent from the live registry (null — a normal reading, not
+// an error).
+const GATE_PHASES = { "op-merge-1": "running", "op-merge-queued": "queued" };
+
 const sessionsStub = {
-  peekPendingMerge(workerSessionId) { return workerSessionId === "w-merging" ? PENDING_MERGE_VIEW : undefined; },
+  peekPendingMerge(workerSessionId) { return PENDING_MERGE_VIEWS[workerSessionId]; },
+  gatePhaseForOpId(opId) { return GATE_PHASES[opId] ?? null; },
   listPendingSpawns(managerSessionId) { return managerSessionId === "mgr" ? [PENDING_SPAWN] : []; },
   listCapQueuedSpawns() { return []; }, // no cap-queued markers in this stub's scenario — exercised for real in worker-spawn-cap-queue.mjs
   isArchivedWithoutReport() { return false; }, // card ae0b7891: no archived-without-report worker in this stub's scenario
@@ -65,7 +87,7 @@ const call = async (name, args) => parse(await client.callTool({ name, arguments
 try {
   const list = await call("worker_list");
   check("worker_list stays a BARE ARRAY (non-breaking — no {workers,pendingSpawns} wrapper)", Array.isArray(list));
-  check("worker_list has 3 real workers + 1 placeholder = 4 rows", list.length === 4);
+  check("worker_list has 5 real workers + 1 placeholder = 6 rows", list.length === 6);
 
   const plain = list.find((w) => w.workerSessionId === "w-plain");
   check("(w-plain) a worker with no pending op → pendingMerge:null", plain && plain.pendingMerge === null);
@@ -76,6 +98,20 @@ try {
   const done = list.find((w) => w.workerSessionId === "w-done");
   check("(w-done) reportedState/awaitingReview projection still works alongside pendingMerge", done && done.reportedState === "done" && done.awaitingReview === true && done.pendingMerge === null);
 
+  // --- card 008f33f1: gatePhase disambiguates WAITING from EXECUTING without a second call ---
+  check("(w-merging) POSITIVE CONTROL: a genuinely admitted/running merge still reports state:\"running\" AND gatePhase:\"running\"",
+    merging.pendingMerge.state === "running" && merging.pendingMerge.gatePhase === "running");
+
+  const mergingQueued = list.find((w) => w.workerSessionId === "w-merging-queued");
+  check("(w-merging-queued) repro of the reported bug: PendingOpRegistry state:\"running\" but gatePhase:\"queued\" — observably DIFFERENT from the admitted case above",
+    mergingQueued && mergingQueued.pendingMerge.state === "running" && mergingQueued.pendingMerge.gatePhase === "queued");
+  check("(w-merging-queued) NEGATIVE CONTROL: queued must not read as gatePhase:\"running\"",
+    mergingQueued.pendingMerge.gatePhase !== "running");
+
+  const mergingPrep = list.find((w) => w.workerSessionId === "w-merging-prep");
+  check("(w-merging-prep) op minted but not yet submitted to the gate at all → gatePhase:null (a normal reading, not an error)",
+    mergingPrep && mergingPrep.pendingMerge.state === "running" && mergingPrep.pendingMerge.gatePhase === null);
+
   const placeholder = list.find((w) => w.workerSessionId === null);
   check("(placeholder) a pending spawn with NO worker row surfaces additively", !!placeholder);
   check("(placeholder) carries taskId + the pendingSpawn opId/startedAt", placeholder.taskId === "task-spawning" && placeholder.pendingSpawn.opId === "op-spawn-1" && placeholder.pendingSpawn.startedAt === now);
@@ -85,13 +121,16 @@ try {
 
   // --- prove a naive "live workers" / "awaiting review" consumer is NOT fooled by the placeholder ---
   const liveWorkers = list.filter((w) => w.processState === "live");
-  check("(consumer) filtering processState==='live' excludes the placeholder (3 real live workers)", liveWorkers.length === 3 && !liveWorkers.some((w) => w.workerSessionId === null));
+  check("(consumer) filtering processState==='live' excludes the placeholder (5 real live workers)", liveWorkers.length === 5 && !liveWorkers.some((w) => w.workerSessionId === null));
   const awaitingReview = list.filter((w) => w.awaitingReview);
   check("(consumer) filtering awaitingReview excludes the placeholder (only w-done)", awaitingReview.length === 1 && awaitingReview[0].workerSessionId === "w-done");
 
-  // --- worker_status(id) on a real worker also carries pendingMerge ---
+  // --- worker_status(id) on a real worker also carries pendingMerge, INCLUDING gatePhase ---
   const status = await call("worker_status", { workerSessionId: "w-merging" });
   check("worker_status(w-merging) carries pendingMerge too", status.pendingMerge && status.pendingMerge.opId === "op-merge-1");
+  check("worker_status(w-merging) carries gatePhase too (same disambiguation, not just worker_list)", status.pendingMerge.gatePhase === "running");
+  const statusQueued = await call("worker_status", { workerSessionId: "w-merging-queued" });
+  check("worker_status(w-merging-queued) gatePhase:\"queued\" — the fix applies on the by-id path too, not just the fleet view", statusQueued.pendingMerge.gatePhase === "queued");
   const statusPlain = await call("worker_status", { workerSessionId: "w-plain" });
   check("worker_status(w-plain) pendingMerge:null", statusPlain.pendingMerge === null);
 } finally {

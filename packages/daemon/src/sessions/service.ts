@@ -5436,6 +5436,28 @@ export class SessionService {
     return this.pendingOps.peek(`merge:${workerSessionId}`);
   }
 
+  /**
+   * The disambiguating half of `pendingMerge.gatePhase` (card 008f33f1). `pendingMerge.state:"running"`
+   * is `PendingOpRegistry`'s own coarse, kind-agnostic lifecycle bit — it is set the INSTANT the merge op
+   * is minted (`attach()`'s synchronous mint branch), well before worktree prep/union-merge even finish,
+   * let alone before the gate is submitted to {@link GateSemaphore} for admission. So `"running"` here
+   * means "an op is in flight for this worker", NOT "the gate is executing" — a manager reading it as the
+   * latter can watch a merge sit QUEUED behind a same-repo sibling for minutes and reasonably (but
+   * wrongly) conclude it's wedged.
+   *
+   * This reads the SAME live `GateSemaphore.findByOpId` lookup `gate_status(opId)`/`gate_queue` already
+   * use, so it can never disagree with either: `"queued"` (admitted-pending, waiting on a semaphore slot
+   * or a same-repo sibling), `"running"` (actually admitted and executing), or `null` while the op hasn't
+   * reached gate admission yet (worktree prep / union-merge still in progress) or has already left the
+   * live registry (gate step finished, squash/finalize still running — or a gateless project, which never
+   * registers with the semaphore at all). `null` is NOT an error state — it just means this particular
+   * disambiguation has nothing to add right now; `pendingMerge.state` alone still tells the caller the op
+   * overall is in flight. */
+  gatePhaseForOpId(opId: string): "queued" | "running" | null {
+    const r = this.gateSemaphore.findByOpId(opId);
+    return r.kind === "found" ? r.record.phase : null;
+  }
+
   /** Read-only pending-spawn listing for worker_list's placeholder rows (card fb8df559 Part 1) — a
    *  pending spawn has no worker row yet (it's inserted only once createWorktree resolves), so it's
    *  surfaced by manager rather than hung off a per-worker `peek()`. A taskless spawn's key
