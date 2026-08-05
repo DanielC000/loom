@@ -4,6 +4,10 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-08-05
+
+**A delivery-reliability and observability release.** The Windows **command-line ceiling** that could refuse a session spawn outright before the daemon ever produced a process is gone — no role puts its startup prompt on argv any more. Message delivery, merge/git integrity, and give-up/recovery handling all get a deep hardening pass; managers gain **per-step gate timings, idle-vs-elapsed wedge diagnostics, and deploy staleness**; and the board learns **data-driven un-defer conditions**, duplicate detection, and CAS-checked edits.
+
 ### Added
 - **Git tab branch browser.** The web Git tab gains branch search/filter and folds worker (`loom/*`)
   branches; each is labeled with its originating card title and merged/unmerged state, backed by a
@@ -64,8 +68,8 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
   related-notes drop is now reported as "N of M" instead of silently.
 - **`loom stop`** no longer risks signaling a reused pid on its fallback ladder, which `taskkill /T` would
   otherwise amplify into killing an unrelated process tree.
-- **Skill hygiene.** A dev-only skill that's since been retired from a user's roster (e.g. `research`,
-  previously seeded and then de-listed) no longer leaves its orphaned store directory behind forever; a
+- **Skill hygiene.** A skill that's since been retired from a user's roster (previously seeded, then
+  de-listed) no longer leaves its orphaned store directory behind forever; a
   worktree's `.claude/settings.local.json` is now excluded from git so a worker's broad `git add` can't
   accidentally stage it.
 - **Settings UI.** Timeout fields that take seconds no longer validate against a millisecond bound.
