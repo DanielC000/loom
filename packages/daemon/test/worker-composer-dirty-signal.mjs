@@ -58,6 +58,30 @@ process.env.LOOM_HOME = tmpHome;
 // exists; this fake pty never confirms anything on its own, so every bounded wait below always maxes out
 // its bound). GIVE_UP_HOLD_MS is pinned small too, so the positive control's own redrain (scenario 2's
 // `proveClearMechanismWorks`) doesn't need to wait the 20s production default.
+// Card 733e1403 audit of this file's TWO `windowMs` sites (both feed `_timing-guard.mjs`, not a bare
+// sleep): injection-tested by delaying every production verify-timeout `setTimeout` (host.ts's
+// `sendEnterAndVerify`, the `ms === SUBMIT_VERIFY_TIMEOUT_MS` calls — here pinned to 600) by 8x, confirmed
+// real and consequential by wall-clock (this file's own run: ~7.4s unmodified -> ~32.6s injected, ~4.4x,
+// matching the two give-up chains — SID's and the positive control's — each paying 3 attempts x
+// (4800-600)ms of extra delay) — NOT by a single check flipping, since none needed to for either site to
+// be proven safe. Pushed to 9x as a SEPARATE control run (never committed) to confirm the harness CAN fail
+// loud under enough delay — at 9x, `waitForBusyFalse`'s own 15s poll bound is exceeded and
+// `assertNeverWithControl` correctly THROWS ("positive control did NOT observe check() go true") rather
+// than silently passing — proving the 8x null above is a genuine null, not a vacuous one.
+// (1) Line ~181's `observeOnce({..., windowMs: VERIFY_TIMEOUT})` inside `proveClearMechanismWorks`: proven
+// safe by construction, not injection-dependent at all — the reset it polls for
+// (`composerDirtyLenClearedByGen === submitGeneration`) is stamped SYNCHRONOUSLY inside `deliverHook`
+// itself (see the comment two lines above that call), never behind the delayed `SUBMIT_VERIFY_TIMEOUT_MS`
+// timer, so `check()` is already true on `observeOnce`'s first (pre-wait) poll regardless of how late that
+// timer fires.
+// (2) Line ~250's `assertNeverWithControl` (the real negative assertion, `windowMs: VERIFY_TIMEOUT *
+// (MAX_ATTEMPTS + 1)`): proven safe under 8x — held throughout, mandatory positive control fired correctly
+// — because give-up structurally never writes anything that could flip `composerDirtyLen` away from the
+// stranded length on its own (confirmed by scenario 2's own later assertion, and by the mirror case in
+// worker-flush-composer.mjs's scenario 3), so the check's OUTCOME cannot depend on WHEN the delayed give-up
+// timer fires, only on whether it fires at all — mechanism (2) from 6d53b02b's audit (a verdict decided by
+// already-fixed state is invariant to callback timing). Not converted (converting would be symmetry, not a
+// fix — see 1aabf969's identical finding on codescape-health-probe.mjs).
 const ENTER_DELAY = 50;
 const VERIFY_TIMEOUT = 600;
 const MAX_ATTEMPTS = 3;

@@ -35,6 +35,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmpHome = path.join(os.tmpdir(), `loom-flushcomposer-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 733e1403 audit of this file's TWO `windowMs` sites (both feed `_timing-guard.mjs`, not a bare
+// sleep): injection-tested by delaying every production verify-timeout `setTimeout` (host.ts's
+// `sendEnterAndVerify`, the `ms === SUBMIT_VERIFY_TIMEOUT_MS` calls — here pinned to 150) by 8x, confirmed
+// real and consequential by wall-clock (this file's own run: ~4.2s unmodified -> ~6.3s injected, matching
+// the 4 give-up cycles across scenarios (2)/(3) each paying (1200-150)ms of extra delay).
+// (1) Line ~163's `windowMs: 20` inside the positive control's own `observeOnce`: proven safe by
+// construction — it observes a SYNCHRONOUS array push (`fakes[SID].writes.push(TEXT)`) the line above it,
+// never a delayed callback, so it is not "at risk" in the sense this audit tests for at all.
+// (2) Line ~170's real `assertNeverWithControl` (`windowMs: VERIFY_TIMEOUT + SETTLE_MAX_POLLS *
+// SETTLE_POLL`, ~200ms unscaled — well short of the give-up chain's injected ~1200ms): proven safe under
+// 8x anyway, because the checked invariant (the stranded body's byte count in the pty writes) cannot
+// change on give-up regardless of when give-up fires — MAX_ATTEMPTS=1's give-up path only calls
+// `setBusy(false)` + `requeueGiveUpOrigin`, no further pty write at all (confirmed directly by scenario
+// (3)'s own assertion "the stranded body was still never re-pasted", exercised under this same file's real
+// give-up path). Not converted (converting would be symmetry, not a fix — see 1aabf969's identical finding
+// on codescape-health-probe.mjs).
 const ENTER_DELAY = 20;
 const VERIFY_TIMEOUT = 150;
 const MAX_ATTEMPTS = 1;
