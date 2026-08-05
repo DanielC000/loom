@@ -71,27 +71,46 @@ function runChild(script, { timeoutMs = 10_000 } = {}) {
   check("(throw) helper STILL removed the dir on an uncaught throw (the exact gap 25/88 companion files had)", !!r.dir && !fs.existsSync(r.dir));
 }
 
-// ============================ (4) EBUSY, recoverable — the acceptance evidence =========================
-{
-  const r = runChild("_child-ebusy-recoverable.mjs", { timeoutMs: 5000 });
-  check("(ebusy-recoverable) the managed dir genuinely existed before cleanup was ever triggered", r.checkPassed === true);
-  check("(ebusy-recoverable) child STILL exited 0 — the EBUSY hazard during its own cleanup did NOT override its already-passed result", r.code === 0);
-  check("(ebusy-recoverable) the dir WAS eventually removed once the holder's CWD lock cleared (bounded retry genuinely worked, not just silently swallowed)", !!r.dir && !fs.existsSync(r.dir));
-}
-
-// ============================ (5) EBUSY, exhausted — the honest complement =============================
-{
-  const r = runChild("_child-ebusy-exhausted.mjs", { timeoutMs: 5000 });
-  check("(ebusy-exhausted) the managed dir genuinely existed before cleanup was ever triggered", r.checkPassed === true);
-  check("(ebusy-exhausted) child STILL exited 0 — exhausting retries does not throw or corrupt the exit code", r.code === 0);
-  check("(ebusy-exhausted) the helper logged the exhausted-retry warning rather than hiding the failure", /\[tmp-fixture\] could not remove/.test(r.stderr));
-  // The dir is honestly LEFT BEHIND here (that's the point) — clean it up ourselves once the holder
-  // (which runs ~2s past this child's own exit) has actually released its CWD lock, so this test doesn't
-  // itself add to the real residue the whole card is about.
-  if (r.dir) {
-    await new Promise((resolve) => setTimeout(resolve, 2200));
-    try { fs.rmSync(r.dir, { recursive: true, force: true }); } catch { /* best-effort, not under test here */ }
+// ============================ (4)+(5) EBUSY, recoverable + exhausted — WINDOWS-ONLY ====================
+// Card f33830d1 (main red on Linux since 2026-07-31): both fixtures' own doc comments say the EBUSY they
+// reproduce is a WINDOWS-SPECIFIC lock — a live process's CWD sitting inside the managed dir, "verified
+// empirically on this host/Node to throw EBUSY on rmdir" (see _child-ebusy-recoverable.mjs's header; a
+// plain open file handle does NOT trigger it, since this Node/Windows combo opens files with
+// FILE_SHARE_DELETE by default). POSIX permits `rmdir`/`rename` of a directory that is another live
+// process's CWD — no error is raised, the process's cwd just becomes a dangling reference — so this
+// mechanism cannot be reproduced on Linux/macOS at all: `rmSync` there always succeeds on the FIRST
+// attempt, no EBUSY, no retry, ever. Confirmed against real CI (gh run 30947596896): on Linux EVERY
+// (ebusy-recoverable) assertion passes anyway (consistent with an immediate, retry-free removal), and
+// the ONLY failing assertion in this file is (ebusy-exhausted)'s "helper logged the exhausted-retry
+// warning" — which can only fire once retries are genuinely exhausted, and retries are never even
+// attempted on POSIX. Skipping (ebusy-recoverable) too, not just the failing (ebusy-exhausted): a POSIX
+// pass there is not a real test of the retry path either — it passes only because the hazard it exists
+// to exercise never occurs, which is coverage-by-accident, not evidence the retry logic works.
+if (process.platform === "win32") {
+  // ---- (4) EBUSY, recoverable — the acceptance evidence -----------------------------------------------
+  {
+    const r = runChild("_child-ebusy-recoverable.mjs", { timeoutMs: 5000 });
+    check("(ebusy-recoverable) the managed dir genuinely existed before cleanup was ever triggered", r.checkPassed === true);
+    check("(ebusy-recoverable) child STILL exited 0 — the EBUSY hazard during its own cleanup did NOT override its already-passed result", r.code === 0);
+    check("(ebusy-recoverable) the dir WAS eventually removed once the holder's CWD lock cleared (bounded retry genuinely worked, not just silently swallowed)", !!r.dir && !fs.existsSync(r.dir));
   }
+
+  // ---- (5) EBUSY, exhausted — the honest complement ----------------------------------------------------
+  {
+    const r = runChild("_child-ebusy-exhausted.mjs", { timeoutMs: 5000 });
+    check("(ebusy-exhausted) the managed dir genuinely existed before cleanup was ever triggered", r.checkPassed === true);
+    check("(ebusy-exhausted) child STILL exited 0 — exhausting retries does not throw or corrupt the exit code", r.code === 0);
+    check("(ebusy-exhausted) the helper logged the exhausted-retry warning rather than hiding the failure", /\[tmp-fixture\] could not remove/.test(r.stderr));
+    // The dir is honestly LEFT BEHIND here (that's the point) — clean it up ourselves once the holder
+    // (which runs ~2s past this child's own exit) has actually released its CWD lock, so this test doesn't
+    // itself add to the real residue the whole card is about.
+    if (r.dir) {
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      try { fs.rmSync(r.dir, { recursive: true, force: true }); } catch { /* best-effort, not under test here */ }
+    }
+  }
+} else {
+  console.log("SKIP  (ebusy-recoverable) + (ebusy-exhausted) — EBUSY-via-live-process-CWD-inside-the-directory is an NTFS-locking-specific reproduction; POSIX permits rmdir/rename of a directory that is another process's CWD, so no EBUSY is ever raised and the retry path is structurally unreachable here");
 }
 
 console.log(failures === 0

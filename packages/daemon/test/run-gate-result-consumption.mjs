@@ -37,7 +37,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, computeWorktreeGateStamp } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -106,12 +106,44 @@ try {
     db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: null, worktreePath, branch });
 
-    // Comfortably longer than the SessionService's own `syncAttachBudgetMs` (shrunk to 100ms below, from
-    // the 12s production SYNC_ATTACH_BUDGET_MS, via the same test-only DI seam `gateOpRetainMs`/
-    // `gateCancelVerifyMs` already use — card 0faaaa55) so BOTH calls degrade to pending, with real margin
-    // left before the underlying op actually settles — same logical shape as the real 12s/16s budget/sleep,
-    // at a fraction of the wall-clock cost.
-    //
+    // CALIBRATED MARGIN, NOT A GUESSED CONSTANT (card f33830d1 — a fixed `syncAttachBudgetMs: 100` was
+    // losing this exact race deterministically on GH Actions' `ubuntu-latest` runner, 7/7 CI runs).
+    // runWorkerGate computes a REAL WorktreeGateStamp TWICE before the gate is ever entered — once for
+    // `startStamp` (before the semaphore), once for `admitStamp` (inside it, right before the injected
+    // `runGate` is invoked — service.ts ~11966-12012) — each a real `git rev-parse`/`git status
+    // --porcelain`[/`git diff HEAD`] subprocess round trip. The ORIGINATING call's own internal
+    // `attach()` race (`Promise.race([e.settle, sleep(waitMs)])`, pending-ops.ts ~705) starts ticking at
+    // essentially t≈0, independent of that work, so `waitMs` has to outlast BOTH real round trips — not
+    // just one — for that call's post-race staleness read to land after the mid-flight edit below. Get
+    // this wrong in EITHER direction and the assertion below stops meaning what it says: too small, and
+    // `gateStartStamps` isn't even populated yet when the race resolves, so `gateStampsDiffer`'s fail-safe
+    // `startStamp ? … : true` (service.ts ~12358) trivially returns `true` — the assertion PASSES for the
+    // wrong reason, without ever comparing real stamps (reproduced locally: on a dev box where a single
+    // round trip alone runs ~140ms, `syncAttachBudgetMs: 100` NEVER exercises the real comparison at all);
+    // too big, and the call reads its own currentStamp only after the edit has safely landed regardless
+    // (also a pass, also not what card 50c1e0d0 set out to prove: that a call whose OWN sync-wait is what
+    // straddles the edit — not one that started waiting comfortably after it — still reports correctly).
+    // A hand-picked constant that happens to survive TODAY's host is exactly the "generous timeout masking
+    // a real inter-scenario dependency" anti-pattern (card c062a307) — it silently breaks again the moment
+    // stamp computation gets slower than whatever was guessed, which is precisely what broke on CI, and a
+    // merely-bigger guess only defers. Instead: MEASURE the real cost of this exact operation against THIS
+    // worktree, live, right now — a signal, not a guess, the same "observe reality instead of assuming
+    // timing" discipline this block's own `gateEnteredSignal` below already applies to an EVENT, just
+    // applied here to a DURATION. A slower/loaded host measures a bigger number and gets a proportionally
+    // bigger budget automatically; a fast one gets a small one — neither is hand-tuned.
+    const calibrationStart = performance.now();
+    await computeWorktreeGateStamp(worktreePath);
+    await computeWorktreeGateStamp(worktreePath);
+    const measuredDoubleStampMs = performance.now() - calibrationStart;
+    // 3x the measured cost of the two real round trips runWorkerGate itself performs, plus a floor for a
+    // host fast enough to measure near-zero — comfortable headroom against run-to-run jitter without
+    // reintroducing a fixed "big enough to survive forever" guess.
+    const syncAttachBudgetMs = Math.max(60, Math.ceil(measuredDoubleStampMs * 3));
+    // `slowGate`'s own hold must comfortably outlast `syncAttachBudgetMs`, scaled off the same live
+    // measurement, or the gate could actually SETTLE before the timeout fires and both calls would
+    // observe `settled:true` instead of the `pending` shape this scenario exists to exercise.
+    const slowGateDelayMs = Math.max(400, syncAttachBudgetMs * 3);
+
     // Bounded gate-entry SIGNAL, not a blind sleep (card 47a515ff — 5th instance of this file's blind-
     // sleep class in one day): in runWorkerGate, `computeWorktreeGateStamp` is awaited — and its result
     // stored into `gateStartStamps` — strictly BEFORE `runGateSeq` (this injected `runGate`) is ever
@@ -138,8 +170,8 @@ try {
     const GATE_ENTRY_BOUND_MS = 8000;
     let gateEntered;
     const gateEnteredSignal = new Promise((resolve) => { gateEntered = resolve; });
-    const slowGate = async () => { gateEntered(); await sleep(400); return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: slowGate, syncAttachBudgetMs: 100 });
+    const slowGate = async () => { gateEntered(); await sleep(slowGateDelayMs); return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: slowGate, syncAttachBudgetMs });
 
     const p1 = sessions.runWorkerGate(workerId); // don't await — runs in the background
     const enteredInTime = await Promise.race([
