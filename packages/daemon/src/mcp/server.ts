@@ -330,7 +330,13 @@ export class TaskMcpRouter {
           "them all, so an old, untouched-but-critical pinned note can still be dropped — tag it " +
           "`\"never-drop\"` (via `tags`) to pack it ahead of every other pinned note; a dropped never-drop " +
           "note is reported as a distinct ALARM (not routine overflow) so a broken guarantee is never " +
-          "silent, but it can still fail to fit if it alone exceeds the whole budget. Optional `title` " +
+          "silent, but it can still fail to fit if it alone exceeds the whole budget. NOTE: `\"never-drop\"` " +
+          "only does anything on a note that is ALSO `pinned:true` — set on an unpinned note it's inert " +
+          "(never packed into the floor tier), and this response says so. Setting/keeping `\"never-drop\"` " +
+          "on a pinned note returns a `neverDropStatus` on this response reporting that whole floor tier's " +
+          "current size against the project's read-side digest budget (`memory.budgetTokens`) — purely " +
+          "informational, it never blocks this write; use it to judge whether the tier is getting too big " +
+          "to keep guaranteeing delivery. Optional `title` " +
           "(short label, max 200 chars) and `tags` (string[]). Write " +
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
           "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +

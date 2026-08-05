@@ -97,6 +97,44 @@ function isNeverDrop(m: ProjectMemoryEntry): boolean {
   return m.tags?.includes(NEVER_DROP_TAG) ?? false;
 }
 
+/** The floor tier's rendered size — same header + `SECTION_SEP` join every other section in this file
+ *  uses, over blocks already built by {@link noteBlock}. Factored out so the write-time status
+ *  ({@link computeFloorTierStatus}, card 835a8d67) and the in-digest ALARM line in
+ *  {@link composeProjectMemoryDigest} compute the identical number from the identical blocks — one
+ *  function, not two independently-written token sums that could quietly drift apart. `[]` ⇒ 0, not the
+ *  bare header's own token cost (nothing to report when there's no floor tier at all). */
+function floorSectionTokens(floorBlocks: string[]): number {
+  return floorBlocks.length === 0
+    ? 0
+    : estimateTokens(["## Pinned project memory (always included)", ...floorBlocks].join(SECTION_SEP));
+}
+
+/** Card 835a8d67 — the floor tier's current standing against `budgetTokens`, computed at `memory_write`
+ *  time (mcp/memory.ts) so the author sees it at the ONLY moment anyone can act on it, rather than a
+ *  kickoff-time ALARM reaching a different, later agent who can't fix the tagging. Predicate is
+ *  `pinned && never-drop` (NOT the tag alone — {@link isNeverDrop} filters `pinnedNotes`, which the caller
+ *  must already have restricted to `pinned:true` rows, e.g. via `db.listPinnedProjectMemory`) — mirrors
+ *  {@link composeProjectMemoryDigest}'s own floor-tier predicate exactly, so a note tagged `never-drop`
+ *  but left unpinned is structurally excluded here too, same as it is from the packer. */
+export function computeFloorTierStatus(
+  pinnedNotes: ProjectMemoryEntry[],
+  budgetTokens: number,
+  annotate: (m: ProjectMemoryEntry) => string[] = () => [],
+): { floorCount: number; floorTokens: number; budgetTokens: number; overBudget: boolean; roughFitCount: number } {
+  const floorSorted = sortPinnedByRecency(pinnedNotes.filter(isNeverDrop));
+  const floorBlocks = floorSorted.map((m) => noteBlock(m, annotate(m)));
+  const floorTokens = floorSectionTokens(floorBlocks);
+  const overBudget = floorTokens > budgetTokens;
+  // "Roughly how many fit" — an average-size estimate, deliberately NOT a re-simulation of the packer's
+  // own skip-and-continue pass (which can let a later, smaller note fit ahead of an earlier larger one
+  // that didn't) — good enough for an author deciding whether to trim, not a promise of which specific
+  // notes survive.
+  const roughFitCount = floorBlocks.length === 0
+    ? 0
+    : Math.min(floorBlocks.length, Math.max(0, Math.floor(budgetTokens / (floorTokens / floorBlocks.length))));
+  return { floorCount: floorBlocks.length, floorTokens, budgetTokens, overBudget, roughFitCount };
+}
+
 /** Card 738568b6 — the MAXIMUM share of `budgetTokens` the RELATED tier can wall off from the pinned-REST
  *  sub-tier — a CEILING on the reservation, not an unconditional grant. Fixes a structural bug, not a
  *  tuning shortfall: PLATFORM_DEFAULTS' own `memory.budgetTokens` doc comment (shared/src/config.ts)
@@ -291,9 +329,7 @@ export function composeProjectMemoryDigest(
       // "(their own size exceeds the budget)", is true only when the tier is a single oversized note; it
       // is false in the ordinary case of many small notes whose SUM overflows (see the doc comment ~70
       // lines above this block: "or the sum of several floor notes").
-      const floorTotalTokens = estimateTokens(
-        ["## Pinned project memory (always included)", ...floorBlocks].join(SECTION_SEP),
-      );
+      const floorTotalTokens = floorSectionTokens(floorBlocks);
       const floorFitCount = floorSorted.length - droppedFloorKeys.length;
       const alarmLine = `🚨 ALARM: ${droppedFloorKeys.length} note(s) tagged "${NEVER_DROP_TAG}" were STILL DROPPED ` +
         `— floor tier ≈ ${floorTotalTokens} tok vs budget ${budgetTokens} tok; ${floorFitCount} of ${floorSorted.length} fit ` +

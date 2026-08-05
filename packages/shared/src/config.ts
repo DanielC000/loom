@@ -1072,6 +1072,13 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // plus a sizeable related-tier slice without dominating a turn (mirrors MEMORY_RECALL_MAX_BYTES's
   // sizing rationale); topK 8 related notes considered per kickoff; maxNotes 500 unpinned notes per
   // project before LRU-by-retrieval eviction kicks in (small-corpus assumption from the design doc).
+  // Card 835a8d67 — the arithmetic behind "a handful": `memory.ts`'s `MAX_TEXT_BYTES` (4000 BYTES, a
+  // per-note write cap) is ~1000 estimated tokens at the ~4-bytes/token heuristic `estimateTokens` uses,
+  // so `budgetTokens / ~1000 ≈ N` maxed-out notes is roughly how many the FLOOR (pinned + "never-drop")
+  // tier can hold before it starts dropping — at this 4000 default, N ≈ 4. NOTE THE NUMERAL COLLISION:
+  // this default and `MAX_TEXT_BYTES` are both literally `4000`, in two DIFFERENT units (tokens here,
+  // bytes there) — coincidence, not a derived relationship; changing one does NOT rescale the other. See
+  // `memory.ts`'s `MAX_TEXT_BYTES` comment for the reverse-direction statement of the same arithmetic.
   memory: { budgetTokens: 4000, topK: 8, maxNotes: 500 },
   // Session-usage telemetry (epic c9924bcd): daemon-global sampler cadence (5m) + sample retention (90d).
   usageSampleIntervalMs: 300000,

@@ -2,6 +2,7 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
+import { computeFloorTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
 // resolved SERVER-SIDE from the session id — the agent never passes a projectId, mirroring tasks.ts.
@@ -16,7 +17,14 @@ const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
  *  few KB so an accidental memory_write-in-a-loop (or a large paste) can't bloat every future kickoff or
  *  grow the DB unbounded; rejected with a clear error rather than silently truncated (silent truncation
  *  would corrupt the note's meaning). `title` gets a small cap too — it lands verbatim in the injected
- *  digest's section header. */
+ *  digest's section header.
+ *
+ *  Card 835a8d67 — this is a BYTES cap, and it feeds the READ side: `estimateTokens` (project-memory-
+ *  recall.ts) is ~4 bytes/token, so one maxed-out note costs ≈1000 estimated tokens of `memory.budgetTokens`
+ *  (config.ts) — itself a TOKENS budget defaulting to 4000. `4000` appears at both sites, in two DIFFERENT
+ *  units, ~4× apart in what they mean: FOUR notes maxed against THIS cap alone exhaust the ENTIRE default
+ *  read budget, before anything else (any other pinned note, any related-tier match) gets a byte. See
+ *  config.ts's `memory.budgetTokens` doc comment for the arithmetic from the other direction. */
 const MAX_TEXT_BYTES = 4000;
 const MAX_TITLE_CHARS = 200;
 
@@ -58,6 +66,32 @@ export interface MemoryWriteTooLong {
 }
 
 /**
+ * Card 835a8d67 — an informational signal returned ALONGSIDE a successful write, never a rejection: the
+ * write above has ALREADY succeeded by the time this is computed, exactly as it did before this card.
+ * Present only when the note's (post-write) `tags` include {@link NEVER_DROP_TAG}; absent otherwise (an
+ * ordinary write is byte-identical to before this card).
+ *
+ * Two, mutually exclusive shapes:
+ * - `inert: true` — the tag is set on an UNPINNED note. The floor tier the packer builds is
+ *   `pinned && never-drop` (see `computeFloorTierStatus`/`isNeverDrop` in project-memory-recall.ts), so an
+ *   unpinned tagged note is never in it — the tag does nothing for this note until it's also pinned.
+ * - the floor-tier numbers — this note IS pinned+never-drop, so it's actually IN the tier being measured.
+ *   `floorTokens`/`budgetTokens`/`overBudget` come from `computeFloorTierStatus`, the SAME helper
+ *   `composeProjectMemoryDigest`'s own in-digest ALARM line uses internally (via `floorSectionTokens`) —
+ *   one function, so the number reported here and what the packer actually drops on the next kickoff
+ *   cannot disagree.
+ */
+export interface NeverDropSignal {
+  message: string;
+  inert?: true;
+  floorCount?: number;
+  floorTokens?: number;
+  budgetTokens?: number;
+  overBudget?: boolean;
+  roughFitCount?: number;
+}
+
+/**
  * UPSERT by `key` (owner decision #2: always-update in place) — a second write to the same key updates
  * the note rather than piling a contradictory duplicate. Enforces the per-project bounded-store cap
  * (`memory.maxNotes`, resolveConfig) on every write; pinned notes are exempt (see
@@ -69,6 +103,10 @@ export interface MemoryWriteTooLong {
  * REJECTED with the current note attached (`conflict`) instead of silently clobbering it. A brand-new key
  * needs no base. See {@link Db.upsertProjectMemoryChecked} for the full rationale.
  *
+ * Card 835a8d67: a successful write whose (post-write) `tags` include `NEVER_DROP_TAG` also carries a
+ * `neverDropStatus` on the returned entry — see {@link NeverDropSignal}. Purely informational: it can
+ * never turn a write that would otherwise succeed into a rejection.
+ *
  * Card 249004c3: an update is a true PATCH, not a hard overwrite — `title`/`pinned`/`tags` the caller
  * OMITS from `input` are left unchanged on the stored row (only `text` + the version bump apply); passing
  * one explicitly (incl. `pinned:false`/`tags:[]`) still writes it verbatim. See
@@ -78,7 +116,11 @@ export function writeProjectMemory(
   db: Db,
   projectId: string,
   input: MemoryWriteInput,
-): ProjectMemoryEntry | { error: string } | MemoryWriteConflict | MemoryWriteTooLong {
+):
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal })
+  | { error: string }
+  | MemoryWriteConflict
+  | MemoryWriteTooLong {
   const key = input.key?.trim();
   if (!key) return { error: "key is required" };
   if (!KEY_RE.test(key)) return { error: "key must be a short slug: letters, digits, '-', '_' only, 1-64 chars" };
@@ -101,11 +143,11 @@ export function writeProjectMemory(
   const requestIds = input.requestIds === undefined
     ? undefined
     : input.requestIds.map((id) => id.trim()).filter((id) => id.length > 0);
-  const maxNotes = resolveConfig(db.getProject(projectId)?.config).memory.maxNotes;
+  const memoryConfig = resolveConfig(db.getProject(projectId)?.config).memory;
   const result = db.upsertProjectMemoryChecked(
     projectId,
     { key, title, text, pinned: input.pinned, tags: input.tags, requestIds },
-    maxNotes,
+    memoryConfig.maxNotes,
     input.baseVersion,
   );
   if (!result.ok) {
@@ -116,7 +158,45 @@ export function writeProjectMemory(
       current: result.current,
     };
   }
-  return result.entry;
+  const neverDropStatus = computeNeverDropStatus(db, projectId, result.entry, memoryConfig.budgetTokens);
+  return neverDropStatus ? { ...result.entry, neverDropStatus } : result.entry;
+}
+
+/** Card 835a8d67 DoD-1/2/3 — computed AFTER the write above already succeeded (never blocks/rejects it).
+ *  `undefined` when the note's tags don't include {@link NEVER_DROP_TAG} at all — an ordinary write's
+ *  response is unaffected (no `neverDropStatus` key) — otherwise one of the two shapes documented on
+ *  {@link NeverDropSignal}. */
+function computeNeverDropStatus(
+  db: Db,
+  projectId: string,
+  entry: ProjectMemoryEntry,
+  budgetTokens: number,
+): NeverDropSignal | undefined {
+  if (!entry.tags.includes(NEVER_DROP_TAG)) return undefined;
+  if (!entry.pinned) {
+    return {
+      inert: true,
+      message: `"${NEVER_DROP_TAG}" is set but this note is UNPINNED — the floor tier only packs ` +
+        `pinned notes tagged "${NEVER_DROP_TAG}" (pinned && never-drop, not the tag alone), so the tag ` +
+        `does nothing for this note until it's also pinned (pinned:true).`,
+    };
+  }
+  const pinnedNow = db.listPinnedProjectMemory(projectId);
+  const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
+  const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
+  return {
+    floorCount: status.floorCount,
+    floorTokens: status.floorTokens,
+    budgetTokens: status.budgetTokens,
+    overBudget: status.overBudget,
+    roughFitCount: status.roughFitCount,
+    message: status.overBudget
+      ? `floor tier (pinned + "${NEVER_DROP_TAG}") is now ≈${status.floorTokens} tok against a ` +
+        `${status.budgetTokens} tok budget — "${NEVER_DROP_TAG}" can no longer GUARANTEE delivery for ` +
+        `every note in this tier; roughly ${status.roughFitCount} of ${status.floorCount} such notes fit.`
+      : `floor tier (pinned + "${NEVER_DROP_TAG}") is ≈${status.floorTokens} tok of a ` +
+        `${status.budgetTokens} tok budget (${status.floorCount} note(s)) — fits.`,
+  };
 }
 
 /** Explicit curation (layer 1 of the two-layer cleanup mechanism — layer 2 is the bounded-store eviction

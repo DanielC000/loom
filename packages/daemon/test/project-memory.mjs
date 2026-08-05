@@ -425,6 +425,70 @@ try {
     check("(mcp) the blind path still bumps version normally (it just never CHECKS it)", seed1.version === 1 && seed2.version === 2);
   }
 
+  // ===================== card 835a8d67: memory_write's neverDropStatus signal =====================
+  {
+    const ndProj = "proj-never-drop-status";
+    db.insertProject({
+      id: ndProj, name: "Never-Drop Status Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: { memory: { budgetTokens: 100 } }, createdAt: now, archivedAt: null,
+    });
+
+    // An ORDINARY write (no never-drop tag) never carries the field at all — byte-identical to before
+    // this card, not merely "field present but undefined".
+    const plain = writeProjectMemory(db, ndProj, { key: "plain", text: "an ordinary note, no tags" });
+    check("(never-drop) an ordinary write carries NO neverDropStatus key at all", !("neverDropStatus" in plain));
+
+    // DoD-3: never-drop set on an UNPINNED note is INERT — the floor tier is pinned && never-drop, so this
+    // note is never in it. Written BEFORE the pinned ones below, so its presence must NOT inflate their count.
+    const inertNote = writeProjectMemory(db, ndProj, {
+      key: "nd-unpinned", text: "y".repeat(200), tags: [NEVER_DROP_TAG], // pinned omitted ⇒ false
+    });
+    check("(never-drop) unpinned+tagged write succeeds", !("error" in inertNote) && !("conflict" in inertNote));
+    check("(never-drop) unpinned+tagged note reports inert:true", inertNote.neverDropStatus?.inert === true);
+    check("(never-drop) the inert message names the note as unpinned/inert, not a floor-tier ratio",
+      !("floorTokens" in (inertNote.neverDropStatus ?? {})) && /unpinned/i.test(inertNote.neverDropStatus.message));
+
+    // DoD-1/DoD-6 (under budget): first pinned+never-drop note — small relative to the 100-token budget —
+    // reports overBudget:false. POSITIVE CONTROL direction 1: under-budget ⇒ no scary "no longer
+    // guarantee" wording.
+    const noteA = writeProjectMemory(db, ndProj, {
+      key: "nd-a", text: "y".repeat(200), pinned: true, tags: [NEVER_DROP_TAG],
+    });
+    check("(never-drop) pinned+tagged write succeeds", !("error" in noteA) && !("conflict" in noteA));
+    check("(never-drop) a single small floor note reports overBudget:false", noteA.neverDropStatus?.overBudget === false);
+    check("(never-drop) floorCount is 1 — the unpinned+tagged note above is EXCLUDED from the floor total",
+      noteA.neverDropStatus?.floorCount === 1);
+    check("(never-drop) under-budget message carries no 'no longer guarantee' scare wording",
+      !/no longer/i.test(noteA.neverDropStatus.message));
+
+    // A second pinned+never-drop note of the same size pushes the floor tier's aggregate over the 100-token
+    // budget. POSITIVE CONTROL direction 2: over-budget ⇒ an accurate, non-silent ratio.
+    const noteB = writeProjectMemory(db, ndProj, {
+      key: "nd-b", text: "y".repeat(200), pinned: true, tags: [NEVER_DROP_TAG],
+    });
+    check("(never-drop) a second floor note tips the tier over the 100-token budget", noteB.neverDropStatus?.overBudget === true);
+    check("(never-drop) floorCount is now 2 (nd-a, nd-b) — STILL excludes the unpinned nd-unpinned", noteB.neverDropStatus?.floorCount === 2);
+    check("(never-drop) over-budget message says delivery can no longer be guaranteed (DoD-2)",
+      /no longer/i.test(noteB.neverDropStatus.message) && /guarantee/i.test(noteB.neverDropStatus.message));
+    check("(never-drop) over-budget message reports roughly how many notes fit (DoD-2)",
+      Number.isInteger(noteB.neverDropStatus.roughFitCount) && noteB.neverDropStatus.roughFitCount >= 0 &&
+      noteB.neverDropStatus.roughFitCount <= noteB.neverDropStatus.floorCount);
+    check("(never-drop) budgetTokens echoed on the status matches this project's resolved config", noteB.neverDropStatus.budgetTokens === 100);
+
+    // DoD-6: the reported floorTokens total must be the SAME number the packer's own in-digest ALARM line
+    // computes on the next kickoff — cross-checked against the REAL compiled composeProjectMemoryDigest via
+    // retrieveProjectMemoryForKickoff's actual framed digest text (the daemon-log console.error line is a
+    // DIFFERENT, shorter message that doesn't carry the token total — the digest text is where the "floor
+    // tier ≈ N tok" figure actually lives), not re-derived by hand — the two must be structurally unable to
+    // disagree, not just coincidentally equal.
+    const framedKickoff = retrieveProjectMemoryForKickoff(db, ndProj, "");
+    check("(never-drop) DoD-6: the packer's own ALARM actually fired for this over-budget floor tier",
+      typeof framedKickoff === "string" && framedKickoff.includes("🚨 ALARM"));
+    const alarmFloorTokens = Number(/floor tier ≈ (\d+) tok/.exec(framedKickoff ?? "")?.[1]);
+    check("(never-drop) DoD-6: memory_write's reported floorTokens EXACTLY MATCHES the packer's own ALARM total",
+      Number.isFinite(alarmFloorTokens) && alarmFloorTokens === noteB.neverDropStatus.floorTokens);
+  }
+
   // ===================== card e6d270b3: linked request state resolved at RECALL time, never write time =====================
   {
     const mkQuestion = (over) => ({
