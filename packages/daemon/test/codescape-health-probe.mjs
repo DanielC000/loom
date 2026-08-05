@@ -636,7 +636,12 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
   const pidBefore = sup.getPid();
 
-  await sleep(500); // several probe ticks — an honest exit-0 build:null must never be mistaken for a read failure
+  // Card 1aabf969: was a fixed `sleep(500)` — same real subprocess round trip as scenario (9) below (the
+  // running build here is a real, resolvable string, not absent/null, so checkBuildDrift DOES call
+  // readInstalledBuild() — the version-probe subprocess). Poll on the supervisor's own completed-tick
+  // counter until the state actually settles, same technique as (9).
+  await waitForCompletedCondition(() => sup.getDriftCheckState() === "not-checked:installed-null", () => sup.getCompletedProbeTickCount());
+  await sleep(400); // deliberate flood-catch window for the negative (no-restart/no-diagnostic) assertions below, not a completion guess — the state is already confirmed by the line above
   check("(8c) an HONEST installed build:null never triggers a restart",
     readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
   const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
@@ -678,7 +683,16 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
   const pidBefore = sup.getPid();
 
-  await sleep(500);
+  // Card 1aabf969: was a fixed `sleep(500)` — a single probe tick here is a REAL round trip (health fetch
+  // + the version-probe subprocess checkBuildDrift spawns), and this file's own comments elsewhere
+  // (scenarios (1)/(2)/(5)/(8) etc.) already document that round trip as "~70-85ms observed, MORE UNDER
+  // HOST LOAD" — a fixed 500ms budget against a 300ms probe interval leaves almost no margin for that
+  // variance and rejected a real merge gate under load (op `7781135b`). Poll on the supervisor's own
+  // completed-tick counter (progress-keyed, immune to load) until the state actually settles to "match",
+  // same technique as `waitForCompletedCondition`'s other callers in this file; only genuine stall (no
+  // tick progress for the generous default ceiling) times it out.
+  await waitForCompletedCondition(() => sup.getDriftCheckState() === "match", () => sup.getCompletedProbeTickCount());
+  await sleep(400); // deliberate flood-catch window (same shape as (8b) above), not a completion guess — the match is already confirmed by the line above
   check("(9) `build` matching never restarts even when `version` differs — `version` is not the drift signal",
     readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
   // Card 545ef479 (Defect 1): the fourth distinguishable state — a genuine, comparable MATCH — completing
