@@ -114,3 +114,18 @@ export function resolveCodescapeProjectId(repoPath: string, homeDir: string): st
   const entry = manifest.projects.find((p) => samePath(p.path, repoPath));
   return entry?.id ?? null;
 }
+
+/**
+ * Card 0e4a859a — resolve the freshness stamp (the manifest entry's own `lastIngested`) for a repo's
+ * ingested graph, or `null` if that repo has no (usable) manifest entry. A SEPARATE read from
+ * {@link resolveCodescapeProjectId} (not folded into its return): most callers only need the id, and this
+ * is read only by the few call sites that also need to show a human-readable "graph last indexed" stamp
+ * (the manager/worker prompt block — see `sessions/service.ts` `resolveCodescapeGraphContext`). Same
+ * clean-skip contract as `resolveCodescapeProjectId` — never throws, never guesses.
+ */
+export function resolveCodescapeLastIngested(repoPath: string, homeDir: string): string | null {
+  const manifest = readCodescapeManifest(homeDir);
+  if (!manifest) return null;
+  const entry = manifest.projects.find((p) => samePath(p.path, repoPath));
+  return entry?.lastIngested ?? null;
+}

@@ -111,6 +111,9 @@ function makeFakeCodescape(homeDir, orderLog) {
   return {
     calls,
     getHomeDir: () => homeDir,
+    // Card 0e4a859a: SessionService's codescape prompt-block gate also reads getPort() — a live port, so
+    // the P (positive) scenarios in this file don't throw calling startManager/spawnWorker/recycleWorker.
+    getPort: () => 4000,
     resolveProjectId: (repoPath) => resolveCodescapeProjectId(repoPath, homeDir),
     reingestInFlightCount: () => reingestInFlight,
     async registerWorktree(projectId, info) {

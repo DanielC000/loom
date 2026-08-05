@@ -203,6 +203,19 @@ export const SYNTHESIZE_SCRIPT = path.join(__dirname, "..", "assets", "python", 
  */
 export const OBSIDIAN_PREFLIGHT_FRAGMENT = path.join(__dirname, "..", "assets", "skill-fragments", "obsidian-preflight.md");
 
+/**
+ * Card 0e4a859a: the codescape discovery block's PROSE TEXT lives as a dev-only asset file — NOT a source
+ * string literal — inside the `codescape` skill dir (`assets/skills/codescape/prompt-block.md`), never
+ * under `skill-fragments/` above (which ships to every user). `codescape/` is one of `DEV_ONLY_SKILLS`
+ * (`curate-release-skills.mjs`) and is entirely omitted from a published `loomctl` release, exactly like
+ * that dir's own SKILL.md — the SAME privacy posture the codescape-privacy-guard test (card f3ce53f1)
+ * already enforces for that dir. Read live from the package dir at manager/worker spawn time
+ * (`sessions/service.ts`'s `resolveCodescapeBlockText`); a missing/unreadable file (every non-dev,
+ * non-self-host build, where this dir was curated out) degrades to no block — never a fallback string
+ * embedded in source, which would defeat the whole point of moving it here.
+ */
+export const CODESCAPE_PROMPT_BLOCK_ASSET = path.join(__dirname, "..", "assets", "skills", "codescape", "prompt-block.md");
+
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 /**

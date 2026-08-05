@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  type Session, type StopMode, type OrchestrationEvent, type Task,
+  type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type CompanionRoute,
@@ -19,7 +19,7 @@ import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranc
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
-import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
@@ -35,6 +35,7 @@ import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
 import { retrieveProjectMemoryForKickoff } from "./project-memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { CodescapeSupervisor } from "../codescape/supervisor.js";
+import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
@@ -1771,6 +1772,62 @@ export class SessionService {
   }
 
   /**
+   * Card 0e4a859a — resolve whether THIS host is actually serving a codescape graph for `project`. MUST
+   * stay presence-gated on purpose (codescape is a private product): mirrors the SAME gate
+   * `codescapeHttpMcpServer` uses to decide whether to mount the MCP itself (the daemon-wide supervisor
+   * gate + the per-project opt-in + a LIVE port + `resolveProjectId` resolving an id for this repo) —
+   * never a looser/separate check, so {@link resolveCodescapeBlockText} can never tell a session to load
+   * a graph that isn't actually being served. `resolveProjectId` is THIS supervisor instance's own cached
+   * resolver (registration cache first, manifest fallback) — the SAME one `pty/host.ts` uses for the real
+   * mount. The freshness stamp is a SEPARATE, uncached manifest read (cheap — see
+   * `resolveCodescapeLastIngested`) that only runs once an id has already resolved, so a transient
+   * stamp-read hiccup degrades to an unstamped block rather than hiding the whole thing.
+   */
+  private resolveCodescapeGraphContext(project: Project): { lastIngestedAt: string | null } | undefined {
+    if (!this.codescape) return undefined;
+    const codescapeEnabled = resolveCodescapeConfig(project.config).enabled;
+    const dbPath = resolveCodescapeIntegrationPath(this.db.getPlatformConfig());
+    if (!isCodescapeEnabled(codescapeEnabled, dbPath)) return undefined;
+    if (this.codescape.getPort() == null) return undefined;
+    const id = this.codescape.resolveProjectId(project.repoPath);
+    if (!id) return undefined;
+    return { lastIngestedAt: resolveCodescapeLastIngested(project.repoPath, this.codescape.getHomeDir()) };
+  }
+
+  /**
+   * Card 0e4a859a — the FULLY-RENDERED codescape discovery block, ready to append verbatim via the
+   * generic {@link appendMemoryRecallToStartupPrompt} (the SAME primitive companion/project-memory blocks
+   * already reuse), or `undefined` to append nothing.
+   *
+   * PRIVACY GUARD (card f3ce53f1) — WHY THIS READS A FILE INSTEAD OF A STRING LITERAL: the block's PROSE
+   * ("Codescape is available for this project…") is NOT a source string anywhere in this codebase — it
+   * lives ONLY at {@link CODESCAPE_PROMPT_BLOCK_ASSET}, a dev-only asset file INSIDE the `codescape`
+   * skill dir, which is entirely omitted from a published `loomctl` release (one of `DEV_ONLY_SKILLS`,
+   * exactly like that dir's own SKILL.md). A compiled dist/ file can carry a `codescape`-NAMED IDENTIFIER
+   * (this method, its callers, `resolveCodescapeConfig`, …) — the owner ruled 2026-07-23 (Request
+   * `e685f273`) that compiled internals are not a user-visible leak — but it must never carry the PROSE
+   * ITSELF, which reads as a feature announcement an end user could find by grepping their install. This
+   * is also why `composeManagerStartupPrompt`/`composeWorkerStartupPrompt` know NOTHING about codescape:
+   * they just append an opaque pre-rendered block, so the concept never has to compile into those files.
+   *
+   * Never throws: a missing/unreadable asset (the expected shape on every non-dev/non-self-host host,
+   * where {@link resolveCodescapeGraphContext} already returned `undefined` anyway since the daemon-wide
+   * gate is off there too) degrades to no block, same as any other clean-skip in this feature.
+   */
+  private resolveCodescapeBlockText(project: Project): string | null {
+    const info = this.resolveCodescapeGraphContext(project);
+    if (!info) return null;
+    let base: string;
+    try {
+      base = fs.readFileSync(CODESCAPE_PROMPT_BLOCK_ASSET, "utf-8").trim();
+    } catch {
+      return null;
+    }
+    if (!base) return null;
+    return info.lastIngestedAt ? `${base} Graph last indexed: ${info.lastIngestedAt}.` : base;
+  }
+
+  /**
    * Phase-2 profile-driven spawn (Agents→Profiles P2): resolve an agent's OPTIONAL Profile into
    * the effective spawn shape the "start a session in an agent" paths read — the role it confers, the
    * startup prompt to inject, and the permission policy (config allow + the profile's allowDelta).
@@ -1986,7 +2043,10 @@ export class SessionService {
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
-      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename })
+      ? appendMemoryRecallToStartupPrompt(
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+          this.resolveCodescapeBlockText(project),
+        )
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
     // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
@@ -2112,7 +2172,10 @@ export class SessionService {
       // through UNCHANGED — byte-identical to today.
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+          appendMemoryRecallToStartupPrompt(
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+            this.resolveCodescapeBlockText(project),
+          ),
           prompt,
         );
         const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
@@ -5317,9 +5380,12 @@ export class SessionService {
           // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
           // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
           startupPrompt: appendMemoryRecallToStartupPrompt(
-            // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
-            // session row above — the same resolution, so the prompt can never disagree with the worktree.
-            composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
+            appendMemoryRecallToStartupPrompt(
+              // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
+              // session row above — the same resolution, so the prompt can never disagree with the worktree.
+              composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
+              this.resolveCodescapeBlockText(project),
+            ),
             workerProjectMemoryFramed,
           ),
           role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -9112,7 +9178,10 @@ export class SessionService {
         // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
         // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
+          appendMemoryRecallToStartupPrompt(
+            composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
+            this.resolveCodescapeBlockText(project),
+          ),
           recycleProjectMemoryFramed,
         ),
         role: "worker",
@@ -9196,12 +9265,15 @@ export class SessionService {
     // roots + the resolved resume-doc path), or it cold-boots into the same Glob-timeout trap a fresh
     // manager used to hit. Without this, the successor only ever saw the continuation handoff text and
     // had to guess/reconstruct its own resume-doc path.
-    const startupPrompt = composeManagerStartupPrompt(
-      (warmup ? warmup + "\n\n---\n" : "") +
-        `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
-        `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
-        `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename },
+    const startupPrompt = appendMemoryRecallToStartupPrompt(
+      composeManagerStartupPrompt(
+        (warmup ? warmup + "\n\n---\n" : "") +
+          `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
+          `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
+          `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
+        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename },
+      ),
+      this.resolveCodescapeBlockText(project),
     );
 
     const now = new Date().toISOString();

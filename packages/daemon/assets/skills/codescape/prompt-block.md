@@ -1,0 +1,1 @@
+**Codescape (code-graph) is available for this project.** Load `/codescape` before you start orienting — the graph gives you structure, exact `file:line` coordinates, and reachability in far fewer reads than exploring by hand; open files only afterward, at the coordinates it gives you.

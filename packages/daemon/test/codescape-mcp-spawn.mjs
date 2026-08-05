@@ -382,6 +382,9 @@ const host = new SeamHost(events);
 const registerCalls = [];
 const fakeSupervisor = {
   getHomeDir: () => e2eHomeDir,
+  // Card 0e4a859a: SessionService's new codescape prompt-block gate also reads getPort() — a live port,
+  // matching the 55000 this file's own buildMcpServers checks below use as "serve is up".
+  getPort: () => 55000,
   resolveProjectId: (repoPath) => resolveCodescapeProjectId(repoPath, e2eHomeDir),
   async registerWorktree(projectId, info) {
     registerCalls.push({ projectId, ...info });
