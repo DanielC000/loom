@@ -809,6 +809,23 @@ function giveUpConfirmationHedge(subject: string): string {
 }
 
 /**
+ * Card 518d0305: the percentile-grounded proportionality clause every `[loom:worker-spawn-broken]` notice
+ * states — originally written once, inline, for `buildBrokenSpawnMsg` (the idle-watchdog sender, card
+ * 738f2109); extracted here so `handleKickoffGiveUpExhausted`'s notice (the OTHER, independent sender —
+ * see that method's own doc) states the SAME derived numbers instead of a second, independently-worded
+ * claim that can drift apart from this one. n=177 give-up-driven, content-matched confirmations
+ * (`purgeConfirmedGiveUpRequeue`'s `"CONFIRMED logicalId=… latencyMs=…"` line, deliberately NOT the more
+ * common single-generation `"CONFIRMED gen=N …"` line — see `BROKEN_SPAWN_HOLDOFF_MS`'s own doc for why)
+ * pooled from 4 daemon-output.log rotations (~2026-07-29–08-05): p50=8.5s, p90=45.9s, p95=342s, p99=675s,
+ * max=970s (16min) — see pinned memory engine-confirmation-can-lag-minutes-timeouts-assume-seconds.
+ */
+function confirmationLatencyProportionalityClause(): string {
+  return `Engine confirmation is NOT bounded to seconds — across 177 give-up-driven confirmations measured on this fleet, ` +
+    `90% landed within ~46s but the tail reaches minutes (p95=342s, max observed ~16min); an elapsed time within that ` +
+    `range is routine, not itself evidence of breakage (see memory engine-confirmation-can-lag-minutes-timeouts-assume-seconds).`;
+}
+
+/**
  * Card 92902cc2: `notifyManagerOfIdleWorker`'s [loom:worker-spawn-broken] notice — the SECOND, INDEPENDENT
  * sender of this tag (the idle watchdog; site A is `handleKickoffGiveUpExhausted`, above). Unlike site A,
  * this one is PERIODIC — it re-fires on every idle tick, not once — so unlike site A it must stay close to
@@ -842,9 +859,7 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
     ? "an engine session WAS established but never ran a turn — a stranded-composer candidate, not a missing session"
     : "no engine session was ever established — the spawn kickoff never ran";
   return `[loom:worker-spawn-broken] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn (${elapsedClause}): ${cause}. ` +
-    `Engine confirmation is NOT bounded to seconds — across 177 give-up-driven confirmations measured for this card, 90% landed within ~46s but the tail ` +
-    `reaches minutes (max observed ~16min); a short elapsed time above is routine, not itself evidence of breakage (see memory ` +
-    `engine-confirmation-can-lag-minutes-timeouts-assume-seconds). ` +
+    `${confirmationLatencyProportionalityClause()} ` +
     `Observed (single point-in-time read): engineSessionId=${w.engineSessionId ?? "none"}, turnSeq=${w.turnSeq ?? 0} ` +
     `(confirm via a second read before treating this as settled — a lone reading can't rule out a race still resolving), ` +
     `composerDirtyLen=${composerDirtyLen ?? "n/a"} (>0 confirms an unsent kickoff sitting in the composer; 0 or n/a does NOT rule that out — the ` +
@@ -1246,6 +1261,36 @@ const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_M
  * "or fewer" — `Number(…) || 1` treats `LOOM_GIVE_UP_REMINT_LIMIT=0` (falsy) the same as unset, silently
  * falling back to 1; 0 is unreachable via this env var. Genuinely wanting zero re-mints (park on the very
  * first exhaustion) needs a code change to the fallback expression, not an env override.
+ *
+ * Card 518d0305, ADDENDUM (2026-08-05): the SAME pinning above also forecloses "just raise the kickoff
+ * park budget" — `handleKickoffGiveUpExhausted` (this file, `[loom:worker-spawn-broken]`'s OTHER,
+ * independent sender; the idle-watchdog sender is `notifyManagerOfIdleWorker`/`buildBrokenSpawnMsg`, card
+ * 738f2109) reuses THIS constant for its own remint chain — it has no kickoff-scoped budget of its own to
+ * tune. Any raise here lands on population B (ordinary durable/settle-nudge messages) too, reopening the
+ * exact regression already recorded above (3→1, `merge-spawn-tracked.mjs` 26s→60s+). Measured (worker
+ * report, card 738f2109 DoD-1): n=177 give-up-driven, content-matched confirmations (kickoffs + ordinary
+ * messages pooled, 4 daemon-output.log rotations, ~2026-07-29–08-05): p50=8.5s, p90=45.9s, p95=342s,
+ * p99=675s, max=970s. The one fully-traced kickoff false positive (`ba6b65dc`, card 05056168) confirmed
+ * 120.6s after first write. A kickoff-SCOPED 1→2 remint (a separate constant, NOT this one) would land
+ * the park budget at ~113-116s (`PARK_HOLDS`=1×3=3 × `GIVE_UP_HOLD_MS` + the same ~53-56s submit-retry
+ * overhead already observed on top of the hold) — BELOW 120.6s, so it would NOT have caught even the one
+ * specimen this card has. (`c33fb627`, the other park event in the observation window, was
+ * `worker_stop`'d before any confirmation could land — its true outcome is unrecoverable from logs and
+ * must NOT be counted as a second confirmed false positive.)
+ * SECOND SPECIMEN, added 2026-08-05: `f229f9e0`, kickoff parked, engine-confirmed (content-matched
+ * `[loom:redelivery-confirmed]`) ~271s after write — more than 2× past the ~113-116s a 1→2 raise would
+ * have produced. Attribution between Loom's own late retry and a manual submit is NOT established (a
+ * manager-message origin IS excluded: `worker_list` showed no directive ever sent to this worker); state
+ * only that it confirmed late. n=2 confirmed late-confirmation false positives; `c33fb627` stays excluded.
+ * DECISION: no constant moves. The notice's CLAIM was made proportionate instead — see
+ * `confirmationLatencyProportionalityClause`, shared with `buildBrokenSpawnMsg` (card 738f2109's fix for
+ * the OTHER sender) so both state the same derived numbers rather than drifting — plus the existing
+ * pre-park discriminator (`handleKickoffGiveUpExhausted`'s `readTranscript`/`hasFirstTurnStarted` check)
+ * which already suppresses the notice whenever the engine confirms before park-time. A load-elastic
+ * budget (cf. `66649a90`, which proposes the same shape for the remint re-dispatch delay) is DEFERRED,
+ * not rejected: `66649a90` is itself unresolved on a cold-start trap (a cross-item/EWMA input reads empty
+ * at daemon start / first-of-batch). Re-open this once that card lands a proven rule shape, rather than
+ * designing a second, possibly-diverging one here.
  */
 const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
 
@@ -6688,7 +6733,12 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
       kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked" },
     });
-    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
+    // Card 518d0305: the park budget itself is NOT raised (this notice's `GIVE_UP_REMINT_LIMIT` is SHARED
+    // with the general durable-message give-up path — see that constant's own doc for the full derivation,
+    // n=177, the ba6b65dc specimen, and why); instead the notice's CLAIM is made proportionate via
+    // `confirmationLatencyProportionalityClause`, shared with `buildBrokenSpawnMsg` (the OTHER
+    // [loom:worker-spawn-broken] sender, card 738f2109) so both state the same derived numbers.
+    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${confirmationLatencyProportionalityClause()} ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript — that is the decisive check: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Do NOT treat worker_list as an equivalent check: a worker that already retired cleanly (e.g. its work merged) can show NO row there at all, which reads identically to "the kickoff never ran" — an absent row is uninformative here either way, not confirmation of anything. If this worker has a bound task, tasks_get's merged/mergedSha field is a second, cheap signal (a merged task means the work already shipped, regardless of what worker_list shows). Only if worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
   }
 

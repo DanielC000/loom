@@ -357,6 +357,13 @@ try {
         !!note && /not evidence the kickoff failed/i.test(note));
       check("(S1) no longer asserts unverifiable certainty ('nothing began at all')",
         !!note && !/nothing began at all/i.test(note));
+      // Card 518d0305: the notice's CLAIM is now proportionate to the measured confirmation-latency
+      // distribution — the SAME clause buildBrokenSpawnMsg (the idle-watchdog sender, card 738f2109)
+      // already carries, shared via confirmationLatencyProportionalityClause so the two can't drift.
+      check("(S1) states the confirmation-latency distribution is not bounded to seconds",
+        !!note && /not bounded to seconds/i.test(note));
+      check("(S1) states an elapsed time within the measured range is routine, not evidence of breakage",
+        !!note && /routine, not itself evidence of breakage/i.test(note));
     }
 
     // (S2) DURABLE, not fire-and-forget: a BUSY manager still gets a persisted session_message_queued record.
