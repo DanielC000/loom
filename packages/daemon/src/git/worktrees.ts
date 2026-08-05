@@ -2076,6 +2076,293 @@ export async function isInertMergeDiff(
   return paths.every((p) => INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)));
 }
 
+/** Compiled-source and non-compiled-test path scopes {@link computeEmitCompareGate} classifies changed
+ *  paths into — see that function's own doc for why only these two, and why everything else fails closed. */
+const EMIT_COMPARE_SRC_PREFIX = "packages/daemon/src/";
+const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
+
+/** The static source-TEXT guards (Code Review, `docs/investigations/c4ccae66-.../findings.md`) — these
+ *  grep raw file content rather than compiled behavior, so {@link computeEmitCompareGate}'s emit-compare
+ *  proof does not cover them; a reduced gate built from {@link buildReducedGateCommand} always runs them
+ *  unconditionally, same as it always runs `pnpm build`. Repo-root-relative: the real `gateCommand` (e.g.
+ *  `"pnpm build && pnpm --filter @loom/daemon test:daemon"`) always runs from repo root, so a reduced
+ *  command built from these paths must match that convention to `&&`-chain into {@link splitGateSteps}
+ *  the identical way.
+ */
+const STATIC_GUARD_REPO_PATHS = [
+  "packages/daemon/test/clock-path-regression-guard.mjs",
+  "packages/daemon/test/fixed-wait-negative-guard.mjs",
+  "packages/daemon/test/onexit-discard-guard.mjs",
+  "packages/daemon/test/codescape-privacy-guard.mjs",
+];
+
+/** {@link computeEmitCompareGate}'s verdict. */
+export interface EmitCompareGateResult {
+  /** `true` ⇒ the caller may run {@link buildReducedGateCommand}'s output in place of the real
+   *  `gateCommand` — the ~668-test `test:daemon` runtime suite is PROVABLY unable to change outcome for
+   *  this diff. `false` ⇒ run the full gate exactly as today; `reason` names why, for diagnostics only. */
+  eligible: boolean;
+  /** Repo-root-relative paths of changed, non-helper `test/*.mjs` files to run directly — populated only
+   *  when `eligible`. A changed test file never BLOCKS eligibility on its own; it only ever ADDS itself
+   *  here, since the guards + running the file itself is a strictly stronger check than the file merely
+   *  sitting unrun in a full suite pass it would have passed anyway. */
+  changedTestFiles: string[];
+  /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
+   *  caller so a skip is never silent (card 2154b6ad DoD-5). */
+  identicalFileCount: number;
+  reason?: string;
+}
+
+/**
+ * Whether a merge gate's ~668-test `test:daemon` runtime suite can be SKIPPED for this diff — card
+ * 2154b6ad (owner-requested: two comment-only branches burned a full ~15min gate each). Distinct from
+ * {@link isInertMergeDiff} above, which proves a diff can skip the gate ENTIRELY: this proves only that the
+ * diff's COMPILED BEHAVIOR is unchanged, so `pnpm build` (real typecheck) and the static source-text guards
+ * below still run UNCONDITIONALLY — only the runtime test suite itself is ever skipped, and only for
+ * `packages/daemon/src/**\/*.ts`; every other path (including `test/*.mjs`, handled separately below) fails
+ * this diff closed to the full gate.
+ *
+ * WHY NOT "skip when the diff is comments-only" (Code Review, card 2154b6ad §2): three of the four static
+ * guards under `packages/daemon/test/` grep raw FILE CONTENT — e.g. `clock-path-regression-guard.mjs`'s
+ * `/Date\.now\(\)/` scan. A comment-only edit CAN flip one of them: a real owner branch (`6d53b02b`)
+ * introduced the literal string `Date.now()` inside an explanatory comment in a `test/*.mjs` file. So
+ * "comments only" alone is unsafe as a gate-SKIP predicate — this function never uses it as one. It only
+ * ever widens what may be skipped (the runtime suite); the guards below always run regardless of what this
+ * function decides about any `test/*.mjs` path, which is exactly what makes that counterexample
+ * STRUCTURALLY impossible to mis-skip here, not merely avoided by care.
+ *
+ * WHY NOT "byte-identical full compiled emit" (the design originally proposed for this card, falsified by
+ * measurement before being built, not after): `packages/daemon/tsconfig.json` never sets `removeComments`,
+ * and TypeScript's default is `false` — comments are emitted VERBATIM into `dist/**\/*.js` (verified:
+ * `grep -n "PROVEN on git 2.47.0" packages/daemon/dist/git/worktrees.js` — a real JSDoc sentence found
+ * sitting in compiled output). A comment-only diff therefore produces a NON-identical full-program emit
+ * under this repo's real compiler settings — that check would never have fired for the exact branches that
+ * prompted this card. Not a dangerous mechanism, a dead one. Fixed here by transpiling each CHANGED file
+ * ALONE with `removeComments:true` set EXPLICITLY for this throwaway comparison only (never for the real
+ * `dist/` build, which must keep its comments for anyone reading compiled output) — see
+ * {@link transpileIgnoringCommentsAndWhitespace}.
+ *
+ * ⚠️ A HAND-ROLLED SCANNER LOOP IS NOT A SAFE SUBSTITUTE FOR `ts.transpileModule` — left as a warning, not
+ * quietly avoided: an earlier draft of this comparison drove `ts.createScanner` directly in a `while` loop
+ * (a plausible-looking "real tokenizer, not a regex"). It DESYNCED on a template literal containing `${...}`
+ * interpolation elsewhere in the same file — the scanner needs `reScanTemplateToken`/`reScanSlashToken`
+ * calls at the right points to track what the real parser would see, and a bare `scan()` loop never makes
+ * them. Observed failure, reproduced against this file's own `changedPathsBetween` doc comment: a large
+ * multi-line JSDoc block got silently swallowed into the middle of an unrelated template-literal token, so
+ * an edit INSIDE that comment flipped the verdict by accident, not because of the comment. `transpileModule`
+ * uses the real parser and does not have this failure mode — reach for it, never a hand-rolled scan loop,
+ * for anything claiming to compare "real tokens." (This is the card's own regex-comment-stripper trap
+ * wearing a more respectable disguise — same defect, one level up.)
+ *
+ * SOUNDNESS PRECONDITION (Code Review, card 2154b6ad): comparing each changed file's transpile output IN
+ * ISOLATION is only sound if no OTHER (unchanged) file's compiled behavior can depend on a changed file's
+ * TYPE-only content. Two known TS mechanisms could break that — `emitDecoratorMetadata` (reflects a
+ * decorated member's TYPE into runtime metadata another file could read) and `const enum` (its members are
+ * INLINED at every use site program-wide, so a value edit in the enum's own file silently changes every
+ * OTHER file that references it). Neither exists in this repo today, but {@link emitCompareSoundnessOk}
+ * RE-CHECKS BOTH LIVE on every call rather than trusting this comment — a future tsconfig edit or a newly
+ * added `const enum` would otherwise silently reverse this precondition with no other signal (see also
+ * `packages/daemon/test/emit-compare-soundness-guard.mjs`, the committed regression test for the same
+ * precondition).
+ *
+ * NOT A BUG, WORTH NAMING SO IT ISN'T "FIXED" LATER: a TYPE-ONLY edit (e.g. widening a parameter's type,
+ * with no runtime-observable change) also transpiles identically and is therefore also proven eligible for
+ * the skip. That is CORRECT, not a gap — types are erased before this comparison ever runs, so a type-only
+ * change cannot change what the ~668 runtime tests observe, and `pnpm build` (which still runs
+ * unconditionally) is exactly what re-typechecks it.
+ *
+ * FAILS CLOSED on every uncertain case, same asymmetry as {@link isInertMergeDiff}: a git error, an
+ * unresolvable `typescript` module (e.g. a shipped end-user install with no devDependencies — this whole
+ * mechanism is Loom-repo-specific and simply never engages there), any changed path outside the two scoped
+ * prefixes, any non-`M` status (added/deleted/renamed) on a compiled file, or a failed soundness
+ * precondition all return `eligible:false`. A false `false` costs one ordinary gate run; a false `true`
+ * would land unverified behavior on main — the same asymmetry that decided every judgement call here.
+ */
+export async function computeEmitCompareGate(
+  repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
+): Promise<EmitCompareGateResult> {
+  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, reason });
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+
+  let entries: string[];
+  try {
+    const raw = (await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", `${baseSha}..${ref}`]),
+      timeoutMs, "git diff --name-status (emit-compare classify)",
+    )).trim();
+    entries = raw ? raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean) : [];
+  } catch {
+    return notEligible("git error reading the diff");
+  }
+  if (entries.length === 0) return notEligible("empty diff — nothing to prove inert from");
+
+  const changedTsFiles: string[] = [];
+  const changedTestFiles: string[] = [];
+  for (const line of entries) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) return notEligible(`unparseable diff line: ${line}`);
+    const status = line[0];
+    const p = line.slice(tab + 1);
+    if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
+      if (status !== "M") return notEligible(`non-modify status "${status}" on compiled file ${p}`);
+      changedTsFiles.push(p);
+      continue;
+    }
+    if (p.startsWith(EMIT_COMPARE_TEST_PREFIX) && p.endsWith(".mjs")) {
+      // Mirrors scripts/test-daemon.mjs's own discovery rule: an underscore-prefixed segment anywhere in
+      // the path (the file's own name, or a containing directory like `_scratch/`) marks a non-test helper
+      // whose standalone-run behavior isn't guaranteed — fail closed rather than assume it's safe to run
+      // in isolation or silently drop it.
+      if (p.split("/").some((seg) => seg.startsWith("_"))) return notEligible(`underscore-prefixed test helper path: ${p}`);
+      // Code Review (card 2154b6ad): `buildReducedGateCommand` interpolates this path directly into a
+      // shell-executed `&&` chain (`node ${p}`) — the prefix/suffix checks above constrain WHERE the path
+      // sits, not WHICH CHARACTERS it contains. A committed filename carrying shell metacharacters (a
+      // narrow but real vector — this repo's own gateCommand trust model already treats a committed
+      // filename as untrusted-until-checked, see `--no-renames`'s doc above) must fail closed here, not
+      // reach the shell string at all. Mirrors sibling card 344ce950's `identifyRetriableTestFile`, which
+      // guards the analogous interpolation with an explicit allowlist before building its own command
+      // string — same subsystem, same posture.
+      if (!/^[A-Za-z0-9_.\-/]+$/.test(p)) return notEligible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
+      if (status === "A" || status === "M") changedTestFiles.push(p);
+      // status "D" (deleted): nothing left to run directly; the guards below still cover its blast radius.
+      continue;
+    }
+    return notEligible(`path outside emit-compare scope: ${p}`);
+  }
+
+  if (changedTsFiles.length === 0 && changedTestFiles.length === 0) {
+    // Every changed path was a DELETED test/*.mjs file — nothing left needing behavioral proof, but
+    // nothing PROVEN inert either; fail closed rather than special-case a deletion-only diff.
+    return notEligible("no eligible changed path left to prove inert");
+  }
+
+  if (changedTsFiles.length > 0) {
+    if (!(await emitCompareSoundnessOk(worktreePath))) {
+      return notEligible("soundness precondition (emitDecoratorMetadata / const enum) not verified");
+    }
+    let tsModule: TypeScriptModule;
+    try {
+      const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
+      tsModule = imported.default ?? imported;
+    } catch {
+      return notEligible("typescript module not resolvable (expected on a shipped end-user install)");
+    }
+    for (const p of changedTsFiles) {
+      let before: string;
+      let after: string;
+      try {
+        before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
+      } catch {
+        return notEligible(`could not read base content for ${p}`);
+      }
+      try {
+        after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
+      } catch {
+        return notEligible(`could not read branch content for ${p}`);
+      }
+      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule).outputText;
+      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule).outputText;
+      if (outBefore !== outAfter) return notEligible(`${p} is not transpile-identical — a real code change`);
+    }
+  }
+
+  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length };
+}
+
+/** Narrow structural type for the `typescript` package's default export — only the surface this file
+ *  actually uses, so this stays correct without depending on `typescript`'s own (large) public types. */
+interface TypeScriptModule {
+  transpileModule(input: string, opts: unknown): { outputText: string };
+  ScriptTarget: Record<string, unknown>;
+  ModuleKind: Record<string, unknown>;
+}
+
+/** Single-file, syntax-only transpile with `removeComments:true` forced — see {@link computeEmitCompareGate}'s
+ *  own doc for why this (not a hand-rolled scanner, not the real `dist/` build) is the right tool. Matches
+ *  `tsconfig.base.json`'s real `target`/`module` so the emitted SYNTAX shape (e.g. downleveling) is
+ *  representative; every other option is irrelevant here since `transpileModule` never type-checks. */
+function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModule): { outputText: string } {
+  return tsModule.transpileModule(text, {
+    compilerOptions: {
+      target: tsModule.ScriptTarget.ES2022,
+      module: tsModule.ModuleKind.NodeNext,
+      removeComments: true,
+      sourceMap: false,
+      declaration: false,
+    },
+    fileName,
+  });
+}
+
+/** Live re-check of {@link computeEmitCompareGate}'s soundness precondition — see that function's own doc
+ *  for what these two TS mechanisms would break if either were present. Reads directly off `worktreePath`
+ *  (the exact tree about to be gated): a plain, deterministic filesystem walk, not git — there is no
+ *  "before" state to reconcile here since both properties are PROGRAM-WIDE, not diff-scoped, so the only
+ *  question is whether they hold in the tree being tested right now. Any read/parse error fails closed
+ *  (returns `false` — precondition NOT proven), same asymmetry as everywhere else in this file.
+ *
+ * Code Review (card 2154b6ad): `packages/daemon/tsconfig.json` `extends` `tsconfig.base.json` and carries
+ * its OWN `compilerOptions` block (`outDir`/`rootDir`/`types` today) — the more natural place someone adds
+ * a daemon-specific compiler option going forward. An earlier version of this function read ONLY the base
+ * config, so `emitDecoratorMetadata:true` added to the PACKAGE file instead would have been invisible to
+ * this check: `transpileIgnoringCommentsAndWhitespace` never sets that flag, so a type-only edit to a
+ * decorated member would transpile identically while the REAL `pnpm build` emit's metadata silently
+ * changed — `eligible:true` on a genuine behavior change, exactly the failure this precondition exists to
+ * catch. Both files in the daemon's actual `extends` chain are checked below, each independently. If a
+ * third config layer is ever added to that chain, this must widen to cover it too. */
+async function emitCompareSoundnessOk(worktreePath: string): Promise<boolean> {
+  for (const tsconfigRelPath of ["tsconfig.base.json", path.join("packages", "daemon", "tsconfig.json")]) {
+    try {
+      const raw = fs.readFileSync(path.join(worktreePath, tsconfigRelPath), "utf8");
+      const opts = (JSON.parse(raw) as { compilerOptions?: Record<string, unknown> }).compilerOptions;
+      if (opts?.emitDecoratorMetadata === true) return false;
+    } catch {
+      return false;
+    }
+  }
+  const srcDir = path.join(worktreePath, "packages", "daemon", "src");
+  // Requires the actual DECLARATION shape (`const enum <Identifier> {`), not just the two words adjacent —
+  // deliberately tighter than a bare `\bconst\s+enum\b`. Two real false positives on the LOOSER pattern
+  // were found by running this exact check against this exact repo before shipping it: (1) a variable
+  // merely NAMED `const enumerate = ...` (pty/host.ts's own process-enumeration helper — kept as this
+  // check's positive control below, the pattern must NOT match that line), and (2) THIS FILE'S OWN doc
+  // comments ABOVE, which explain the `const enum` mechanism in prose ("`const enum` (its members are
+  // INLINED..." etc.) — a bare word-adjacency regex tripped on its own documentation and would have made
+  // this mechanism permanently fail-closed the moment it shipped, discovered only by actually running the
+  // check rather than eyeballing the pattern. Requiring `<Identifier> {` immediately after excludes both:
+  // prose describing the concept doesn't happen to place an identifier and an open brace right after the
+  // words "const enum" (and if a future comment ever DID include a worked-example declaration in that
+  // exact shape, the worst case is the same safe direction — an unnecessary fail-closed, never a missed
+  // real one).
+  const CONST_ENUM = /\bconst\s+enum\s+[A-Za-z_$][\w$]*\s*\{/;
+  try {
+    for (const file of walkTsFiles(srcDir)) {
+      if (CONST_ENUM.test(fs.readFileSync(file, "utf8"))) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function walkTsFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkTsFiles(full, out);
+    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+
+/** Builds the `&&`-chained reduced gate command for a diff {@link computeEmitCompareGate} proved eligible
+ *  — `pnpm build` (unconditional, real typecheck+emit) + the static guards (unconditional, source-text
+ *  scanners) + each changed `test/*.mjs` file run directly, so its OWN behavior is actually exercised
+ *  rather than merely proven absent from `src/`. Never includes the ~668-test `test:daemon` suite — that
+ *  omission is the entire saving this mechanism exists for. */
+export function buildReducedGateCommand(changedTestFiles: string[]): string {
+  return ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`), ...changedTestFiles.map((p) => `node ${p}`)].join(" && ");
+}
+
 /**
  * Verifies a squash commit's persisted `Loom-Worker-PathSet` claim purely from the commit's OWN ancestry —
  * `sha` and its parent `sha^`, both permanently reachable from HEAD once landed, so unlike a branch-tip

@@ -15,7 +15,7 @@ import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.j
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -10739,6 +10739,16 @@ export class SessionService {
     // decided). Mutually exclusive with the reuse producer: checked only when reuse did NOT already apply
     // (a reused self-check is a REAL prior verdict, strictly cheaper to trust than re-deriving inertness).
     let inertSkip = false;
+    // Card 2154b6ad: whether this merge's REAL (still-spawned) gate had its ~668-test `test:daemon`
+    // runtime suite swapped out for `buildReducedGateCommand`'s smaller command — `pnpm build` + the
+    // static guards + any changed test/*.mjs file, run directly. Distinct from `inertSkip` above: that one
+    // means NO gate spawned at all; this one means a real, smaller gate spawned. Mutually exclusive with
+    // `inertSkip` by construction (checked only in the `else` branch below) and diagnostic-only past this
+    // point — `emitCompareTestFiles`/`emitCompareIdenticalCount` exist purely to surface WHY in the merge
+    // result/build_gate event, mirroring `inertSkip`'s own `skipReason` (see the warning/event block below).
+    let emitCompareSkip = false;
+    let emitCompareTestFiles: string[] = [];
+    let emitCompareIdenticalCount = 0;
     // Card a2873f7e: per-step durations from whichever gate run actually settles below (the first attempt,
     // or the transient-kill retry if one fires) — declared at THIS outer scope for the same reason `gateRan`
     // is: the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined`
@@ -11106,6 +11116,22 @@ export class SessionService {
         if (inertSkip) gateRan = false;
       }
 
+      // EMIT-COMPARE REDUCED GATE (card 2154b6ad): considered only when the diff wasn't ALREADY proven
+      // fully inert above — a docs-only diff already skips everything, so there's nothing left to reduce.
+      // Unlike `inertSkip`, this does NOT touch `gateRan`/`gateBaseMainHead`/`gateBaseBranchHead` at all —
+      // a real gate still spawns below (`gateSemaphore.runExclusive` still runs, still takes the per-repo
+      // admission guard on a pass), just with `buildReducedGateCommand`'s smaller command substituted for
+      // the project's real `gateCommand`. See `computeEmitCompareGate`'s own doc for the full safety case.
+      if (!inertSkip && !reuseResult && gateBaseMainHead) {
+        const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+        if (emitCompare.eligible) {
+          emitCompareSkip = true;
+          emitCompareTestFiles = emitCompare.changedTestFiles;
+          emitCompareIdenticalCount = emitCompare.identicalFileCount;
+        }
+      }
+      const effectiveGate = emitCompareSkip ? buildReducedGateCommand(emitCompareTestFiles) : gate;
+
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -11306,7 +11332,7 @@ export class SessionService {
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
           // event, not a second independently-computed signal.
           const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-          const r = await runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
+          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
           // CARD c24dd48a: a passing gate is about to hand off to this method's own squash phase
           // (`mergeBranch`, below, outside this call) — keep the per-repo admission guard held so a queued
           // same-repo sibling isn't admitted into the gap between this gate settling and that squash
@@ -11408,6 +11434,10 @@ export class SessionService {
         // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
         // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
         ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+        // Card 2154b6ad: a REAL gate still ran (gateRan:true, unlike the inert-diff skip above) but with
+        // the runtime test suite swapped out — surfaced here so `gate_history` never reads this as an
+        // ordinary full-suite pass with no signal that anything was reduced.
+        ...(emitCompareSkip ? { emitCompareReduced: true, emitCompareIdenticalCount, emitCompareTestFiles } : {}),
         // Card 344ce950: stamped onto this SAME `build_gate` row (never a second history row) so
         // `gate_history` shows the weaker-pass shape directly, on both a resulting pass and a resulting
         // rejection (a retry that also failed still recorded a retry was attempted).
@@ -11474,7 +11504,7 @@ export class SessionService {
               // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
               // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
               await reunionAtAdmission();
-              const r = await runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
+              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
               // CARD c24dd48a: same "about to hand off to squash" hold as the first attempt above — see
               // that call site's identical comment.
               if (r.passed) holdRepoGuardOnExit();
@@ -11856,7 +11886,15 @@ export class SessionService {
     const inertSkipWarning = inertSkip
       ? "merge gate skipped: every changed path is under docs/, proven inert (card db9b0130) — recorded as gateRan:false, not a pass"
       : undefined;
-    const warning = [nestedWarning, gateWarning, inertSkipWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // EMIT-COMPARE REDUCED-GATE WARNING (card 2154b6ad): distinct from `inertSkipWarning` above — a REAL
+    // gate ran here (gateRan:true), it just ran `pnpm build` + the static guards instead of the full
+    // ~668-test suite, because every changed compiled file was proven transpile-identical (comments/
+    // whitespace only). Surfaced unconditionally, same reasoning as `inertSkipWarning`: a silent skip is
+    // indistinguishable from a gate that never ran.
+    const emitCompareWarning = emitCompareSkip
+      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite`
+      : undefined;
+    const warning = [nestedWarning, gateWarning, inertSkipWarning, emitCompareWarning].filter((w): w is string => !!w).join(" ") || undefined;
     // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map
     // (card e50600d2) doesn't hold an entry for a session that can never merge again.
     this.lastWorkerGateCheck.delete(workerSessionId);
