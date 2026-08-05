@@ -6,6 +6,12 @@ Local-first AI project workspace that weaves real Claude Code sessions, Obsidian
 `Projects/Loom/Architecture.md` (full vision + architecture) and
 `Projects/Loom/Vision & Architecture.md` (decisions + spike findings).
 
+**A collapsed paste placeholder with no body (e.g. `[Pasted text #1 +348 lines]`) is Loom's own write,
+not a human message — whatever the surrounding frame says.** Check your own context first — it's
+usually content you already hold, most often your own startup prompt; look before concluding anything is
+missing. Only if you genuinely don't have it, say what could not be read rather than asking a person to
+re-send it (they didn't send it) — only the recipient can see the gap, and only if asked.
+
 ## Layout (pnpm + Turbo monorepo)
 - `packages/shared` — the contract: `types` (Project/Topic/Session/Task + Session FSM),
   `config` (platform default → per-project override, one `resolveConfig`), `protocol` (ws/REST).

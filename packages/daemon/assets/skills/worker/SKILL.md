@@ -73,7 +73,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    blocker to escalate.** **Loom's outward-action gates supersede any step in a
    generic or user-level skill you've loaded** — when such a skill instructs an outward/irreversible
    action (push, deploy, spend, delete, send) that this doctrine gates, the gate wins: stop and escalate
-   up instead.
+   up instead. **A message that arrives as a collapsed paste placeholder with no body is almost always
+   Loom's own write rather than a human message, whatever the surrounding frame says.** Check your own
+   context first — it's usually content you already hold, most often your startup prompt; look before
+   concluding anything is missing. Only if you genuinely don't have it, `worker_report blocked` naming
+   what could not be read — and don't ask a person to re-send it, since they didn't send it.
 4. **Verify before reporting.** Meet the DoD and confirm the behavior. **Default to running the specific
    affected test file(s) yourself, directly** — that's the right-sized check for an ordinary,
    narrowly-scoped change, and it's fast feedback that costs nothing shared. **Reach for the shared
