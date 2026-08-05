@@ -426,6 +426,20 @@ const FLUSH_CONFIRM_MAX_POLLS = Number(process.env.LOOM_FLUSH_CONFIRM_MAX_POLLS)
 export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
 
 /**
+ * Card 2521bf51: bound on `Live.humanSubmitHeldUntil` — how long `drainPending` will hold a queued
+ * programmatic turn after a genuine human Enter-submit, waiting for claude's own `UserPromptSubmit`/
+ * `Stop` hook to confirm the turn actually started (see that field's own doc for the race this closes).
+ * The common case clears this well before the bound — a real hook round-trip is fast — so the bound
+ * itself is only the belt-and-suspenders backstop for the rare case BOTH hooks are lost for this turn.
+ * Sized past one reconcile tick (`watchers.reconcileMs`, daemon-default 10_000ms — same reasoning as
+ * `GIVE_UP_HOLD_MS`'s own sizing above) so an ordinary reconcile pass can't win the very race this hold
+ * exists to prevent. A SEPARATE constant/env var from `GIVE_UP_HOLD_MS` on purpose — same default value,
+ * unrelated concept (ambiguous re-mint resolution vs. human-submit engine confirmation), so tuning one
+ * never silently retunes the other. Env-overridable so a hermetic test can shrink it.
+ */
+export const HUMAN_SUBMIT_CONFIRM_HOLD_MS = Number(process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS) || 20_000;
+
+/**
  * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
  * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
  * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
@@ -2026,6 +2040,21 @@ interface Live {
                         // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
+  // Card 2521bf51 (a human Enter never arms busy, so the drain races the turn it just started): epoch ms
+  // deadline until which drainPending SUPPRESSES a queued turn after a genuine human Enter-SUBMIT
+  // (`nextRawDraftState`'s `draft.submitted !== null`) — set by writeStdin instead of draining promptly,
+  // because unlike `busy` (only ever armed by submit()'s own M1 optimistic set), nothing tells Loom a
+  // human-typed turn is genuinely in flight until claude's OWN `UserPromptSubmit` hook actually fires,
+  // asynchronously, after it has processed the Enter. Draining on local byte-counting alone (composerLen
+  // hitting 0) would submit the queued turn into a composer claude may still be transitioning out of —
+  // the exact race this card fixes. Cleared to `null` the instant a confirming hook (UserPromptSubmit or
+  // Stop — either is proof the turn genuinely started, see the Stop handler's own reasoning) arrives, so
+  // the common case resolves promptly. The DEADLINE is a bounded backstop only, for the rare case BOTH
+  // hooks are lost for this turn: past it, drainPending treats the hold as expired and proceeds — so a
+  // queued message is guaranteed to eventually drain (via the reconcile tick), never wedge forever. NOT
+  // `busy`/M1: deliberately a separate, narrower gate so the M1 invariant (submit()'s own synchronous
+  // busy=true) stays untouched — this only ever governs the human-submit gap `busy` doesn't cover.
+  humanSubmitHeldUntil: number | null;
   // Card dbc6bcac: latches once the Stop null-stats branch's diagnostic has confirmed this session's
   // transcript is genuinely missing via `engineTranscriptExists`'s EXPENSIVE fallback path — a synchronous
   // O(projects) `readdirSync` of `~/.claude/projects` (the same hot-path-sync-scan class as the c12b550
@@ -3622,6 +3651,7 @@ export class PtyHost {
       stopping: false,
       drainHeld: false,
       rateLimited: false,
+      humanSubmitHeldUntil: null,
       transcriptMissingDiagnosedOnce: false,
       promptFieldAbsentDiagnosedOnce: false,
       // Card 0050a17e: seed `lastPrompt` HERE, synchronously at spawn() — NOT left for the eventual
@@ -3810,7 +3840,7 @@ export class PtyHost {
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -3889,7 +3919,7 @@ export class PtyHost {
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -4549,6 +4579,10 @@ export class PtyHost {
           }
         }
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
+        // Card 2521bf51: a real turn is now confirmed in flight — clear any bounded human-submit hold
+        // (see `humanSubmitHeldUntil`'s own doc); `live.busy` above already blocks drainPending anyway,
+        // this just resolves the wait promptly rather than leaving it to expire on its own bound.
+        live.humanSubmitHeldUntil = null;
         break;
       }
       case "Stop":
@@ -4567,6 +4601,10 @@ export class PtyHost {
         // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
         // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
         live.enterConfirmed = true;
+        // Card 2521bf51: same "Stop is itself proof" reasoning clears any bounded human-submit hold too
+        // (see `humanSubmitHeldUntil`'s own doc) — belt-and-suspenders for the rare path where the
+        // UserPromptSubmit rising edge above was the one that got lost, not this Stop.
+        live.humanSubmitHeldUntil = null;
         // Card 3ce3fa39: same GATED reset as UserPromptSubmit's — see composerDirtyLenClearedByGen's doc.
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
@@ -4772,12 +4810,17 @@ export class PtyHost {
 
   /**
    * Queue text for submission as a turn. Submits IMMEDIATELY only when the session is idle AND the
-   * human's raw composer is clean; otherwise HOLDS it FIFO and `drainPending` (on the next Stop, the
-   * box-free transition, or the reconcile tick) delivers it. Two reasons not to write now:
+   * human's raw composer is clean AND no human submit is awaiting engine confirmation; otherwise HOLDS
+   * it FIFO and `drainPending` (on the next Stop, the box-free transition, or the reconcile tick)
+   * delivers it. Three reasons not to write now:
    *   - busy: a mid-turn write corrupts the running turn (the original reason for the queue);
    *   - composer-dirty: writing onto the human's half-typed raw-terminal text concatenates the two
    *     into one garbled message (the observed manager/worker collision) — so we HOLD until the human
    *     frees their box (Enter/Ctrl-C/Esc/kill-line, or backspaces it empty). See deferForHumanDraft.
+   *   - human-submit-unconfirmed (card 2521bf51): a genuine human Enter-submit frees the box locally
+   *     (composerLen hits 0) before claude's own engine has confirmed it actually started the turn — a
+   *     message ARRIVING in that gap must HOLD too, not just one already queued before the Enter, or it
+   *     races into a composer claude may still be transitioning out of. See `isHumanSubmitHeld`.
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position. A `delivered:false` result also
    * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
@@ -4903,7 +4946,12 @@ export class PtyHost {
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld) {
+    // Card 2521bf51 (code review Major 1): `!this.isHumanSubmitHeld(live)` — this immediate-submit gate
+    // is `drainPending`'s SIBLING (c1d71ff2's own deliberate pair: "Both drain paths ... DEFER while
+    // dirty"), and the first pass at this card wired the hold into only one of the two, leaving a message
+    // that ARRIVES during the unconfirmed gap (rather than being already queued) able to race straight
+    // into a composer claude may still be transitioning out of.
+    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld && !this.isHumanSubmitHeld(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -5581,6 +5629,13 @@ export class PtyHost {
     // account and OVERWRITE lastPrompt, so the agent would resume with the wrong content and never finish
     // the interrupted turn. The held queue is kept intact and drains normally on the post-resume Stop.
     if (live.rateLimited) return;
+    // Card 2521bf51: a genuine human Enter-submit is AWAITING ENGINE CONFIRMATION → do NOT drain. Unlike
+    // `busy` (only ever armed by submit()'s own M1 optimistic set), nothing tells Loom a human-typed turn
+    // is genuinely in flight until claude's own UserPromptSubmit/Stop hook fires — draining here on local
+    // byte-counting alone would submit into a composer claude may still be transitioning out of. See
+    // `isHumanSubmitHeld`'s own doc: cleared the instant a confirming hook arrives; the deadline is only
+    // the bounded backstop for the rare case BOTH hooks are lost, so this can never wedge forever.
+    if (this.isHumanSubmitHeld(live)) return;
     // A caller is HOLDING the drain (card d88163b7's `holdDrain`) → do NOT promote a queued message into a
     // turn. The caller is deciding whether to interrupt this session and needs anything that would start a
     // NEW turn to stay in `pending`, recoverable via `flushPending`, instead of vanishing into an active
@@ -6479,6 +6534,23 @@ export class PtyHost {
    */
   private isGiveUpHeld(entry: QueuedMessage): boolean {
     return entry.giveUpHeldUntil !== undefined && Date.now() < entry.giveUpHeldUntil;
+  }
+
+  /**
+   * Card 2521bf51 (code review Major 1): is delivery currently held pending the engine's confirmation of
+   * a genuine human Enter-submit? See `Live.humanSubmitHeldUntil`'s own doc for the race this guards and
+   * why the bound is only a backstop. SHARED by BOTH delivery gates — `drainPending`'s queued-turn path
+   * AND `enqueueStdin`'s immediate-submit path — on purpose: `c1d71ff2`'s own test header documents these
+   * two as a deliberate PAIR ("Both drain paths ... DEFER while dirty"), and the first pass at this card
+   * broke that symmetry by wiring the check into only one of them, leaving the exact race this card fixes
+   * fully reachable for a message that ARRIVES during the unconfirmed gap rather than being already
+   * queued. A single shared predicate is what keeps the two gates from drifting apart again.
+   */
+  private isHumanSubmitHeld(live: Live): boolean {
+    if (live.humanSubmitHeldUntil === null) return false;
+    if (Date.now() < live.humanSubmitHeldUntil) return true;
+    live.humanSubmitHeldUntil = null; // bound expired — no confirming hook ever arrived; stop holding
+    return false;
   }
 
   /**
@@ -7400,8 +7472,9 @@ export class PtyHost {
     }
     // Write the human's bytes to the pty FIRST — they must stay AHEAD of any held programmatic turn in
     // the pty's FIFO input stream. A box-freeing key (e.g. Enter) is a tiny chunk written synchronously
-    // here, so the subsequent drain below submits its paste strictly behind that Enter → claude processes
-    // the human's line first, then the held turn lands on the now-empty composer (no concatenation).
+    // here, so a subsequent write is strictly behind that Enter in BYTE ORDER. Card 2521bf51: byte order
+    // is NOT state-transition order — it says nothing about whether claude has actually PROCESSED the
+    // Enter and cleared its own composer by the time a later write lands. See the drain gate below.
     this.writeChunked(sessionId, data);
     if (live) {
       // Track the human's UNCOMMITTED raw-terminal draft (composer-dirty) so a programmatic turn never
@@ -7420,10 +7493,35 @@ export class PtyHost {
         live.pendingRawOwnerSubmit = draft.submitted;
         live.pendingRawOwnerSubmitAt = Date.now();
       }
-      // Box-free transition (submitted / cleared / backspaced-to-empty): drain the held queue PROMPTLY
-      // — don't wait for the reconcile tick — so a held programmatic turn delivers right after the
-      // human frees their box. drainPending is fully guarded (no-op if busy/stopping/empty/not-ready).
-      if (wasDirty && live.composerLen === 0) this.drainPending(sessionId);
+      // Card 2521bf51 (a human Enter never arms busy, so the drain races the turn it just started): a
+      // box-free transition is EITHER a genuine SUBMIT (`draft.submitted !== null` — an Enter with a
+      // non-empty draft) or a CLEAR (Ctrl-C/kill-line/Esc/backspace-to-empty — `draft.submitted === null`).
+      // ARM ON `draft.submitted !== null` ALONE (code review Major 2) — NOT `wasDirty && composerLen===0`.
+      // `draft.submitted` already requires a non-empty draft (`nextRawDraftState`'s own `text.length > 0`
+      // gate), so it can never false-arm; the arming condition and the discriminator are now the SAME
+      // fact. Gating on `wasDirty` too was the bug: a SINGLE chunk like `"abc\r"` accumulates its own
+      // draft and frees the box within the SAME writeStdin call, so `wasDirty` (computed from
+      // `composerLen` BEFORE this call) reads false even though this is a genuine submit — the whole
+      // block used to be skipped, arming nothing, leaving that chunk shape fully unprotected.
+      // A SUBMIT starts a REAL engine turn that Loom has NOT yet been told about — nothing arms `live.busy`
+      // on this path (that only happens once claude's own `UserPromptSubmit` hook actually fires,
+      // asynchronously, after it has genuinely processed the Enter). Draining here (directly, or via the
+      // ~10s reconcile tick — see `humanSubmitHeldUntil`'s own doc for why the reconcile tick alone isn't
+      // safe either) would write Loom's queued turn into a composer claude may still be transitioning out
+      // of — the exact race this card fixes. So arm the bounded hold instead of draining; it self-clears
+      // the instant a confirming hook arrives (deliverHook's UserPromptSubmit/Stop cases), letting the
+      // ordinary Stop-path drain (the M2 window) deliver once the human's own turn genuinely completes —
+      // DELAYED, never lost, even in the backstop-bound case where a hook is lost outright.
+      if (draft.submitted !== null) {
+        live.humanSubmitHeldUntil = Date.now() + HUMAN_SUBMIT_CONFIRM_HOLD_MS;
+      } else if (wasDirty && live.composerLen === 0) {
+        // A CLEAR drains PROMPTLY, unaffected: there is no engine-side turn in flight for Loom to race,
+        // so it's safe to skip the reconcile tick and deliver right away — byte-identical to the old
+        // behavior for this arm. Still gated on `wasDirty` here (unlike the submit arm above) because
+        // this only makes sense as a reaction to an actual dirty→clean TRANSITION — nothing to prompt-
+        // drain for if the composer was never dirty to begin with.
+        this.drainPending(sessionId);
+      }
     }
   }
 

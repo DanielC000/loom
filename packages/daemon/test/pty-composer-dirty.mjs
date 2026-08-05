@@ -9,8 +9,13 @@
 // THE FIX (this test locks it down): a per-session composer-dirty signal derived from the raw input
 // bytes — set on a printable/editing keystroke, cleared by a box-freeing key (Enter/Ctrl-C/Esc/kill-
 // line) or backspace-to-empty. Both drain paths (drainPending + enqueueStdin's immediate path) DEFER
-// while dirty, and the box-free transition triggers a PROMPT drain. The human's bytes are NEVER
-// touched. submit()'s write sequence + the M1 optimistic-busy invariant are unchanged.
+// while dirty. UPDATED (card 2521bf51): a box-free transition triggers a PROMPT drain only for a CLEAR
+// (Ctrl-C/kill-line/Esc/backspace-to-empty) — promptness there was always a LATENCY OPTIMIZATION
+// subordinate to the no-clobber guarantee this file's title names, never a correctness requirement, so
+// relaxing it costs nothing. A genuine SUBMIT (a non-empty draft freed by Enter) instead HOLDS until
+// claude's own engine confirms the turn actually started — promptness is exactly what was UNSAFE in
+// that case (see pty-human-submit-race.mjs for the mechanism and its own repro). The human's bytes are
+// NEVER touched. submit()'s write sequence + the M1 optimistic-busy invariant are unchanged.
 //
 // Exercises the real PtyHost state machine against a FAKE pty (createPty seam) — no real claude, no
 // daemon, no network, no ~/.claude.json writes. Run: node test/pty-composer-dirty.mjs (after a build).
@@ -119,13 +124,24 @@ try {
     host.reconcile();
     check("(a) reconcile does NOT drain onto a dirty composer", !written().includes(REPORT) && host.getPending(SID).length === 1);
 
-    // --- (b) box-free via Enter → human's line submits first, THEN the held turn delivers cleanly ---
+    // --- (b) box-free via Enter (a genuine SUBMIT, non-empty draft) → see card 2521bf51: byte order in
+    // the pty FIFO (human's Enter before the held turn's paste) is NOT proof claude has actually
+    // PROCESSED the Enter and cleared its own composer — so a submit must NOT drain promptly the way a
+    // CLEAR does (scenarios below). It waits for the engine's own confirming hook instead. ---
     const beforeEnterLen = fake.writes.length;
-    host.writeStdin(SID, "\r");                 // human presses Enter on their own line
+    host.writeStdin(SID, "\r");                 // human presses Enter on their own line (a genuine submit: draft "ha" is non-empty)
+    check("(b) Enter freed the box, but the held REPORT does NOT deliver yet — no engine confirmation has arrived (card 2521bf51)",
+      !written().includes(REPORT) && host.getPending(SID).length === 1);
+    host.reconcile();
+    check("(b) an unconfirmed reconcile tick does NOT drain it either (closes the periodic-tick variant of the same race)",
+      !written().includes(REPORT) && host.getPending(SID).length === 1);
+    // The engine's own hooks confirm the human's turn actually started and completed — NOW it delivers.
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: "ha" });
+    host.deliverHook(SID, { hook_event_name: "Stop" });
     const idxEnter = fake.writes.indexOf("\r", beforeEnterLen);
     const idxPaste = fake.writes.indexOf(PASTE_START, beforeEnterLen);
-    check("(b) Enter freed the box → the held REPORT now delivered", written().includes(REPORT) && host.getPending(SID).length === 0);
-    check("(b) FIFO order preserved: human's Enter is written BEFORE the held turn's paste", idxEnter >= 0 && idxPaste >= 0 && idxEnter < idxPaste);
+    check("(b) once confirmed, the held REPORT delivers", written().includes(REPORT) && host.getPending(SID).length === 0);
+    check("(b) FIFO order preserved: human's Enter is still written BEFORE the held turn's paste", idxEnter >= 0 && idxPaste >= 0 && idxEnter < idxPaste);
     host.stop(SID, "hard");
   }
 
@@ -168,8 +184,12 @@ try {
     check("(mlpaste) the held REPORT is NOT written onto the pasted draft", !written().includes(REPORT));
     host.reconcile();
     check("(mlpaste) reconcile does NOT drain onto the multi-line paste", !written().includes(REPORT) && host.getPending(SID).length === 1);
-    host.writeStdin(SID, "\r");                                   // human presses Enter → submits the paste
-    check("(mlpaste) a real Enter after the paste releases the hold → REPORT delivered", written().includes(REPORT) && host.getPending(SID).length === 0);
+    host.writeStdin(SID, "\r");                                   // human presses Enter → submits the paste (a genuine submit)
+    check("(mlpaste) a real Enter after the paste frees the box, but REPORT does not deliver yet (card 2521bf51 — awaiting engine confirmation)",
+      !written().includes(REPORT) && host.getPending(SID).length === 1);
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: "line one\nline two" });
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(mlpaste) once confirmed, REPORT delivers", written().includes(REPORT) && host.getPending(SID).length === 0);
     host.stop(SID, "hard");
   }
 

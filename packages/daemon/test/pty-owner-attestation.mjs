@@ -19,6 +19,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmpHome = path.join(os.tmpdir(), `loom-owner-attest-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 2521bf51: scenario 11 below needs the backstop expiry, shrunk so it doesn't burn real seconds.
+const HUMAN_SUBMIT_HOLD_MS = 120;
+process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS = String(HUMAN_SUBMIT_HOLD_MS);
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -178,16 +181,28 @@ try {
     check("10: a Loom-originated (system/kickoff/nudge) turn never attests ownerText with no prior raw activity", host.getActiveTurnOwnerText(sid) === null);
   }
 
-  // ===== 11. NEGATIVE (security-critical): a raw draft is captured, but a Loom-originated submit() races in FIRST =====
-  // This is the crux of the fabrication guard: submit() must invalidate the pending raw baseline BEFORE
-  // the system turn's own UserPromptSubmit fires, so the system turn's hook never sees it.
+  // ===== 11. NEGATIVE (security-critical): a raw draft is captured, but a Loom-originated submit() races in EVENTUALLY =====
+  // UPDATED (card 2521bf51 code review Major 1): post-fix, a system-originated enqueueStdin call arriving
+  // right after a human's Enter can no longer take the IMMEDIATE-submit path while the human's own submit
+  // is awaiting engine confirmation — it correctly QUEUES instead (that hold is this card's whole point;
+  // an instant race here is no longer reachable at all — see pty-human-submit-race.mjs for that mechanism
+  // and its own repro). This scenario's REAL protected property is narrower and independent of that
+  // timing: submit() ALWAYS clears pendingRawOwnerSubmit before writing its own text (host.ts, the
+  // "SECURITY INVARIANT" comment right at the top of submit()), so a Loom-originated turn can never
+  // inherit a human's raw draft NO MATTER WHEN it actually runs. Exercised here via the bounded backstop
+  // expiry (no confirming hook ever arrives for the human's own turn) — the only way left for a
+  // system-originated submit() to still genuinely run while pendingRawOwnerSubmit is still set.
   {
     const sid = newSession("K"); SIDS.push(sid);
     host.writeStdin(sid, "some human draft\r"); // frees the box, sets pendingRawOwnerSubmit — session still idle
-    // A Loom-originated turn (worker-report-drain shape) submits before the engine's own hook fires.
-    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
-    check("11: a raced-in submit() invalidates the pending raw draft — the system turn attests NULL, never the human's draft", host.getActiveTurnOwnerText(sid) === null);
+    const r = host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    check("11: post-fix, the racing system turn is HELD, not submitted immediately (card 2521bf51)", r.delivered === false);
+    // No confirming hook EVER arrives for the human's own turn — only the bounded backstop lets the held
+    // system message actually drain and genuinely call submit().
+    await sleep(HUMAN_SUBMIT_HOLD_MS + 100);
+    host.reconcile(); // backstop expired — THIS is what actually calls submit() for the system message
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // the system turn's OWN confirming hook
+    check("11: even once the racing submit() genuinely runs (post-backstop), it already cleared the pending raw draft — the system turn attests NULL, exclusively its own attribution", host.getActiveTurnOwnerText(sid) === null);
   }
 
   // ===== 12. NEGATIVE (security-critical): consume-once — a LATER, unrelated turn never inherits an already-consumed raw attestation =====
