@@ -49,6 +49,19 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+// Card 6d53b02b audit of every `sleepUntil` call site in this file: injection-tested by delaying every
+// production verify-timeout `setTimeout` (host.ts's `sendEnterAndVerify`, the `ms === VERIFY_TIMEOUT`
+// calls) by 4600ms — ~8x the real timeout, confirmed real by the run taking ~8s instead of the usual
+// couple of seconds. ALL PASS, unchanged. Two independent reasons neither this file's suppression checks
+// nor its heal/restore checks can be fooled by a still-pending, merely-delayed timer: (1) the false-
+// suppress verdict here is decided by `lastOutputAt` (already advanced by this file's own `emitData`
+// call, well before give-up time) — whenever the delayed give-up callback eventually fires, it reads the
+// SAME already-fixed state and reaches the SAME verdict, so delaying it changes only when it fires, never
+// what it decides; (2) `healIfStuck` itself is never scheduled by that chain at all — every assertion
+// after the initial suppression is driven by this file's own explicit `host.reconcile()` calls, which
+// read `busySince`/`lastOutputAt` fresh against wall-clock `Date.now()`, so they don't depend on whether
+// the internal give-up timer has fired. Proven-safe by construction, not converted (converting would be
+// symmetry, not a fix — see 1aabf969's identical finding on codescape-health-probe.mjs).
 
 // Capture `[submit] <sessionId> ...` log lines (card 2c3c4aff's restore fires the SAME
 // "GIVE-UP RECOVERY: re-queued" line the normal give-up path does) so the restore can be verified by WHICH

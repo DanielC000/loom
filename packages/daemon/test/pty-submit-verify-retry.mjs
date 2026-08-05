@@ -58,6 +58,19 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+// Card 6d53b02b audit of the REMAINING `sleepUntil` call sites in this file (everywhere below except the
+// give-up wait in scenario (4) and the overlap watch-loop in scenario (5), both already on `waitUntil` per
+// the doc above): injection-tested by delaying every production verify-timeout `setTimeout` (the exact
+// `ms === VERIFY_TIMEOUT` calls inside host.ts's `sendEnterAndVerify`) by up to 5000ms — 8x the real
+// timeout. Positive-polarity checks (e.g. scenario (1)'s "a SECOND Enter was written") correctly FAILED
+// LOUD under that injection, proving the delay was real and consequential, not a no-op. The negative-
+// polarity check in scenario (2) ("NO further Enter retries after confirmation") still PASSED — not
+// because the wait outran the bad thing, but because `sendEnterAndVerify` reads `live.submitGeneration`
+// FRESH the instant its (possibly very-late) timer callback fires (host.ts, the `submitGeneration !== gen`
+// guard) — once `Stop` has bumped the generation, a delayed callback firing minutes later is still a
+// structural no-op. The remaining sites are POSITIONING checkpoints between two already-known writes, not
+// races against a still-pending decision — proven-safe, not converted (converting them would be symmetry,
+// not a fix — see 1aabf969's identical finding on codescape-health-probe.mjs).
 /** Card b64b3726: bounded poll until `predicate()` is true — used for a state TRANSITION (e.g. busy
  *  becoming false) instead of a computed-deadline `sleepUntil`, which races the give-up chain's own timers
  *  under host/scheduler jitter (a real merge-gate run caught exactly this: a comfortable margin pre-Half-1
