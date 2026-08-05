@@ -3044,7 +3044,15 @@ export class OrchestrationMcpRouter {
           "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"), " +
           "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
-          "sessionId, projectId, projectName}. " +
+          "sessionId, projectId, projectName, retriedFile, retryPassed}. " +
+          "Card 344ce950 — `retriedFile`/`retryPassed`: a `gateType:\"merge\"` row whose test step named " +
+          "one identifiable, re-runnable file retried JUST that file, once, before this row's verdict — " +
+          "`retriedFile` is `null` on the overwhelming majority of rows (nothing retried). A `\"pass\"` row " +
+          "carrying a non-null `retriedFile` is WEAKER evidence than an ordinary clean pass (the first " +
+          "attempt failed for real; only the isolated re-run came back green — the exact shape an " +
+          "order-dependent/cross-test-pollution bug can produce) — never read it as an ordinary green. " +
+          "`retryPassed:false` alongside a non-null `retriedFile` means the retry ALSO failed and this row " +
+          "rejected exactly as it would have with no retry mechanism at all. " +
           "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
           "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
           "Before this card a cancelled `\"worker\"` row (the only gate type whose cancel shares the plain " +

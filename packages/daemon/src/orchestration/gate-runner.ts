@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * Split a `gateCommand` on its TOP-LEVEL `&&` joins (outside single/double quotes) into independent
@@ -97,14 +99,35 @@ const FAILING_TEST_CARRY_CAP_BYTES = 8192;
  * synthetic bare-`\r`/no-delimiter chunks, mirroring how `runGateStep`/`splitGateSteps` are already
  * exported for the same reason.
  */
-export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(): string | undefined } {
+export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(): string | undefined; matchCount(): number } {
   const decoder = new TextDecoder("utf-8");
   let carry = "";
+  // Card [manager review, sibling p0 report on 344ce950]: `lastByPattern` alone (below) can only ever
+  // report the LAST line that matched each tier — a run where MULTIPLE lines match the SAME tier (e.g. two
+  // genuinely distinct failing test files, each printing its own `FAIL <name>` line) silently discards
+  // every one but the last. `countByPattern` is the fix's data source: incremented on EVERY match, never
+  // reset, so `matchCount()` (below) can tell a caller "exactly one line matched" apart from "more than
+  // one matched and only the last survived" — the distinction {@link identifyRetriableTestFile} needs to
+  // avoid retrying (and silently accepting) ONE of several genuinely-failing files while the others are
+  // never re-examined.
   const lastByPattern: (string | undefined)[] = new Array(FAILING_TEST_PATTERNS.length).fill(undefined);
+  const countByPattern: number[] = new Array(FAILING_TEST_PATTERNS.length).fill(0);
+  // A carry flush (the final partial line, scanned once at `result()`/`matchCount()` time — see below) must
+  // never run twice: `scanLine` mutates `countByPattern`, and `result()`/`matchCount()` can each be called
+  // once per tracker instance in production (one per gate step) — but nothing prevents a caller invoking
+  // both, and re-scanning the same carry line twice would silently inflate its tier's count.
+  let carryFlushed = false;
   const scanLine = (line: string): void => {
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
-      if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); return; }
+      if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return; }
     }
+  };
+  const flushCarryOnce = (): void => {
+    if (carryFlushed) return;
+    carryFlushed = true;
+    // A final partial line (no trailing newline/CR, e.g. the process exited mid-write) can still be the
+    // failing marker itself — scan it too before resolving the winning tier.
+    scanLine(carry);
   };
   return {
     feed(chunk: Buffer): void {
@@ -115,11 +138,19 @@ export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(
       for (const line of lines) scanLine(line);
     },
     result(): string | undefined {
-      // A final partial line (no trailing newline/CR, e.g. the process exited mid-write) can still be the
-      // failing marker itself — scan it too before resolving the winning tier.
-      scanLine(carry);
+      flushCarryOnce();
       for (const m of lastByPattern) if (m) return m;
       return undefined;
+    },
+    /** How many lines matched the SAME tier {@link result} reports (i.e. the winning, highest-priority
+     *  tier that has ANY match) — `0` when nothing matched at all (mirrors `result()`'s own `undefined`).
+     *  Deliberately NOT deduped by exact line content: a tier that matched N times, even if some of those
+     *  lines are textually identical, reports N — over-counting only ever SUPPRESSES a retry (the safe
+     *  direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. */
+    matchCount(): number {
+      flushCarryOnce();
+      for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) if (lastByPattern[i]) return countByPattern[i] ?? 0;
+      return 0;
     },
   };
 }
@@ -187,6 +218,13 @@ export interface GateStepResult {
    *  {@link OUTPUT_TAIL_BYTES}. `undefined` when nothing recognizable was found (an honest miss, never a
    *  guess — see {@link extractFailingTest}'s own doc). */
   failingTest?: string;
+  /** How many lines matched the SAME tier `failingTest` was drawn from (see
+   *  {@link createFailingTestTracker.matchCount}) — `undefined` iff `failingTest` is `undefined` (nothing
+   *  matched at all). `1` means `failingTest` is a COMPLETE account of the failure; `>1` means it is only
+   *  the LAST of several matching lines and the others (e.g. other genuinely failing test files) are not
+   *  named anywhere in this result — a caller must never treat `failingTest` as "the only failure" without
+   *  checking this is exactly `1` first. */
+  failingTestCount?: number;
   decidedAt?: number;
   /** Card 8d585277: true ONLY when this step's settle followed a `cancelSignal` abort AND the step's own
    *  `close`/`error` event actually fired afterward (i.e. the kill was VERIFIED, not merely issued — see
@@ -285,13 +323,15 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // the verification: it can only ever be attached to a genuinely observed close/error, never to the bare
   // act of asking for one.
   let cancelling = false;
-  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "decidedAt">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
+    const failingTest = failingTestTracker.result();
     resolve({
       ...result, ...(cancelling ? { cancelled: true } : {}),
-      outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt: performance.now(),
+      outputTail: tail(), failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
+      decidedAt: performance.now(),
     });
   };
   const onCancel = () => {
@@ -348,6 +388,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       : canExtend
         ? ` (no extend: idle ${Math.round(idleMs)}ms ≥ ${GATE_EXTEND_IDLE_MS}ms threshold — stalled)`
         : " (no extend: extend unavailable for this run)";
+    const timeoutFailingTest = failingTestTracker.result();
     void killGateProcessTree(child).finally(() => {
       resolve({
         status: null,
@@ -357,7 +398,8 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         // finally fired, tag it cancelled too — a caller checking `cancelled` must see it even when the
         // eventual settle came from the timeout path rather than a fresh close/error after the kill.
         ...(cancelling ? { cancelled: true } : {}),
-        outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt,
+        outputTail: tail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
+        decidedAt,
       });
     });
   };
@@ -433,6 +475,9 @@ export interface GateSequentialResult {
   /** See {@link GateStepResult.failingTest} — forwarded verbatim from the failing step's own result, so a
    *  caller no longer has to re-derive it (truncation-prone) from `outputTail` itself. */
   failingTest?: string;
+  /** See {@link GateStepResult.failingTestCount} — forwarded verbatim alongside `failingTest`. A caller
+   *  MUST check this is exactly `1` before treating `failingTest` as a complete account of what failed. */
+  failingTestCount?: number;
   /** Card 8d585277: forwarded from the cancelled step's own VERIFIED {@link GateStepResult.cancelled} — a
    *  distinct "no verdict" outcome a caller must never fold into `passed:false`'s ordinary failure
    *  handling (no retry, no failure classification, no "gate failed" nudge). */
@@ -664,14 +709,14 @@ export async function runGateSequential(
     if (res.cancelled) {
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, steps,
+        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount, steps,
       };
     }
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, steps,
+        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount, steps,
       };
     }
   }
@@ -760,4 +805,61 @@ export function extractFailingTest(outputTail: string): string | undefined {
     if (hit) return hit.trim();
   }
   return undefined;
+}
+
+/** {@link identifyRetriableTestFile}'s result — `command` is the ready-to-run single-file re-invocation,
+ *  `name` is the bare test name (for the `retriedFile` record). */
+export interface RetriableTestFile {
+  name: string;
+  command: string;
+}
+
+/**
+ * Card 344ce950: given a gate run's own {@link GateStepResult.failingTest}/{@link
+ * GateSequentialResult.failingTest} marker and the gate's `cwd`, identify a SINGLE test file this
+ * daemon's own hermetic suite (`packages/daemon/scripts/test-daemon.mjs`) can re-run in ISOLATION via its
+ * existing `--only=<name>` selection flag (card 6185fbfc — the same flag `test-daemon-cli-args.mjs`/
+ * `test-daemon-gate-timing-sigkill.mjs` already drive directly), so a merge gate can retry ONE failing
+ * file instead of the whole ~650-file suite before declaring a rejection.
+ *
+ * DELIBERATELY NARROW AND FAIL-CLOSED: this recognizes ONLY this daemon's own `FAIL  <name>` convention
+ * (a bare identifier — letters/digits/hyphen/underscore, no path, no extension — see test-daemon.mjs's own
+ * `runLane`: `console.log(\`${result.ok ? "PASS" : "FAIL"}  ${result.name}...\`)`), never the sibling
+ * Jest/AVA/tap/`AssertionError`/`error TSxxxx` shapes {@link FAILING_TEST_PATTERNS} also recognizes, and
+ * NEVER via a second parser on `failingTest` beyond this one bare-name regex — the caller must pass the
+ * SAME `failingTest` the live {@link createFailingTestTracker} scan already extracted, not re-derive one.
+ * A candidate name is confirmed against the REAL filesystem (`fs.existsSync`) before ever being reported
+ * identifiable — never a regex-only guess — so a name that merely LOOKS like one of ours but doesn't
+ * correspond to a real file, or a gate run on a project that doesn't have this suite at this path at all,
+ * returns `undefined` (the caller's cue to reject exactly as today — no behavior change on that path).
+ *
+ * ⚠️ MANAGER REVIEW (sibling p0 report on card 344ce950) — REQUIRES `failingTestCount === 1`: this
+ * daemon's own test runner has NO fail-fast (`test-daemon.mjs`'s `Promise.all` over lanes; `failed` is an
+ * ARRAY) — a single run can genuinely fail on MULTIPLE files. `createFailingTestTracker` keeps only the
+ * LAST matching line per tier, so `failingTest` alone cannot tell "the only failure" apart from "the last
+ * of several, with the others never named anywhere in this result". Retrying and passing that ONE file
+ * would silently let a merge through while an untouched OTHER failure sits in the same run — exactly the
+ * order-dependent/cross-test-pollution class this card's own §4 already warned a single-file retry can
+ * mask, now via a second, distinct route (a second FILE instead of a second RUN). `failingTestCount` is
+ * REQUIRED (not optional) specifically so a caller can't forget to pass it — any value other than exactly
+ * `1` (including `undefined`, e.g. a test double/legacy shape that never supplies one) fails closed,
+ * mirroring this function's existing "ambiguity ⇒ not identifiable" posture. The safe direction is
+ * over-counting (a test's own output prints an incidental FAIL-shaped line ⇒ this refuses a retry that
+ * would have been fine) — never under-counting, which `createFailingTestTracker`'s one-line-per-file
+ * `runLane` convention makes structurally unlikely.
+ */
+export function identifyRetriableTestFile(failingTest: string | undefined, cwd: string, failingTestCount: number | undefined): RetriableTestFile | undefined {
+  if (!failingTest) return undefined;
+  if (failingTestCount !== 1) return undefined;
+  const m = /^FAIL\s+(\S+)/.exec(failingTest);
+  if (!m) return undefined;
+  const name = m[1]!;
+  // A bare identifier only — never a path separator or shell metacharacter — before this ever reaches a
+  // shell command string. This daemon's own FAIL line never names anything else; a token shaped
+  // differently can't be one of ours regardless of what the file-existence check below would say.
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return undefined;
+  const scriptFile = path.join(cwd, "packages", "daemon", "scripts", "test-daemon.mjs");
+  const testFile = path.join(cwd, "packages", "daemon", "test", `${name}.mjs`);
+  if (!fs.existsSync(scriptFile) || !fs.existsSync(testFile)) return undefined;
+  return { name, command: `node packages/daemon/scripts/test-daemon.mjs --only=${name}` };
 }

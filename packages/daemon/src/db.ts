@@ -7214,6 +7214,11 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // NEVER BACKFILLED (card c6750500) — null for every row recorded before this field shipped, independent
   // of whether `concurrentGates` itself is present on that same row. See GateHistoryRow's own doc.
   const concurrentGatesMax = typeof detail.concurrentGatesMax === "number" ? detail.concurrentGatesMax : null;
+  // Card 344ce950: `null` for every row that never attempted a single-file retry (the overwhelming
+  // majority) — never fabricated for an older row recorded before this field shipped either, same
+  // never-backfilled discipline as `concurrentGatesMax` above.
+  const retriedFile = typeof detail.retriedFile === "string" ? detail.retriedFile : null;
+  const retryPassed = typeof detail.retryPassed === "boolean" ? detail.retryPassed : null;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
@@ -7233,6 +7238,8 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     gateCap,
     concurrentGates,
     concurrentGatesMax,
+    retriedFile,
+    retryPassed,
   };
 }
 

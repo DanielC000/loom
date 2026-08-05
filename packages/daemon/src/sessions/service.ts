@@ -46,7 +46,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -348,6 +348,18 @@ type ConfirmMergeResult = {
    *  cancellation entirely (see `cancelGateOp`'s own doc for why those two phases deliberately differ). */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
+  /** Card 344ce950: the bare name of a single test file this merge's gate retried in isolation before
+   *  reaching this verdict (see gate-runner.ts's `identifyRetriableTestFile`) — `undefined` when no such
+   *  retry fired (the overwhelming majority of merges). Set on BOTH a resulting pass (the isolated re-run
+   *  came back green — see `retryPassed`) AND a resulting rejection (the re-run ALSO failed) — a reader
+   *  must not assume `retriedFile` alone implies a pass. */
+  retriedFile?: string;
+  /** Card 344ce950: whether the `retriedFile` retry itself passed. `undefined` whenever `retriedFile` is
+   *  `undefined`. `true` here means THIS merge's `merged:true` is WEAKER evidence than an ordinary clean
+   *  pass — the first attempt failed for real and only the isolated re-run came back green, exactly the
+   *  shape an order-dependent/cross-test-pollution bug can produce (real in the suite, absent alone). Never
+   *  silently upgraded to an ordinary pass anywhere this flows — see the card's own honesty requirement. */
+  retryPassed?: boolean;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -10752,6 +10764,12 @@ export class SessionService {
     // sits OUTSIDE the `if (gate)` block below, where the value is actually computed. `undefined` for a
     // gateless project, a REUSED gate, or a pre-gate rejection (nothing spawned).
     let gateOutputTailForRecord: string | undefined;
+    // Card 344ce950: the single-file retry's own outcome (see the `if (gate)` block below for where these
+    // are actually set) — declared at THIS outer scope for the SAME reason as the fields just above: the
+    // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined` for
+    // the overwhelming majority of merges (no such retry ever fired).
+    let retriedFile: string | undefined;
+    let retryPassed: boolean | undefined;
     // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
     // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
@@ -11337,6 +11355,39 @@ export class SessionService {
       // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
       // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
       concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+      // SINGLE-FILE RETRY (card 344ce950 — the single largest MEASURED waste in the merge pipeline: mgr
+      // #127's `gate_history` read, n=14, found 5 of the last 14 merge-gate runs REJECTED, all five
+      // followed by a PASS on the same branch, each costing a full ~12-18min second run of the whole
+      // suite). Fires ONLY for a "genuine" classification (a clean non-zero exit — never a kill/timeout,
+      // which the TRANSIENT-KILL AUTO-RETRY below already owns, and never twice: this runs exactly once,
+      // before that section, so the two retries can never both fire for the same gate attempt) that names
+      // one identifiable, re-runnable file (see gate-runner.ts's `identifyRetriableTestFile` for the
+      // deliberately narrow, fail-closed match — a project without this exact suite, or a failure that
+      // doesn't name a real file, always returns `undefined` here and this block is a no-op, byte-identical
+      // to before this card). NO CAUSE IS ASSERTED anywhere in this block or its wording — see the card's
+      // own "measured n=30: neither concurrent gates nor fleet size discriminates pass from fail" finding.
+      // MANAGER REVIEW (sibling p0 report): `identifyRetriableTestFile` ALSO requires
+      // `gateResult.failingTestCount === 1` — this daemon's own test runner has no fail-fast, so a run can
+      // genuinely fail on MULTIPLE files while the live tracker's own "last match per tier" shape reports
+      // only one of them. Passing `failingTestCount` through is what lets that function refuse to retry a
+      // collapsed multi-failure signal (see its own doc for the full reasoning).
+      if (gateRan && !gateResult.passed && classifyGateFailure(gateResult) === "genuine") {
+        const candidate = identifyRetriableTestFile(gateResult.failingTest, worktreePath, gateResult.failingTestCount);
+        if (candidate) {
+          retriedFile = candidate.name;
+          const retryResult = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, undefined, false);
+          retryPassed = retryResult.passed;
+          evt("build_gate_single_file_retry", { retriedFile, retryPassed, priorFailingTest: gateResult.failingTest });
+          // THE NON-NEGOTIABLE PART (card 344ce950 §3): a pass-after-retry is WEAKER evidence than a clean
+          // pass — an order-dependent/cross-test-pollution bug can pass in isolation and fail in the full
+          // suite, which is EXACTLY the class this single-file retry would otherwise mask. `retriedFile`/
+          // `retryPassed` (stamped on the SAME `build_gate` event below, and on this method's own return —
+          // see `ConfirmMergeResult.retryPassed`'s own doc) are the ONLY thing keeping such a bug visible;
+          // this absorbs the retry into `gateResult.passed` for the squash decision below but NEVER erases
+          // the fact that a retry happened. Never looped: this runs exactly once regardless of outcome.
+          if (retryPassed) gateResult = { ...gateResult, passed: true };
+        }
+      }
       // Card 3aec1df6: a `gate_history` row can name the SAME op `gate_status(opId)` would return full
       // diagnostics for — this event's own detail never carries `failingTest`/`outputTail` (see the
       // rejection block below, which records those on the SEPARATE `merge_rejected` event
@@ -11357,6 +11408,10 @@ export class SessionService {
         // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
         // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
         ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+        // Card 344ce950: stamped onto this SAME `build_gate` row (never a second history row) so
+        // `gate_history` shows the weaker-pass shape directly, on both a resulting pass and a resulting
+        // rejection (a retry that also failed still recorded a retry was attempted).
+        ...(retriedFile ? { retriedFile, retryPassed } : {}),
       });
       if (gateRan) {
         if (gateResult.failedTimedOut) {
@@ -11603,6 +11658,10 @@ export class SessionService {
           gateExtended,
           gateProximity,
           outputTail: gateOutputTailForRecord,
+          // Card 344ce950: a retry that ALSO failed still recorded that one was attempted — this rejection's
+          // own `reason`/`detailText`/`gateDetail` above are UNCHANGED by that retry (DoD-1: "fails again ⇒
+          // reject exactly as today"); this is purely additive observability alongside the unchanged verdict.
+          ...(retriedFile ? { retriedFile, retryPassed } : {}),
         };
       }
     }
@@ -11805,8 +11864,8 @@ export class SessionService {
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(retriedFile ? { retriedFile, retryPassed } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(retriedFile ? { retriedFile, retryPassed } : {}) };
   }
 
   /**
@@ -12175,6 +12234,14 @@ export class SessionService {
         const proximityNote = outcome.ok && outcome.value.merged && outcome.value.gateProximity?.nearBudget
           ? ` ⚠ gate budget proximity: step '${outcome.value.gateProximity.step}' used ${Math.round(outcome.value.gateProximity.fraction * 100)}% of its HARD gateCommandTimeoutMs retry ceiling (no auto-extend on a retry, card 24642c3d — a first attempt may run ~2× further while still producing output) — consider raising it, splitting the suite, or investigating what got slower before it starts timing out.`
           : "";
+        // Card 344ce950 §3 (NON-NEGOTIABLE): a pass-after-single-file-retry is WEAKER evidence than a clean
+        // pass — a manager must be able to tell "green" from "green after a retry" from this nudge alone,
+        // never just from the durable gate_history row. No cause is asserted here (see the card's own
+        // "measured n=30" finding) — this states only that a retry happened and passed, nothing about why
+        // the first attempt failed.
+        const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
+          ? ` ⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${outcome.value.retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`
+          : "";
         // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
         // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
         // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
@@ -12186,7 +12253,7 @@ export class SessionService {
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during
