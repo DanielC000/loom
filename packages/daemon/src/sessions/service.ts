@@ -11604,7 +11604,39 @@ export class SessionService {
     }
     const result = await this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, this.syncAttachBudgetMs,
-      (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
+      // RACE RECOVERY (card 479f449f): a thrown error here does NOT mean the merge failed — the dead-owner
+      // eviction check above is a STATIC "owner exited" test that can evict a genuinely RUNNING op and let
+      // THIS call re-mint a fresh confirmWorkerMerge while the evicted op's own orphaned run() is still
+      // executing in the background (evictDeadOwner never cancels it — see PendingOpRegistry's DEAD-OWNER
+      // RECOVERY doc). `finalizeMerge` removes the worktree BEFORE a fresh mint's own early-idempotency
+      // check can catch up to it, so the fresh confirm can throw operating on a directory its own
+      // predecessor just deleted — AFTER that predecessor's squash had already committed (finalizeMerge only
+      // ever runs post-squash, never before). Re-derive the truth from git instead of trusting the throw: if
+      // the branch's work is already on main, report the REAL outcome (merged) via the same idempotent path
+      // a stale retry already uses (`finishAlreadyMerged`, safe to call redundantly), instead of a false
+      // failure for work that already landed. NEVER swallows a genuine failure — if the branch never
+      // landed, this falls through and rethrows the original error unchanged, so the classification below
+      // still reports it (as "unknown", not "failed" — see that doc).
+      async (opId) => {
+        try {
+          return await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt);
+        } catch (err) {
+          const worker = this.db.getSession(workerSessionId);
+          const project = worker ? this.db.getProject(worker.projectId) : undefined;
+          if (worker?.branch && project) {
+            const repo = resolveRepoByKey(project, worker.repoKey);
+            const landedSha = await findLandedSquashCommit(repo.path, worker.branch, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => null);
+            if (landedSha) {
+              return this.finishAlreadyMerged({
+                managerSessionId, workerSessionId, taskId, worktreePath: worker.worktreePath ?? worker.cwd,
+                branch: worker.branch, repoPath: repo.path, projectId: project.id, opId, forceRemoveWorktree,
+                opStartedAt, mergedSha: landedSha, repoKey: worker.repoKey ?? null,
+              });
+            }
+          }
+          throw err;
+        }
+      },
       (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
         // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
@@ -11672,11 +11704,18 @@ export class SessionService {
           ? (outcome.value.merged
             ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
-          // DoD 2: a THROWN exception can strike at literally any point inside confirmWorkerMerge — including
-          // AFTER mergeBranch's own squash commit succeeded, during finalizeMerge's worktree/branch cleanup —
-          // so this branch must NEVER claim "canonical repo untouched"; say plainly that it's unknown and name
-          // the concrete next step, rather than a bare "build gate failed"-shaped string.
-          : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo / squash-phase state UNKNOWN — the error struck at an indeterminate point, possibly after the squash committed; check 'git --no-pager log <repo>' for a squash commit carrying a Loom-Worker-Branch trailer for this branch before assuming nothing landed.`;
+          // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
+          // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during
+          // finalizeMerge's worktree/branch cleanup — so this branch must NEVER claim "canonical repo
+          // untouched"; say plainly that it's unknown and name the concrete next step, rather than a bare
+          // "build gate failed"-shaped string.
+          // NEVER "merge-failed" HERE (card 479f449f): the recovery attempt just above (before this
+          // callback ever runs) already re-derives the real outcome from git and reports a genuine
+          // `[loom:merge-done]` when the squash DID land — so reaching this branch at all means that
+          // recovery ALSO could not prove it landed. That is still not proof it *didn't* — a manager acting
+          // on "failed" here would be told a merge failed when it may well be sitting on main; "unknown" is
+          // the only honest tag for a verdict this method could not determine either way.
+          : `[loom:merge-unknown] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo / squash-phase state UNKNOWN — the error struck at an indeterminate point, possibly after the squash committed, and a git-log recheck for a landed squash also came back empty/inconclusive; check 'git --no-pager log <repo>' for a squash commit carrying a Loom-Worker-Branch trailer for this branch before assuming nothing landed. This is NOT a confirmed failure — do not re-dispatch or re-merge without checking first.`;
         // Card 522cf573 DoD 3: correlate this settled op's OWN failure detail to its opId in the daemon's
         // rotating stdout log, independent of whether the pty push above landed or was suppressed — an
         // operator can grep `daemon-output.log` for `opId=<id>` to recover this after the fact.
@@ -11706,14 +11745,20 @@ export class SessionService {
       {
         // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
         // PendingOpRegistry's "RETAINED TERMINAL VIEW" doc) with a distinct terminal outcome, so the Board
-        // card's merge-gate hairline can render merged/rejected/cancelled/failed instead of reverting the
-        // instant the gate settles. `merged:true` → "merged"; `cancelled:true` (card 361520a0, Half Four —
-        // checked BEFORE the merged/rejected branch below, since a cancelled outcome also carries
-        // `merged:false` and would otherwise misclassify as "rejected", the exact DoD-3 class this card
-        // fixes) → "cancelled"; a RESOLVED `merged:false` with no `cancelled` flag (the gate/stranded-work/
-        // empty-stage rejection paths — none of these throw) → "rejected"; only a genuinely THROWN error (a
-        // real exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side
-        // classification.
+        // card's merge-gate hairline can render merged/rejected/cancelled/(failed by raw state) instead of
+        // reverting the instant the gate settles. `merged:true` → "merged"; `cancelled:true` (card 361520a0,
+        // Half Four — checked BEFORE the merged/rejected branch below, since a cancelled outcome also
+        // carries `merged:false` and would otherwise misclassify as "rejected", the exact DoD-3 class this
+        // card fixes) → "cancelled"; a RESOLVED `merged:false` with no `cancelled` flag (the gate/
+        // stranded-work/empty-stage rejection paths — none of these throw) → "rejected"; a genuinely THROWN
+        // error (a real exception, not a rejection result) → "unknown", NEVER "failed" (card 479f449f — the
+        // recovery attempt wired into the `run` callback above already reports a real "merged" whenever the
+        // throw can be proven to have struck after a landed squash; reaching this classification at all
+        // means that recovery could not prove it either way, which is a materially weaker claim than
+        // "failed" and must not be worded as one — see the `[loom:merge-unknown]` echo's own doc). The
+        // Board's `mergeDisplay` still renders a thrown-exception op as "failed" (red) via the entry's raw
+        // `state` field, which is unaffected by this string — deliberately left as-is: `state` is a true,
+        // unambiguous fact ("an exception was thrown"), unlike this classified `outcome`.
         retainMs: MERGE_OP_RETAIN_MS,
         // UNTIL-SUPERSEDED RE-CALL DEDUPE (card 1555e361 — the merge-gate re-call trap): DECOUPLED from
         // `retainMs` above on purpose. `retainMs` only governs the brief, cosmetic worker_list/Board display
@@ -11741,7 +11786,7 @@ export class SessionService {
         // breaking the pre-existing "re-poll returns the EXACT SAME opId" invariant. `identityOptional`
         // tells attach() to trust the cached verdict regardless in exactly (and only) this case.
         identityOptional: alreadyFinished,
-        classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected"),
         // BYPASS BOTH CACHES ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01; extended by card 1555e361 to
         // also cover the new until-superseded dedupe above — same reasoning, same flag): the dedupe (see
         // PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on `workerSessionId`, not on

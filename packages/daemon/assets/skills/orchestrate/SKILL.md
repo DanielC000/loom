@@ -523,7 +523,8 @@ what you checked. Found none? Treat it as live.
        clearly meant as one, not any use of the word anywhere in the body.
    - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
-     wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` nudge that
+     wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` /
+     `[loom:merge-unknown]` nudge that
      lands the moment the gate/merge actually finishes — it carries the same `opId` you were handed, so if
      several merges are pending at once you can tell which one just settled. If you need the answer sooner,
      poll the read-only `gate_status(opId)` (never starts a new run) or read `worker_list`'s `pendingMerge`
@@ -576,7 +577,10 @@ what you checked. Found none? Treat it as live.
      result carries a duration, that number already reflects real, admitted run time (excluding queue
      wait) — read it from there instead of asking for a hand-rolled measurement.
    - **Know the `[loom:*]` nudge vocabulary Loom pushes at you.** Besides the merge trio
-     (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), you'll see `[loom:worker-idle]`
+     (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), you'll see `[loom:merge-unknown]`
+     (not a confirmed failure — the confirm threw before it could tell whether the squash landed; check
+     before re-dispatching or re-merging), `[loom:merge-cancelled]` (a queued merge withdrawn before the
+     gate ever ran — never a failure, no verdict was reached), `[loom:worker-idle]`
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was
      already merged — no action), and `[loom:auto-recovered]` / `[loom:crash-recovered]` — these last two
      mean **Loom has ALREADY recovered the worker** (resumed it in place after a dead-drop or crash), so do

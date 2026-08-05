@@ -618,10 +618,15 @@ export interface PendingMerge {
    *  withdrawn before it ever ran; NO verdict was reached, the branch was neither merged nor rejected —
    *  checked BEFORE "rejected" below since a cancelled outcome also carries `merged:false`), "rejected"
    *  (the gate/stranded-work/empty-stage check resolved `merged:false` with no `cancelled` flag — no
-   *  exception, the merge was refused), or "failed" (the confirm itself threw). This is what lets the
-   *  Board distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as
+   *  exception, the merge was refused), or "unknown" (card 479f449f — the confirm itself threw and a
+   *  git-log recheck could not prove either way whether the squash had already landed; NEVER "failed" —
+   *  a genuine confirmed failure is always a RESOLVED `merged:false`, i.e. "rejected", never a throw). The
+   *  Board still renders this case with the same red "failed" treatment via the sibling raw `state` field
+   *  ("failed" there is an honest fact — an exception WAS thrown — independent of this softer `outcome`
+   *  string), so `mergeDisplay` needs no separate case for "unknown" today. This is what lets the Board
+   *  distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as
    *  green "merged" via `state === "done"` — and, since Half Four, from a cancelled one (neither). */
-  outcome?: "merged" | "cancelled" | "rejected" | "failed";
+  outcome?: "merged" | "cancelled" | "rejected" | "unknown";
 }
 
 export interface Session {

@@ -421,15 +421,19 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
 // 361520a0, Half Four: NO verdict was reached, so this must never render as the same amber "rejected"
 // fill a real refusal gets — checked before "rejected" below since a cancelled outcome also carries
 // `merged:false`), "rejected" (amber — a distinct solid fill from the RUNNING sweep, which is also amber
-// but animated), or "failed" (red, an unexpected exception during confirm). `outcome` is only absent for
-// a legacy/synthetic "done" with no outcome field (e.g. an older cached row) — that degrades to "merged"
-// for backward compatibility, matching the old done⇒merged reading.
+// but animated), or "failed" (red — a thrown exception during confirm; driven by the raw `pm.state`, NOT
+// `pm.outcome`, since card 479f449f: a thrown confirm classifies as `outcome:"unknown"`, never "failed" —
+// the confirm could not prove the merge failed, only that it couldn't confirm the outcome either way, and
+// `state === "failed"` alone already unambiguously identifies "an exception was thrown" without needing
+// the softer `outcome` string to agree). `outcome` is only absent for a legacy/synthetic "done" with no
+// outcome field (e.g. an older cached row) — that degrades to "merged" for backward compatibility,
+// matching the old done⇒merged reading.
 type MergeState = "running" | "merged" | "cancelled" | "rejected" | "failed";
 type MergeDisplay = { state: MergeState; tone: Tone; label: string; startedAt: string };
 function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null {
   if (!pm) return null;
   if (pm.state === "running") return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
-  if (pm.state === "failed" || pm.outcome === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
+  if (pm.state === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
   if (pm.outcome === "cancelled") return { state: "cancelled", tone: "cyan", label: "cancelled", startedAt: pm.startedAt };
   if (pm.outcome === "rejected") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
   return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
