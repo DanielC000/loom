@@ -1346,8 +1346,16 @@ export interface GatesActive {
   gates: GateRun[];
 }
 
-/** How a settled gate run ended, derived from its orchestration_event detail. */
-export type GateOutcome = "pass" | "reject" | "timeout" | "kill";
+/** How a settled gate run ended, derived from its orchestration_event detail. Card 3a6f04cc:
+ *  `"cancelled"` is a DISTINCT terminal state, not a `"reject"` — a cancelled run reached no verdict at
+ *  all (withdrawn via `gate_cancel`, or auto-superseded), so it must never be counted as a failure when
+ *  computing a pass/fail or rejection RATE from a series of {@link GateHistoryRow}s. Before this card,
+ *  a cancelled `"worker"` row (the ONLY gate type whose cancel event shares the SAME `worker_gate` kind
+ *  {@link Db.listGateEvents} reads — a cancelled MERGE gate emits a separate `merge_cancelled` kind that
+ *  `GATE_HISTORY_KINDS` excludes entirely, so it never reached this enum at all) fell through
+ *  `gateOutcomeFromDetail`'s fallback and read as `"reject"`, silently inflating any rejection rate
+ *  computed from this field. */
+export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled";
 
 /** One settled gate run in the HISTORY table — reconstructed from a gate-related orchestration_event
  *  (`worker_gate` / `build_gate` / `deploy`), enriched via a JOIN to the keyed session's project/task. */
@@ -1361,7 +1369,12 @@ export interface GateHistoryRow {
   taskId: string | null;
   branch: string | null;
   workerLabel: string | null;
-  /** Real run time (settle − admission) — null for rows recorded before durationMs was stamped. */
+  /** Real run time (settle − admission) for the common case — null for rows recorded before durationMs
+   *  was stamped, OR (card 3a6f04cc) for a worker self-check cancelled BEFORE it was ever admitted (there
+   *  is no admission instant to measure from). ⚠️ Not settle−admission for every non-null row either: a
+   *  REUSED merge self-check's `durationMs` measures from a pre-reuse-decision timestamp, not a real
+   *  admission (see {@link GateHistoryRow.gateRan}'s own doc — this is exactly why that field exists,
+   *  don't infer "did real gate work happen" from this field alone). */
   durationMs: number | null;
   /** ISO timestamp the run settled. */
   endedAt: string;
@@ -1384,8 +1397,36 @@ export interface GateHistoryRow {
   /** `outcome === "pass"` — a plain boolean sibling of `outcome` (card 753d9911: agent-facing consumers
    *  asked for a pass/fail flag rather than deriving it from the outcome enum themselves). A `false` row
    *  is exactly the rejected-run case that carries `durationMs` too (recorded unconditionally, before any
-   *  pass/fail branching) — this field never being true for a rejection is the whole point. */
+   *  pass/fail branching) — this field never being true for a rejection is the whole point.
+   *  ⚠️ Card 3a6f04cc: `passed:false` on a `outcome:"cancelled"` row does NOT mean the same thing as
+   *  `passed:false` on a `outcome:"reject"` row — a cancelled run reached NO VERDICT (withdrawn, not
+   *  failed), it is simply also not a pass. A caller computing a rejection RATE must filter on
+   *  `outcome === "reject"`, never on `passed === false` alone, or a cancellation is silently counted as
+   *  a failure — exactly the defect this card fixes. This field's own boolean shape is deliberately left
+   *  unchanged (still just `outcome === "pass"`) rather than widened to a tri-state; `outcome` is where
+   *  the real granularity lives. */
   passed: boolean;
+  /** Card 3a6f04cc: whether a gate PROCESS actually spawned for this op — `false` for a merge that
+   *  REUSED an already-green worker self-check (no process spawned at merge time) or a worker self-check
+   *  cancelled BEFORE it was ever admitted past the queue (also no process spawned); `true` for every
+   *  other row, INCLUDING one cancelled WHILE running that DID spawn a step (real wall time consumed,
+   *  even though no verdict was reached). Exists so a duration series built from this table can exclude
+   *  non-runs without a per-row pivot to `gate_status(opId)` — a reused/never-spawned row's `durationMs`
+   *  reflects bookkeeping overhead, not real gate work, and biases a naive average toward "getting
+   *  faster" if left in.
+   *  ⚠️ Code Review correction: this is DERIVED, not a raw stamp everywhere, and its accuracy depends on
+   *  WHICH signal was available when the row was written. It is EXACT for `reused:true` rows and for any
+   *  row carrying an explicit `gateSpawned` producer stamp (both worker-gate cancel sites — queued and
+   *  running — stamp this explicitly as of the Code Review follow-up). For an OLDER cancelled row with no
+   *  such stamp (written in the narrow window between this card's original fix and that follow-up), it
+   *  falls back to "did this admit before it was cancelled" (`durationMs` presence) — admission is NOT
+   *  the same fact as a process having spawned (a cancel landing between admission and the gate runner's
+   *  own first-step check settles with zero steps run despite a real `durationMs`), so that fallback can
+   *  read `true` for a row where nothing actually ran. Defaults `true` when no positive non-run signal
+   *  exists at all (a real pass/fail/timeout/kill/error, or a deploy) — never `null`, but "never null"
+   *  is not the same claim as "always exact"; treat it as reliable, not guaranteed, for the fallback case
+   *  above. */
+  gateRan: boolean;
   /** The resolved `maxConcurrentGates` cap in effect when this run was recorded, and how many gates were
    *  concurrently active at its admission — both read straight from the event's own `detail_json` (every
    *  gate kind stamps them unconditionally, same as `durationMs`). `null` only for a row recorded before

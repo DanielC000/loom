@@ -2968,10 +2968,38 @@ export class OrchestrationMcpRouter {
           "settled history). Use this to recover a real gate-duration trend (e.g. \"is the floor climbing\") " +
           "instead of hand-maintaining a readings table from nudge text. Returns {items: GateHistoryRow[], " +
           "total, limit, offset, nextOffset} — `items` is newest-first; each row is {id, gateType " +
-          "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"), passed " +
-          "(the same outcome as a plain boolean — `outcome===\"pass\"`), durationMs, gateCap, " +
+          "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"), " +
+          "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName}. " +
+          "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
+          "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
+          "Before this card a cancelled `\"worker\"` row (the only gate type whose cancel shares the plain " +
+          "`worker_gate` event kind with a real run — a cancelled MERGE gate emits a separate excluded event " +
+          "kind and never reaches this table at all) silently fell through to `outcome:\"reject\"`. A caller " +
+          "computing a pass/fail or REJECTION RATE from this table must filter on `outcome===\"reject\"`, " +
+          "never on `passed===false` alone — `passed` stays `outcome===\"pass\"` exactly as before (so a " +
+          "cancelled row still reads `passed:false`, since it is also not a pass), but `passed:false` on a " +
+          "`\"cancelled\"` row does NOT mean the same thing as `passed:false` on a `\"reject\"` row; only " +
+          "`outcome` carries that distinction. ⚠️ BACKFILL: existing rows are re-classified for FREE the " +
+          "moment this ships — `outcome` is derived live from each row's own stored detail, never stored " +
+          "materialized, so a historical cancelled row that already recorded `cancelled:true` reads " +
+          "`\"cancelled\"` retroactively, not just going forward. A trend spanning the boundary is still " +
+          "SAFE to compare on `outcome` for this reason — unlike `concurrentGatesMax` below, there is no " +
+          "old-encoding-vs-new-encoding mix to account for here. " +
+          "`gateRan` (card 3a6f04cc) answers \"did a gate PROCESS actually spawn for this row\" — `false` " +
+          "for a merge that REUSED an already-green worker self-check (no process spawned at merge time) or " +
+          "a worker self-check cancelled BEFORE it was ever admitted past the queue; `true` for every other " +
+          "row, INCLUDING one cancelled WHILE running that DID spawn a step. Use this to exclude non-runs " +
+          "from a duration series without a per-row pivot to `gate_status(opId)` — a non-run's `durationMs` " +
+          "(when present at all) reflects bookkeeping overhead or admission-to-cancel time, not real gate " +
+          "work, and left in, biases a naive average toward \"getting faster\". Never `null` — but this is a " +
+          "DERIVED field, not a raw stamp on every row: it is EXACT for a `reused` row or one carrying an " +
+          "explicit producer `gateSpawned` stamp (both worker-gate cancel sites stamp this explicitly); for " +
+          "an older cancelled row with neither, it falls back to \"admitted before cancel\" (via " +
+          "`durationMs` presence) — admission is not proof a process spawned (a cancel landing between " +
+          "admission and the gate runner's own first-step check settles with zero steps despite a real " +
+          "`durationMs`), so treat that fallback case as reliable, not guaranteed. " +
           "⚠️ THIS TOOL IS THE INDEX, NOT THE DETAIL SURFACE (card 3aec1df6): a `gateType:\"merge\"` row's " +
           "`failingTest` is `null` on EVERY row, pass or fail — a merge run's failure diagnostic " +
           "(`failingTest`/`phase`/`stderrTail`/`outputTail`) is never carried on the event this history " +

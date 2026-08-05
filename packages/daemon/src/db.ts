@@ -7141,16 +7141,45 @@ function gateTypeForKind(kind: string): GateType {
   return "merge"; // build_gate | build_gate_retry
 }
 
-/** Derive the settled outcome from a gate event's detail. Truthy `passed` (worker/build gates) or `ok`
- *  (deploy) is a pass; otherwise a timed-out run is `timeout`, a signal-killed run is `kill`, and anything
- *  else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`) detail only carries `passed`,
- *  so a failed merge gate reads as `reject` — its kill/timeout nuance lives on the sibling merge_rejected
- *  event, not surfaced here. */
+/** Derive the settled outcome from a gate event's detail. Card 3a6f04cc: `detail.cancelled === true` is
+ *  checked FIRST and returns the distinct `"cancelled"` outcome — a withdrawn run (`gate_cancel`, queued
+ *  or running) reached no verdict at all and must never fall through to `"reject"`. This is the ONLY
+ *  cancel shape reachable here: a cancelled MERGE gate emits a separate `merge_cancelled` event kind that
+ *  `GATE_HISTORY_KINDS` excludes entirely, so only a cancelled WORKER self-check (which shares the plain
+ *  `worker_gate` kind with a real run) ever reaches this function with `cancelled:true`. Otherwise, truthy
+ *  `passed` (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed
+ *  run is `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`)
+ *  detail only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance lives
+ *  on the sibling merge_rejected event, not surfaced here. */
 function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
+  if (detail.cancelled === true) return "cancelled";
   if (detail.passed === true || detail.ok === true) return "pass";
   if (detail.timedOut === true) return "timeout";
   if (typeof detail.signal === "string" && detail.signal.length > 0) return "kill";
   return "reject";
+}
+
+/** Card 3a6f04cc: derive {@link GateHistoryRow.gateRan}. Checked in order: an explicit `gateSpawned`
+ *  stamp — as of the Code Review follow-up, BOTH worker-gate cancel producer sites stamp this explicitly
+ *  (queued-before-admission AND cancelled-while-running — the latter via `gateResult.steps.length > 0`,
+ *  since admission alone does NOT prove a process spawned: `runGateSequential` checks
+ *  `cancelSignal.aborted` before its own first step too, so a cancel landing between admission and that
+ *  check settles with `steps:[]` despite a real, non-zero `durationMs` — the case that motivated this
+ *  correction), plus the pre-existing reused-merge-gate site — always wins when present; else
+ *  `reused:true` (pre-existing on every reuse event, since the reuse feature's own introduction — a row
+ *  from before that shipped could never BE a reuse, so reads `true` correctly by the absence of the
+ *  feature, not the absence of the field); else, for a cancelled worker-gate row with no explicit stamp
+ *  (a row written between this card's original fix and the Code Review correction above — a narrow
+ *  window, NOT the general case going forward), whether `durationMs` is a number as a FALLBACK — this is
+ *  the exact heuristic the correction proved insufficient (a cancel-before-first-step still stamps a real
+ *  `durationMs`), so it is honest about what it answers ("was this admitted before it was cancelled",
+ *  not "did a process spawn") and is named accordingly. Every other row (a real pass/fail/timeout/kill/
+ *  error, or a deploy) has neither `reused` nor `cancelled` set, so falls through to `true`. */
+function gateRanFromDetail(detail: Record<string, unknown>): boolean {
+  if (typeof detail.gateSpawned === "boolean") return detail.gateSpawned;
+  if (detail.reused === true) return false;
+  if (detail.cancelled === true) return typeof detail.durationMs === "number";
+  return true;
 }
 
 /** Compose the Gates worker label ("<agent> · <short task title>"). Mirrors the daemon-side
@@ -7196,6 +7225,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     failingTest,
     opId,
     passed: outcome === "pass",
+    gateRan: gateRanFromDetail(detail),
     gateCap,
     concurrentGates,
     concurrentGatesMax,

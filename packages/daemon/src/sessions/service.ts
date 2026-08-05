@@ -11220,6 +11220,10 @@ export class SessionService {
       // forget it" comment.
       evt("build_gate", {
         passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+        // `gateSpawned` (card 3a6f04cc): this method's own `gateRan` local IS the did-a-process-spawn bit
+        // `gate_history`'s `gateRan` field needs — stamped explicitly rather than left to the `reused`
+        // flag's absence, so a future change to the reuse shape can't silently desync the two.
+        gateSpawned: gateRan,
         ...(gateRan ? {} : { reused: true, reusedOpId }),
       });
       if (gateRan) {
@@ -12521,7 +12525,12 @@ export class SessionService {
             // for this op, so there is nothing to sweep/record against the timeout breaker either — return
             // immediately with a distinct, never-conflated-with-pass/fail shape.
             if (err instanceof GateCancelledError) {
-              evt({ cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+              // `gateSpawned:false` (card 3a6f04cc): this throw fires strictly BEFORE admission — no
+              // process was ever spawned for this op — feeding `gate_history`'s own did-a-gate-run bit.
+              // Deliberately NOT named `ran` (see `gateRanFromDetail`'s own doc): this closure's `return`
+              // below already uses `ran:false` for a DIFFERENT reason (no computed verdict to report), and
+              // the two must not be conflated even though they agree here.
+              evt({ cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, gateSpawned: false });
               return { ran: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId };
             }
             // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
@@ -12546,7 +12555,23 @@ export class SessionService {
           // currency, the reuse-a-green-self-check record) since nothing about this run reached a real
           // verdict to record.
           if (gateResult.cancelled) {
-            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - gateStartedAt });
+            // `gateSpawned` (Code Review, card 3a6f04cc): admission ("running") is NOT the same fact as a
+            // process having actually spawned — `runGateSequential` checks `cancelSignal.aborted` BEFORE
+            // its FIRST step too (gate-runner.ts, in the loop, before `runStep` is ever called), so a
+            // cancel landing in the real gap between admission and that first check (this closure's own
+            // `computeWorktreeGateStamp` await, above, is exactly such a gap) settles here with
+            // `gateResult.steps` still `[]` — zero processes, despite `durationMs` being a real, non-zero
+            // number (it measures admission-to-settle, not spawn-to-settle). `steps.length > 0` is the
+            // actual "did a step's `runStep` genuinely get invoked and return" fact — stamped explicitly
+            // here rather than left to the caller-side `durationMs`-presence fallback (`gateRanFromDetail`),
+            // which cannot see this distinction at all (both this case and a real running-cancel stamp a
+            // real `durationMs`). DELIBERATE CALL: a `runGate` test double that never populates `steps` on
+            // its cancelled return reads `gateSpawned:false` here even if it conceptually "ran" — accepted,
+            // since every real producer (`runGateSequential`) always populates `steps` for a step that
+            // actually started (gate-runner.ts pushes onto `steps` the instant `runStep` resolves, before
+            // ever checking `res.cancelled`), so this is exact for production traffic; a double must
+            // populate `steps` itself to be measured correctly by this field.
+            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - gateStartedAt, gateSpawned: (gateResult.steps?.length ?? 0) > 0 });
             return { ran: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager while running", opId };
           }
           if (worker.branch) {

@@ -53,8 +53,10 @@ function relTime(iso: string, now: number): string {
 // ── gate-type + outcome + priority styling (kept on the existing token palette) ──
 const KIND_COLOR: Record<GateType, string> = { merge: color.phosphor, deploy: color.amber, worker: color.cyan };
 const KIND_LABEL: Record<GateType, string> = { merge: "merge", deploy: "deploy", worker: "worker" };
-const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red };
-const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true };
+// "cancelled" (card 3a6f04cc) gets its OWN neutral cyan, matching Board.tsx's own cancelled-outcome tone
+// for a pending-merge cancel — it must never read as a failure (red), since no verdict was reached.
+const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red, cancelled: color.cyan };
+const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false };
 const PRIORITY_RANK: Record<TaskPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.red, p1: color.red, p2: color.amber, p3: color.textMuted };
 

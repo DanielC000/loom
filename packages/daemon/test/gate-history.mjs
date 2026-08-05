@@ -22,6 +22,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           if that call site were reverted — caught live: removing `opId: thisOpId` from the real code
 //           and rerunning left every fixture-driven check above GREEN, since seed() writes detail_json
 //           directly and never calls the production code at all).
+//   (card 3a6f04cc) a CANCELLED worker-gate op used to be misreported as `outcome:"reject"` — the two
+//           disagreed with `gate_status`, which correctly reported `outcome:"cancelled"`. Fixed at the
+//           mapper (`gateOutcomeFromDetail` now checks `detail.cancelled` FIRST) and widened with a new
+//           `gateRan` bit (whether a gate PROCESS actually spawned, so a reused/never-admitted row is
+//           excludable from a duration series). The "(unit, card 3a6f04cc)" block below proves the mapper
+//           against synthetic fixtures for all three ambiguous shapes (cancelled-while-queued, cancelled-
+//           while-running, a reused merge self-check) PLUS a pre-fix-shaped historical row (no `gateSpawned`
+//           stamp at all) to prove the fallback derivation, not just the new explicit stamp. The
+//           "(e2e, REAL WRITE PATH, card 3a6f04cc)" block below is the DoD's positive control: it drives an
+//           ACTUAL `gate_cancel` on a genuinely QUEUED `runWorkerGate` op, and a REAL rejection on a
+//           sibling op, through the production code paths — proving the two rows are now distinguishable at
+//           the source, not just at the mapper.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-history.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -170,6 +182,10 @@ function seed(db) {
     check("(unit) the passed row has passed:true and its own durationMs/gateCap/concurrentGates/concurrentGatesMax", passed?.passed === true && passed?.durationMs === 61234 && passed?.gateCap === 2 && passed?.concurrentGates === 1 && passed?.concurrentGatesMax === 1);
     check("(unit) enrichment (branch / workerLabel, composed from agent+task title) is present for an OWN-project row", passed?.branch === "loom/p1-branch" && passed?.workerLabel === "dev-1 · Own project task title");
     check("(unit) the foreign project's task title never appears in a P1-scoped page", !JSON.stringify(page).includes("Foreign project task title"));
+    // Card 3a6f04cc: a real rejection/pass/historical row (none of them reused or cancelled) reads
+    // gateRan:true — a process genuinely spawned for every one of these.
+    check("(unit, card 3a6f04cc) a REJECTED row's gateRan is true (a real process spawned and failed)", rejected?.gateRan === true);
+    check("(unit, card 3a6f04cc) a PASSED row's gateRan is true", passed?.gateRan === true);
 
     // DIRECTIVE #4: the HISTORICAL shape — a row recorded before concurrentGatesMax shipped. Its
     // durationMs/gateCap/concurrentGates must stay intact while concurrentGatesMax comes back null —
@@ -179,6 +195,7 @@ function seed(db) {
     check("(unit) the historical row's durationMs/gateCap/concurrentGates are intact", historical?.durationMs === 45000 && historical?.gateCap === 2 && historical?.concurrentGates === 1);
     check("(unit) the historical row's concurrentGatesMax comes back null (never backfilled), not 0 or undefined", historical?.concurrentGatesMax === null);
     check("(unit) the historical row's opId also reads back null (a row from before this field shipped)", historical?.opId === null);
+    check("(unit, card 3a6f04cc) the HISTORICAL row's gateRan is STILL true — no backfill gap for this field, unlike concurrentGatesMax", historical?.gateRan === true);
 
     // Negative control: an unscoped read (no projectId) DOES see both — proves the P1-only result above
     // is the scoping filter actually working, not an accidental absence of P2's row altogether.
@@ -189,6 +206,105 @@ function seed(db) {
     const paged = db.listGateEvents({ projectId: P1, limit: 1, offset: 0 });
     check("(unit) limit:1 returns exactly 1 item", paged.items.length === 1 && paged.limit === 1);
     check("(unit) newest-first ordering: the rejected (later) row comes first", paged.items[0].outcome === "reject");
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
+// ── (unit, card 3a6f04cc) outcome:"cancelled" + gateRan — the mapper, against synthetic fixtures shaped
+// EXACTLY like the four real producer shapes (see gateOutcomeFromDetail/gateRanFromDetail's own docs).
+// A cancelled row must NEVER read outcome:"reject" (the defect), and must be DISTINGUISHABLE from a real
+// rejection on the SAME `outcome` field — the two are asserted side by side below. ─────────────────────
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P = `gh-cancel-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    db.insertProject({ id: P, name: "Cancel Fixtures", repoPath: `/tmp/${P}`, vaultPath: `/tmp/${P}`, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    const a = `${P}-a`;
+    db.insertAgent({ id: a, projectId: P, name: "dev", startupPrompt: "", position: 0 });
+    const t = `${P}-task`;
+    db.insertTask({ id: t, projectId: P, title: "Cancel fixtures task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const mgr = `${P}-mgr`, w = `${P}-wkr`;
+    db.insertSession({ id: mgr, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: w, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t, worktreePath: `/tmp/${P}-wt`, branch: "loom/cancel-branch" });
+
+    // (1) Cancelled WHILE QUEUED — the exact shape service.ts's `evt({cancelled:true, ...})` catch site
+    // stamps for a `GateCancelledError` thrown BEFORE admission: no `durationMs` (nothing was ever timed),
+    // explicit `gateSpawned:false`. Mirrors the card's own specimen op 4e4ffba4.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 4000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "worker_gate",
+      detail: { cancelled: true, cancelKind: "manual", cancelDetail: "cancelled by manager X via gate_cancel", gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0, gateSpawned: false },
+    });
+    // (2) Cancelled WHILE RUNNING — a process genuinely spawned and ran for a while before being killed;
+    // carries a real `durationMs` and NO explicit `gateSpawned` stamp, proving the FALLBACK derivation
+    // (durationMs presence on a cancelled row) reads it correctly without the new field.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 3000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "worker_gate",
+      detail: { cancelled: true, cancelKind: "manual", gateCap: 1, concurrentGates: 1, concurrentGatesMax: 1, durationMs: 543 },
+    });
+    // (3) A REUSED merge self-check — `build_gate` with `reused:true` (pre-existing field) AND the new
+    // explicit `gateSpawned:false` stamp — this is Codescape's op 37629df2 sibling case: a near-zero
+    // durationMs that reflects bookkeeping overhead, not real gate work.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 2000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "build_gate",
+      detail: { passed: true, durationMs: 2, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0, reused: true, reusedOpId: "some-prior-op", gateSpawned: false },
+    });
+    // (4) LEGACY-SHAPED cancelled row — `cancelled:true` with NEITHER `gateSpawned` NOR `durationMs` at
+    // all (a bare minimal shape, predating both the new stamp and any duration on the queued-cancel site).
+    // Proves the fallback still resolves outcome correctly even with the least information available.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 1000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "worker_gate",
+      detail: { cancelled: true },
+    });
+    // (5) A REAL rejection, for side-by-side comparison — must remain outcome:"reject", never "cancelled".
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 500).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "worker_gate",
+      detail: { passed: false, durationMs: 9999, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0, failingTest: "some.mjs" },
+    });
+
+    const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
+    check("(unit, card 3a6f04cc) all 5 fixture rows returned", page.items.length === 5);
+    // Fixtures (1) and (4) share durationMs:null (neither was ever timed) — distinguished by
+    // concurrentGates: (1) stamps it (0, a real number), (4) never stamps it at all (reads back null).
+    const queuedCancel = page.items.find((r) => r.durationMs === null && r.concurrentGates === 0);
+    const legacyCancel = page.items.find((r) => r.durationMs === null && r.concurrentGates === null);
+    const runningCancel = page.items.find((r) => r.durationMs === 543);
+    const reused = page.items.find((r) => r.durationMs === 2);
+    const realReject = page.items.find((r) => r.durationMs === 9999);
+    check("(unit, card 3a6f04cc) precondition: all 5 fixtures resolved to 5 DISTINCT rows (the finders above didn't collide)", new Set([queuedCancel, legacyCancel, runningCancel, reused, realReject]).size === 5 && [queuedCancel, legacyCancel, runningCancel, reused, realReject].every(Boolean));
+    check("(unit, card 3a6f04cc) (1) is a genuine worker-gate row with normal enrichment intact (branch/workerLabel/gateType/gateCap)", queuedCancel?.gateType === "worker" && queuedCancel?.gateCap === 1 && queuedCancel?.branch === "loom/cancel-branch" && queuedCancel?.workerLabel === "dev · Cancel fixtures task");
+
+    check("(unit, card 3a6f04cc) (1) cancelled-while-queued: outcome is \"cancelled\", NEVER \"reject\" — THE DEFECT", queuedCancel?.outcome === "cancelled");
+    check("(unit, card 3a6f04cc) (1) cancelled-while-queued: passed:false (not a pass, but see the tool description — never read as a rejection)", queuedCancel?.passed === false);
+    check("(unit, card 3a6f04cc) (1) cancelled-while-queued: gateRan is false — no process ever spawned (explicit gateSpawned:false stamp)", queuedCancel?.gateRan === false);
+    check("(unit, card 3a6f04cc) (1) cancelled-while-queued: durationMs is null — nothing was ever timed", queuedCancel?.durationMs === null);
+
+    check("(unit, card 3a6f04cc) (2) cancelled-while-running: outcome is \"cancelled\"", runningCancel?.outcome === "cancelled");
+    check("(unit, card 3a6f04cc) (2) cancelled-while-running: gateRan is TRUE (fallback derivation) — a process DID spawn and run before being killed", runningCancel?.gateRan === true);
+    check("(unit, card 3a6f04cc) (2) cancelled-while-running: durationMs is preserved (543)", runningCancel?.durationMs === 543);
+
+    check("(unit, card 3a6f04cc) (3) reused self-check: outcome is still \"pass\" (reuse is orthogonal to outcome)", reused?.outcome === "pass");
+    check("(unit, card 3a6f04cc) (3) reused self-check: gateRan is false — no process spawned at merge time (explicit gateSpawned:false stamp)", reused?.gateRan === false);
+    check("(unit, card 3a6f04cc) (3) reused self-check: durationMs (2ms) reflects bookkeeping, not real gate work — exactly what gateRan:false exists to flag", reused?.durationMs === 2);
+
+    check("(unit, card 3a6f04cc) (4) legacy-shaped cancel (no gateSpawned, no durationMs) STILL reads outcome:\"cancelled\", never \"reject\"", legacyCancel?.outcome === "cancelled");
+    check("(unit, card 3a6f04cc) (4) legacy-shaped cancel: gateRan falls back to false (cancelled + no durationMs)", legacyCancel?.gateRan === false);
+
+    check("(unit, card 3a6f04cc) (5) a REAL rejection stays outcome:\"reject\" — distinguishable from all four cancelled/reused rows above", realReject?.outcome === "reject");
+    check("(unit, card 3a6f04cc) (5) a REAL rejection has gateRan:true", realReject?.gateRan === true);
+
+    // THE CORE DELIVERABLE: side by side, a cancellation and a rejection are now genuinely distinguishable
+    // on `outcome` — before this fix both queuedCancel/runningCancel/legacyCancel AND realReject would all
+    // have read outcome:"reject", indistinguishable from each other.
+    const outcomes = page.items.map((r) => r.outcome).sort();
+    check("(unit, card 3a6f04cc) THE DELIVERABLE: 3 distinct \"cancelled\" rows + 1 \"pass\" (reused) + 1 \"reject\" — never 4x \"reject\"", JSON.stringify(outcomes) === JSON.stringify(["cancelled", "cancelled", "cancelled", "pass", "reject"]));
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   }
@@ -328,7 +444,157 @@ function seed(db) {
   }
 }
 
+// ── (e2e, REAL WRITE PATH, card 3a6f04cc) — THE DoD's POSITIVE CONTROL, THREE ARMS, THROUGH PRODUCTION
+// CODE: drives an ACTUAL `gate_cancel` (cancelGateOp) on a genuinely QUEUED `runWorkerGate` op (never
+// admitted, its `fn` never invoked — zero process risk, same guarantee gate-cancel.mjs proves at the
+// semaphore layer), an ACTUAL `gate_cancel` on a genuinely RUNNING op that is cancelled BEFORE its first
+// step ever spawns (Code Review finding [A] — the real race that made `gateRan` read `true` for a
+// never-spawned run: admission alone is not proof a process spawned), and a REAL rejection — all landing
+// through the exact `evt(...)` call sites this card touched in service.ts, not a synthetic detail_json
+// fixture. Proves all three settle into DISTINGUISHABLE gate_history rows at the SOURCE. ────────────────
+{
+  const dbs = [];
+  const worktrees = [];
+  try {
+    const P = `gh-realcancel-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GH-REALCANCEL", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    // cap:2 (not the default 1) — `maxConcurrentGates` is daemon-GLOBAL (platform config), never a
+    // per-project override (see config.ts's own doc) — worker1 (the ARM-2 holder) and worker3 (the ARM-3
+    // running-cancel target) both need to be ADMITTED concurrently so worker3 can genuinely be "running"
+    // when cancelled, while worker2 still queues behind them (fired only once both are admitted, below)
+    // for ARM 1. Mirrors every other daemon test that needs cap>1 (gate-cancel.mjs, worker-run-gate.mjs).
+    db.setPlatformConfig({ maxConcurrentGates: 2 });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const mgrId = `${P}-mgr`;
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    // THREE real workers, each with its OWN worktree — worker1 + worker3 both hold a lane (cap:2);
+    // worker2's own self-check genuinely QUEUES behind them (never admitted) until cancelled.
+    const task1Id = `${P}-task1`, worker1Id = `${P}-wkr1`;
+    db.insertTask({ id: task1Id, projectId: P, title: "GH-REALCANCEL-HOLDER", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt1 = await createWorktree(repo, P, task1Id);
+    worktrees.push(wt1.worktreePath);
+    db.insertSession({ id: worker1Id, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
+
+    const task2Id = `${P}-task2`, worker2Id = `${P}-wkr2`;
+    db.insertTask({ id: task2Id, projectId: P, title: "GH-REALCANCEL-QUEUED", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt2 = await createWorktree(repo, P, task2Id);
+    worktrees.push(wt2.worktreePath);
+    db.insertSession({ id: worker2Id, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
+
+    const task3Id = `${P}-task3`, worker3Id = `${P}-wkr3`;
+    db.insertTask({ id: task3Id, projectId: P, title: "GH-REALCANCEL-RUNNING", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt3 = await createWorktree(repo, P, task3Id);
+    worktrees.push(wt3.worktreePath);
+    db.insertSession({ id: worker3Id, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: wt3.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task3Id, worktreePath: wt3.worktreePath, branch: wt3.branch });
+
+    // Worker1's injected gate holds forever until released. Worker3's injected gate reacts to the REAL
+    // `cancelSignal` GateSemaphore.cancelRunning aborts — resolving with EXACTLY the shape
+    // `runGateSequential` itself produces when a cancel lands before its first step (gate-runner.ts:658:
+    // `steps:[]`, since `steps.push` only happens AFTER a step's own `runStep` returns) — this is the REAL
+    // race from Code Review finding [A], reproduced by driving the REAL cancel signal, not by pre-baking
+    // the outcome. Worker2's own gate must NEVER actually be invoked (cancelled while still queued).
+    let releaseHolder;
+    const holderP = new Promise((res) => { releaseHolder = res; });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      runGate: (_gate, worktreePath, _timeoutMs, _runStep, _envOverride, _allowExtend, cancelSignal) => {
+        if (worktreePath === wt1.worktreePath) return holderP;
+        if (worktreePath === wt3.worktreePath) {
+          return new Promise((resolve) => {
+            const settleCancelled = () => resolve({ passed: false, cancelled: true, failedStep: "pnpm test", steps: [] });
+            if (cancelSignal?.aborted) { settleCancelled(); return; }
+            cancelSignal?.addEventListener("abort", settleCancelled, { once: true });
+          });
+        }
+        throw new Error(`worker2's gate must NEVER actually run — it was cancelled while queued (worktreePath=${worktreePath})`);
+      },
+      syncAttachBudgetMs: 300,
+    });
+
+    const first = await sessions.runWorkerGate(worker1Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) precondition: worker1's holder gate degrades to pending", first.settled === false);
+    const op1Id = first.op.opId;
+    await waitUntil(() => (sessions.gateStatus(op1Id).state === "running" ? true : undefined), { timeoutMs: 10_000, label: "op1 to admit (running)" });
+
+    const third = await sessions.runWorkerGate(worker3Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) precondition: worker3's gate degrades to pending", third.settled === false);
+    const op3Id = third.op.opId;
+    await waitUntil(() => (sessions.gateStatus(op3Id).state === "running" ? true : undefined), { timeoutMs: 10_000, label: "op3 to admit (running)" });
+
+    const second = await sessions.runWorkerGate(worker2Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) precondition: worker2's self-check degrades to pending (queued — cap:2 fully held by worker1+worker3)", second.settled === false);
+    const op2Id = second.op.opId;
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) precondition: worker2's op is genuinely QUEUED", sessions.gateStatus(op2Id).state === "queued");
+
+    // THE POSITIVE CONTROL, ARM 1: a real gate_cancel on the QUEUED op.
+    const cancelResult = await sessions.cancelGateOp(mgrId, op2Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) cancelGateOp cancels the QUEUED op immediately, zero process risk", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "worker");
+    await waitUntil(() => (sessions.gateStatus(op2Id).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "op2 to settle after cancel" });
+
+    // THE POSITIVE CONTROL, ARM 3 (Code Review finding [A]'s own regression guard): a real gate_cancel on
+    // the genuinely RUNNING op, whose injected gate reacts to the real cancel signal and settles with
+    // ZERO steps run — the exact shape that used to read gateRan:true before this correction.
+    const cancelRunningResult = await sessions.cancelGateOp(mgrId, op3Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A] REGRESSION GUARD) cancelGateOp cancels the RUNNING op (verified kill)", cancelRunningResult.outcome === "cancelled" && cancelRunningResult.phase === "running" && cancelRunningResult.gateType === "worker");
+    await waitUntil(() => (sessions.gateStatus(op3Id).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "op3 to settle after running-cancel" });
+
+    // THE POSITIVE CONTROL, ARM 2: release worker1's gate with a REAL failing result — a genuine
+    // rejection, for side-by-side comparison against both cancellations above.
+    releaseHolder({
+      passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+      outputTail: "FAIL  real_cancel_test.mjs", failingTest: "real_cancel_test.mjs",
+      steps: [{ step: "pnpm test", durationMs: 700, status: 1 }],
+    });
+    await waitUntil(() => (sessions.gateStatus(op1Id).state === "settled" ? true : undefined), { timeoutMs: 20_000, label: "op1 to settle after release" });
+
+    // ALL THREE ARMS, PASTED SIDE BY SIDE — the deliverable the card's DoD asks for.
+    const page = db.listGateEvents({ projectId: P, limit: 10, offset: 0 });
+    const cancelledQueuedRow = page.items.find((r) => r.sessionId === worker2Id);
+    const cancelledRunningRow = page.items.find((r) => r.sessionId === worker3Id);
+    const rejectedRow = page.items.find((r) => r.sessionId === worker1Id);
+    console.log("(e2e, REAL WRITE PATH, card 3a6f04cc) CANCELLED-WHILE-QUEUED row:", JSON.stringify(cancelledQueuedRow));
+    console.log("(e2e, REAL WRITE PATH, card 3a6f04cc) CANCELLED-WHILE-RUNNING (zero steps) row:", JSON.stringify(cancelledRunningRow));
+    console.log("(e2e, REAL WRITE PATH, card 3a6f04cc) REJECTED row:", JSON.stringify(rejectedRow));
+
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the CANCELLED-WHILE-QUEUED row exists (a real worker-gate row)", !!cancelledQueuedRow && cancelledQueuedRow.gateType === "worker");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — THE FIX) the CANCELLED-WHILE-QUEUED row reads outcome:\"cancelled\", NEVER \"reject\"", cancelledQueuedRow?.outcome === "cancelled");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the CANCELLED-WHILE-QUEUED row's gateRan is false — its fn was NEVER invoked (zero process risk, proven above)", cancelledQueuedRow?.gateRan === false);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the CANCELLED-WHILE-QUEUED row's durationMs is null — nothing was ever timed", cancelledQueuedRow?.durationMs === null);
+
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A] REGRESSION GUARD) the CANCELLED-WHILE-RUNNING row exists", !!cancelledRunningRow && cancelledRunningRow.gateType === "worker");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A] REGRESSION GUARD) outcome is \"cancelled\" (admission alone never made this a verdict)", cancelledRunningRow?.outcome === "cancelled");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A] REGRESSION GUARD, THE ACTUAL BUG) gateRan is FALSE — admission happened but ZERO steps ever spawned; before the correction this read true", cancelledRunningRow?.gateRan === false);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A]) durationMs is a REAL non-null number (admission-to-cancel time) despite gateRan:false — proving gateRan and durationMs answer genuinely different questions here", typeof cancelledRunningRow?.durationMs === "number" && cancelledRunningRow.durationMs !== null);
+
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the REJECTED row exists and is a genuine failure", !!rejectedRow && rejectedRow.gateType === "worker");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the REJECTED row reads outcome:\"reject\" — DISTINGUISHABLE from both cancelled rows above", rejectedRow?.outcome === "reject");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the REJECTED row's gateRan is true — a real process spawned and failed", rejectedRow?.gateRan === true);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the REJECTED row carries its real failingTest (a worker row embeds it inline)", rejectedRow?.failingTest === "real_cancel_test.mjs");
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) the REJECTED row's durationMs is a real, non-null number", typeof rejectedRow?.durationMs === "number" && rejectedRow.durationMs > 0);
+
+    // gate_status(opId) agrees with gate_history on all THREE ops — the two surfaces this card's DoD-1
+    // requires never disagree again.
+    const status2 = sessions.gateStatus(op2Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) gate_status AGREES with gate_history on the cancelled-while-queued op", status2.state === "settled" && status2.cancelled === true && status2.outcome === "cancelled");
+    const status3 = sessions.gateStatus(op3Id);
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A]) gate_status AGREES with gate_history on the cancelled-while-running op too", status3.state === "settled" && status3.cancelled === true && status3.outcome === "cancelled");
+    const status1 = sessions.gateStatus(op1Id);
+    // gate_status's own vocabulary is "fail" (PendingGateOpVerdictKind), NOT "reject" (GateOutcome) — the
+    // two surfaces agree in MEANING (a real, non-passing verdict), never in literal string. Compared via
+    // passed:false, the field both surfaces actually share.
+    check("(e2e, REAL WRITE PATH, card 3a6f04cc) gate_status AGREES with gate_history on the rejected op (same meaning — passed:false — not the same outcome VOCABULARY: gate_status says \"fail\", gate_history says \"reject\")", status1.state === "settled" && status1.passed === false && status1.outcome === "fail");
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+    for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, and is registered on the manager surface ONLY — the worker's pinned depth-1 tool set is unchanged."
+  ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
