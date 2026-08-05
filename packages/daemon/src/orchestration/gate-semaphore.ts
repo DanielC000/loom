@@ -355,6 +355,23 @@ export class GateSemaphore {
   // boot's own initial cap never logs a spurious "transition" from nothing.
   private lastKnownCap: number | undefined;
 
+  /** Card 96d5f76b: forensics for `activeMergeRepos`'s add/delete lifecycle — this Set's membership is
+   *  the ENTIRE per-repo merge-admission guard, and the incident this card investigates (a holder's guard
+   *  vanishing ~10 minutes into its own still-running gate, with no known caller responsible) went
+   *  unexplained for as long as it did because no mutation of this Set was ever logged with a timestamp
+   *  taken AT the mutation itself — every timing argument had to be reconstructed after the fact from a
+   *  LATER stamp (an op's own `settledAt`), which is measurably not the same instant (confirmed during
+   *  that investigation: a sibling op's `settledAt` postdates its own `endSquash` call, the actual
+   *  `activeMergeRepos` mutation, by an unmeasured margin). `performance.now()` (monotonic — immune to
+   *  wall-clock adjustment, and the same clock `gate-runner.ts`'s own liveness tracking already uses) is
+   *  the ordering-authoritative value; the ISO `Date.now()` string rides alongside it purely so a reader
+   *  can correlate this line against `pending_gate_ops`/`orchestration_events`, which are wall-clock only.
+   *  `opId` is `undefined` for a call site that has none to offer (none exist today — every caller of the
+   *  four mutation points below has one) rather than a fabricated placeholder. */
+  private logRepoGuardMutation(action: "add" | "delete", repoPath: string, opId: string | undefined, callSite: string): void {
+    console.log(`[gate:repo-guard] ${action} repoPath=${repoPath} opId=${opId ?? "?"} site=${callSite} t=${performance.now().toFixed(3)} iso=${new Date().toISOString()}`);
+  }
+
   /** True when `entry` is free to be admitted RIGHT NOW with respect to the per-worktree exclusivity
    *  guard alone (card 8d585277) — a worktree-less descriptor (`wt == null`) is ALWAYS eligible, never
    *  blocked by this check; a worktree-bound one is eligible only while no OTHER running entry holds the
@@ -389,6 +406,7 @@ export class GateSemaphore {
     if (wt != null) this.activeWorktrees.add(wt);
     if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
       this.activeMergeRepos.add(entry.descriptor.repoPath);
+      this.logRepoGuardMutation("add", entry.descriptor.repoPath, entry.descriptor.opId, "admit");
     }
     // Card c6750500: an admission is the ONLY event that can raise `active` — a release only ever lowers
     // it — so it's the only place a running entry's max-over-run can change. Bump EVERY currently-running
@@ -437,6 +455,7 @@ export class GateSemaphore {
     if (wt != null) this.activeWorktrees.delete(wt);
     if (!holdRepoGuard && entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
       this.activeMergeRepos.delete(entry.descriptor.repoPath);
+      this.logRepoGuardMutation("delete", entry.descriptor.repoPath, entry.descriptor.opId, "release");
     }
     this.grantNext();
   }
@@ -465,9 +484,14 @@ export class GateSemaphore {
    *  OWN op's hold. `Set.add` being idempotent is retained as a belt-and-braces property — it means a
    *  redundant call from the SAME op (this hold is typically already present, extended by
    *  `holdRepoGuardOnExit`) is harmless — it is NOT why a DIFFERENT op's call would be safe; no other op is
-   *  ever expected to call this for a repo it doesn't itself hold. */
-  beginSquash(repoPath: string): void {
+   *  ever expected to call this for a repo it doesn't itself hold.
+   *
+   *  `opId` (card 96d5f76b, forensics-only): threaded through purely so {@link logRepoGuardMutation} can
+   *  attribute this mutation to a specific op in the log; optional and never read for any admission
+   *  decision — an omitted value logs `opId=?` and changes no behavior. */
+  beginSquash(repoPath: string, opId?: string): void {
     this.activeMergeRepos.add(repoPath);
+    this.logRepoGuardMutation("add", repoPath, opId, "beginSquash");
   }
 
   /** Card c24dd48a: end a `beginSquash` hold (the squash has settled — landed or failed, doesn't matter
@@ -480,16 +504,22 @@ export class GateSemaphore {
    *  no-ops) so a `gateRan` op's OWN gate-failed early-return path — which never held anything in the first
    *  place, since a failing gate never calls `holdRepoGuardOnExit` — can still call this unconditionally
    *  without a double-free; that idempotence is a safety net for THIS op's own no-op case, not a licence for
-   *  a different op to call it. */
-  endSquash(repoPath: string): void {
-    this.releaseMergeRepoGuard(repoPath);
+   *  a different op to call it. `opId` (card 96d5f76b): forwarded to {@link releaseMergeRepoGuard} — see
+   *  its own doc, same forensics-only, non-behavioral contract as {@link beginSquash}'s `opId`. */
+  endSquash(repoPath: string, opId?: string): void {
+    this.releaseMergeRepoGuard(repoPath, opId);
   }
 
   /** Card c24dd48a: explicitly free a per-repo merge-admission guard — see {@link endSquash}'s doc (its
    *  synonym) for when/why to call this. Idempotent: deleting an absent key from a `Set` is a no-op, so
-   *  this can never under- or over-release relative to how many times the guard was actually acquired. */
-  releaseMergeRepoGuard(repoPath: string): void {
-    if (this.activeMergeRepos.delete(repoPath)) this.grantNext();
+   *  this can never under- or over-release relative to how many times the guard was actually acquired.
+   *  `opId` (card 96d5f76b): same forensics-only, non-behavioral contract as {@link beginSquash}'s `opId`
+   *  — see that param's own doc. */
+  releaseMergeRepoGuard(repoPath: string, opId?: string): void {
+    if (this.activeMergeRepos.delete(repoPath)) {
+      this.logRepoGuardMutation("delete", repoPath, opId, "releaseMergeRepoGuard");
+      this.grantNext();
+    }
   }
 
   /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before touching

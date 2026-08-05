@@ -271,6 +271,66 @@ const worktrees = [];
     check("(repo-mutex, d4) the running fn actually threw on abort", result instanceof Error && result.message === "aborted");
     check("(repo-mutex, d4) an aborted-then-thrown run still frees the repo hold", await repoFreedAfter(sem, "/repo/d4"));
   }
+
+  // (e) THE QUEUE PATH (card 96d5f76b, DoD-2): (a) above proves the second same-repo merge never starts
+  // while nothing else happens around it — but that's the ADMISSION path (`acquire()`'s synchronous
+  // fast-path check), never the QUEUE path production actually hit in the 2026-08-05 incident this card
+  // investigates: a same-repo sibling sitting QUEUED while an UNRELATED op (different repo, different
+  // project) admits and releases, firing a REAL `grantNext()` scan that must correctly skip the still-
+  // repo-blocked waiter rather than admit it just because a cap slot happened to free. A cap-only guard
+  // (or a `grantNext()` that forgot to re-check `mergeRepoFree`) would pass (a) — nothing there ever frees
+  // an unrelated slot — and only this test exercises the actual mechanism that failed to explain the
+  // incident's ~28s (later narrowed to ≤3.4s) window where the repo guard was found absent with no known
+  // caller responsible. This test does not reproduce THAT incident (no known code path causes it, per this
+  // card's own investigation) — it proves the ORDINARY queue path stays correct under the exact trigger
+  // shape (an unrelated release) that production's 07:29:22.900 admission coincided with.
+  {
+    const sem = new GateSemaphore();
+    let releaseHolder;
+    const holder = () => new Promise((res) => { releaseHolder = res; });
+    const pHolder = sem.runExclusive(2, mergeDesc("eh", "/repo/queue-path"), () => holder());
+    check("(repo-mutex, e) the holder admits immediately (repo free, cap headroom)", sem.snapshot().active === 1);
+
+    let siblingStarted = false;
+    // NO sleep needed here (mirrors (a)'s identical proven shape above): `acquire()`'s admission decision
+    // — including a QUEUED waiter's registry push, inside the `new Promise` executor — is entirely
+    // SYNCHRONOUS, completing before `runExclusive(...)` ever returns control to this line. A fixed wait
+    // here would be a genuine TIMING-GUARD violation (an unfalsifiable "hasn't happened yet" vs "never
+    // will"); checking synchronously is not a race because there is nothing async to race.
+    const pSibling = sem.runExclusive(2, mergeDesc("es", "/repo/queue-path"), async () => { siblingStarted = true; return "sibling"; });
+    check("(repo-mutex, e) the sibling is genuinely QUEUED, not admitted (cap has headroom — this IS repo contention)",
+      sem.snapshot().queued === 1 && sem.snapshot().active === 1);
+    const queuedEntry = sem.snapshot().entries.find((e) => e.phase === "queued");
+    check("(repo-mutex, e) the queued sibling is visibly repoContended", !!queuedEntry && queuedEntry.repoContended === true);
+
+    // Free an UNRELATED slot: an entirely different repo/project admits into the second cap slot, then
+    // resolves and releases — the SAME `release()` → `grantNext()` call production's own peer-project
+    // merge made in the real incident. This is the trigger the fixed-wait guard below needs a genuine
+    // event to anchor on, not a bare sleep.
+    await sem.runExclusive(2, { gateType: "merge", projectId: "unrelated", sessionId: "unrelated-sess", repoPath: "/repo/totally-different" }, async () => "unrelated-done");
+    check("(repo-mutex, e) the unrelated op's release did NOT touch the repo-blocked sibling's queued state",
+      sem.snapshot().queued === 1 && sem.snapshot().active === 1);
+
+    const QUEUE_PATH_WINDOW_MS = 150;
+    const neverStarted = await assertNeverWithControl({
+      label: "(repo-mutex, e) the sibling STAYS QUEUED after an UNRELATED slot frees — the queue path, not just admission",
+      check: () => siblingStarted,
+      windowMs: QUEUE_PATH_WINDOW_MS,
+      positiveControl: async () => {
+        const controlSem = new GateSemaphore();
+        let controlStarted = false;
+        const pControl = controlSem.runExclusive(2, mergeDesc("ectrl", "/repo/queue-path-control"), async () => { controlStarted = true; return "control"; });
+        const observed = await observeOnce({ check: () => controlStarted, windowMs: QUEUE_PATH_WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(repo-mutex, e) the sibling PROVABLY did not start after the unrelated release — the same window just proved (via the control) capable of catching a real start", neverStarted);
+
+    releaseHolder("holder-done");
+    const [rHolder, rSibling] = await Promise.all([pHolder, pSibling]);
+    check("(repo-mutex, e) once the ACTUAL holder releases, the sibling is admitted and settles", rHolder === "holder-done" && rSibling === "sibling");
+  }
 }
 
 // ── MAX-CONCURRENT-OVER-RUN (card c6750500): `concurrentGates` (at-admission only) can never see a gate

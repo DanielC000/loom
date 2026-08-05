@@ -10651,8 +10651,11 @@ export class SessionService {
     // real cross-op hazard for the REUSE/gateless paths specifically. This try/finally's OWN scope (this
     // comment) is unaffected by that confinement: it still wraps the whole span regardless of `gateRan`,
     // because a throw anywhere in here must still be caught to keep `merge` well-defined for the code
-    // after — the `finally`'s `endSquash` call is simply a no-op for a `gateRan:false` op that never held
-    // anything in the first place.
+    // after — the `finally`'s `endSquash` call is guarded by that SAME `if (gateRan)` (card 96d5f76b
+    // DoD-4 correction: it is NOT called at all for a `gateRan:false` op — describing it as a no-op call
+    // described the pre-confinement design this card replaced; `Set.delete`'s idempotence is still real
+    // and still the reason a REDUNDANT call from THIS op's own gate-failed early-return path is harmless,
+    // it just never arises for reuse/gateless in the first place).
     let merge: Awaited<ReturnType<typeof mergeBranch>>;
     try {
     if (gate) {
@@ -11425,7 +11428,7 @@ export class SessionService {
     // (`reunionAtAdmission`) reads. Bounded: `mergeBranch` itself is timeout-bounded (`this.gitOpMs`), so
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
-    if (gateRan) this.gateSemaphore.beginSquash(repoPath);
+    if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
     merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead);
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
@@ -11433,7 +11436,7 @@ export class SessionService {
       // touches a key it never acquired. Safe to call for EVERY `gateRan` exit (including a gate-failed
       // early return, where `holdRepoGuardOnExit` was never invoked and nothing is held): `Set.delete` on
       // an absent key is a no-op, so this only ever releases THIS op's own hold if one exists.
-      if (gateRan) this.gateSemaphore.endSquash(repoPath);
+      if (gateRan) this.gateSemaphore.endSquash(repoPath, thisOpId);
     }
     if (!merge.ok) {
       if (merge.gateBaseInvalidated) {
