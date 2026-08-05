@@ -4,7 +4,73 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Added
+- **Git tab branch browser.** The web Git tab gains branch search/filter and folds worker (`loom/*`)
+  branches; each is labeled with its originating card title and merged/unmerged state, backed by a
+  per-card git ship-state (merged sha + repo, plus which check answered it) now persisted on the board.
+- **`useConptyDll`, an opt-in per-session flag** that avoids node-pty's `kill()` fork path on Windows.
+- **Gate and deploy observability deepen.** Deploy staleness (served dist build time vs. mainline HEAD,
+  correctly following incremental builds and covering `packages/web`) is surfaced to managers; a gate run
+  now exposes per-step durations, IDLE time (distinct from raw elapsed — the right number for judging a
+  wedge), and a budget-proximity warning on a still-passing run, and its per-file test timings survive a
+  SIGKILL instead of being lost; `gate_status`/`gate_history` can be looked up by opId, and a specific
+  directive's delivery status by msgId.
+- **Board quality-of-life.** A deferred card's un-defer condition is now data (it auto-clears when the
+  named blocking card merges) instead of prose a human has to remember to re-check; suspected-duplicate
+  cards sharing a rare identifier are flagged; a deferred DoD sub-item hand-off is structurally visible
+  instead of buried in a comment.
+- **Manager tools.** `worker_flush` presses Enter on a worker's stranded composer (writing nothing new)
+  when a paste landed but its confirm never registered; a manager can now cancel or supersede a worker's
+  own queued gate self-check instead of it silently colliding with a merge gate on the same worktree.
+
 ### Fixed
+- **The Windows startup-prompt command-line ceiling is gone.** Every session role now boots with no
+  prompt on argv; the kickoff/topic-start text is delivered once the session is ready, through the same
+  turn-submission path every later message already uses, instead of riding positionally on the process
+  command line — so a large kickoff (a sizeable project-memory digest, a verbose card body) can no longer
+  blow through Windows's ~32K command-line limit and refuse the spawn outright before the daemon ever
+  produced a process.
+- **Merge/git integrity, continued.** `main` advancing during a multi-minute gate run no longer lets the
+  eventual squash land on an un-gated tree; an already-landed branch no longer skips its own gate-base
+  check while still gating; leftover `MERGE_HEAD` residue is now cleared before (not after) the
+  dirty-tree refusal runs; a duplicate merge op can no longer be minted and left un-withdrawn; a
+  cancelled, superseded, or tree-contaminated gate result can no longer be replayed as a false pass, and
+  an accidental repeat `worker_merge_confirm` can no longer launder a rejected branch into a merge; the
+  gate semaphore no longer admits two merge gates for the same repo at once, and worktree creation's own
+  git sequence is now serialized per repo.
+- **Windows process enumeration** (used by worktree-reap / orphan cleanup) now forces UTF-8 output and
+  fails loudly with captured stderr on an empty result instead of silently under-counting, and no longer
+  times out prematurely under load.
+- **Message delivery reliability.** A stranded kickoff no longer re-pastes its full body on every
+  re-drive (was an up to ~4x compounding runaway); a given-up `submit()` re-queues instead of dropping its
+  text, and give-up recovery no longer clears prematurely or misattributes a held requeue across a
+  restart; a collapsed or truncated turn is now detected and recovered for any long turn, not just
+  pastes; a late engine confirmation is matched by content id so it can no longer duplicate or purge the
+  wrong message; a redelivery/recovery notice can no longer falsely claim "you haven't seen this" for a
+  message either side had already consumed and acted on.
+- **Worker/session lifecycle.** `worker_list` no longer goes blank for a stopped worker with an unmerged
+  branch; a crashed spawn no longer misroutes toward "respawn" behind a hardcoded false claim; the
+  idle-worker nudge no longer fires for a session that's already been recycled or whose spawn is
+  known-broken; a boot/resume redrive now announces and logs itself instead of happening silently.
+- **Task board data integrity.** `tasks_update` now CAS-checks a card body against a read-first
+  `baseVersion` instead of blind-replacing it, so two concurrent editors can no longer silently destroy
+  each other's edits; a human save that would clobber an agent's in-flight task edit now warns instead of
+  clobbering it.
+- **Companion escalation reliability.** Re-escalation evidence is kept and linked to its retitled
+  follow-up card instead of being lost; a capability upgrade no longer drops a companion's identity/age
+  fields; a severity-escalated re-escalation is no longer swallowed by the in-progress dedup gate.
+- **Memory-recall completeness.** A dropped-pinned-notes notice no longer truncates its own list of what
+  was dropped; pinned notes now overflow by importance ordering rather than alphabetically; a partial
+  related-notes drop is now reported as "N of M" instead of silently.
+- **`loom stop`** no longer risks signaling a reused pid on its fallback ladder, which `taskkill /T` would
+  otherwise amplify into killing an unrelated process tree.
+- **Skill hygiene.** A dev-only skill that's since been retired from a user's roster (e.g. `research`,
+  previously seeded and then de-listed) no longer leaves its orphaned store directory behind forever; a
+  worktree's `.claude/settings.local.json` is now excluded from git so a worker's broad `git add` can't
+  accidentally stage it.
+- **Settings UI.** Timeout fields that take seconds no longer validate against a millisecond bound.
+- **Deploy build.** A failed deploy rebuild now restores `web/dist` instead of leaving the previously
+  served UI half-replaced.
 - **`gate_status` no longer conflates a settled gate/merge op with one that never existed.** The durable
   op record (`pending_gate_ops`) is now written at OP CREATION — covering a fast op that settles inline,
   not just one that was surfaced pending — and is never pruned; a live-registry miss now falls back to
@@ -15,6 +81,14 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
   caller can never distinguish "never existed" from "exists, but isn't yours", so it gets an honest
   ambiguity sink rather than a false non-existence claim. The boot-time restart-orphan sweep no longer
   risks a false failure nudge for a fast op that already settled cleanly before a crash.
+- **MCP tool-arg validation is now enforced fleet-wide** (`strictShape()` rolled out to every
+  `registerTool` site), so an unknown argument hard-rejects consistently instead of only at some call
+  sites.
+
+### Internal
+- A continued suite de-flaking and doctrine-currency sweep (~90 test/docs commits): timing-guard
+  hardening against fixed-wait races, per-file gate telemetry, temp-dir/leak isolation across the daemon
+  test suite, and doctrine corrections across the bundled `/worker` and `/orchestrate` skills.
 
 ## [0.25.0] — 2026-07-24
 
