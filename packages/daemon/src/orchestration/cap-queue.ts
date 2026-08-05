@@ -66,10 +66,19 @@ export class CapQueueRegistry {
    *  (`new CapQueueRegistry()`) is byte-identical. */
   constructor(private readonly now: () => number = Date.now) {}
 
-  private prune(nowMs: number): void {
+  /** Returns whatever this call actually reaped (across every manager) — {@link takeOldestOrReaped} uses
+   *  this to notice an entry that aged out for ITS OWN manager before ever being drained (card 5ab3c664
+   *  Part 2). Every other caller (`record`/`listByManager`/`takeOldest`) still just discards it — reaping
+   *  during a plain read/record stays silent, exactly as before; only the drain path reports it. */
+  private prune(nowMs: number): CapQueueEntry[] {
+    const reaped: CapQueueEntry[] = [];
     for (const [key, e] of this.entries) {
-      if (nowMs - Date.parse(e.queuedAt) >= CAP_QUEUE_TTL_MS) this.entries.delete(key);
+      if (nowMs - Date.parse(e.queuedAt) >= CAP_QUEUE_TTL_MS) {
+        this.entries.delete(key);
+        reaped.push(e);
+      }
     }
+    return reaped;
   }
 
   /** Record a cap-rejected spawn intent. Returns the PUBLIC projection (opId + kickoffLabel + queuedAt —
@@ -133,6 +142,26 @@ export class CapQueueRegistry {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Same as {@link takeOldest}, plus any entries belonging to THIS manager that this call's own TTL prune
+   * just silently removed (card 5ab3c664 Part 2) — used ONLY by {@link SessionService.maybeDrainCapQueue}
+   * so it can tell its manager a queued dispatch aged out before a slot ever freed for it, instead of the
+   * entry just vanishing with no signal at all (the pre-existing `[loom:cap-queue-autofire-failed]`
+   * notice only ever fires when a POPPED entry then fails inside spawnWorker — a TTL reap never reaches
+   * that branch, since `takeOldest` already discarded it before returning). Entries reaped for OTHER
+   * managers are unaffected — still silently dropped, exactly as `takeOldest`/`listByManager` do.
+   */
+  takeOldestOrReaped(managerSessionId: string): { entry: CapQueueEntry | undefined; reapedForManager: CapQueueEntry[] } {
+    const reapedForManager = this.prune(this.now()).filter((e) => e.managerSessionId === managerSessionId);
+    for (const [key, e] of this.entries) {
+      if (e.managerSessionId === managerSessionId) {
+        this.entries.delete(key);
+        return { entry: e, reapedForManager };
+      }
+    }
+    return { entry: undefined, reapedForManager };
   }
 
   /**

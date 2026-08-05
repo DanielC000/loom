@@ -49,7 +49,7 @@ import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateF
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
-import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
+import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
@@ -5689,7 +5689,22 @@ export class SessionService {
       // would otherwise reach here; without this check each queued entry would be mistaken for a genuinely
       // broken spawn and dropped, which is exactly wrong for an emergency stop-everything.
       if (this.control.isPaused(managerSessionId)) return;
-      const entry = this.capQueue.takeOldest(managerSessionId);
+      const { entry, reapedForManager } = this.capQueue.takeOldestOrReaped(managerSessionId);
+      // TTL REAP NOTIFICATION (card 5ab3c664 Part 2): an entry that aged past CAP_QUEUE_TTL_MS before
+      // this drain ever ran is discarded silently INSIDE takeOldestOrReaped's own prune — it never reaches
+      // the try/catch below (that block only runs for an entry `takeOldestOrReaped` actually returned).
+      // Report only what was OBSERVED (it existed, when it was queued, that it exceeded the TTL, that no
+      // worker was ever spawned for it) — never a claim about WHY a slot didn't free in time, which this
+      // method has no way to know. One-shot: the entry is already gone from the queue, never re-sent.
+      for (const reaped of reapedForManager) {
+        try {
+          this.enqueueDurableMessage(
+            managerSessionId,
+            `[loom:cap-queue-ttl-reaped] queued spawn (opId ${reaped.opId}, task ${reaped.taskId ?? "taskless"}, agent ${reaped.agentId}) queued at ${reaped.queuedAt} was dropped from the cap queue — it exceeded the queue's ${CAP_QUEUE_TTL_MS / 60_000}-minute TTL, and no worker was ever spawned for it. Re-call worker_spawn yourself if it's still needed.`,
+            { sender: "system", taskId: reaped.taskId ?? null, kind: "agent" },
+          );
+        } catch { /* best-effort — never let the notification disturb the drain */ }
+      }
       if (!entry) return;
       try {
         await this.spawnWorker(managerSessionId, {

@@ -59,6 +59,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       unsuppress leaves it still held, and only the SECOND drops it to 0 and lets the drain proceed.
 //  (23)/(24) worker_stop's neither-arg and both-arg (workerSessionId + opId) validation branches.
 //
+// Proves (card 5ab3c664 Part 2 — a queued entry that ages past CAP_QUEUE_TTL_MS BEFORE a slot ever frees
+// for it used to vanish with NO signal at all; [loom:cap-queue-autofire-failed] only ever covers a POPPED
+// entry that then fails inside spawnWorker, a different case):
+//  (25) an entry whose TTL has already lapsed by the time a slot frees for it never becomes a live worker,
+//       is gone from worker_list (not left cap-queued), and the manager gets a ONE-SHOT
+//       [loom:cap-queue-ttl-reaped] notice naming the opId/task/agent/queuedAt — reporting OBSERVED facts
+//       only (no "because"/"due to" causal wording about why the slot didn't free in time).
+//  (26) both-directions control: a normally-queued entry (no TTL lapse) still auto-fires into a real
+//       worker exactly as before, AND emits NO [loom:cap-queue-ttl-reaped] notice.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/worker-spawn-cap-queue.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -269,7 +279,7 @@ try {
       db.insertTask({ id, projectId: "pC", title: `task C${n}`, body: "", columnKey: "backlog", position: n, priority: "p2", createdAt: now, updatedAt: now });
       return id;
     };
-    const taskC = Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((n) => [n, mkTask(n)]));
+    const taskC = Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map((n) => [n, mkTask(n)]));
 
     const router2 = new OrchestrationMcpRouter(db, svc);
     const server2 = router2.buildServer("mgr2", "manager");
@@ -410,6 +420,44 @@ try {
     const liveC9 = listC.find((w) => w.taskId === taskC[9] && w.processState === "live");
     check("(13) once unpaused, the SAME entry fires on the next drain", !!liveC9);
     if (liveC9) worktreesC.push(db.getSession(liveC9.workerSessionId)?.worktreePath);
+
+    // ===================== (25) a TTL-lapsed entry silently ages out — the manager must be TOLD =====================
+    const rejC12 = await callC("worker_spawn", { taskId: taskC[12], agentId: "agentDevC", kickoffPrompt: "GO C12, will TTL-reap before ever draining" });
+    check("(25 setup) taskC12 is cap-queued (cap is full — C9 is live)", !!rejC12.capQueued);
+    // White-box (TS `private` erased at runtime — same pattern as suppressCapQueueDrain/inFlightSpawnTaskIds
+    // elsewhere in this file): rewrite the raw registry entry's queuedAt to simulate CAP_QUEUE_TTL_MS having
+    // already elapsed, instead of a real 30-minute wait.
+    const rawC12 = svc.capQueue.entries.get(taskC[12]);
+    check("(25 setup) white-box access reaches the raw registry entry", !!rawC12);
+    const staleQueuedAt = new Date(Date.now() - CAP_QUEUE_TTL_MS - 1000).toISOString();
+    rawC12.queuedAt = staleQueuedAt;
+
+    host.enqueueLog.length = 0; // clean slate — only this drain's own notifications should show up below
+    await retireAndDrain(liveC9.workerSessionId); // frees the ONLY slot (cap=1) — the drain runs and finds C12 already past TTL
+    listC = await callC("worker_list");
+    check("(25) the TTL-reaped entry (C12) never became a live worker", !listC.some((w) => w.taskId === taskC[12] && w.processState === "live"));
+    check("(25) the TTL-reaped entry is gone from worker_list, not left cap-queued forever", !listC.some((w) => w.taskId === taskC[12] && w.processState === "cap-queued"));
+    check("(25) the manager was notified via [loom:cap-queue-ttl-reaped], naming the opId/task/agent/queuedAt",
+      host.enqueueLog.some((e) => e.sessionId === "mgr2" && e.text.includes("[loom:cap-queue-ttl-reaped]")
+        && e.text.includes(rejC12.capQueued.opId) && e.text.includes(taskC[12]) && e.text.includes("agentDevC") && e.text.includes(staleQueuedAt)));
+    check("(25) the notice reports OBSERVED facts only — no causal claim about why the slot didn't free in time",
+      !host.enqueueLog.some((e) => e.sessionId === "mgr2" && e.text.includes("[loom:cap-queue-ttl-reaped]") && (/\bbecause\b/i.test(e.text) || /\bdue to\b/i.test(e.text))));
+
+    // ===================== (26) both-directions control: a normal drain still fires, and emits NO ttl-reaped notice =====================
+    const spawnC13 = await callC("worker_spawn", { taskId: taskC[13], agentId: "agentDevC", kickoffPrompt: "GO C13, refills the cap" });
+    check("(26 setup) taskC13 fills the cap again (freed by the TTL-reap drain above)", !!spawnC13.workerSessionId);
+    worktreesC.push(spawnC13.worktreePath);
+    const rejC14 = await callC("worker_spawn", { taskId: taskC[14], agentId: "agentDevC", kickoffPrompt: "GO C14, queued normally, should auto-fire clean" });
+    check("(26 setup) taskC14 is cap-queued", !!rejC14.capQueued);
+
+    host.enqueueLog.length = 0;
+    await retireAndDrain(spawnC13.workerSessionId);
+    listC = await callC("worker_list");
+    const liveC14 = listC.find((w) => w.taskId === taskC[14] && w.processState === "live");
+    check("(26) a normally-queued entry (no TTL lapse) still auto-fires into a real worker", !!liveC14);
+    if (liveC14) worktreesC.push(db.getSession(liveC14.workerSessionId)?.worktreePath);
+    check("(26) a normal successful auto-fire emits NO [loom:cap-queue-ttl-reaped] notice",
+      !host.enqueueLog.some((e) => e.sessionId === "mgr2" && e.text.includes("[loom:cap-queue-ttl-reaped]")));
   } finally {
     try {
       const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -580,6 +628,32 @@ try {
   check("(16) the wrongly-scoped cancel left the entry in place", reg3.listByManager("mgrZ").some((e) => e.opId === eZ5.opId));
   check("(16) cancel() by the OWNING manager removes it", reg3.cancel("mgrZ", eZ5.opId) === true);
   check("(16) a repeat cancel of an already-gone opId is a safe no-op (false, not a throw)", reg3.cancel("mgrZ", eZ5.opId) === false);
+
+  // (27)-(29): takeOldestOrReaped — the primitive maybeDrainCapQueue's TTL-reap notice (card 5ab3c664 Part 2) is built on.
+  const reg4 = new CapQueueRegistry(() => fakeNow);
+  const eW1 = reg4.record("mgrW", "agentW", "tW1", "kickoff W1");
+  {
+    const { entry, reapedForManager } = reg4.takeOldestOrReaped("mgrW");
+    check("(27) takeOldestOrReaped returns the live entry when nothing has aged out", entry && entry.opId === eW1.opId);
+    check("(27) reapedForManager is empty when nothing aged out", reapedForManager.length === 0);
+  }
+  const eW2 = reg4.record("mgrW", "agentW", "tW2", "kickoff W2");
+  fakeNow += CAP_QUEUE_TTL_MS + 1; // age W2 out without a real 30-minute wait
+  {
+    const { entry, reapedForManager } = reg4.takeOldestOrReaped("mgrW");
+    check("(28) takeOldestOrReaped returns undefined once the only queued entry has aged out", entry === undefined);
+    check("(28) reapedForManager reports the TTL-lapsed entry (opId/taskId/queuedAt all present)",
+      reapedForManager.length === 1 && reapedForManager[0].opId === eW2.opId && reapedForManager[0].taskId === "tW2" && typeof reapedForManager[0].queuedAt === "string");
+  }
+  // A reap for a DIFFERENT manager must never leak into this manager's reapedForManager.
+  const reg5 = new CapQueueRegistry(() => fakeNow);
+  reg5.record("mgrOther", "agentOther", "tOther", "kickoff");
+  fakeNow += CAP_QUEUE_TTL_MS + 1; // age it out too
+  {
+    const { entry, reapedForManager } = reg5.takeOldestOrReaped("mgrW"); // nothing was ever queued for mgrW here
+    check("(29) a different manager's TTL-reaped entry never leaks into another manager's reapedForManager", reapedForManager.length === 0);
+    check("(29) and no entry is returned either", entry === undefined);
+  }
 }
 
 db.close();
