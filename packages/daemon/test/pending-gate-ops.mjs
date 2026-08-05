@@ -400,18 +400,25 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   check("(3) the already-settled row is UNTOUCHED at state='settled'", rowsAfter.find((r) => r.opId === "already-settled-1").state === "settled");
   check("(3) the surfaced-then-settled row is UNTOUCHED at state='settled'", rowsAfter.find((r) => r.opId === "surfaced-then-settled-1").state === "settled");
 
-  const gateNudge = host.enqueueCalls.find((c) => c.sessionId === workerId && /\[loom:gate-failed\]/.test(c.text));
-  check("(3) the 'gate' row pushed [loom:gate-failed] to the WORKER (the owning session)", gateNudge !== undefined);
+  // Card c838aeac: a genuinely-unrecoverable orphan is NOT a verdict, so it must NEVER be tagged with the
+  // FAILED vocabulary — that was the mislabel this card fixes (Loom used to report "your gate FAILED" for
+  // "your gate NEVER RAN"). It gets its own distinct, non-verdict tag instead.
+  const gateNudge = host.enqueueCalls.find((c) => c.sessionId === workerId && /\[loom:gate-orphaned\]/.test(c.text));
+  check("(3) the 'gate' row pushed [loom:gate-orphaned] (a non-verdict signal, NOT gate-failed) to the WORKER (the owning session)", gateNudge !== undefined);
   check("(3) it names the restart cause and tells the worker to re-run", gateNudge && /restart/i.test(gateNudge.text) && /re-run `run_gate`/.test(gateNudge.text));
+  check("(3) it plainly states this is NOT a failure", gateNudge && /NOT a failure/.test(gateNudge.text));
   check("(3) pushed with kind:\"warning\"", gateNudge && gateNudge.kind === "warning");
+  check("(3) card c838aeac: the 'gate' row's nudge NEVER carries the [loom:gate-failed] tag — no false verdict", !host.enqueueCalls.some((c) => c.sessionId === workerId && c.text.includes("orphan-gate-1") && /\[loom:gate-failed\]/.test(c.text)));
 
-  const mergeNudge = host.enqueueCalls.find((c) => c.sessionId === mgrId && /\[loom:merge-failed\]/.test(c.text));
-  check("(3) the 'merge' row pushed [loom:merge-failed] to the MANAGER (the owning session)", mergeNudge !== undefined);
+  const mergeNudge = host.enqueueCalls.find((c) => c.sessionId === mgrId && /\[loom:merge-orphaned\]/.test(c.text));
+  check("(3) the 'merge' row pushed [loom:merge-orphaned] (a non-verdict signal, NOT merge-failed) to the MANAGER (the owning session)", mergeNudge !== undefined);
   check("(3) it names the restart cause and tells the manager to re-confirm", mergeNudge && /restart/i.test(mergeNudge.text) && /re-run `worker_merge_confirm`/.test(mergeNudge.text));
+  check("(3) it plainly states this is NOT a failure", mergeNudge && /NOT a failure/.test(mergeNudge.text));
+  check("(3) card c838aeac: the 'merge' row's nudge NEVER carries the [loom:merge-failed] tag — no false verdict", !host.enqueueCalls.some((c) => c.sessionId === mgrId && c.text.includes("orphan-merge-1") && /\[loom:merge-failed\]/.test(c.text)));
 
   // The false-positive check: neither settled row's opId should appear in ANY pushed nudge text at all.
   const anyFalseNudge = host.enqueueCalls.some((c) => /already-settled-1|surfaced-then-settled-1/.test(c.text));
-  check("(3) NEITHER already-settled op appears in ANY pushed nudge — no false [loom:gate-failed] for a fast op that passed before the crash", !anyFalseNudge);
+  check("(3) NEITHER already-settled op appears in ANY pushed nudge — no false [loom:gate-orphaned]/[loom:gate-failed] for a fast op that passed before the crash", !anyFalseNudge);
 
   // Re-running the sweep with nothing left in 'pending' state is a harmless no-op — boot calls this
   // unconditionally on every start, restart-triggered or not.
@@ -477,8 +484,15 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.insertPendingGateOp({ opId: "merge-recoverable-cancelled", kind: "merge", key: `merge:${workerId}-r5`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   db.appendEvent({ id: "evt-merge-cancelled-5", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "merge_cancelled", detail: { cancelled: true, cancelKind: "manual", cancelDetail: "cancelled by manager while running", opId: "merge-recoverable-cancelled" } });
 
+  // --- SCENARIO 6 (card c838aeac's DoD-4 second half, the "gate" counterpart to (3b-1)/(3b-2)): a GATE
+  // (worker self-check) op that genuinely FAILED — a real verdict, recovered from its own worker_gate
+  // event. This is the one direction that's easy to break while fixing the mislabel: proves a REAL
+  // failure still reads as [loom:gate-failed], never demoted to the new non-verdict [loom:gate-orphaned].
+  db.insertPendingGateOp({ opId: "gate-recoverable-fail", kind: "gate", key: `gate:${workerId}-r6`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-worker-gate-6", ts: now, managerSessionId: workerId, workerSessionId: workerId, taskId: null, kind: "worker_gate", detail: { passed: false, durationMs: 1800, phase: "test", failedStep: "pnpm test", failingTest: "daemon/test/bar.mjs", exitCode: 1, opId: "gate-recoverable-fail" } });
+
   const cleared = sessions.reconcileOrphanedGateOps();
-  check("(3b) reconcileOrphanedGateOps reports all 5 rows reconciled (4 recovered + 1 genuinely unrecoverable)", cleared === 5);
+  check("(3b) reconcileOrphanedGateOps reports all 6 rows reconciled (5 recovered + 1 genuinely unrecoverable)", cleared === 6);
 
   const rowsAfter = db.listPendingGateOps();
   const byId = (id) => rowsAfter.find((r) => r.opId === id);
@@ -498,14 +512,25 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   check("(3b-3) a PASSING merge gate with no subsequent rejection/cancel is NOT fabricated as recovered — still marked 'orphaned-by-restart'", byId("merge-unrecoverable-pass").state === "orphaned-by-restart");
   const nudge3 = host.enqueueCalls.find((c) => c.text.includes("merge-unrecoverable-pass"));
   check("(3b-3) its nudge states the outcome could not be recovered — never asserts the unverified 'daemon restart killed this run' mechanism", nudge3 && /could not be recovered/.test(nudge3.text) && !/daemon restart killed this run/.test(nudge3.text));
+  // Card c838aeac: this row is a true non-verdict orphan too (falls through the same fallback branch as
+  // section (3) above) — must get the SAME distinct non-verdict tag, never the FAILED vocabulary, even
+  // though its underlying gate actually passed. Asserting a "fail" here would be exactly backwards.
+  check("(3b-3) tagged [loom:merge-orphaned], NEVER [loom:merge-failed] — no verdict exists, not even a fail", nudge3 && nudge3.text.includes("[loom:merge-orphaned]") && !nudge3.text.includes("[loom:merge-failed]"));
 
   check("(3b-4) a PASSING gate (worker self-check) IS recovered — state='settled', verdict='pass'", byId("gate-recoverable-pass").state === "settled" && byId("gate-recoverable-pass").verdict === "pass");
   const nudge4 = host.enqueueCalls.find((c) => c.text.includes("gate-recoverable-pass"));
-  check("(3b-4) tagged [loom:gate-done], never [loom:gate-failed], for a recovered PASS", nudge4 && nudge4.text.includes("[loom:gate-done]") && !nudge4.text.includes("[loom:gate-failed]"));
+  check("(3b-4) tagged [loom:gate-done], never [loom:gate-failed] or [loom:gate-orphaned], for a recovered PASS", nudge4 && nudge4.text.includes("[loom:gate-done]") && !nudge4.text.includes("[loom:gate-failed]") && !nudge4.text.includes("[loom:gate-orphaned]"));
 
   check("(3b-5) a CANCELLED merge op is recovered as 'cancelled', never 'fail'", byId("merge-recoverable-cancelled").state === "settled" && byId("merge-recoverable-cancelled").verdict === "cancelled");
   const nudge5 = host.enqueueCalls.find((c) => c.text.includes("merge-recoverable-cancelled"));
   check("(3b-5) tagged [loom:merge-cancelled] and states this is NOT a failure", nudge5 && nudge5.text.includes("[loom:merge-cancelled]") && /NOT a failure/.test(nudge5.text));
+
+  // Card c838aeac, DoD-4 second half: a REAL "gate" failure must still read as a real failure — proves the
+  // mislabel fix didn't accidentally soften a genuine red into the new non-verdict tag.
+  check("(3b-6) a genuinely FAILED gate (worker self-check) IS recovered — state='settled', verdict='fail'", byId("gate-recoverable-fail").state === "settled" && byId("gate-recoverable-fail").verdict === "fail");
+  const nudge6 = host.enqueueCalls.find((c) => c.text.includes("gate-recoverable-fail"));
+  check("(3b-6) tagged [loom:gate-failed], UNCHANGED — never demoted to [loom:gate-orphaned] for a real failure", nudge6 && nudge6.text.includes("[loom:gate-failed]") && !nudge6.text.includes("[loom:gate-orphaned]"));
+  check("(3b-6) it carries the REAL recovered failure diagnosis (failingTest)", nudge6 && /failing: daemon\/test\/bar\.mjs/.test(nudge6.text));
 
   db.close();
 }

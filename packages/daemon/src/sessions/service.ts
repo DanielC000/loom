@@ -5587,13 +5587,26 @@ export class SessionService {
    * Only a row with NO recoverable audit trail at all falls through to the ORIGINAL behavior: push a
    * synthetic terminal nudge to its owning session (the worker for "gate", the manager for "merge") and
    * mark the row `orphaned-by-restart` (never deleted — this table is a permanent tombstone, see the
-   * schema doc) — but the nudge text no longer asserts "daemon restart killed this run" (an unverified
+   * schema doc) — the nudge text no longer asserts "daemon restart killed this run" (an unverified
    * mechanism this daemon never actually confirmed): it states plainly that the outcome could not be
-   * recovered, and invites a re-run. Best-effort per row (one push failure must never block the rest) +
-   * never throws; returns the count reconciled for a boot-log line (recovered + genuinely-orphaned rows
-   * both count). Runs AFTER the fleet-resume passes (mirrors reconcileDeadOwnerMergeOps's own placement)
-   * so a resumed owning session is live to receive the push rather than queuing into a session that isn't
-   * there yet.
+   * recovered, and invites a re-run.
+   *
+   * Card c838aeac: this genuinely-unrecoverable branch is tagged `[loom:gate-orphaned]`/
+   * `[loom:merge-orphaned]` — a DISTINCT signal from `[loom:gate-failed]`/`[loom:merge-failed]` — because
+   * NO verdict was ever reached here; a row that reaches this branch never ran to completion in any
+   * observable way (see {@link recoverGateOpVerdict}'s doc for exactly what "no recoverable audit trail"
+   * means). The old behavior reused the FAILED tag for this branch, which reads to a worker/manager as "your
+   * gate/merge ran and failed" when the true state is "no gate/merge verdict exists at all, re-fire it" —
+   * the exact "no verdict" vs "a verdict I didn't like" confusion this fix exists to close (see
+   * `db.ts`'s `pending_gate_ops` schema comment, which already names `orphaned-by-restart` as a non-verdict
+   * STATE; this closes the gap between that state and the NOTICE TEXT describing it). The recovered-verdict
+   * branch above is UNCHANGED by this — it still emits the real `[loom:gate-done]`/`[loom:gate-failed]`/
+   * `[loom:gate-cancelled]`/`[loom:merge-failed]`/`[loom:merge-cancelled]` vocabulary whenever a genuine
+   * verdict WAS recovered, so a real failure still reads as a real failure. Best-effort per row (one push
+   * failure must never block the rest) + never throws; returns the count reconciled for a boot-log line
+   * (recovered + genuinely-orphaned rows both count). Runs AFTER the fleet-resume passes (mirrors
+   * reconcileDeadOwnerMergeOps's own placement) so a resumed owning session is live to receive the push
+   * rather than queuing into a session that isn't there yet.
    */
   reconcileOrphanedGateOps(): number {
     let cleared = 0;
@@ -5628,12 +5641,14 @@ export class SessionService {
         continue;
       }
 
-      const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
+      // Card c838aeac: a DISTINCT non-verdict tag — never the FAILED vocabulary, which asserts a verdict
+      // (fail) that was never reached. See this method's own doc above for why.
+      const tag = isMerge ? "[loom:merge-orphaned]" : "[loom:gate-orphaned]";
       const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
       // Card 7d492f8b: no longer asserts "daemon restart killed this run" — this daemon never actually
       // verified that mechanism (see recoverGateOpVerdict's own doc for what WAS checked: its own durable
       // audit trail, found empty). States the honest limit instead.
-      const msg = `${tag} op ${row.opId} — this op's outcome could not be recovered after a daemon restart (no durable settle record was found for it) — ${verb} to re-derive it.` + attribution;
+      const msg = `${tag} op ${row.opId} — no gate/merge verdict was ever reached for this op (its outcome could not be recovered after a daemon restart — no durable settle record was found for it). This is NOT a failure — ${verb} to get a real result.` + attribution;
       try {
         const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
         // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't

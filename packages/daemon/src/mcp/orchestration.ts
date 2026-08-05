@@ -273,9 +273,11 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +
       "ever delivered for it, treat it like `settled` for planning purposes and just re-run " +
-      "`worker_merge_confirm`. `orphaned-by-restart` means a daemon restart killed this run before it could " +
-      "finish — you should already have received a synthetic `[loom:merge-failed]` nudge for it at boot; " +
-      "re-run `worker_merge_confirm`. `pending` is rare: the op is known to exist but isn't visible in the " +
+      "`worker_merge_confirm`. `orphaned-by-restart` means this op's outcome could not be recovered after a " +
+      "daemon restart (no durable settle record was found for it) — you should already have received a " +
+      "synthetic `[loom:merge-orphaned]` nudge for it at boot, a DISTINCT signal from `[loom:merge-failed]` " +
+      "since NO verdict was ever reached; not a failure — re-run `worker_merge_confirm` to get a real " +
+      "result. `pending` is rare: the op is known to exist but isn't visible in the " +
       "live registry yet (a narrow just-started or post-restart window) — wait and re-check rather than " +
       "treating it as stuck. `never_existed` is a POSITIVE assertion the id was never minted at all — never " +
       "confuse it with `settled` (a real op DID run, you just don't have its outcome from this tool). " +
