@@ -261,9 +261,10 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead
   // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard). `envOverride` (card 7f96aa09)
   // lets a caller force additional vars onto just this step's own child — e.g. the worker self-gate pins
-  // `LOOM_GATE_TEST_CONCURRENCY=2` here (card 68920f5b, renamed by ba3c9580), matching the merge gate's own
-  // unpinned default lane count, so the host-load budget is `maxConcurrentGates × 2` — the SAME bound the
-  // merge gate already implies, not a new one — applied AFTER the base env so an override always wins.
+  // `LOOM_GATE_TEST_CONCURRENCY=3` here (card 68920f5b, renamed by ba3c9580, raised 2->3 by 2ff32b5c),
+  // matching the merge gate's own unpinned default lane count, so the host-load budget is
+  // `maxConcurrentGates × 3` — the SAME bound the merge gate already implies, not a new one — applied
+  // AFTER the base env so an override always wins.
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...envOverride };
   // `detached` on POSIX makes `child.pid` the process GROUP id (the shell calls setsid) — killGateProcessTree
   // below needs that to reach the whole tree, not just this one shell. Harmless on win32 (its tree-kill goes

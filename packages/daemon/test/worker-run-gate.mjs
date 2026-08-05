@@ -264,10 +264,11 @@ try {
     check("(D) reports ran:true, passed:true", r.value.ran === true && r.value.passed === true);
   }
 
-  // ── (D2) run_gate's spawned child is pinned to LOOM_GATE_TEST_CONCURRENCY=2 (card 68920f5b: matches
+  // ── (D2) run_gate's spawned child is pinned to LOOM_GATE_TEST_CONCURRENCY=3 (card 68920f5b: matches
   //         the merge gate's own default lane count — was "=1" pre-68920f5b, half the merge gate's
   //         parallelism against the same gateCommandTimeoutMs, which made run_gate structurally more
-  //         timeout-prone than the merge gate it feeds) ─────────────────────────────────────────────
+  //         timeout-prone than the merge gate it feeds; raised 2->3 by card 2ff32b5c alongside
+  //         DEFAULT_CONCURRENCY's own 2->3 raise, to keep matching the merge gate's default) ─────────
   // Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY`, which this project's own gate child
   // (as any OTHER project's would too — nothing here branches on project identity, so this "WG-GATE" test
   // project stands in for a non-Loom project just as well) received unconditionally regardless of whether
@@ -288,7 +289,7 @@ try {
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: capturingGate });
 
     await sessions.runWorkerGate(gateWorkerId);
-    check("(D2) run_gate pins LOOM_GATE_TEST_CONCURRENCY=2 on its spawned child", capturedEnvOverride?.LOOM_GATE_TEST_CONCURRENCY === "2");
+    check("(D2) run_gate pins LOOM_GATE_TEST_CONCURRENCY=3 on its spawned child", capturedEnvOverride?.LOOM_GATE_TEST_CONCURRENCY === "3");
     check("(D2) run_gate does NOT inject the old generic LOOM_TEST_CONCURRENCY name (closes the cross-project collision hazard)", capturedEnvOverride?.LOOM_TEST_CONCURRENCY === undefined);
   }
 

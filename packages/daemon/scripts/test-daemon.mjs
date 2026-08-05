@@ -634,10 +634,23 @@ const MAX_CONCURRENCY = 8;
 // unattended). Previously this fell back to `os.availableParallelism()`, which on a many-core
 // self-hosting box let this command spike to `MAX_CONCURRENCY` lanes of concurrent temp-SQLite/
 // in-process-daemon boots with nothing bounding it — that's what starved the live Codescape service.
-// 2 is a conservative default; a beefier/known-safe host can still override upward via the env.
 // Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY`, which every project's gate child
 // received regardless of whether its own harness happened to read that same generic name.
-const DEFAULT_CONCURRENCY = 2;
+//
+// Card 2ff32b5c: raised 2 -> 3, a DIRECT OWNER DECISION given live in chat (superseding the adaptive
+// shape they'd chosen in Request 17b90717 the same day — the adaptive version, card a496166a, is
+// DEFERRED behind this one, not abandoned). The product math that bounds this number:
+//   worst-case concurrent test processes = orchestration.maxConcurrentGates (2) x this constant's lanes
+//   2 lanes -> 4 processes  (today, safe)
+//   3 lanes -> 6 processes  (this change — still below the documented failure level)
+//   4 lanes -> 8 processes  (DO NOT raise to 4 — this is EXACTLY the level that starved the live
+//                            self-hosting Codescape service on 2026-07-15: card 301d8c01's incident was
+//                            ONE unpinned gate spiking to MAX_CONCURRENCY=8 lanes with nothing bounding
+//                            it, not N gates at a smaller pool size — but 8 total concurrent processes is
+//                            8 total concurrent processes regardless of how they were assembled)
+// MAX_CONCURRENCY stays at 8 (the ceiling above is deliberately unchanged) and this constant stays a
+// fixed number, not adaptive to host load — both are explicitly out of scope for this change.
+const DEFAULT_CONCURRENCY = 3;
 const POOL_SIZE = Math.max(
   1,
   Math.min(
