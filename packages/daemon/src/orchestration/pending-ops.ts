@@ -63,12 +63,43 @@ interface Entry<T> {
    *  something else entirely instead of re-polling, so the terminal settle is the only guaranteed delivery
    *  moment for them — see `attach()`'s `onSettledAfterPending`. */
   surfacedPending: boolean;
+  /** Set ONLY for a genuinely fresh entry (never for one this call merely attached to as already-running,
+   *  and never populated at all for a cache hit — see `attach()`'s own doc, card 615967c5, the
+   *  cached-verdict-legibility fix). Carried on the entry itself (not just handed back to the minting
+   *  call) so a LATER caller that attaches to this SAME still-running op — a poll — sees the identical
+   *  reason, not `undefined`. */
+  freshMint?: FreshMintInfo;
+}
+
+/** WHY a fresh op was just minted instead of the caller's `attach()` call being served from a cache — see
+ *  the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section for the caching this classifies. Only ever
+ *  set for a `key` that opted into `opts.retainVerdictUntilSuperseded` (today: merge); every other kind
+ *  leaves this `undefined` (byte-identical to before this existed).
+ *  - `"forced"`: `opts.bypassRetained` — the caller explicitly asked to skip every cache and run for real.
+ *  - `"base-advanced"`: a cached verdict existed for this `key` but its `identity` did not match this
+ *    call's `opts.verdictIdentity` — e.g. for merge, the branch tip moved (often via Loom's OWN pre-gate
+ *    union-merge advancing it) between the cached verdict's settle and this call.
+ *  - `"genuinely-new"`: no cached verdict has ever been recorded for this `key` (in this daemon process —
+ *    see the class doc's PROCESS-LOCAL note; a restart also produces this).
+ *  `priorIdentity` is the identity recorded on the verdict this mint superseded/bypassed, when one
+ *  existed — always present for `"base-advanced"`, present for `"forced"` only if a prior verdict
+ *  happened to exist, absent for `"genuinely-new"`. This is an OBSERVED FIELD, not an assertion of cause:
+ *  it names what the registry recorded, never why the identity changed. */
+export interface FreshMintInfo {
+  reason: "base-advanced" | "forced" | "genuinely-new";
+  priorIdentity?: string;
+  /** NEVER set by this registry — it only ever knows the identity a PAST settle recorded, not what a
+   *  caller can freshly resolve NOW. A caller that also resolves its own "current" identity (e.g.
+   *  confirmWorkerMergeTracked's `verdictIdentity`, read fresh before every `attach()` call) may fold it
+   *  in here, on the result THIS registry already handed back, purely for reporting symmetry with
+   *  `priorIdentity`. Left `undefined` by any caller that doesn't. */
+  currentIdentity?: string;
 }
 
 export type AttachResult<T> =
-  | { settled: true; ok: true; value: T }
-  | { settled: true; ok: false; error: unknown }
-  | { settled: false; op: PendingOpView };
+  | { settled: true; ok: true; value: T; freshMint?: FreshMintInfo }
+  | { settled: true; ok: false; error: unknown; freshMint?: FreshMintInfo }
+  | { settled: false; op: PendingOpView; freshMint?: FreshMintInfo };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -603,17 +634,19 @@ export class PendingOpRegistry {
       // same (now-stale) settle and would otherwise silently serve the identical wrong answer for its own
       // few-second window — a mismatch here must fall all the way through to a fresh mint, not merely to
       // the next cache.
+      // `priorVerdict` is read UNCONDITIONALLY whenever this `key` opted in — even under `bypassRetained`,
+      // which only gates whether it's SERVED (below), never whether it's LOOKED AT. A plain `Map.get` has
+      // no side effect, so this costs nothing and is what lets a FORCED fresh mint still report what it
+      // superseded (card 615967c5's `FreshMintInfo.priorIdentity`) instead of only a mismatched one.
       let untilSupersededMiss = false;
-      if (opts?.retainVerdictUntilSuperseded && !opts?.bypassRetained) {
-        const verdictHit = this.untilSupersededVerdicts.get(key);
-        if (verdictHit) {
-          if (opts.identityOptional || verdictHit.identity === opts.verdictIdentity) {
-            return verdictHit.rawOutcome.ok
-              ? { settled: true, ok: true, value: verdictHit.rawOutcome.value as T }
-              : { settled: true, ok: false, error: verdictHit.rawOutcome.error };
-          }
-          untilSupersededMiss = true;
+      const priorVerdict = opts?.retainVerdictUntilSuperseded ? this.untilSupersededVerdicts.get(key) : undefined;
+      if (priorVerdict && !opts?.bypassRetained) {
+        if (opts?.identityOptional || priorVerdict.identity === opts?.verdictIdentity) {
+          return priorVerdict.rawOutcome.ok
+            ? { settled: true, ok: true, value: priorVerdict.rawOutcome.value as T }
+            : { settled: true, ok: false, error: priorVerdict.rawOutcome.error };
         }
+        untilSupersededMiss = true;
       }
       const retainedHit = untilSupersededMiss ? undefined : this.retained.get(key);
       // CANCELLED SENTINEL (card 171297dc — mirrors the untilSupersededVerdicts write gate above, same
@@ -637,9 +670,20 @@ export class PendingOpRegistry {
             : { settled: true, ok: false, error: retainedHit.rawOutcome.error };
         }
       }
+      // FRESH-MINT REASON (card 615967c5 — the cached-verdict-legibility fix): reaching this line means
+      // BOTH cache reads above missed, so a genuinely new op is about to run — record WHY, purely for
+      // reporting (this never feeds back into the decision above). `opts?.retainVerdictUntilSuperseded`
+      // false/omitted (every kind but merge, today) leaves this `undefined` — byte-identical to before.
+      const freshMint: FreshMintInfo | undefined = !opts?.retainVerdictUntilSuperseded
+        ? undefined
+        : opts?.bypassRetained
+        ? { reason: "forced", ...(priorVerdict?.identity !== undefined ? { priorIdentity: priorVerdict.identity } : {}) }
+        : untilSupersededMiss
+        ? { reason: "base-advanced", priorIdentity: priorVerdict?.identity }
+        : { reason: "genuinely-new" };
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),
-        state: "running", settle: Promise.resolve(), surfacedPending: false,
+        state: "running", settle: Promise.resolve(), surfacedPending: false, freshMint,
       };
       this.entries.set(key, fresh);
       // MINT HOOK (card e3e40167): fires here, synchronously, before `run()` is ever invoked — see
@@ -707,11 +751,14 @@ export class PendingOpRegistry {
       e.surfacedPending = true;
       const view = projectView(e);
       opts?.onSurfacedPending?.(view, e.opId);
-      return { settled: false, op: view };
+      // `e.freshMint` is read off the ENTRY (not the local `freshMint` computed above), so a caller who
+      // merely attached to an already-running op — a poll, never having minted anything itself this call —
+      // still sees the SAME reason the entry-creating call recorded. See the class doc + `Entry.freshMint`.
+      return { settled: false, op: view, freshMint: e.freshMint };
     }
     return e.state === "done"
-      ? { settled: true, ok: true, value: e.result as T }
-      : { settled: true, ok: false, error: e.error };
+      ? { settled: true, ok: true, value: e.result as T, freshMint: e.freshMint }
+      : { settled: true, ok: false, error: e.error, freshMint: e.freshMint };
   }
 }
 

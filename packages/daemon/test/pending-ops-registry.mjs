@@ -759,6 +759,81 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(identity omitted, backward compat) no verdictIdentity on either call still dedupe-hits — undefined matches undefined", calls === 1 && r2.value.opId === "op-1");
 }
 
+// --- FRESH-MINT REASON ANNOUNCEMENT (card 615967c5 — the cached-verdict-legibility fix): a caller must
+// never read an invisible re-run as a cached verdict. `attach()`'s result now carries `freshMint` on
+// EVERY genuine fresh mint (never on a cache hit), naming WHY: "genuinely-new" (nothing cached yet),
+// "base-advanced" (a cached verdict existed but its identity didn't match this call's), or "forced"
+// (opts.bypassRetained bypassed every cache outright). DoD-1's own wording: "so a caller can never read a
+// re-gate as a cached verdict." ---
+
+// (fm1) GENUINELY-NEW: the very first call for a key that opted into retainVerdictUntilSuperseded has
+// nothing cached to supersede — no priorIdentity either.
+{
+  const reg = new PendingOpRegistry();
+  const r1 = await reg.attach("fm1", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(freshMint genuinely-new) a first-ever call announces genuinely-new", r1.freshMint?.reason === "genuinely-new");
+  check("(freshMint genuinely-new) carries no priorIdentity — nothing existed to supersede", r1.freshMint?.priorIdentity === undefined);
+}
+
+// (fm2) CACHE HIT carries NO freshMint at all — the actual signal a caller uses to tell "served from
+// cache" apart from "a fresh gate genuinely ran." This is the negative control fm3/fm4 below need: without
+// it, "freshMint is sometimes present" would be unfalsifiable as evidence of a cache hit specifically.
+{
+  const reg = new PendingOpRegistry();
+  const r1 = await reg.attach("fm2", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(freshMint cache-hit precondition) first call is a fresh mint", r1.freshMint?.reason === "genuinely-new");
+  await waitUntil(() => reg.peek("fm2") === undefined, { label: "fm2 TTL'd display view expired" });
+  const r2 = await reg.attach("fm2", "merge", "mgr1", 200, async () => ({ merged: false, reason: "should not run", opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(freshMint cache-hit) a same-identity re-call served from cache carries NO freshMint at all", r2.freshMint === undefined);
+}
+
+// (fm3) BASE-ADVANCED: a cached verdict exists, a later call's identity mismatches — announces
+// base-advanced with the CACHED verdict's identity as `priorIdentity` (the OBSERVED field the card's DoD
+// asks for; this registry never asserts a cause like "main advanced").
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("fm3", "merge", "mgr1", 200, async () => ({ merged: false, reason: "build gate failed", opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  const r2 = await reg.attach("fm3", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-BBB", classifyOutcome: classify });
+  check("(freshMint base-advanced) an identity-mismatched re-call announces base-advanced", r2.freshMint?.reason === "base-advanced");
+  check("(freshMint base-advanced) carries the CACHED verdict's identity as priorIdentity", r2.freshMint?.priorIdentity === "sha-AAA");
+}
+
+// (fm4) FORCED: bypassRetained always mints fresh and announces "forced" — WITH the prior identity when
+// one existed, even at the SAME identity (the registry looks at the cache read-only for reporting purposes
+// even though `bypassRetained` means it never SERVES it).
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("fm4", "merge", "mgr1", 200, async () => ({ merged: false, reason: "build gate failed", opId: "op-1" }), undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  const r2 = await reg.attach("fm4", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-2" }), undefined, { retainMs: 200, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify, bypassRetained: true });
+  check("(freshMint forced) a bypassRetained re-call announces forced even at the SAME identity", r2.freshMint?.reason === "forced");
+  check("(freshMint forced) still reports what it superseded, when something existed", r2.freshMint?.priorIdentity === "sha-AAA");
+}
+
+// (fm5) A caller who merely ATTACHES to an already-running op — never having minted anything itself this
+// call — sees the SAME freshMint the entry-creating call recorded, not undefined. Proves the reason lives
+// on the entry (so a poller sees it too), not just handed back once to the minting call.
+{
+  const reg = new PendingOpRegistry();
+  let releaseSlow;
+  const slow = async () => { await new Promise((res) => { releaseSlow = res; }); return { merged: true, opId: "op-1" }; };
+  const r1 = await reg.attach("fm5", "merge", "mgr1", 20, slow, undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(freshMint on attach-to-running precondition) the entry-creating call surfaced pending", r1.settled === false);
+  check("(freshMint on attach-to-running precondition) it's a fresh mint (genuinely-new)", r1.freshMint?.reason === "genuinely-new");
+  const r2 = await reg.attach("fm5", "merge", "mgr1", 20, async () => ({ merged: false, reason: "should not run", opId: "should-not-run" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(freshMint on attach-to-running) a retry that merely attaches sees the SAME freshMint reason", r2.settled === false && r2.freshMint?.reason === "genuinely-new");
+  releaseSlow();
+  await sleep(10);
+}
+
+// (fm6) OPT-OUT UNAFFECTED: a 'gate' op with no retainVerdictUntilSuperseded carries no freshMint at all,
+// on either a fresh mint or a re-mint after retainMs — byte-identical to before this card for every kind
+// that never opted in.
+{
+  const reg = new PendingOpRegistry();
+  const r1 = await reg.attach("fm6", "gate", "mgr1", 200, async () => ({ done: true }));
+  check("(freshMint opt-out) a plain 'gate' op (no retainVerdictUntilSuperseded) carries no freshMint", r1.freshMint === undefined);
+}
+
 // --- NEVER CACHE A CANCELLED VERDICT (card 171297dc — the gate_cancel-replayed-forever trap): a
 // cancellation is NOT a verdict (no gate ran, nothing was validated), so `retainVerdictUntilSuperseded`
 // must never let it be replayed to a later plain re-call the way a real PASS/REJECTION correctly is. The

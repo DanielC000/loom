@@ -11580,7 +11580,7 @@ export class SessionService {
         }
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
     }
-    return this.pendingOps.attach<ConfirmMergeResult>(
+    const result = await this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, this.syncAttachBudgetMs,
       (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
       (outcome, opId) => {
@@ -11759,6 +11759,19 @@ export class SessionService {
         },
       },
     );
+    // CURRENT-IDENTITY ENRICHMENT (card 615967c5 — the cached-verdict-legibility fix): `result.freshMint`
+    // (set by the registry ONLY for a genuine fresh mint — never for a cache hit, see PendingOpRegistry's
+    // own doc) carries the CACHED verdict's identity (`priorIdentity`) but not THIS call's own
+    // freshly-resolved one — the registry is deliberately identity-vocabulary-agnostic (it never
+    // interprets `verdictIdentity`, just compares it), so it has no notion of "current" beyond what this
+    // caller already resolved above, before `attach()` ever ran. Folded in HERE, the one place both are in
+    // scope, rather than widen the registry's own generic contract for this one caller. A cache hit (no
+    // `freshMint`) is untouched — this only ever adds information to a result that already announces a
+    // fresh gate ran, never changes whether one did.
+    if (result.freshMint) {
+      return { ...result, freshMint: { ...result.freshMint, currentIdentity: verdictIdentity } };
+    }
+    return result;
   }
 
   /** The configured gate timeout for a worker's own merge, or `null` if the worker/project can't be
