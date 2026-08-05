@@ -114,15 +114,16 @@ const NEGATIVE_WINDOW_MS = 200;
 let controlSeq = 0;
 async function spawnControlDelivery(label) {
   const id = `control-${controlSeq++}-${label.replace(/[^a-z0-9]+/gi, "-")}`;
+  const kickoff = `control kickoff (${label})`;
   host.spawn({
-    sessionId: id, cwd: tmpHome, startupPrompt: `control kickoff (${label})`,
+    sessionId: id, cwd: tmpHome, startupPrompt: kickoff,
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
     geometry: { cols: 120, rows: 40 }, sessionEnv: {},
   });
   const fake = lastFake();
   host.deliverHook(id, { hook_event_name: "SessionStart" });
   await waitUntil(() => countIn(fake, PASTE_START) === 1, { label: `${label}: control kickoff delivered once` });
-  return { id, fake };
+  return { id, fake, kickoff };
 }
 
 try {
@@ -150,25 +151,42 @@ try {
     // is no further completion event to poll for here, only an absence to bound. Proven via
     // assertNeverWithControl (not a bare sleep+look-once) — see NEGATIVE_WINDOW_MS's own comment for why
     // the window stays well under the pinned SUBMIT_VERIFY_TIMEOUT_MS.
+    //
+    // Card c4ccae66: the check below counts occurrences of the KICKOFF BODY TEXT, not the bare
+    // BRACKET_PASTE_START byte marker (`"\x1b[200~"`, aliased here as PASTE_START). `sendEnterAndVerify`
+    // (host.ts) LEGITIMATELY re-writes that exact same marker (as an empty `BRACKET_PASTE_START +
+    // BRACKET_PASTE_END` "reassert-paste" pair, carrying NO body text) on every retry attempt once
+    // SUBMIT_VERIFY_TIMEOUT_MS elapses with no confirming hook — which is guaranteed to eventually happen
+    // in THIS scenario, since H1a deliberately never delivers one. A marker-count check is therefore
+    // racing a real, designed-to-fire production retry, not just guarding against a hypothetical: forcing
+    // ~700ms of extra delay between kick-A's own (unconfirmed, by design) Enter attempt 1 and this
+    // assertion reliably reproduced a live gate failure this way — `sendEnterAndVerify` legitimately wrote
+    // a second bare PASTE_START marker with the ORIGINAL kickoff text never repeated, and the old
+    // `countIn(fa, PASTE_START) >= 2` check misread that as a duplicate delivery. Counting the BODY TEXT
+    // instead is immune to this by construction (a bare reassert-paste has no body to match), independent
+    // of NEGATIVE_WINDOW_MS/SUBMIT_VERIFY_TIMEOUT_MS's relative timing — not a bigger window, a correct
+    // discriminator. See docs/investigations/c4ccae66-h1a-intermittent-repeat-delivery/findings.md.
     const noRepeatH1a = await assertNeverWithControl({
-      label: "(H1a) still exactly ONE delivery (no repeat firing)",
-      check: () => countIn(fa, PASTE_START) >= 2,
+      label: "(H1a) still exactly ONE delivery of the kickoff body (no repeat firing)",
+      check: () => countIn(fa, KICKOFF) >= 2,
       windowMs: NEGATIVE_WINDOW_MS,
       positiveControl: async () => {
-        // Arm a REAL second delivery on a throwaway control session — its own real delivery, then a
-        // legitimate end-of-turn (UserPromptSubmit+Stop, same shape as H1b below) + enqueueStdin to force
-        // a genuine second submit() — proving the >=2 check can actually catch a repeat via the SAME real
-        // write path scheduleKickoffGuarantee uses.
-        const { id, fake } = await spawnControlDelivery("H1a repeat-check positive control");
+        // Arm a REAL second delivery of the IDENTICAL kickoff body on a throwaway control session — its
+        // own real delivery, then a legitimate end-of-turn (UserPromptSubmit+Stop, same shape as H1b
+        // below) + enqueueStdin repeating that SAME text verbatim, to force a genuine second submit() of
+        // the same body — proving the body-text check can actually catch a real repeat via the SAME real
+        // write path scheduleKickoffGuarantee uses (not just that PASTE_START can appear twice, which a
+        // harmless reassert-paste retry can also do — see this block's own doc above).
+        const { id, fake, kickoff } = await spawnControlDelivery("H1a repeat-check positive control");
         host.deliverHook(id, { hook_event_name: "UserPromptSubmit" });
         host.deliverHook(id, { hook_event_name: "Stop" }); // end that turn — clears busy
-        host.enqueueStdin(id, "control forced second delivery", "system", undefined, undefined, "agent");
-        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 2, windowMs: NEGATIVE_WINDOW_MS });
+        host.enqueueStdin(id, kickoff, "system", undefined, undefined, "agent");
+        const went = await observeOnce({ check: () => countIn(fake, kickoff) >= 2, windowMs: NEGATIVE_WINDOW_MS });
         try { host.stop(id, "hard"); } catch { /* ignore */ }
         return went;
       },
     });
-    check("(H1a) still exactly ONE delivery (no repeat firing)", noRepeatH1a);
+    check("(H1a) still exactly ONE delivery of the kickoff body (no repeat firing)", noRepeatH1a);
   }
 
   // ============ (H1b) SAME-TICK RACE: something else starts a turn BEFORE the deferred check runs ========
