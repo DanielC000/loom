@@ -51,7 +51,7 @@ function pasteSettleExtraMs(textLength: number): number {
 
 /**
  * Card 1bd1f045: cheap, non-cryptographic 32-bit FNV-1a content fingerprint for the `[pty-write]` write-
- * sequence log (see `ptyWrite`). O(n) over a SINGLE write call's data — bounded at PTY_WRITE_CHUNK_BYTES
+ * sequence log (see `ptyWrite`). O(n) over a SINGLE write call's data — bounded at PTY_WRITE_CHUNK_UNITS
  * for a chunk (a few KB, never the full 15KB+ turn), so it stays cheap on the hot path. Not collision-
  * proof and doesn't need to be: on `tag=chunk` records, two `[pty-write]` entries sharing (len, hash) at
  * distinct `seq` WITHIN THE SAME `gen` is a duplicate CANDIDATE for a human/script to correlate, not a
@@ -471,8 +471,33 @@ const AMBIGUOUS_DISPATCH_CAP = 20;
 // hermetic test can shrink the chunk size / widen the delay to make a multi-chunk writeChunked() chain
 // span a wide, deterministic window instead of relying on production-sized timing — see
 // pty-restart-nudge-atomicity.mjs.
-const PTY_WRITE_CHUNK_BYTES = Number(process.env.LOOM_PTY_WRITE_CHUNK_BYTES) || 1024;
+// Card fc58ae55: named UNITS, not BYTES — `String.prototype.slice`/`.length` count UTF-16 CODE UNITS,
+// not bytes, and the old `_BYTES` name read as byte-safe when it never was (part of why the surrogate-
+// pair-splitting bug survived). The env var keeps its original name (LOOM_PTY_WRITE_CHUNK_BYTES) —
+// existing tests set it and there is no correctness reason to churn it, only the in-code identifier lied.
+const PTY_WRITE_CHUNK_UNITS = Number(process.env.LOOM_PTY_WRITE_CHUNK_BYTES) || 1024;
 const PTY_WRITE_CHUNK_DELAY_MS = Number(process.env.LOOM_PTY_WRITE_CHUNK_DELAY_MS) || 8;
+
+/**
+ * Card fc58ae55: the last unit of a `writeChunked` chunk must never be the high half of a surrogate
+ * pair whose low half starts the NEXT chunk. Each chunk is written to the pty (and UTF-8-encoded)
+ * independently, so a pair split across chunks turns into two lone surrogates — each independently
+ * replaced with U+FFFD on encode. Same length in, same length out, content silently corrupted.
+ * Splitting BETWEEN two distinct code points (e.g. either side of a ZWJ) is NOT this bug and must stay
+ * untouched — only shrink the chunk when the split point is provably INSIDE one surrogate pair.
+ */
+function surrogateSafeChunkEnd(text: string, start: number, maxUnits: number): number {
+  const end = Math.min(start + maxUnits, text.length);
+  if (end <= start || end >= text.length) return end;
+  const lastUnit = text.charCodeAt(end - 1);
+  const nextUnit = text.charCodeAt(end);
+  const lastIsHighSurrogate = lastUnit >= 0xd800 && lastUnit <= 0xdbff;
+  const nextIsLowSurrogate = nextUnit >= 0xdc00 && nextUnit <= 0xdfff;
+  // Only shrink when doing so leaves a non-empty chunk — an unrealistically small maxUnits (e.g. a
+  // hermetic test) could otherwise produce a zero-length chunk and stall the `i` advance forever.
+  if (lastIsHighSurrogate && nextIsLowSurrogate && end - 1 > start) return end - 1;
+  return end;
+}
 
 /**
  * Bracketed-paste delimiters. Programmatic turns (worker reports, queued messages, /input) are
@@ -7779,8 +7804,9 @@ export class PtyHost {
       const l = this.live.get(sessionId);
       // Same guarantee as above: the session died (or was killed) mid-burst — still fire `done` once.
       if (!l?.alive || l.killed) { done?.(); return; }
-      this.ptyWrite(sessionId, l, text.slice(i, i + PTY_WRITE_CHUNK_BYTES), "chunk");
-      i += PTY_WRITE_CHUNK_BYTES;
+      const end = surrogateSafeChunkEnd(text, i, PTY_WRITE_CHUNK_UNITS);
+      this.ptyWrite(sessionId, l, text.slice(i, end), "chunk");
+      i = end;
       if (i >= text.length) { done?.(); return; }
       setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
     };
