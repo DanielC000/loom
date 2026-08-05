@@ -28,8 +28,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // EXEMPTIONS: a flagged site clears ONLY by (a) a `// TIMING-GUARD-SAFE: <reason>` comment anywhere in the
 // contiguous `//`-comment block immediately above the wait line (or on the wait line itself), where
 // <reason> is one of the THREE sanctioned clearing patterns below — the enum is CLOSED on purpose, because
-// an exemption comment is itself a claim, and an open enum would let that claim mean anything — or (b)
-// being listed in KNOWN_UNAUDITED_WAITS.
+// an exemption comment is itself a claim, and an open enum would let that claim mean anything — (b) being
+// listed in KNOWN_UNAUDITED_WAITS, or (c) a `// TIMING-GUARD-FALSE-MATCH: <reason>` comment in the same
+// position (card 1c5dda5d). (a)/(b) are both claims about THE WAIT — "this fixed duration is safe despite
+// guarding a genuinely negative assertion." (c) is a DIFFERENT claim, about THE CLASSIFIER — "this
+// assertion was never negative-polarity to begin with; NEG_KEYWORDS matched incidentally." Folding (c) into
+// the same enum as (a) would erase that distinction and let a genuinely negative-polarity site borrow a
+// classifier excuse it hasn't earned. (c) sites are NOT silently cleared the way (a)/(b) are — they're
+// counted and printed as their OWN population (see FALSE_MATCH_REASONS / falseMatches below), so a rising
+// false-match count stays visible as a signal that NEG_KEYWORDS itself needs work, instead of disappearing
+// into the same bucket as genuinely-audited waits.
 //
 // ⭐ BASELINE KEY = (file, assertion label text) — NOT (file, line number). A worker was mid-flight
 // migrating 49 test files onto a shared fixture (~10-line class body → 1-2 line import) the SAME day this
@@ -77,10 +85,23 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // annotations below).
 const SANCTIONED_REASONS = new Set(["sync-early-return", "sync-probe-no-macrotask", "fully-awaited-completion"]);
 
+// CLOSED enum for TIMING-GUARD-FALSE-MATCH — see the EXEMPTIONS note above. Unlike SANCTIONED_REASONS
+// (each a claim about why THE WAIT is safe), each entry here is a claim about why NEG_KEYWORDS fired on a
+// label that is NOT actually negative-polarity — a classifier miss, not a timing argument. Card 1c5dda5d's
+// specimen (worker-unconfirmed-delivery-signal.mjs, "getPendingConfirmMs is monotonically increasing…") is
+// the first source-verified instance of this reason: NEG_KEYWORDS' bare "not" matched inside a methodology
+// parenthetical explaining HOW the claim is proven ("…proves it's elapsed time, not a static marker"), not
+// the claim's own polarity — the label's actual assertion ("is monotonically increasing") is
+// POSITIVE-polarity and fails loudly on a static/wrong-typed value. `a14717af`'s `:234` specimen ("…not a
+// hand-fed generation number") is the same shape, one card earlier. Extend this enum only with a NEW
+// reason that is itself source-verified against a real site, same discipline as SANCTIONED_REASONS.
+const FALSE_MATCH_REASONS = new Set(["keyword-in-methodology-aside"]);
+
 const IDIOM_A = /\bsleep\(\s*[^)]+\)/;
 const IDIOM_B = /new Promise\(\s*\(?\s*[a-zA-Z_$][\w$]*\s*\)?\s*=>\s*setTimeout\(\s*[a-zA-Z_$][\w$]*\s*,\s*[^)]+\)/;
 const NEG_KEYWORDS = /\b(never|not\b|no\s|zero|absent|unaffected|unchanged|stops advancing|stayed|stays|frozen|didn.?t|doesn.?t|hasn.?t|won.?t|refuse|omit)/i;
 const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*([a-z-]+)/;
+const FALSE_MATCH_RE = /TIMING-GUARD-FALSE-MATCH:\s*([a-z-]+)/;
 // Card a14717af: every check()/assert() call in a wait's window, not just the textually-first one — a
 // non-global `.match()` silently drops every match after the first, which is how a genuinely-negative
 // site sharing a window with an earlier positive-polarity check went unreported entirely (found 1 where
@@ -477,17 +498,20 @@ function walkTestFiles() {
 }
 
 /** Scan backward from `waitLineIdx` through the contiguous `//`-comment block directly above it (plus the
- *  wait line itself, which may carry a trailing `//` comment) for a TIMING-GUARD-SAFE marker. Multi-line
- *  annotation comments are the norm in this codebase, so a single-line lookback would miss them. */
-function exemptionReasonFor(lines, waitLineIdx) {
-  const onWaitLine = EXEMPT_RE.exec(lines[waitLineIdx]);
+ *  wait line itself, which may carry a trailing `//` comment) for a marker matching `markerRe`. Multi-line
+ *  annotation comments are the norm in this codebase, so a single-line lookback would miss them. Shared by
+ *  both TIMING-GUARD-SAFE and TIMING-GUARD-FALSE-MATCH — same placement rule, different marker + meaning. */
+function markerReasonFor(lines, waitLineIdx, markerRe) {
+  const onWaitLine = markerRe.exec(lines[waitLineIdx]);
   if (onWaitLine) return onWaitLine[1];
   for (let i = waitLineIdx - 1; i >= 0 && /^\s*\/\//.test(lines[i]); i--) {
-    const m = EXEMPT_RE.exec(lines[i]);
+    const m = markerRe.exec(lines[i]);
     if (m) return m[1];
   }
   return null;
 }
+const exemptionReasonFor = (lines, waitLineIdx) => markerReasonFor(lines, waitLineIdx, EXEMPT_RE);
+const falseMatchReasonFor = (lines, waitLineIdx) => markerReasonFor(lines, waitLineIdx, FALSE_MATCH_RE);
 
 function scanFile(file) {
   const text = fs.readFileSync(path.join(TEST_DIR, file), "utf8");
@@ -502,7 +526,7 @@ function scanFile(file) {
     for (const m of window.matchAll(CHECK_OR_ASSERT_RE)) {
       const label = m[2];
       if (!NEG_KEYWORDS.test(label)) continue;
-      hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i) });
+      hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i), falseMatch: falseMatchReasonFor(lines, i) });
     }
   }
   return hits;
@@ -512,6 +536,8 @@ const files = walkTestFiles();
 const newViolations = [];
 const badExemptions = [];
 const regressions = [];
+const falseMatches = [];
+const badFalseMatches = [];
 
 for (const file of files) {
   for (const hit of scanFile(file)) {
@@ -519,6 +545,14 @@ for (const file of files) {
     if (hit.exempt) {
       if (!SANCTIONED_REASONS.has(hit.exempt)) badExemptions.push({ ...hit, key });
       continue; // validly exempted — cleared, not baselined
+    }
+    if (hit.falseMatch) {
+      // Card 1c5dda5d: a claim about the CLASSIFIER, not the wait — kept OUT of newViolations/baseline
+      // entirely (this was never a genuinely negative-polarity site to audit), but tracked as its own
+      // population rather than folded silently into the exempt-and-forgotten set above.
+      if (!FALSE_MATCH_REASONS.has(hit.falseMatch)) badFalseMatches.push({ ...hit, key });
+      else falseMatches.push({ ...hit, key });
+      continue;
     }
     if (RETROFITTED_FILES.has(file)) { regressions.push({ ...hit, key }); continue; }
     if (baselineHas(file, hit.label)) continue; // baselined debt, not clearance — see header
@@ -535,6 +569,16 @@ for (const r of regressions) console.log(`  REGRESSION  ${r.key}  "${r.label}"`)
 
 check(`every TIMING-GUARD-SAFE exemption cites one of the ${SANCTIONED_REASONS.size} sanctioned reasons (found ${badExemptions.length} invalid)`, badExemptions.length === 0);
 for (const b of badExemptions) console.log(`  BAD-EXEMPTION  ${b.key}  reason="${b.exempt}"`);
+
+// Card 1c5dda5d: TIMING-GUARD-FALSE-MATCH sites are a SEPARATE, VISIBLE population — not silently cleared
+// like a TIMING-GUARD-SAFE exemption, and not counted toward newViolations/the baseline. This check always
+// passes (cond:true) — it exists to print the count and each site, not to gate the guard; a rising count is
+// the signal that NEG_KEYWORDS itself needs work.
+check(`${falseMatches.length} site(s) cleared via TIMING-GUARD-FALSE-MATCH (classifier false positives — reported separately from TIMING-GUARD-SAFE clearances, not itself a pass/fail signal)`, true);
+for (const f of falseMatches) console.log(`  FALSE-MATCH  ${f.key}  reason="${f.falseMatch}"  "${f.label}"`);
+
+check(`every TIMING-GUARD-FALSE-MATCH cites one of the ${FALSE_MATCH_REASONS.size} sanctioned reasons (found ${badFalseMatches.length} invalid)`, badFalseMatches.length === 0);
+for (const b of badFalseMatches) console.log(`  BAD-FALSE-MATCH  ${b.key}  reason="${b.falseMatch}"`);
 
 // The 4 confirmed instances from card 1addef27 must actually be gone from the raw idiom shape (not merely
 // exempted or baselined) — proves the retrofit landed, not just that this guard would have accepted a

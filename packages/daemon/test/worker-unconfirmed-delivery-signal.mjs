@@ -160,14 +160,17 @@ try {
     check("(1) THE BLIND WINDOW: composerDirtyLen is STILL 0 here — give-up has not fired yet", host.getComposerDirtyLen(SID) === 0);
     check("(1) genuinely in flight: busy is still true (no give-up has resolved this generation)", busyLog[SID]?.at(-1) === true);
 
-    // Prove it's LIVE elapsed time rather than a stuck flag: a second reading after a real sleep must be
-    // larger. Rationale lives here rather than in the check label because of card 1c5dda5d — the guard's
-    // NEG_KEYWORDS matches a bare "not" inside a methodology parenthetical and mis-flags this
-    // POSITIVE-polarity assertion. The check itself is unchanged and still fails loudly if the value is
-    // static or wrong-typed.
+    // Prove it's LIVE elapsed time, not a stuck flag: a second reading after a real sleep must be larger.
+    // TIMING-GUARD-FALSE-MATCH: keyword-in-methodology-aside — NEG_KEYWORDS' bare "not" below matches inside
+    // the label's methodology parenthetical ("proves it's elapsed time, not a static marker"), which
+    // describes HOW the claim is proven, not the claim's own polarity. The assertion itself
+    // (`typeof second === "number" && second > first`) is POSITIVE-polarity and fails loudly on a
+    // static/wrong-typed value — this 40ms wait IS the quantity under test, not a guessed duration (card
+    // 1c5dda5d).
     await sleep(40);
     const second = host.getPendingConfirmMs(SID);
-    check("(1) getPendingConfirmMs is monotonically increasing across a real sleep", typeof second === "number" && second > first);
+    check("(1) getPendingConfirmMs is monotonically increasing across a real sleep (proves it's elapsed time, not a static marker)",
+      typeof second === "number" && second > first);
 
     const list = await mgrClient.call("worker_list");
     const row = list.find((w) => w.workerSessionId === SID);
