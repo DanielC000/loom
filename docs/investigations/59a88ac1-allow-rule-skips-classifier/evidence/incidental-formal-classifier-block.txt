@@ -1,0 +1,37 @@
+Verbatim tool-result error text received by THIS investigation's own worker session (this session, not a
+probe), 2026-08-05, in response to an ordinary Bash tool call (a chained `node test/_probe-classifier-
+search2-59a88ac1.mjs > <logfile> 2>&1; grep -n "^\[search2\]" <logfile>` command — nothing adversarial,
+nothing security-sensitive on its face). Reproduced here exactly as returned:
+
+----
+Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by
+classifier. If you have other tasks that don't depend on this action, continue working on those.
+IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to
+accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this
+denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You
+should only try to work around this restriction in reasonable ways that do not attempt to bypass the
+intent behind this denial. If you believe this capability is essential to complete the user's request,
+STOP and explain to the user what you were trying to do and why you need this permission. Let the user
+decide how to proceed. To allow this type of action in the future, the user can add a Bash permission
+rule to their settings.
+----
+
+Significance: this is the ONLY time this investigation observed the FORMAL, structured "Claude Code auto
+mode classifier" denial (as opposed to the model authoring its own prose refusal — see the IMDS/curl-pipe-
+bash/env-exfil transcripts elsewhere in this evidence folder, which are a different, model-judgment
+mechanism with no such structured message). It:
+  (a) confirms a distinctly-named "Claude Code auto mode classifier" mechanism genuinely exists in the
+      vendor CLI (matching the card's hypothesis almost verbatim), and
+  (b) explicitly self-describes its own remedy as "the user can add a Bash permission rule to their
+      settings" — direct textual support for the allow-rule-skips-classifier hypothesis, from the
+      classifier's own denial message.
+
+Limitation: this occurrence was NOT staged and could not be reproduced on demand. The exact same command
+was retried twice more (see evidence/search-round2-{b,c}.log, both preceded by an identical outer Bash
+call in this session's own transcript) and did NOT trigger the block either time — the underlying trigger
+condition is not understood, and appears context/session-state dependent rather than a deterministic
+function of the literal command string alone. Because this session cannot edit its OWN permissions.allow
+(that surface is human/config-only per this project's architecture — see CLAUDE.md's "Vault + git writes"
+section for the equivalent trust-boundary posture on other human-only writers), the controlled
+"add an exact allow rule for THIS specific denial and re-run" step could not be performed against this
+specific occurrence. See findings.md for how this bounds the overall verdict.

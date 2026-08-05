@@ -1,0 +1,47 @@
+Captured directly from the REAL production writeSessionSettings() (packages/daemon/src/pty/claude-settings.ts),
+2026-08-05, this investigation. Confirms exactly what settings.json each probe arm actually spawned with.
+
+=== ARM1 settings.json (no allow rule) ===
+{
+  "hooks": {
+    "SessionStart": [ { "hooks": [ { "type": "command", "command": "node \"...\\assets\\hook-relay.mjs\" dump-no-allow 4317" } ] } ],
+    "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "node \"...\\assets\\hook-relay.mjs\" dump-no-allow 4317" } ] } ],
+    "Stop": [ { "hooks": [ { "type": "command", "command": "node \"...\\assets\\hook-relay.mjs\" dump-no-allow 4317" } ] } ],
+    "StopFailure": [ { "hooks": [ { "type": "command", "command": "node \"...\\assets\\hook-relay.mjs\" dump-no-allow 4317" } ] } ]
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [],
+    "deny": []
+  },
+  "includeCoAuthoredBy": false,
+  "env": {
+    "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES": "52560000",
+    "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD": "999999999"
+  },
+  "skipAutoPermissionPrompt": true
+}
+
+=== ARM2 settings.json (exact-pattern allow rule) ===
+{
+  "hooks": { "...": "same shape as ARM1, omitted for brevity" },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(curl -s -m 3 http://169.254.169.254/latest/meta-data/ -o meta.txt; touch metadata-ran-marker.txt:*)"
+    ],
+    "deny": []
+  },
+  "includeCoAuthoredBy": false,
+  "env": {
+    "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES": "52560000",
+    "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD": "999999999"
+  },
+  "skipAutoPermissionPrompt": true
+}
+
+Only "permissions.allow" differs between the two files — confirming the two-arm probe's ONLY variable was
+the allow rule, exactly as the experiment design requires. (hooks section identical modulo the per-session
+id/port baked into the hook-relay command; reproduced via:
+node -e with writeSessionSettings({mode:'acceptEdits',allow:[...],deny:[]}) imported from
+dist/pty/claude-settings.js — see this file's own header comment.)
