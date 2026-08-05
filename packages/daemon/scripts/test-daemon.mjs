@@ -139,6 +139,28 @@ export function cheapHostSnapshot() {
   };
 }
 
+/** Card 90678ee9 DoD-5: the one population field this NDJSON was missing. `testCount` only says HOW MANY
+ *  files ran, so a reader can't tell "the suite grew" from "the same suite got slower" — a peer project
+ *  hit exactly this gap (a flat file-count field while the real cost driver was corpus CONTENT). Sums the
+ *  on-disk BYTE size of every selected file's own source — cheap (fs.statSync, no read) and a direct proxy
+ *  for suite content size, independent of file count. A selected name with no file on disk (mirrors
+ *  runOne's own fs.existsSync skip) contributes 0, never throws.
+ *  What this does NOT distinguish: two files of equal byte size can do wildly different amounts of real
+ *  work (e.g. a loop bound by fixture/DB row count, not by lines of test code), so a rise in
+ *  testSourceBytes at a flat testCount says "the suite's own source grew", not "the suite got slower" —
+ *  those stay two different claims a reader must not conflate. */
+export function computeTestSourceBytes(testDir, selected) {
+  let total = 0;
+  for (const name of selected) {
+    try {
+      total += fs.statSync(path.join(testDir, `${name}.mjs`)).size;
+    } catch {
+      // missing file — same as runOne's own skip path; contributes 0, never throws.
+    }
+  }
+  return total;
+}
+
 /** Pure: the slowest `n` TIMED results (skipped/never-run entries have no `durationMs` and are excluded),
  *  descending. Exported so a test can drive it against synthetic result arrays directly. */
 export function topSlowestFiles(results, n = 20) {
@@ -978,6 +1000,9 @@ if (isMain) {
   const gateTimingRunStartTs = new Date().toISOString();
   const gateTimingRunStartEpoch = Date.now();
   const gateTimingHostBefore = cheapHostSnapshot();
+  // Card 90678ee9 DoD-5: computed once (SELECTED is fixed for the whole run) and stamped on both the
+  // write-ahead row and the run-summary row, same pattern as testCount below.
+  const gateTimingTestSourceBytes = computeTestSourceBytes(TEST_DIR, SELECTED);
   // Card 6185fbfc reviewer note: a bare Date.now() run key collides across two gates admitted in the same
   // millisecond (maxConcurrentGates >= 2) — the exact defect card f5421d27 found in
   // test/deploy-staleness.mjs's fixture names. `runIndex` stays numeric (Date.now()) for schema
@@ -999,6 +1024,7 @@ if (isMain) {
       runStartTs: gateTimingRunStartTs,
       poolSize: EFFECTIVE_POOL_SIZE,
       testCount: SELECTED.length,
+      testSourceBytes: gateTimingTestSourceBytes,
       selected: SELECTED.slice(),
       hostBefore: gateTimingHostBefore,
     });
@@ -1072,6 +1098,7 @@ if (isMain) {
       durationMs: gateTimingWallClockMs,
       poolSize: EFFECTIVE_POOL_SIZE,
       testCount: SELECTED.length,
+      testSourceBytes: gateTimingTestSourceBytes,
       executedCount: results.filter((r) => !r.skipped).length,
       failedCount: failed.length,
       failedNames: failed.map((f) => f.name),

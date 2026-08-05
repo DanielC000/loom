@@ -17,6 +17,7 @@ import {
   appendGateTimingRow,
   gateTimingWriteFailureSummary,
   cheapHostSnapshot,
+  computeTestSourceBytes,
   topSlowestFiles,
   formatGateTimingSummaryLines,
   neverCompletedFiles,
@@ -77,6 +78,40 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
   // Honest-null, not a guessed value — this repo has a standing rule against adding a subprocess here (see
   // createRssTracker's own scope caveat in scripts/test-daemon.mjs).
   check("nodeLikeProcessCount/nodeLikeWorkingSetMB are honestly null (no subprocess added)", snap.nodeLikeProcessCount === null && snap.nodeLikeWorkingSetMB === null);
+}
+
+// ── computeTestSourceBytes (card 90678ee9 DoD-5) ────────────────────────────────────────────────────────
+{
+  const testDirRoot = fs.mkdtempSync(path.join(scratchRoot, "src-bytes-"));
+  fs.writeFileSync(path.join(testDirRoot, "alpha.mjs"), "x".repeat(100));
+  fs.writeFileSync(path.join(testDirRoot, "beta.mjs"), "y".repeat(250));
+  fs.writeFileSync(path.join(testDirRoot, "gamma.mjs"), "z".repeat(10));
+
+  // [positive control] sums exactly the byte size of the SELECTED files' own source, ignoring an
+  // on-disk file that isn't in the selection.
+  check(
+    "[positive control] sums selected files' on-disk byte sizes",
+    computeTestSourceBytes(testDirRoot, ["alpha", "beta"]) === 350,
+  );
+  check(
+    "an on-disk file NOT in the selection does not contribute",
+    computeTestSourceBytes(testDirRoot, ["alpha"]) === 100,
+  );
+  // [negative control] a selected name with no matching file on disk (mirrors runOne's own
+  // fs.existsSync skip) contributes 0 and must not throw — same posture as appendGateTimingRow.
+  let threwOnMissing = false;
+  let missingResult = null;
+  try {
+    missingResult = computeTestSourceBytes(testDirRoot, ["alpha", "does-not-exist"]);
+  } catch {
+    threwOnMissing = true;
+  }
+  check("[negative control] a selected name with no file on disk does not throw", !threwOnMissing);
+  check("[negative control] a missing file contributes 0, not a fabricated size", missingResult === 100);
+  check(
+    "[negative control] an empty selection reports 0 bytes",
+    computeTestSourceBytes(testDirRoot, []) === 0,
+  );
 }
 
 // ── topSlowestFiles ──────────────────────────────────────────────────────────────────────────────────────
