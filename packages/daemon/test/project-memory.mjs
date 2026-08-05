@@ -103,7 +103,12 @@ try {
   }
 
   {
-    // pinned ALWAYS included even under tight budget, related dropped first.
+    // pinned ALWAYS included even under tight budget, related dropped first. Card 738568b6: ordinary
+    // pinned packs against `budgetTokens` minus whatever RELATED actually needs (probed against a 30%
+    // reserve ceiling, never an unconditional grant — see RELATED_RESERVE_FRACTION). At this tight a
+    // budget (60 tokens), even the reserve ceiling itself (18 tokens) is far too small for any of these
+    // 200-byte related notes to fit — the probe finds NOTHING packs, so relatedNeed is 0 and REST's cap is
+    // the FULL 60 tokens, unchanged from before this card. 60 (the original value) stays correct.
     const pinned = [mk({ id: "p1", key: "important", text: "y".repeat(100) })];
     const related = Array.from({ length: 20 }, (_, i) => mk({ id: `r${i}`, key: `rel-${i}`, text: "y".repeat(200) }));
     const tightBudget = 60; // fits pinned's header+block roughly, not much else

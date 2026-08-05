@@ -378,7 +378,11 @@ export class TaskMcpRouter {
           "NEWLINE-DELIMITED JSON, one note per line. Each note carries `requestAnnotations` — one line per " +
           "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
           "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
-          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
+          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve. " +
+          "Each note also carries `everDelivered` (`retrievalCount > 0`) — false means this note has NEVER " +
+          "once been included in an actually-injected kickoff digest (a merely-explicit memory_read/memory_list " +
+          "doesn't count), regardless of whether it's pinned or matched by a related-tier search — if you wrote " +
+          "a note and it shows `everDelivered:false`, nobody has received it yet.",
         inputSchema: strictShape({}),
       },
       async () => okLines(listProjectMemoryEntries(db, projectId)),

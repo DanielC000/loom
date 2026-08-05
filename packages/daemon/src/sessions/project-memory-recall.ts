@@ -97,6 +97,33 @@ function isNeverDrop(m: ProjectMemoryEntry): boolean {
   return m.tags?.includes(NEVER_DROP_TAG) ?? false;
 }
 
+/** Card 738568b6 — the MAXIMUM share of `budgetTokens` the RELATED tier can wall off from the pinned-REST
+ *  sub-tier — a CEILING on the reservation, not an unconditional grant. Fixes a structural bug, not a
+ *  tuning shortfall: PLATFORM_DEFAULTS' own `memory.budgetTokens` doc comment (shared/src/config.ts)
+ *  states the 4000-token default is sized for "a handful of pinned notes plus a sizeable related-tier
+ *  slice" — but before this fix, pinned-REST packed greedily against the FULL budget with no reservation,
+ *  so any pinned set that alone exceeded budgetTokens (measured live on this project: ~20,300 tokens of
+ *  pinned notes vs. a 4000 budget) left RELATED a guaranteed, permanent zero — the exact opposite of the
+ *  documented intent.
+ *  30%, derived from this project's own measured corpus (memory_list, 2026-08-05): unpinned note blocks
+ *  (the RELATED tier's own population) average ~782 tokens / median ~831 tokens, so a 30% reserve (1200
+ *  tokens at the 4000 default) reliably fits at least one typically-sized related note plus its section
+ *  header, with room for a second smaller match — while still leaving 70% for pinned.
+ *  ⚠️ CORRECTED (code review, same card): an EARLIER version of this fix reserved this fraction
+ *  UNCONDITIONALLY, regardless of whether `related` had anything in it or needed the full reserve — an
+ *  empty or small related tier then walled off space nothing occupied, dropping MORE pinned notes than
+ *  before this card for ZERO benefit (a straight regression the original test suite couldn't see, since it
+ *  only ever seeded related notes bigger than the reserve). {@link composeProjectMemoryDigest} now PROBES
+ *  how much related would ACTUALLY consume (via {@link packRelatedPrefix}, capped at this fraction) and
+ *  reserves only THAT — empty related ⇒ zero reserved ⇒ byte-identical to pre-this-card behavior.
+ *  This DELIBERATELY drops MORE ordinary pinned notes than before under a tight budget WHEN related
+ *  genuinely needs the room: a note the FTS matcher scored against THIS task's text is more likely to
+ *  matter for THIS task than the Nth-most-recent general pinned note, so trading some of that margin to
+ *  related is the intended outcome, not a regression — but ONLY when related actually uses it.
+ *  NEVER_DROP_TAG notes are UNAFFECTED — the floor tier keeps packing against the FULL `budgetTokens`
+ *  exactly as before; this reserve narrows only the ordinary pinned-REST sub-tier's own ceiling. */
+const RELATED_RESERVE_FRACTION = 0.3;
+
 /** Card 15503722 — the pinned tier's delivery-order signal: newest `updatedAt` first, `key` ascending as
  *  a deterministic tiebreak (fixtures — and real notes bulk-written in the same instant — often share one
  *  timestamp). Chosen over `retrievalCount` (self-reinforcing: a note the OLD key-alphabetical bug was
@@ -108,6 +135,38 @@ function isNeverDrop(m: ProjectMemoryEntry): boolean {
  *  trivial wording fix can outrank real value. This is a heuristic with known edges, not a settled policy. */
 function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[] {
   return [...entries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+}
+
+/** Card 738568b6 — greedy PREFIX pack of the RELATED tier (rank order, `break`s at the first overflow)
+ *  against an arbitrary cap. Factored out so the SAME packing logic runs TWICE: once as a PROBE (capped at
+ *  the reserve, see {@link RELATED_RESERVE_FRACTION}) purely to discover how many tokens related would
+ *  ACTUALLY consume — so an empty or under-reserve related tier never forces pinned-REST to hold space
+ *  nothing occupies (the exact regression a fixed unconditional reserve produced: a no-match kickoff, or
+ *  one small match, silently dropped MORE pinned notes than before this card for zero benefit) — and once
+ *  for the REAL final pack, capped at the true post-pinned remaining (unchanged mechanism from before this
+ *  card: when pinned ends up smaller than its cap, related still expands BEYOND its own reserve). Returns
+ *  the packed section text (`null` if nothing fit), the ids included, and the index into `related` where
+ *  dropping starts (`related.length` if nothing dropped) — the caller derives `droppedRelatedKeys` from
+ *  that index, keeping this a pure sizing/packing helper, not a reporting one. */
+function packRelatedPrefix(
+  related: ProjectMemoryEntry[],
+  capTokens: number,
+  annotate: (m: ProjectMemoryEntry) => string[],
+): { section: string | null; includedIds: string[]; droppedFrom: number } {
+  const blocks: string[] = [];
+  let section: string | null = null;
+  const includedIds: string[] = [];
+  for (const [i, m] of related.entries()) {
+    const block = noteBlock(m, annotate(m));
+    const candidate = ["## Related project memory (matched your kickoff)", ...blocks, block].join(SECTION_SEP);
+    if (estimateTokens(candidate) > capTokens) {
+      return { section, includedIds, droppedFrom: i };
+    }
+    blocks.push(block);
+    section = candidate;
+    includedIds.push(m.id);
+  }
+  return { section, includedIds, droppedFrom: related.length };
 }
 
 /**
@@ -131,6 +190,11 @@ function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[
  *      ALARM (`droppedFloorKeys`), never folded into the routine overflow signal (an alarm that reads like
  *      routine overflow is an alarm nobody notices).
  *   2. REST — every other pinned note, recency-ordered, reported via the routine `droppedRestKeys` signal.
+ *      Card 738568b6 — REST packs against a REDUCED cap (`budgetTokens` minus what RELATED actually needs,
+ *      PROBED via {@link packRelatedPrefix} and capped at {@link RELATED_RESERVE_FRACTION} — NOT the raw
+ *      nominal fraction itself; an empty or under-reserve related tier reduces this cap by zero or by less
+ *      than the fraction), not the full `budgetTokens` FLOOR still uses: whatever IS reduced can only be
+ *      eaten by FLOOR (which keeps absolute priority, unchanged), never by REST.
  * Both sub-tiers still pack MAXIMALLY within their own pass: an oversized note is SKIPPED (`continue`),
  * never `break` — "pinned ALWAYS injected" is the feature's headline promise, so one bloated note must
  * never suppress every other (possibly small, critical) note behind it in the SAME sub-tier.
@@ -172,15 +236,29 @@ export function composeProjectMemoryDigest(
   const restSorted = sortPinnedByRecency(pinned.filter((m) => !isNeverDrop(m)));
   const pinnedOrdered = [...floorSorted, ...restSorted];
 
+  // Card 738568b6 — PROBE, before pinned packs at all: how many tokens would RELATED actually consume if
+  // capped at its reserve? Capped at whichever is SMALLER — the nominal reserve, or what related genuinely
+  // needs — so an empty related tier (kickoffText empty/whitespace ⇒ no FTS query at all — a common,
+  // legitimate case, see retrieveProjectMemoryForKickoff) or one smaller than the reserve reduces restCap
+  // by ZERO extra, never walling off space nothing occupies.
+  const reserveTokens = Math.floor(budgetTokens * RELATED_RESERVE_FRACTION);
+  const relatedProbe = packRelatedPrefix(related, reserveTokens, annotate);
+  const relatedNeed = relatedProbe.section ? estimateTokens(relatedProbe.section) : 0;
+
   let pinnedSection: string | null = null;
   const droppedFloorKeys: string[] = [];
   const droppedRestKeys: string[] = [];
+  // Card 738568b6 — REST's own ceiling is REDUCED by ONLY what RELATED actually needs (`relatedNeed`, from
+  // the probe above), never by the raw nominal reserve. FLOOR is untouched and still packs against the
+  // full `budgetTokens` (unchanged from before this fix — absolute priority preserved).
+  const restCap = Math.max(0, budgetTokens - relatedNeed);
   {
     const blocks: string[] = [];
     for (const m of pinnedOrdered) {
       const block = noteBlock(m, annotate(m));
       const candidate = ["## Pinned project memory (always included)", ...blocks, block].join(SECTION_SEP);
-      if (estimateTokens(candidate) > budgetTokens) {
+      const cap = isNeverDrop(m) ? budgetTokens : restCap;
+      if (estimateTokens(candidate) > cap) {
         // pack maximally: skip an oversized note, keep trying the rest of THIS note's own sub-tier
         (isNeverDrop(m) ? droppedFloorKeys : droppedRestKeys).push(m.key);
         continue;
@@ -218,24 +296,20 @@ export function composeProjectMemoryDigest(
 
   // `related` arrives already ranked (FTS5 bm25 `rank` order from searchProjectMemory) — preserve that
   // order rather than re-sorting, so the MOST relevant matches survive truncation first.
+  //
+  // Card 738568b6 — the REAL final pack, capped at the TRUE post-pinned remaining (NOT the reserve/probe
+  // above, which only sized `restCap`): if pinned ended up smaller than restCap (granularity, or the floor
+  // tier alone didn't need it all), related still expands BEYOND its own reserve to use the true leftover
+  // — this is the SAME `packRelatedPrefix` helper the probe used, so there is exactly one packing
+  // implementation for this tier, never two that could drift apart.
   let relatedSection: string | null = null;
-  const droppedRelatedKeys: string[] = [];
+  let droppedRelatedKeys: string[] = [];
   {
-    const blocks: string[] = [];
     const remaining = budgetTokens - usedTokens - (pinnedSection ? estimateTokens(SECTION_SEP) : 0);
-    for (const [i, m] of related.entries()) {
-      const block = noteBlock(m, annotate(m));
-      const candidate = ["## Related project memory (matched your kickoff)", ...blocks, block].join(SECTION_SEP);
-      if (estimateTokens(candidate) > remaining) {
-        // `break`, not `continue` (unlike the pinned sub-tiers): the remaining suffix is EXACTLY the
-        // notes past this point in rank order — no per-note fit-check needed to know they're dropped.
-        droppedRelatedKeys.push(...related.slice(i).map((r) => r.key));
-        break;
-      }
-      blocks.push(block);
-      relatedSection = candidate;
-      includedIds.push(m.id);
-    }
+    const finalPack = packRelatedPrefix(related, remaining, annotate);
+    relatedSection = finalPack.section;
+    includedIds.push(...finalPack.includedIds);
+    droppedRelatedKeys = related.slice(finalPack.droppedFrom).map((r) => r.key);
     // Card fddd58ef — "N of M", not a bare count: the denominator is what separates "a couple got
     // trimmed" from "this tier delivered nothing" (see the doc comment above). Same idiom as the pinned
     // tiers otherwise: unconditional once known, uncapped key list via summarizeDroppedKeys.

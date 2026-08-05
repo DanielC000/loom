@@ -54,6 +54,10 @@ const LIVE_CORPUS = [
 // to sit well below LIVE_CORPUS's total (~28,880 bytes of note text alone, ~7.2k tokens once header/block
 // overhead is added) so the corpus reliably overflows and the RED/GREEN contrast below keeps discriminating
 // no matter what the project's real memory.budgetTokens is set to today or in the future.
+// Card 738568b6 — every call in this file passes `related: []`. The pinned-REST sub-tier's cap is
+// `budgetTokens` minus what RELATED actually needs (see RELATED_RESERVE_FRACTION in the real source), and
+// an EMPTY related tier needs zero — so REST's cap here is the full `budgetTokens`, unchanged from before
+// that card. 4000 (the original value) stays correct; it does NOT need bumping.
 const TEST_BUDGET_TOKENS = 4000;
 const FLAGSHIP = "gate-cap-is-2-by-owner-decision-never-change-silently";
 

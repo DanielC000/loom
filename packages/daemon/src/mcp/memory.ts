@@ -127,11 +127,20 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
 
 /** A note plus its linked Requests' LIVE state, resolved fresh at read time (card e6d270b3) — see
  *  project-memory-request-links.ts. `text` itself is never mutated; annotations ride as their own field
- *  so the raw stored note is always distinguishable from the live-resolved commentary about it. */
-export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[] };
+ *  so the raw stored note is always distinguishable from the live-resolved commentary about it.
+ *  `everDelivered` (card 738568b6) — DoD-4: `retrievalCount` is already on `ProjectMemoryEntry`, but it's
+ *  a raw number an author has to know to interpret; this exposes the actual FACT it encodes (`retrievalCount
+ *  > 0`, matching `ProjectMemoryEntry`'s own doc comment: bumped only on actual kickoff-digest inclusion,
+ *  never on an explicit `memory_read`/`memory_list`) so an author can see at a glance that their note has
+ *  never once reached a reader — no judgement about the note's quality, just the fact. */
+export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean };
 
 function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry): ProjectMemoryEntryWithLinks {
-  return { ...entry, requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds) };
+  return {
+    ...entry,
+    requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
+    everDelivered: entry.retrievalCount > 0,
+  };
 }
 
 /**
