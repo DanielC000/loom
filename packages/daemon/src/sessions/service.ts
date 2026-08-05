@@ -8635,6 +8635,13 @@ export class SessionService {
       return;
     }
 
+    // Card 8f36be30: the fallthrough `stranded` branch (below) is the ONLY one of these that both (a)
+    // recommends `worker_merge` unconditionally and (b) asserts "finished a turn" with no observable field
+    // the reader can check it against — the other kinds already carry their own discriminating detail
+    // (minutesSinceStart, wakeAt, status, minutesSinceReport). `w.turnSeq`/`w.lastActivity` are the same
+    // point-in-time-read fields `buildBrokenSpawnMsg` (above) already reports for the sibling broken-spawn
+    // notice — reused here rather than inventing a second idiom. Report OBSERVED fields only; do not assert
+    // a cause from them (the reader decides whether the elapsed time is routine for this worker or not).
     const msg = cls.kind === "parked-gate-stale"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) has a run_gate op that's been running ~${cls.minutesSinceStart} min — past this project's plausible gate runtime, so it may be wedged rather than genuinely still executing. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the gate is stuck.`
       : cls.kind === "parked-wake"
@@ -8645,7 +8652,7 @@ export class SessionService {
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) flagged worker_report(${cls.status}) as parked on its OWN backgrounded task ~${cls.minutesSinceReport} min ago and still hasn't re-engaged — that flag has no expiry of its own and this is now stale, so it may be dead rather than genuinely still running. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the background task is gone.`
       : cls.kind === "parked-ack"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(${cls.status}) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
-      : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
+      : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }
 
@@ -8730,7 +8737,7 @@ export class SessionService {
     const eligible = isCrashRecoveryEligible(this.db, this.control, w);
     const msg = eligible
       ? `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) died unexpectedly — its task is still in_progress. Loom's crash-recovery watchdog will attempt to auto-resume it; no action needed yet. Its worktree/branch (${w.branch ?? "(unknown)"}) is intact — if recovery is later abandoned you'll get a follow-up nudge.`
-      : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review/merge any committed work, or re-dispatch the task.`;
+      : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or re-dispatch the task.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live — the durable event stands */ }
   }
 
