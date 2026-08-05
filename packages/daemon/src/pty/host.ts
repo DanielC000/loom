@@ -2320,6 +2320,50 @@ interface Live {
   // manager that hasn't yet looked should still see it on a LATER read; this is a discovery aid, not a
   // live/transient flag, and overwritten (not accumulated) on a subsequent occurrence.
   lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // Card f5f6515a DoD-4: the SENDER-directed arm for a FUSED match — `lastMismatchReplay` above only ever
+  // fires on a byte-for-byte match against ONE single prior generation's own write; it stays null for a
+  // mismatch whose reported text is a CONCATENATION of more than one generation's writes (the composer
+  // accumulated instead of clearing — the exact shape `detectComposerAccumulation` exists to confirm). Set
+  // ONLY when `detectComposerAccumulation` CONFIRMS (sum AND hash both match) — ANY confirmed span, no
+  // upper bound (Code Reviewer HIGH + §RESOLVED, card f5f6515a): an earlier version of this field capped at
+  // `spanGens.length <= 2`, reasoned from "every hash-confirmed specimen measured so far is span=2" — that
+  // reasoning does not survive scrutiny. This card's own MOTIVATING gen=4 specimen (a stale CLI paste-
+  // collapse placeholder + the preceding generation's full text + the current generation's own text,
+  // 26+4819+1123=5968) is NOT a member of this population at all: a stale placeholder is not text Loom
+  // itself wrote, so it is never in `recentWrittenTurns`, and no contiguous suffix of that ring can ever
+  // sum to a placeholder-inclusive reported length (span=[gen3,gen4] sums to 4819+1123=5942, short by
+  // exactly the 26-char placeholder) — `detectComposerAccumulation` structurally cannot confirm that
+  // specimen at ANY span. That leaves exactly ONE real specimen (the manager's own live gen=9, span=2) —
+  // not a principled basis for a hard cutoff at 2 rather than 3 or 8. The detector's own CONFIRMED result
+  // is equally rigorous at any span up to its window cap (exact length-sum AND exact fnv1a32 hash, over a
+  // window of at most 8 ⇒ at most 7 candidate spans checked — independently audited by Code Review, which
+  // could not force a false positive at any span tried) — a CONFIRMED result is a CONFIRMED result
+  // regardless of how many generations it spans. Capping this field below what the notice itself now
+  // honors (see the `confirmedFusion` local, this file) would silently reintroduce the exact two-surface
+  // disagreement (Code Reviewer CRITICAL+HIGH) this doc was rewritten to remove.
+  // `replayedEntry === undefined` guards against setting this for a shape `lastMismatchReplay` already
+  // covers — NOT because a single-entry match is itself producible by `detectComposerAccumulation` (it only
+  // ever tries spans of 2+ entries, so a length-1 span is structurally impossible here), but because a
+  // CONCATENATION could coincidentally equal some OTHER single prior entry's own text (e.g. an intervening
+  // empty/short write) — exactly the shape `replayedEntry` already claims more precisely, so this guard
+  // keeps the two fields mutually exclusive even in that coincidence, rather than double-firing.
+  // ⚠️ THE CONTRACT IS DUPLICATION, NOT LOSS (Code Reviewer CRITICAL, card f5f6515a — shipped wrong once
+  // already, do not restate `lastMismatchReplay`'s "ESTABLISHED loss / re-send" language here). A confirmed
+  // fusion's span is a CONTIGUOUS SUFFIX whose LAST entry is always the current generation's own write
+  // (`recentWrittenTurns.push` happens at submit() time, before this turn's own hook ever fires — see that
+  // call site) — the content Loom intended for THIS turn therefore ALWAYS arrived; it is the tail of the
+  // fused turn, never missing. The risk runs the OPPOSITE direction from `lastMismatchReplay`'s: an EARLIER
+  // `spanGens` entry's own content may have been ACTED ON A SECOND TIME if its own turn already ran — the
+  // remedy is checking for a duplicate action, never re-sending (there is nothing to re-send).
+  // `spanGens` is oldest-first (mirrors `detectComposerAccumulation`'s own return shape) so a reader can see
+  // which generations were involved without a second lookup. CO-TRIGGERED with the session-facing notice's
+  // own fusion branch — the SAME `confirmedFusion` expression, in the SAME synchronous block, always
+  // together, never independently (an earlier draft of this card's own kickoff said "independently"; that
+  // was wrong and corrected here) — what differs between the two is the READER, not the trigger: this
+  // field serves the session's own WATCHING manager (worker_list/worker_status); the notice serves the
+  // session learning about ITSELF. Same PULL-surface posture as `lastMismatchReplay` otherwise — never
+  // cleared once set, overwritten (not accumulated) by a later occurrence.
+  lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
 }
 
 export interface SpawnOpts {
@@ -3698,7 +3742,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null,
+      lastMismatchReplay: null, lastMismatchFusion: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -3866,7 +3910,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null,
+      lastMismatchReplay: null, lastMismatchFusion: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -3946,7 +3990,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null,
+      lastMismatchReplay: null, lastMismatchFusion: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -4582,7 +4626,14 @@ export class PtyHost {
                 ? isImmediatePrior
                   ? `The submitted content exactly matches what this session itself wrote for the IMMEDIATELY PRECEDING generation (gen=${replayedEntry.gen}) — the shape every measured occurrence of this class of mismatch has shown so far. If that generation's own turn already ran, this is likely a DUPLICATE re-delivery of it, not new content — check the message sent just before this one.`
                   : `The submitted content exactly matches what this session itself wrote for an EARLIER generation (gen=${replayedEntry.gen}, not the immediately preceding one) — if that generation's own turn already ran, this may be a DUPLICATE re-delivery of it, not new content. This is an unusual shape: every measured occurrence of this class of mismatch so far replayed only the immediately preceding generation.`
-                : "The submitted content does not match any of this session's own recent writes that Loom still has a record of. Every measured occurrence of this class of mismatch so far replayed the IMMEDIATELY PRECEDING submission — check the message sent just before this one for what may have been duplicated, even though this specific case could not be matched directly.";
+                : priorEntry !== undefined
+                  ? "The submitted content does not match any of this session's own recent writes that Loom still has a record of. Every measured occurrence of this class of mismatch so far replayed the IMMEDIATELY PRECEDING submission — check the message sent just before this one for what may have been duplicated, even though this specific case could not be matched directly."
+                  // Card f5f6515a (manager msg 71e5f76d): guards against the "check the message sent just
+                  // before this one" advice firing when NO prior submission structurally exists to check —
+                  // keyed on `priorEntry` (the actual ring content), not a literal `gen === 1`, so a resumed/
+                  // forked session presenting a thin `recentWrittenTurns` for reasons other than being on
+                  // its first generation is handled correctly too, not just a true first-ever submission.
+                  : "The submitted content does not match any of this session's own recent writes that Loom still has a record of. There is no earlier write recorded for this session in Loom's own tracking — this may genuinely be its first submission, or a resume/recycle boundary where that tracking restarted — so there is no 'message sent just before this one' to check.";
               // Card cf2fef73 (owner-reported, false LOSS alarm on benign whitespace re-rendering): before
               // treating this mismatch as notice-worthy to the SESSION, check whether `reported` and
               // `intended` reconcile once whitespace is normalized — tabs and runs of spaces collapsed, line
@@ -4631,7 +4682,18 @@ export class PtyHost {
                 // failed the replay match) and do NOT invent a suppression for it: this population is not
                 // yet understood, and cf2fef73's own worker set the precedent for refusing to guess here
                 // (card 2b57b5a9, the form-feed specimen).
-                if (replayedEntry === undefined && reported.length > intended.length) {
+                // Card f5f6515a (Code Reviewer MEDIUM): `!accumulation?.confirmed` added — this tag's own
+                // condition (`reported.length > intended.length`, no recentWrittenTurns match via
+                // `replayedEntry`) is satisfied by EVERY confirmed fusion too (a fusion is, by construction,
+                // longer than the current turn's own intended text and never matches a SINGLE ring entry).
+                // Left unguarded, every confirmed fusion inflated this "UNCHARACTERIZED" count while the
+                // `[composer-accumulation]` line logged one statement earlier already disproves the claim —
+                // a Platform sweep grepping/counting this tag to gauge whether the population needs a card
+                // would be counting events this file already has a full, hash-confirmed answer for.
+                // `accumulation` (not `confirmedFusion`) — this check runs before `confirmedFusion` is
+                // computed further down, and doesn't need its `replayedEntry === undefined` re-check here
+                // (already the leading condition on this same line).
+                if (replayedEntry === undefined && reported.length > intended.length && !accumulation?.confirmed) {
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-unmatched-longer] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} — UNCHARACTERIZED population (card 68459420): reported LONGER than intended, matches none of this session's recent writes, and is neither of the two known benign prefix/whitespace shapes above. Distinct from the measured replay-of-immediately-preceding-generation regularity — do not assume a mechanism or fold this into that shape.`);
                 }
@@ -4645,6 +4707,31 @@ export class PtyHost {
                 if (replayedEntry !== undefined) {
                   live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
                 }
+                // Card f5f6515a DoD-4: the FUSED counterpart to the single-entry replay above — reuses the
+                // SAME `accumulation` result `detectComposerAccumulation` already computed (no second
+                // matcher), captured ONCE here and reused below for BOTH the pull-surface field and the
+                // notice wording (manager review, card 5eef504d): the session-facing notice used to be
+                // composed from ONLY `replayedEntry`, never consulting this already-CONFIRMED result sitting
+                // one variable away — a real recipient (the manager's own gen=9) was told "could not be
+                // matched... possible LOSS" about an event Loom had already established as a confirmed
+                // accumulation. NOT an ordering bug — `accumulation` (line ~4534) and this notice's own
+                // wording are computed back-to-back in the SAME synchronous block, no async gap — a pure
+                // OMISSION in what the notice consulted, not a timing race. `replayedEntry === undefined`
+                // guards against ever firing for a shape `lastMismatchReplay` already covers — not because a
+                // single-entry match is itself producible by `detectComposerAccumulation` (it only ever
+                // tries spans of 2+ entries), but because a concatenation could coincidentally equal some
+                // OTHER single prior entry's own text, which `replayedEntry` already claims more precisely;
+                // this keeps the two fields mutually exclusive even in that coincidence. NO span upper bound
+                // (Code Reviewer HIGH, card f5f6515a — an earlier `spanGens.length <= 2` here left the
+                // session-facing notice below FALSELY telling a session "could not be matched... possible
+                // LOSS" about a genuinely span>=3 CONFIRMED fusion, provably false in the very same
+                // synchronous block; see `Live.lastMismatchFusion`'s own doc for why that cap's supporting
+                // evidence didn't survive scrutiny either). A typed local (not a bare boolean) so
+                // `accumulation`'s non-null, confirmed shape stays narrowed for every later use below.
+                const confirmedFusion = (replayedEntry === undefined && accumulation?.confirmed) ? accumulation : null;
+                if (confirmedFusion) {
+                  live.lastMismatchFusion = { gen: live.submitGeneration, spanGens: confirmedFusion.spanGens, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
+                }
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
                 // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
@@ -4656,10 +4743,26 @@ export class PtyHost {
                 const lossClause = replayedEntry !== undefined
                   ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you: an ESTABLISHED loss, not a possible one. You cannot verify that yourself: you only ever see what arrived, never what was intended for you — only the SENDER can confirm it and re-send. If you are a Loom-driven session, say so in your next report up.`
                   : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
-                const mismatchText =
-                  `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                  `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
-                  `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
+                // Card f5f6515a DoD-4 (manager review 5eef504d): a confirmed fusion gets its OWN complete
+                // notice text rather than a patched `lossClause`/`replayNote` — those two are built around a
+                // loss/replay dichotomy with no "possible LOSS" branch that's safe to reuse for a case where
+                // NOTHING was lost. REQUIRED (manager, card f5f6515a): the phrase "possible LOSS" must never
+                // appear here — that phrase is what sent a real reader (the manager's own gen=9) chasing a
+                // loss that never happened. Reuses `confirmedFusion` — the exact SAME `accumulation` result
+                // captured above, no new matcher. The genuinely-unmatched and single-entry-replay branches
+                // below are BYTE-IDENTICAL to before this change; only the new branch is added.
+                // Card f5f6515a (Code Reviewer HIGH follow-up): named EVERY earlier generation in the span,
+                // not just `spanGens[0]` — now that the span cap is removed (see `confirmedFusion`'s own
+                // comment), a confirmed fusion can legitimately cover 3+ generations, and naming only the
+                // first would silently under-report which turns may have been acted on twice.
+                const earlierFusedGens = confirmedFusion ? confirmedFusion.spanGens.slice(0, -1) : [];
+                const mismatchText = confirmedFusion
+                  ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ESTABLISHED — nothing was lost: the engine's report is a CONFIRMED accumulation (spanGens=${JSON.stringify(confirmedFusion.spanGens)}) — the text Loom intended for THIS turn is in what arrived, fused together with generation(s) ${earlierFusedGens.join(", ")}'s own text because the composer had not fully cleared since ${earlierFusedGens.length > 1 ? "those earlier writes" : "that earlier write"}. If any of generation(s) ${earlierFusedGens.join(", ")}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that before treating everything in this turn as new. ` +
+                    `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on any of this content twice — that duplicate check is yours to make. There is no loss half to verify here: the full text intended for this turn did arrive.`
+                  : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
+                    `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
                 // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
                 // this must land as the notice's OWN pty submission, never appended to another payload — the
                 // standing rule this very finding established, since the whole point is that a payload can
@@ -8026,6 +8129,18 @@ export class PtyHost {
    *  occurrence overwrites rather than accumulates, so this always reflects the LATEST replay only. */
   getLastMismatchReplay(sessionId: string): Live["lastMismatchReplay"] | undefined {
     return this.live.get(sessionId)?.lastMismatchReplay;
+  }
+
+  /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s
+   *  own doc for what it fires on (ANY confirmed composer-accumulation, no span cap — see that doc for why an
+   *  earlier `spanGens.length <= 2` bound was removed) and why it's a separate field rather than widening the
+   *  single-entry one. ⚠️ Its CONTRACT is DUPLICATION, not loss — see the field's own doc before reusing this
+   *  language elsewhere; do not describe it as "re-send if this postdates your last message" (that is
+   *  `lastMismatchReplay`'s contract, not this one). Same PULL-surface mechanics otherwise: `null` = none fired
+   *  yet since this session went live, `undefined` = session not live in this process, never cleared once set,
+   *  overwritten (not accumulated) by a later occurrence. */
+  getLastMismatchFusion(sessionId: string): Live["lastMismatchFusion"] | undefined {
+    return this.live.get(sessionId)?.lastMismatchFusion;
   }
 
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on

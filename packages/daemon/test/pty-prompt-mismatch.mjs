@@ -426,16 +426,174 @@ try {
     }
   }
 
+  // ===== 7e. Card f5f6515a DoD-4 — THE FUSED counterpart to 7d's single-entry replay signal. Reproduces the
+  // manager's own live specimen (session bec400e1, gen=9): the engine reports back gen N-1's OWN written
+  // text CONCATENATED with gen N's own written text — a composer-accumulation shape `detectComposerAccumulation`
+  // already confirms (see pty-composer-accumulation.mjs for that detector's own suite), but which
+  // `replayedEntry`'s single-entry match (7d) cannot see, since the reported text doesn't equal EITHER write
+  // alone. POSITIVE CONTROL: fires on exactly this fused shape. NEGATIVE CONTROLS: stays null on an ordinary
+  // clean turn, stays null when the OTHER signal (single-entry replay) is the correct one, and — the
+  // deliberate span bound itself — stays null when the confirmed accumulation spans MORE than 2 generations,
+  // proving the narrower bound is real and not merely documented. =====
+  {
+    const sid = newSession("Fusion"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const genNMinus1Text = "[loom:worker-report] worker FFFF — generation N-1's own real report";
+    const genNText = "[loom:merge-done] worker GGGG merged — generation N's own real, much shorter content";
+
+    // Generation N-1: an ordinary, cleanly-confirmed turn — establishes the entry in recentWrittenTurns
+    // that generation N's fused reported text will span alongside its own.
+    host.enqueueStdin(sid, genNMinus1Text);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genNMinus1Text }); // byteIdentical=true, gen=1
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // Generation N: Loom writes genNText, but the engine reports gen N-1's text + gen N's own text FUSED —
+    // the exact shape confirmed live on the manager's own session (2038+268=2306, hash-confirmed).
+    host.enqueueStdin(sid, genNText); // gen=2
+    const fusedReported = genNMinus1Text + genNText;
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: fusedReported }); // byteIdentical=false
+    {
+      const fusion = host.getLastMismatchFusion(sid);
+      check("7e: POSITIVE CONTROL — getLastMismatchFusion fires on a confirmed 2-generation fused write",
+        fusion !== null && fusion !== undefined);
+      check("7e: it names the CURRENT generation (gen=2) and the span (gens 1 and 2, oldest-first)",
+        fusion?.gen === 2 && JSON.stringify(fusion?.spanGens) === JSON.stringify([1, 2]));
+      check("7e: it records both the reported and intended lengths",
+        fusion?.reportedLen === fusedReported.length && fusion?.intendedLen === genNText.length);
+      check("7e: a fused match is NOT ALSO a single-entry replay — getLastMismatchReplay stays null for this same mismatch",
+        host.getLastMismatchReplay(sid) === null);
+    }
+    // Card f5f6515a DoD-4, manager review 5eef504d — THE NOTICE TEXT ITSELF, not just the pull surface:
+    // a confirmed fusion must get NEW, honest wording (ESTABLISHED, no loss), never the old "possible LOSS"
+    // phrasing that misled the manager's own gen=9 reading.
+    const enqueuedFusion = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7e: the notice actually enqueues for a confirmed fusion (not suppressed)", enqueuedFusion);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const fusionNoticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7e: REQUIRED — the phrase \"possible LOSS\" MUST NOT appear in a confirmed-fusion notice",
+      !/possible LOSS/.test(fusionNoticeWrite));
+    check("7e: the new wording says ESTABLISHED and names the confirmed accumulation + its spanGens",
+      /ESTABLISHED/.test(fusionNoticeWrite) && /CONFIRMED accumulation/.test(fusionNoticeWrite) && /spanGens=\[1,2\]/.test(fusionNoticeWrite));
+    check("7e: it says plainly nothing was lost", /nothing was lost/.test(fusionNoticeWrite));
+
+    // NEGATIVE — an ordinary, byteIdentical=true turn on the SAME session never sets the fusion signal.
+    {
+      const cleanText = "[loom:idle] an entirely ordinary, correctly-delivered turn";
+      host.enqueueStdin(sid, cleanText); // gen=3
+      const fusionBefore = host.getLastMismatchFusion(sid);
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: cleanText }); // byteIdentical=true
+      check("7e: NEGATIVE CONTROL — an ordinary clean turn never sets/changes getLastMismatchFusion",
+        host.getLastMismatchFusion(sid) === fusionBefore);
+      host.deliverHook(sid, { hook_event_name: "Stop" });
+    }
+
+    // NEGATIVE — the OTHER signal's own shape (a pure single-generation replay, no fusion) must set
+    // lastMismatchReplay but never lastMismatchFusion, proving the two fields are genuinely disjoint rather
+    // than one being a strict superset of the other by accident.
+    {
+      const sid2 = newSession("FusionVsReplay"); SIDS.push(sid2);
+      const priorText = "[loom:worker-report] worker HHHH — a real report, about to be replayed verbatim";
+      host.enqueueStdin(sid2, priorText); // gen=1
+      host.deliverHook(sid2, { hook_event_name: "UserPromptSubmit", prompt: priorText });
+      host.deliverHook(sid2, { hook_event_name: "Stop" });
+      const newText = "[loom:merge-done] worker IIII merged — never actually delivered";
+      host.enqueueStdin(sid2, newText); // gen=2
+      host.deliverHook(sid2, { hook_event_name: "UserPromptSubmit", prompt: priorText }); // pure replay, not fused
+      check("7e: a pure single-entry replay sets lastMismatchReplay...", host.getLastMismatchReplay(sid2) !== null);
+      check("7e: ...but never lastMismatchFusion (the two signals are disjoint, not overlapping)",
+        host.getLastMismatchFusion(sid2) === null);
+      host.deliverHook(sid2, { hook_event_name: "Stop" });
+    }
+
+    // Card f5f6515a (Code Reviewer HIGH + §RESOLVED): the span<=2 cap was REMOVED — a confirmed
+    // accumulation spanning 3+ generations must ALSO set getLastMismatchFusion and get the ESTABLISHED
+    // notice wording, naming EVERY earlier generation in the span (not just spanGens[0] — the exact gap
+    // the Code Reviewer found: an earlier version of this notice only ever named the first). This is the
+    // POSITIVE counterpart of the removed negative-bound test above.
+    {
+      const sid3 = newSession("FusionWideSpan"); SIDS.push(sid3);
+      const fake3 = fakesById.get(sid3);
+      const t1 = "[loom:idle] first accumulated generation";
+      const t2 = "[loom:idle] second accumulated generation";
+      const t3 = "[loom:merge-done] third generation — this turn's own real content";
+      host.enqueueStdin(sid3, t1); // gen=1
+      host.deliverHook(sid3, { hook_event_name: "UserPromptSubmit", prompt: t1 });
+      host.deliverHook(sid3, { hook_event_name: "Stop" });
+      host.enqueueStdin(sid3, t2); // gen=2
+      host.deliverHook(sid3, { hook_event_name: "UserPromptSubmit", prompt: t2 });
+      host.deliverHook(sid3, { hook_event_name: "Stop" });
+      host.enqueueStdin(sid3, t3); // gen=3
+      const writesBeforeWideMismatch = fake3.writes.length;
+      const unmatchedLongerWarnings3 = captureUnmatchedLongerWarnings(() => {
+        host.deliverHook(sid3, { hook_event_name: "UserPromptSubmit", prompt: t1 + t2 + t3 }); // 3-gen fused, span=[1,2,3]
+      });
+      const fusion3 = host.getLastMismatchFusion(sid3);
+      check("7e: POSITIVE — a 3-generation confirmed accumulation (no cap) DOES set getLastMismatchFusion",
+        fusion3 !== null && fusion3 !== undefined);
+      check("7e: it names all 3 generations in the span, oldest-first",
+        JSON.stringify(fusion3?.spanGens) === JSON.stringify([1, 2, 3]));
+      // Card f5f6515a (Code Reviewer MEDIUM): a confirmed fusion — at any span — must NOT also inflate the
+      // [prompt-mismatch-unmatched-longer] UNCHARACTERIZED tag; that tag's own condition is satisfied by
+      // every fusion, and a Platform sweep counting it would double-count events already fully explained.
+      check("7e: MEDIUM FIX — a confirmed fusion does NOT ALSO log [prompt-mismatch-unmatched-longer]",
+        unmatchedLongerWarnings3.length === 0);
+      const enqueuedWide = await waitUntil(() => hasPendingMismatchNotice(sid3));
+      check("7e: the notice enqueues for the 3-generation fusion too", enqueuedWide);
+      host.deliverHook(sid3, { hook_event_name: "Stop" });
+      const wideNoticeWrite = fake3.writes.slice(writesBeforeWideMismatch).join("");
+      check("7e: the notice names BOTH earlier generations (1 and 2), not just spanGens[0] — the exact gap the Code Reviewer found",
+        /generation\(s\) 1, 2/.test(wideNoticeWrite));
+      check("7e: still no \"possible LOSS\" for the wider span either", !/possible LOSS/.test(wideNoticeWrite));
+    }
+  }
+
+  // ===== 7f. Card f5f6515a (manager msg 71e5f76d, Code Reviewer-confirmed action item) — THE GEN=1 GUARD.
+  // DoD, verbatim from the manager: a test that FAILS on 33768e3a (i.e. proves the guard is real, not just
+  // present), plus the regression half proving the honest multi-generation unmatched wording (7b) survives
+  // untouched. On a session's FIRST recorded submission (no prior entry in `recentWrittenTurns` at all),
+  // "check the message sent just before this one" is vacuous — there is no such message — so the notice
+  // must say so instead of repeating advice that can't apply here. =====
+  {
+    const sid = newSession("FirstGenUnmatched"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:deploy-stale] a genuine first-generation kickoff, unusually dense in astral emoji";
+    const unrelatedReported = "content that never came from anything this session itself wrote — not a fusion, not a replay";
+    host.enqueueStdin(sid, intended); // gen=1 — the FIRST submission on this session, nothing precedes it
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedReported }); // byteIdentical=false, no ring match, no accumulation possible (window has only this one entry)
+    const enqueued7f = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7f: the notice still enqueues for a gen=1 unmatched mismatch", enqueued7f);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7f: POSITIVE — on gen=1 (no prior submission at all), the vacuous \"check the message sent just before this one\" advice is ABSENT",
+      !/check the message sent just before this one/.test(noticeWrite) && !/IMMEDIATELY PRECEDING submission/.test(noticeWrite));
+    check("7f: instead it says plainly there is no earlier write to check",
+      /no earlier write recorded for this session/.test(noticeWrite));
+    check("7f: it still keeps the cautious 'possible LOSS' framing — this is a genuinely unmatched mismatch, not a fusion",
+      /possible LOSS/.test(noticeWrite));
+  }
+
   // ===== 7b. Card 201d0d95 Q1 — the FALLBACK wording when no exact match is found in recentWrittenTurns
   // (e.g. the replayed content isn't from this session's own recent writes at all, or fell outside the
   // ring's window) still gives the reader the same measured guidance — check the immediately preceding
-  // message — rather than a bare "unknown". =====
+  // message — rather than a bare "unknown". Card f5f6515a (Code Reviewer follow-up, discovered while
+  // building the gen=1 guard, msg 71e5f76d): this scenario's ORIGINAL setup fired its mismatch at gen=1
+  // itself — the SAME "no prior submission" shape 7f now guards, not the genuine multi-generation case
+  // this scenario's own comment claims. Added a preceding clean gen=1 turn so the mismatch now lands at
+  // gen=2, with a real prior entry in `recentWrittenTurns` — this is what makes it the correct regression
+  // half of 7f's DoD (the honest "IMMEDIATELY PRECEDING" wording must survive when a prior submission
+  // genuinely exists). =====
   {
     const sid = newSession("G2"); SIDS.push(sid);
     const fake = fakesById.get(sid);
+    const earlierGenText = "[loom:idle] an earlier, unrelated, cleanly-delivered turn — establishes a real prior entry";
     const genText = "[loom:worker-report] worker CCCC — this session's own only real report";
     const unrelatedReported = "content that never came from anything this session itself wrote";
-    host.enqueueStdin(sid, genText); // gen=1
+    host.enqueueStdin(sid, earlierGenText); // gen=1 — a real PRIOR submission, so priorEntry is defined for gen=2's own mismatch below
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, genText); // gen=2
     const writesBeforeMismatch = fake.writes.length;
     host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedReported }); // byteIdentical=false, no ring match
     // Same barrier as scenario 7 above (not flagged by the guard's own 5-line window here, but the SAME
@@ -453,10 +611,19 @@ try {
     // not be matched to any of this session's own recent writes.
     check("7b: an unmatched mismatch keeps the cautious 'possible LOSS' framing, never asserts ESTABLISHED",
       /may not have reached you/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
+    // Card f5f6515a DoD-4, manager review 5eef504d — REQUIRED: a genuinely-unmatched mismatch (no confirmed
+    // fusion, no single-entry replay) must stay BYTE-IDENTICAL to before the fusion-notice-text change: the
+    // literal phrase "possible LOSS" still present, unchanged.
+    check("7b: BYTE-IDENTICAL REQUIREMENT — the literal phrase \"possible LOSS\" is still present for a genuinely-unmatched mismatch",
+      /possible LOSS/.test(noticeWrite));
     // Card 68459420 DoD-1: the sender-directed signal is SPECIFIC to a recognized replay — an unmatched
     // mismatch must NOT set it (there is no confirmed prior generation to name as replayed).
     check("7b: getLastMismatchReplay stays null for an UNMATCHED mismatch (nothing to attribute the replay to)",
       host.getLastMismatchReplay(sid) === null);
+    // Card f5f6515a DoD-4: the fusion pull surface must also stay null here — nothing to confirm (no
+    // recentWrittenTurns span in this session sums+hashes to the reported length).
+    check("7b: getLastMismatchFusion also stays null for a genuinely-unmatched mismatch",
+      host.getLastMismatchFusion(sid) === null);
   }
 
   // ===== 7c. Card 201d0d95 Q1 — manager review: `findLast`, not `find`. Loom's own `warning`-kind nudges
