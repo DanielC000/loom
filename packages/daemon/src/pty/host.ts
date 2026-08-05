@@ -820,9 +820,12 @@ export const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then 
  * it CHANGES (the press registered) before deciding again — so a laggy repaint can never trick us into
  * overshooting. Polling cadence + the per-press change-wait cap (≈3s) and the total press cap. Sized so
  * the whole loop (worst case ≈ MAX_PRESSES × CHANGE_MAX_POLLS × POLL_MS + settle ≈ 13–14s) finishes
- * COMFORTABLY under READY_FALLBACK_MS (20s) — the readiness fallback must not fire mid-cycle and release
- * queued injections before the mode settles (the 2026-06-03 strand bug). From the acceptEdits boot mode,
- * auto is reached in 2 presses; the cap is headroom (a full period is 4). */
+ * COMFORTABLY under MODE_CYCLE_FALLBACK_MS (20s, re-armed from SessionStart — see its own doc; card
+ * c469d54e corrected this comment, which previously named READY_FALLBACK_MS here — that constant is
+ * SPAWN-anchored and no longer what a healthy in-flight cycle races against once SessionStart has fired)
+ * — the mode-cycle fallback must not fire mid-cycle and release queued injections before the mode settles
+ * (the 2026-06-03 strand bug). From the acceptEdits boot mode, auto is reached in 2 presses; the cap is
+ * headroom (a full period is 4). */
 const RESUME_MODE_READ_POLL_MS = Number(process.env.LOOM_RESUME_MODE_POLL_MS) || 200;
 const RESUME_MODE_CHANGE_MAX_POLLS = Number(process.env.LOOM_RESUME_MODE_MAX_POLLS) || 15;
 const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES) || 4;
@@ -843,13 +846,60 @@ const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", 
  */
 const MODE_OVERRIDE_MAX_ATTEMPTS = Number(process.env.LOOM_MODE_OVERRIDE_MAX_ATTEMPTS) || 3;
 /**
- * Readiness fallback. SessionStart normally flips a (re)spawned session to `ready` (after the
- * mode-cycles land). If that hook never arrives, don't strand a queued boot injection forever —
+ * Readiness fallback, spawn-scoped. SessionStart normally flips a (re)spawned session to `ready` (after
+ * the mode-cycles land). If that hook never arrives AT ALL, don't strand a queued boot injection forever —
  * mark ready after this grace so the message still drains. Env-overridable so tests don't wait 20s.
+ *
+ * Card c469d54e: this is now ONLY the missed-hook guarantee. Once SessionStart DOES arrive, the
+ * SessionStart handler cancels this timer and re-arms MODE_CYCLE_FALLBACK_MS (below) scoped from that
+ * moment instead — see its own doc for why sharing this one spawn-anchored clock between two different
+ * things it was never sized for (the hook merely arriving vs. the mode-cycle it kicks off actually
+ * finishing) was the defect. Both timers share `Live.readyFallbackTimer` — never two pending at once.
  */
 // Exported (card 27c36293) for the same reason as MODE_LOG_POLL_MS/MODE_LOG_MAX_ATTEMPTS above —
 // kickoff-real-spawn.mjs's real-child-boot budget derives from this production constant too.
 export const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
+
+/**
+ * Card c469d54e — mode-cycle-scoped readiness fallback, re-armed from SessionStart (not spawn) once the
+ * SessionStart hook's `deliverHook` call is actually DISPATCHED (not merely once the hook has arrived at
+ * the process — an arrived-but-not-yet-dispatched hook, e.g. queued behind other synchronous work on an
+ * overloaded event loop, gets none of this budget's protection until dispatch actually happens). Sized
+ * like READY_FALLBACK_MS's own original budget: comfortably over cycleToMode's documented worst case
+ * (~13-14s, see its doc comment) so a HEALTHY cycle always finishes first. Under host contention
+ * SessionStart's dispatch can land late enough to leave less than this much runway before the ORIGINAL
+ * spawn-anchored deadline — that shrinking residual, not cycleToMode being slow, was the actual defect:
+ * confirmed against the 2026-08-01 mass-restart's raw daemon-output.log — 9/9 fallback firings in that
+ * incident had SessionStart already dispatched 5.3s-11.6s before the old spawn+20s deadline, well under
+ * this budget, and 7/9 (8/9 under a broader any-non-clean-landing definition) showed the corrupted-footer
+ * signature this card fixes (see docs/investigations/c469d54e-ready-fallback-race/findings.md for the
+ * frozen log, its md5, and the re-runnable extraction script — this is manager-verified, not the parent
+ * card's original worker-reported figure). Re-arming FROM SessionStart's dispatch gives every healthy
+ * cycle its full, un-eroded budget regardless of how late that dispatch was. Env-overridable so tests
+ * don't wait it out.
+ *
+ * INVARIANT (must hold for the clamp below to ever matter): READY_FALLBACK_ABSOLUTE_CEILING_MS −
+ * MODE_CYCLE_FALLBACK_MS ≥ READY_FALLBACK_MS (45s − 20s ≥ 20s at the shipped defaults). All three are
+ * independently env-overridable — raising LOOM_READY_FALLBACK_MS past ~25s alone (holding the other two at
+ * their defaults) shrinks that margin below zero and deterministically RE-CREATES this card's race: the
+ * ceiling would then clamp the re-armed budget to LESS than the original spawn-anchored deadline already
+ * gave a cycle starting near spawn+0, for no reason. Nothing enforces this invariant at runtime — it is a
+ * deployment-time contract between three env vars, stated here so a future override doesn't reopen it silently.
+ */
+export const MODE_CYCLE_FALLBACK_MS = Number(process.env.LOOM_MODE_CYCLE_FALLBACK_MS) || 20_000;
+
+/**
+ * Card c469d54e — absolute ceiling on the re-armed timer above, measured from SPAWN (Live.startedAt), not
+ * SessionStart. Preserves READY_FALLBACK_MS's original liveness guarantee ("never strand a queued boot
+ * injection forever") for the residual failure mode this fix does NOT eliminate: a SessionStart hook whose
+ * `deliverHook` dispatch is delayed to or past the original spawn+READY_FALLBACK_MS mark — a strictly worse
+ * contention level than anything observed in the incident this card fixes (worst observed SessionStart-
+ * dispatch gap there was ~11.6s, per docs/investigations/c469d54e-ready-fallback-race/findings.md; this
+ * ceiling gives roughly 4x that margin before giving up regardless). Deliberately NOT unbounded: a cycle
+ * that starts very late still gets bounded runway, not an open-ended wait. See MODE_CYCLE_FALLBACK_MS's own
+ * doc for the three-constant invariant this ceiling's value participates in.
+ */
+export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS) || 45_000;
 
 /**
  * Card df5e37e7: bound on waitForMcpSeen — how long a deferred resume-continuation nudge (see
@@ -1907,6 +1957,16 @@ interface Live {
                         // DISTINCT from busy: busy="turn in flight", ready="engine up + safe to submit".
                         // A fresh/resumed pty is NOT ready until SessionStart, so a boot-recovery nudge
                         // queues instead of racing the still-booting composer (the 2026-06-03 restart bug).
+  // Card c469d54e: handle of whichever readiness-fallback timer THIS FIELD currently tracks for this
+  // session — EITHER the spawn-armed one (READY_FALLBACK_MS from spawn, covers a genuinely missed
+  // SessionStart) OR, once SessionStart has fired and re-armed it, the mode-cycle-scoped one
+  // (MODE_CYCLE_FALLBACK_MS from SessionStart, capped by READY_FALLBACK_ABSOLUTE_CEILING_MS from spawn).
+  // At most ONE after the re-arm has completed — see the SessionStart handler's own comment for the
+  // narrow window where a fault mid-re-arm can leave the OLD, uncleared timer ALSO still live (not
+  // tracked by this field once overwritten, but real and still capable of firing) — that is the
+  // documented, safe-to-degrade-into residual, not a contradiction of "at most one tracked here". null
+  // once markReady has run (whichever call actually clears it).
+  readyFallbackTimer: NodeJS.Timeout | null;
   busySince: number | null;  // epoch ms when busy rose — for stuck-busy self-heal (BUSY_STALE_MS)
   lastOutputAt: number; // epoch ms of the last pty output — "is the engine actually producing?"
   composerLen: number;  // best-effort length of the human's UNCOMMITTED raw-terminal draft. >0 ("composer-dirty")
@@ -3519,6 +3579,17 @@ export class PtyHost {
   }
 
   spawn(opts: SpawnOpts): void {
+    // Code review (2026-08-05, card c469d54e): a readiness-fallback timer's callback re-looks-up its Live
+    // by sessionId at fire time (`this.live.get(sessionId)`) rather than closing over the Live object
+    // itself — so a timer left over from a PREVIOUS spawn of this SAME sessionId (e.g. a resume/recycle
+    // that overwrites the map entry below before the outgoing entry's own timer ever fired) would find the
+    // NEW Live instead of a dead one when it eventually fires, and could call markReady on it mid-cycle —
+    // reproducing this card's exact race via a different trigger. Pre-existing in kind (spawn() has always
+    // overwritten the map entry without clearing whatever timer the outgoing one had pending), but this
+    // card's own re-arm widens the max staleness (spawn+20s → up to spawn+45s) and finally makes it cheap
+    // to close, since the handle now exists on Live. Clear it before the overwrite.
+    const outgoing = this.live.get(opts.sessionId);
+    if (outgoing?.readyFallbackTimer) clearTimeout(outgoing.readyFallbackTimer);
     const pty = this.createPty(opts);
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
@@ -3536,6 +3607,7 @@ export class PtyHost {
       logBroken: false,
       busy: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
+      readyFallbackTimer: null, // armed just below; re-armed by the SessionStart handler — see its own doc
       mcpSeen: false, // flipped on the first observed loom-orchestration MCP hit — see Live.mcpSeen / markMcpSeen
       mcpSeenWaiters: [],
       busySince: null,
@@ -3648,6 +3720,11 @@ export class PtyHost {
     });
     pty.onExit(({ exitCode }) => {
       live.alive = false;
+      // Code review (2026-08-05, card c469d54e): clear whatever readiness-fallback timer this dying Live
+      // still holds — belt-and-suspenders alongside the clear at the TOP of spawn() above (which handles
+      // the overwrite-on-resume case); this handles every OTHER exit path (a deliberate stop, a crash) so
+      // a stale timer never outlives the Live it was armed for, even if this sessionId is never respawned.
+      if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
       // The pty is gone → empty the held queue so a stale "Queued (N)" can't linger after exit (the
       // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
@@ -3683,10 +3760,16 @@ export class PtyHost {
 
     // Readiness fallback: if SessionStart never arrives (a missed hook), don't strand a queued boot
     // injection forever — mark ready after a grace so it still drains. Bounded; a no-op if already ready.
-    setTimeout(() => {
+    // Card c469d54e: if SessionStart DOES arrive, its handler cancels THIS timer and re-arms a fresh one
+    // scoped from that moment (MODE_CYCLE_FALLBACK_MS) — so this callback firing genuinely means "still not
+    // ready" at the spawn-relative deadline, which — once that re-arm has happened — can only mean the hook
+    // itself never showed up. The log line below still just states what's actually checked (`!ready`),
+    // never "SessionStart never arrived", because a false alarm here is otherwise indistinguishable from a
+    // real missed hook to anyone reading the log later.
+    live.readyFallbackTimer = setTimeout(() => {
       const l = this.live.get(opts.sessionId);
       if (l?.alive && !l.ready) {
-        console.log(`[pty] ${opts.sessionId} readiness fallback (no SessionStart in ${READY_FALLBACK_MS}ms) — marking ready`);
+        console.log(`[pty] ${opts.sessionId} readiness fallback (still not ready ${READY_FALLBACK_MS}ms after spawn) — marking ready`);
         this.markReady(opts.sessionId);
       }
     }, READY_FALLBACK_MS);
@@ -3724,7 +3807,7 @@ export class PtyHost {
       logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
-      busy: false, ready: true, busySince: null,
+      busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
@@ -3803,7 +3886,7 @@ export class PtyHost {
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       logBroken: false,
-      busy: false, ready: true, busySince: null,
+      busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
@@ -4137,6 +4220,48 @@ export class PtyHost {
           live.startupCyclesDone = true;
           const target = live.resumeModeTarget ?? (live.startupModeCycles > 0 ? modeAfterCyclesFromAcceptEdits(live.startupModeCycles) : null);
           if (target) {
+            // Card c469d54e (THE FIX): a cycle is about to run, so the spawn-armed READY_FALLBACK_MS timer
+            // — sized assuming the cycle starts near spawn+0 — can no longer be trusted; under host
+            // contention SessionStart itself can arrive late enough to leave the cycle less runway than its
+            // own sized worst case, letting the OLD timer fire mid-cycle and release a queued kickoff INTO
+            // the pty while cycleToMode is still pressing Shift+Tab / reading the footer (confirmed against
+            // the 2026-08-01 mass-restart's raw log — see MODE_CYCLE_FALLBACK_MS's own doc). Re-arm a fresh,
+            // bounded fallback scoped from NOW instead, so a healthy cycle always gets its full budget.
+            //
+            // ⚠️ THIS SHRINKS THE RACE, IT DOES NOT ELIMINATE IT: this re-arm only helps once THIS CODE
+            // ACTUALLY RUNS — the precise condition is when `deliverHook` is DISPATCHED for the SessionStart
+            // hook (not merely when the hook itself arrives at the process; a hook that arrives at 18s but
+            // whose deliverHook call is only DISPATCHED at 21s, e.g. queued behind other synchronous work on
+            // an overloaded event loop, hits the residual below exactly the same as a hook that arrived late
+            // in the first place). If that dispatch happens AT OR PAST the ORIGINAL spawn+READY_FALLBACK_MS
+            // mark, this exact race can still be lost (the old timer already fired, or is about to, before
+            // this line ever runs) — a strictly worse contention level than the 2026-08-01 incident (worst
+            // observed SessionStart-to-fallback gap there was ~11.6s, well under READY_FALLBACK_MS's own
+            // margin here — see docs/investigations/c469d54e-ready-fallback-race/findings.md). The absolute
+            // ceiling below still guarantees the kickoff is never stranded forever in that residual case — see
+            // READY_FALLBACK_ABSOLUTE_CEILING_MS's own doc — it just doesn't guarantee that residual case is
+            // corruption-free. Do not claim this closes the race for arbitrary contention.
+            //
+            // ⚠️ ORDER IS LOAD-BEARING: arm the NEW timer BEFORE clearing the OLD one. If anything throws
+            // between the two lines below (or a future edit reorders them), the result is TWO live timers,
+            // never zero — the worst case is the old one firing at spawn+READY_FALLBACK_MS, i.e. degrading
+            // to EXACTLY today's pre-fix behavior (markReady's `live.ready` guard makes a double-fire a
+            // no-op). Clearing first and failing before the re-arm would instead risk ZERO live timers if
+            // cycleToMode itself then never manages to call its onDone — a queued kickoff stranded forever,
+            // which is strictly worse than the bug this card fixes. Degrading toward the old bug is safe;
+            // degrading toward a stranded kickoff is not — do not reverse this order.
+            const elapsedSinceSpawn = Date.now() - live.startedAt;
+            const boundedDelay = Math.max(0, Math.min(MODE_CYCLE_FALLBACK_MS, READY_FALLBACK_ABSOLUTE_CEILING_MS - elapsedSinceSpawn));
+            const newFallbackTimer = setTimeout(() => {
+              const l = this.live.get(sessionId);
+              if (l?.alive && !l.ready) {
+                console.log(`[pty] ${sessionId} mode-cycle fallback (still not ready ${boundedDelay}ms after SessionStart) — marking ready`);
+                this.markReady(sessionId);
+              }
+            }, boundedDelay);
+            const oldFallbackTimer = live.readyFallbackTimer;
+            live.readyFallbackTimer = newFallbackTimer;
+            if (oldFallbackTimer) clearTimeout(oldFallbackTimer);
             this.cycleToMode(sessionId, target, () => this.markReady(sessionId));
           } else {
             this.markReady(sessionId);
@@ -6798,8 +6923,9 @@ export class PtyHost {
    * BOUNDED + GRACEFUL — it NEVER infinite-loops and NEVER wedges boot: every terminating branch (reached
    * the target / hit the press cap / footer unreadable / a press didn't move the footer / pty gone) calls
    * `onDone` exactly once (markReady), so queued injections are released only AFTER the mode settles.
-   * Total time is sized to finish well under READY_FALLBACK_MS so the readiness fallback can't fire
-   * mid-cycle. A give-up branch can, in a rare worst case, leave the session resting in an intermediate
+   * Total time is sized to finish well under MODE_CYCLE_FALLBACK_MS (card c469d54e — re-armed from
+   * SessionStart; see its own doc) so the mode-cycle fallback can't fire mid-cycle. A give-up branch can,
+   * in a rare worst case, leave the session resting in an intermediate
    * mode (incl. `plan`) rather than the target — `logLandedMode`'s role-gated auto-heal is the backstop
    * that catches a Loom-driven role (no `ExitPlanMode` tool) left stranded there; this primitive itself is
    * intentionally unchanged behaviour for the resume caller (do not add path-specific corrections here).
@@ -6972,6 +7098,12 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.ready) return;
     live.ready = true;
+    // Card c469d54e: cancel whichever readiness-fallback timer is still pending (the original spawn-armed
+    // one, or the SessionStart-rearmed one — see Live.readyFallbackTimer's own doc) now that readiness is
+    // ACTUALLY achieved, so it can't fire a redundant (harmless, but wasteful) late no-op call later. The
+    // `live.ready` guard above means this whole function body runs AT MOST once per session, so this clear
+    // can never be skipped by an early return on any call that reaches this line — there is only one.
+    if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
     // Card 25813ecc (fixes a live regression 0050a17e/b4fa85a4 introduced): capture the kickoff from
     // `live.startupPrompt` — the IMMUTABLE field seeded once at spawn() — BEFORE `drainPending` runs
     // below. `live.lastPrompt` is NOT safe to read here: `drainPending` calls `submit()` for any queued
@@ -7163,7 +7295,9 @@ export class PtyHost {
    * mode=unknown — no correction is attempted without a definite read), and corrects at most once per
    * session (modeLogged guard, claimed up front, so a repeat markReady never re-triggers the heal even
    * mid-cycle). Shells are excluded. `cycleToMode` is itself bounded (see its doc comment), so the whole
-   * heal — this poll-for-a-read plus the cycle — stays comfortably under READY_FALLBACK_MS.
+   * heal — this poll-for-a-read plus the cycle — stays comfortably under MODE_CYCLE_FALLBACK_MS (card
+   * c469d54e; a heal's OWN cycleToMode call re-uses whatever fallback timer is already armed at that point
+   * — it does not re-arm one itself).
    *
    * `onSettled` (card 0050a17e, Code Review catch): fires EXACTLY ONCE, on every terminal path (an early
    * return, the poll giving up at MODE_LOG_MAX_ATTEMPTS, a definite read with no heal needed, or a fired
