@@ -1020,12 +1020,48 @@ try {
     db.insertSession({ id: r2MgrId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: R.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: r2WorkerId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: r2Worktree, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: r2MgrId, taskId: r2TaskId, worktreePath: r2Worktree, branch: r2Branch });
 
-    const LEAK_PROBE_TIMEOUT_MS = 5_000;
+    // CARD 944f7c17: this used to race the real confirmWorkerMerge below (real git subprocesses + SQLite)
+    // against a FIXED `LEAK_PROBE_TIMEOUT_MS = 5_000` — a hand-picked wall-clock number that flaked a green
+    // gate (op 7180a6ca, 862s total runtime) despite a measured ~7x quiet-host margin: the repo-guard's own
+    // admit→release window (`[gate:repo-guard]`, `gate_queue activeCount:0`) measured 683ms against that
+    // 5,000ms budget on a direct re-run of THIS SAME assertion. A 7x margin sounding ample and still getting
+    // consumed once is the whole argument against sizing ANY fixed constant here (see the card body's
+    // §DISCRIMINATOR — concurrency and gross host load were both positively EXCLUDED as the driver; the
+    // remaining candidate is a momentary, local stall, which a fixed number can never absorb).
+    //
+    // Fix: calibrate LIVE instead of guessing. Run an ORDINARY confirmWorkerMerge on an UNCONTENDED repo
+    // (same shape as the probe below — same fakeGate, same helpers — but shares no repoPath with R, so it
+    // can never itself be blocked by a leaked guard) immediately beforehand, time it with a monotonic clock,
+    // and scale the probe's own ceiling off THAT live measurement. A slow moment on this host inflates the
+    // ceiling right along with it, instead of racing a number picked on a different day under different
+    // conditions. The BOUND itself is unchanged in kind — still a race, still a `check()` failure (not a
+    // hang) on timeout — only the fixed CONSTANT is gone.
+    const CAL = mk("rcal", "feature-rcal.txt");
+    makeRepo(CAL);
+    const { worktreePath: calWorktree, branch: calBranch } = await createWorktree(CAL.repo, CAL.projId, CAL.taskId);
+    CAL.worktreePath = calWorktree; CAL.branch = calBranch; worktrees.push(calWorktree);
+    fs.writeFileSync(path.join(calWorktree, CAL.file), "work for rcal\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${CAL.file}"`, { cwd: calWorktree });
+    seed(db, CAL, "pnpm gate");
+    const calStartedAt = performance.now();
+    const calResult = await sessions.confirmWorkerMerge(CAL.mgrId, CAL.workerId);
+    const calDurationMs = performance.now() - calStartedAt;
+    check("(R) calibration: an ordinary, uncontended confirmWorkerMerge landed (sizes the probe ceiling below — not itself a leak assertion)", calResult?.merged === true);
+
+    // Floor guards against a freak sub-millisecond calibration reading producing an unrealistically tight
+    // ceiling; the multiplier is the actual safety margin — 20x a REAL, same-host, same-moment, same-shape
+    // measurement is a larger and better-justified margin than the old constant's 7x-against-a-different-
+    // day's-683ms ever was.
+    const LEAK_PROBE_CEILING_FLOOR_MS = 2_000;
+    const LEAK_PROBE_CEILING_MULTIPLIER = 20;
+    const leakProbeCeilingMs = Math.max(LEAK_PROBE_CEILING_FLOOR_MS, calDurationMs * LEAK_PROBE_CEILING_MULTIPLIER);
+    const r2StartedAt = performance.now();
     const r2Result = await Promise.race([
       sessions.confirmWorkerMerge(r2MgrId, r2WorkerId),
-      new Promise((resolve) => setTimeout(() => resolve("TIMED_OUT"), LEAK_PROBE_TIMEOUT_MS)),
+      new Promise((resolve) => setTimeout(() => resolve("TIMED_OUT"), leakProbeCeilingMs)),
     ]);
-    check("(R) a second, ordinary same-repo merge completes promptly after the injected throw — the guard did not leak",
+    const r2DurationMs = performance.now() - r2StartedAt;
+    check(`(R) a second, ordinary same-repo merge completes promptly after the injected throw — the guard did not leak (calibration=${calDurationMs.toFixed(0)}ms, ceiling=${leakProbeCeilingMs.toFixed(0)}ms, actual=${r2DurationMs.toFixed(0)}ms)`,
       r2Result !== "TIMED_OUT" && r2Result?.merged === true);
   }
 
