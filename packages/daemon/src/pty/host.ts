@@ -4478,13 +4478,33 @@ export class PtyHost {
               while (i < max && reported[i] === intended[i]) i++;
               // Show WHERE the divergence starts, not just that one exists — the known specimens all splice
               // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in practice.
-              // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): a systematic BENIGN mismatch
-              // (framing/normalization) would otherwise look identical to a real splice at a glance. `lenDelta`
-              // and the two tail lengths let a reader tell them apart without doing arithmetic — a splice makes
-              // `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at the
-              // divergence point; a trailing-whitespace/normalization artifact diverges near the very END, so
-              // both tails are tiny (near 0) regardless of `lenDelta`; wholly different strings diverge at
-              // `divergesAtChar=0`.
+              // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): `lenDelta` and the two tail
+              // lengths let a reader tell a real splice from a wholly-different string at a glance — a splice
+              // makes `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at
+              // the divergence point; wholly different strings diverge at `divergesAtChar=0`.
+              // ⛔ CORRECTED (card cf2fef73, owner-reported false LOSS alarm): this comment used to also claim a
+              // trailing-whitespace/normalization artifact diverges near the very END with TINY tails on both
+              // sides. MEASURED FALSE for the actual benign case seen in production — an INTERIOR tab, echoed
+              // back space-expanded by the terminal, desyncs a byte-wise scan AT the tab and never re-syncs, so
+              // everything after it counts as mismatched: a tail as large as any real splice's. Over the
+              // retained corpus, 355/368 mismatches had "both tails large" by this shape — almost all of them
+              // this benign case, not real splices. TAIL SIZE CANNOT DISCRIMINATE a benign whitespace re-render
+              // from a real splice; the whitespace-normalized comparison below is the actual discriminator now
+              // used to decide whether the session-facing notice fires.
+              // ⛔ ALSO CORRECTED (manager review, card cf2fef73): "wholly different strings diverge at
+              // `divergesAtChar=0`" is also not reliable in practice — the single most common benign shape
+              // measured in the corpus (a stale collapsed paste-placeholder, `[Pasted text #N +M lines]`,
+              // PREPENDED onto an otherwise-correct submission — see the placeholder-prefix check below)
+              // diverges at `divergesAtChar=1`, not 0: both strings start with the same `[` byte before
+              // splitting. The single most common benign shape in the corpus therefore presents with the
+              // MOST ALARMING-LOOKING raw signature available — do not read `divergesAtChar` alone as a
+              // reliable "wholly unrelated content" signal either.
+              // ⭐ THE GENERAL SHAPE OF THIS BUG: the comparison above is exact, but the property it exists to
+              // detect ("was the intended content preserved") is not a byte-exact one — a benign rendering or
+              // framing transform changes the bytes without losing anything, and an exact byte-comparison has
+              // no way to tell that apart from a real loss. It reports every transformation as a corruption
+              // unless the transform is explicitly named and checked for, which is what the two suppression
+              // checks below do.
               const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
@@ -4549,32 +4569,71 @@ export class PtyHost {
                   ? `The submitted content exactly matches what this session itself wrote for the IMMEDIATELY PRECEDING generation (gen=${replayedEntry.gen}) — the shape every measured occurrence of this class of mismatch has shown so far. If that generation's own turn already ran, this is likely a DUPLICATE re-delivery of it, not new content — check the message sent just before this one.`
                   : `The submitted content exactly matches what this session itself wrote for an EARLIER generation (gen=${replayedEntry.gen}, not the immediately preceding one) — if that generation's own turn already ran, this may be a DUPLICATE re-delivery of it, not new content. This is an unusual shape: every measured occurrence of this class of mismatch so far replayed only the immediately preceding generation.`
                 : "The submitted content does not match any of this session's own recent writes that Loom still has a record of. Every measured occurrence of this class of mismatch so far replayed the IMMEDIATELY PRECEDING submission — check the message sent just before this one for what may have been duplicated, even though this specific case could not be matched directly.";
-              const mismatchText =
-                `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). This means the text Loom intended for this turn may not have reached you at all — a possible LOSS. ${replayNote} ` +
-                `Before trusting the turn that just ran: check it against what you actually intended to act on, and check your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same thing twice.`;
-              // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
-              // this must land as the notice's OWN pty submission, never appended to another payload — the
-              // standing rule this very finding established, since the whole point is that a payload can
-              // itself be substituted — and must run OUTSIDE this hook handler's own synchronous call stack.
-              // kind:"warning" (an operational nudge, not agent-authored content) so it coalesces like other
-              // Loom watchdog notices rather than competing for the one-per-turn "agent" delivery slot.
-              //
-              // SELF-REFERENCE, NOTED AND BOUNDED — manager review, card 201d0d95: this notice is ITSELF
-              // delivered as a pty submission, which sets `live.lastPrompt` for ITS OWN generation exactly
-              // like any other turn — so a substituted mismatch-notice is structurally possible ("a mismatch
-              // notice about a mismatch notice"), and nothing downstream can currently tell a replayed NOTICE
-              // apart from a replayed ordinary payload. Deliberately NOT guarded (no recursion cap, no
-              // dedup): at the measured 0.39%-of-submissions base rate (see the sweep note above), the
-              // expected chain length is ~1/(1-0.0039) ≈ 1.004 — a guard would be defending against a event
-              // this arithmetic says essentially never compounds — and `kind:"warning"` coalescing further
-              // dampens any chain that did start by merging with whatever else is already queued, rather than
-              // stacking. If a cheap, non-invasive way to let a recipient distinguish "this IS a
-              // prompt-mismatch notice, replayed" from "this is a replayed ordinary message" turns up (e.g. a
-              // recognizable tag check mirroring `isPasteRecoveryAttempt`), that is a follow-up, not scope
-              // creep here — this comment exists so a future reader who spots the recursion finds this
-              // reasoning instead of re-deriving it or reaching for an unneeded guard.
-              setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
+              // Card cf2fef73 (owner-reported, false LOSS alarm on benign whitespace re-rendering): before
+              // treating this mismatch as notice-worthy to the SESSION, check whether `reported` and
+              // `intended` reconcile once whitespace is normalized — tabs and runs of spaces collapsed, line
+              // endings normalized. A terminal that echoes a submitted TAB back space-expanded produces
+              // byte-identical CONTENT, but the byte-wise scan above diverges AT the tab and never re-syncs
+              // (see the corrected comment above `divergesAtChar` for why tail size can't tell this apart
+              // from a real splice). FAIL CLOSED: normalization only ever SUPPRESSES the notice, never adds
+              // one — a mismatch that reconciles under normalization is benign and skipped below; one that
+              // does NOT reconcile keeps firing exactly as it does today, unconditionally, including the real
+              // substitution class (card 201d0d95) this notice exists to catch. The diagnostic
+              // `[prompt-mismatch]` / `[prompt-echo]` / `[composer-accumulation*]` logs above are UNCONDITIONAL
+              // on this check — only the session-facing alarm below is gated, so the raw corpus is preserved.
+              const normalizeForMismatchNotice = (s: string) => s.replace(/\r\n/g, "\n").replace(/\t/g, " ").replace(/ +/g, " ");
+              const isBenignWhitespaceRerender = normalizeForMismatchNotice(reported) === normalizeForMismatchNotice(intended);
+              // Card cf2fef73 (manager review, second population — MEASURED the largest single benign class
+              // in the corpus): a STALE PLACEHOLDER PREFIX. The engine echoes back OLDER, already-collapsed
+              // paste-placeholder frame(s) (Claude Code's own paste-collapse UI — a SEPARATE mechanism from
+              // detectPastePlaceholderLengthLoss/eef4883c/0f9268cc, which this card does not touch) PREPENDED
+              // onto what is otherwise the correctly-submitted `intended` text, unchanged. Content is fully
+              // present — `reported` is LARGER than `intended` by exactly the prefix's own length, the wrong
+              // direction for a loss. TWO PLACEHOLDER FORMS are measured in production: `[Pasted text #N +M
+              // lines]` (with a line count) and `[Pasted text #N]` (no line count) — and PLACEHOLDERS STACK:
+              // a real specimen carried THREE concatenated, MIXING both forms (`[Pasted text #11][Pasted
+              // text #12 +38 lines][Pasted text #13 +40 lines]`, delta=71=17+27+27 exactly). The strip is
+              // therefore GLOBAL — one-or-more repetitions of the token, matched as a single leading run —
+              // not a single-shot match: a single-shot strip would leave later placeholders in the
+              // remainder on a stacked run, so `remainder !== intended`, so the identity below would FAIL
+              // and the notice would FIRE on a provably benign case — fail-OPEN in exactly the dense-paste
+              // case where a false alarm costs the most (manager review, card cf2fef73). PRECISE,
+              // non-heuristic, fails closed by construction (no band/threshold/tail arithmetic) regardless
+              // of how many placeholders matched or which form(s): only suppress when `reported` is EXACTLY
+              // `<the whole leading placeholder run>` + `intended`, byte-for-byte after stripping it — a
+              // placeholder run that instead REPLACED real content (measured: both a `lenDelta=-579`
+              // specimen for form 1 and negative-delta specimens for form 2, `reported` SHORTER — a genuine
+              // loss) does not match this shape and keeps firing, unchanged.
+              const stalePlaceholderPrefixMatch = /^(?:\[Pasted text #\d+(?: \+\d+ lines)?\])+/.exec(reported);
+              const isStalePlaceholderPrefix = stalePlaceholderPrefixMatch !== null && reported.slice(stalePlaceholderPrefixMatch[0].length) === intended;
+              if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix) {
+                const mismatchText =
+                  `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                  `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). This means the text Loom intended for this turn may not have reached you at all — a possible LOSS. ${replayNote} ` +
+                  `Before trusting the turn that just ran: check it against what you actually intended to act on, and check your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same thing twice.`;
+                // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
+                // this must land as the notice's OWN pty submission, never appended to another payload — the
+                // standing rule this very finding established, since the whole point is that a payload can
+                // itself be substituted — and must run OUTSIDE this hook handler's own synchronous call stack.
+                // kind:"warning" (an operational nudge, not agent-authored content) so it coalesces like other
+                // Loom watchdog notices rather than competing for the one-per-turn "agent" delivery slot.
+                //
+                // SELF-REFERENCE, NOTED AND BOUNDED — manager review, card 201d0d95: this notice is ITSELF
+                // delivered as a pty submission, which sets `live.lastPrompt` for ITS OWN generation exactly
+                // like any other turn — so a substituted mismatch-notice is structurally possible ("a mismatch
+                // notice about a mismatch notice"), and nothing downstream can currently tell a replayed NOTICE
+                // apart from a replayed ordinary payload. Deliberately NOT guarded (no recursion cap, no
+                // dedup): at the measured 0.39%-of-submissions base rate (see the sweep note above), the
+                // expected chain length is ~1/(1-0.0039) ≈ 1.004 — a guard would be defending against a event
+                // this arithmetic says essentially never compounds — and `kind:"warning"` coalescing further
+                // dampens any chain that did start by merging with whatever else is already queued, rather than
+                // stacking. If a cheap, non-invasive way to let a recipient distinguish "this IS a
+                // prompt-mismatch notice, replayed" from "this is a replayed ordinary message" turns up (e.g. a
+                // recognizable tag check mirroring `isPasteRecoveryAttempt`), that is a follow-up, not scope
+                // creep here — this comment exists so a future reader who spots the recursion finds this
+                // reasoning instead of re-deriving it or reaching for an unneeded guard.
+                setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
+              }
             }
           }
         }
