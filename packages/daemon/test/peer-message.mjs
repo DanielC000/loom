@@ -236,13 +236,15 @@ try {
 
   // ===================== (10) Card 417cea0a — PARK COVERAGE: this file had ZERO park coverage before this =====
   // ===== (negative grep for "park", case-insensitive: 0 hits). A peer_message sender (MGR_A) is NEVER the ===
-  // ===== target's parentSessionId, so this is exactly the case the [loom:redelivery-parked] notice's =========
-  // ===== prescribed-action fix (card 417cea0a, DoD item 1) targets: the honest "no cross-session read" ======
-  // ===== clause, never the impossible worker_list/worker_status instruction. =================================
+  // ===== target's parentSessionId, so this used to be exactly the case the [loom:redelivery-parked] notice's =
+  // ===== prescribed-action fix (card 417cea0a, DoD item 1) targeted: the honest "no cross-session read" ======
+  // ===== clause, never the impossible worker_list/worker_status instruction. Card 0f693dea SUPERSEDES the ====
+  // ===== "no read exists" half for exactly this case: a peer_message sender now gets pointed at =============
+  // ===== peer_message_status instead (a real, working check), since that's the dead end the card measured. ==
   const parkClient = await connect(orch.buildServer("MGR_A", "manager"));
   const parkCall = async (args) => parse(await parkClient.callTool({ name: "peer_message", arguments: args }));
   const enqBeforePark = host.enqueued.length;
-  await parkCall({ targetProjectId: "pB", text: "PEER_PARK_TEST" });
+  const parkSend = await parkCall({ targetProjectId: "pB", text: "PEER_PARK_TEST" });
   const firstDispatch = host.enqueued.slice(enqBeforePark).find((e) => e.id === "MGR_B");
   check("(10) setup: the peer dispatch to MGR_B carried a give-up hook", typeof firstDispatch?.onGiveUpExhausted === "function");
   firstDispatch.onGiveUpExhausted(); // chainDepth 0 exhausted, below GIVE_UP_REMINT_LIMIT (default 1) → RE-MINT
@@ -252,10 +254,21 @@ try {
 
   const parkedNote = host.enqueued.slice(enqBeforePark).reverse().find((e) => e.id === "MGR_A" && e.text.includes("[loom:redelivery-parked]"));
   check("(10) PARK COVERAGE: the peer sender (MGR_A) got a [loom:redelivery-parked] notice", !!parkedNote);
-  check("(10) PARK COVERAGE: a genuine peer sender (not the recipient's manager) gets the honest 'no cross-session read' clause",
-    !!parkedNote && parkedNote.text.includes("no cross-session") && parkedNote.text.includes("transcript/state read available"));
+  check("(10) card 0f693dea: a genuine peer sender now gets pointed at peer_message_status, naming its OWN root msgId — not the old dead-end 'no cross-session read' text",
+    !!parkedNote && parkedNote.text.includes("peer_message_status") && parkedNote.text.includes(parkSend.msgId.slice(0, 8))
+    && !parkedNote.text.includes("no cross-session") && !parkedNote.text.includes("transcript/state read available"));
   check("(10) PARK COVERAGE: the impossible worker_list/worker_status instruction is NEVER offered to a peer sender",
     !!parkedNote && !parkedNote.text.includes("worker_list"));
+
+  // (10b) card 0f693dea CR Major-1 follow-up: query with THE VALUE THE NOTICE ACTUALLY CONTAINS — an 8-char
+  // PREFIX (the notice never prints a full msgId) — not the full id the test happens to have lying around.
+  // A full-id query would pass even if the tool rejected prefixes outright, which is exactly the dead-end
+  // regression Code Review caught here: the notice handing out a value its own named tool then rejected.
+  const notedPrefix = (parkedNote.text.match(/Check (\S+) via peer_message_status/) || [])[1];
+  check("(10b) setup: extracted the exact msgId prefix the notice text carries", typeof notedPrefix === "string" && notedPrefix === parkSend.msgId.slice(0, 8));
+  const parkStatus = parse(await parkClient.callTool({ name: "peer_message_status", arguments: { msgId: notedPrefix } }));
+  check("(10b) the EXACT value the parked notice handed MGR_A (an 8-char prefix) resolves via peer_message_status to state:\"parked\"",
+    parkStatus.found === true && parkStatus.state === "parked");
   await parkClient.close();
 
   // Defense in depth: the service method itself rejects a non-manager caller.

@@ -4,7 +4,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // live backing state and are now registered ONLY when that state exists — so most projects never carry
 // them in their per-turn tool-list floor:
 //   - `deploy` registers ONLY when the project's RESOLVED orchestration.deployCommand is non-empty.
-//   - `peer_message`/`peer_list` register ONLY when the project has ≥1 `project_links` row.
+//   - `peer_message`/`peer_list`/`peer_message_status` register ONLY when the project has ≥1
+//     `project_links` row.
 // Both gates read the SAME underlying data (`db` directly — resolveConfig for deployCommand,
 // db.listProjectLinks for peer links) that the gated tool's OWN execution (sessions.deployOwnProject /
 // sessions.listPeerProjects / sessions.messagePeerManager) relies on, so a registered tool can never be a
@@ -106,9 +107,10 @@ try {
     const unlinkedServer = router.buildServer("mgrUnlinked", "manager");
     check("(C) peer_message is OMITTED when the project has zero project_links rows", !("peer_message" in unlinkedServer._registeredTools));
     check("(C) peer_list is OMITTED when the project has zero project_links rows", !("peer_list" in unlinkedServer._registeredTools));
+    check("(C) peer_message_status is OMITTED when the project has zero project_links rows", !("peer_message_status" in unlinkedServer._registeredTools));
 
     const linkedServerBefore = router.buildServer("mgrLinked", "manager");
-    check("(D pre-check) pLinked starts with no links either — both tools omitted before createProjectLink", !("peer_message" in linkedServerBefore._registeredTools) && !("peer_list" in linkedServerBefore._registeredTools));
+    check("(D pre-check) pLinked starts with no links either — all three tools omitted before createProjectLink", !("peer_message" in linkedServerBefore._registeredTools) && !("peer_list" in linkedServerBefore._registeredTools) && !("peer_message_status" in linkedServerBefore._registeredTools));
   }
 
   db.createProjectLink("pLinked", "pPeer");
@@ -117,6 +119,7 @@ try {
     const linkedServer = router.buildServer("mgrLinked", "manager");
     check("(D) peer_message IS registered once the project has ≥1 project_links row", "peer_message" in linkedServer._registeredTools);
     check("(D) peer_list IS registered once the project has ≥1 project_links row", "peer_list" in linkedServer._registeredTools);
+    check("(D) peer_message_status IS registered once the project has ≥1 project_links row", "peer_message_status" in linkedServer._registeredTools);
 
     // Prove the gate reads the SAME source peer_list's own handler reads (db.listProjectLinks), by
     // calling the real registered handler and checking it surfaces the just-created peer.
@@ -125,7 +128,7 @@ try {
 
     // (C) still holds for the UNLINKED project even after pLinked/pPeer got a link — no cross-project leak.
     const stillUnlinked = router.buildServer("mgrUnlinked", "manager");
-    check("(C cont'd) an unrelated unlinked project is unaffected by another project's new link", !("peer_message" in stillUnlinked._registeredTools) && !("peer_list" in stillUnlinked._registeredTools));
+    check("(C cont'd) an unrelated unlinked project is unaffected by another project's new link", !("peer_message" in stillUnlinked._registeredTools) && !("peer_list" in stillUnlinked._registeredTools) && !("peer_message_status" in stillUnlinked._registeredTools));
   }
 
   // ============ (E) the rest of the manager surface is unaffected ============

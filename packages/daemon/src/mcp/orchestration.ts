@@ -621,6 +621,73 @@ function directiveByMsgId(
 }
 
 /**
+ * Card 0f693dea DoD-2 — the sender-facing per-msgId delivery read behind `peer_message_status`. A
+ * `peer_message` sender has NO cross-project read into the target project's session at all (see
+ * `handleGiveUpExhausted`'s `canCheckRecipient` doc, sessions/service.ts — the honest "no read exists"
+ * clause a peer sender gets in a `[loom:redelivery-parked]` notice) — the actual gap this card exists to
+ * close. Ownership is enforced BY CONSTRUCTION, with no exception: every event this function ever consults
+ * is drawn from `db.listEvents(id)` for `id` in the caller's OWN recycle lineage (`ownLineageIds` below) —
+ * NEVER a read into any other session's stream, peer or otherwise. This function genuinely never reads the
+ * peer manager's own event stream; earlier drafts of this doc and of this function's own body disagreed on
+ * that point (a real "the sentence asserting a policy is where it breaches" instance, caught in Code
+ * Review) — fixed at the SOURCE instead, see below.
+ *
+ * THREE fixes landed here after Code Review on this card's first pass, all measured against the running
+ * daemon rather than assumed from the shape of the code:
+ *
+ * (CRITICAL) A held/queued send that later drains normally used to read "pending" FOREVER. Root cause:
+ * `resolveDirectiveOutcome`'s delivered-check for a NON-immediate hand-off looks for a
+ * `session_message_delivered` event carrying this msgId — but `resolveQueuedMessage` (sessions/service.ts)
+ * used to stamp that event with `managerSessionId:""` (never the sender), so it could never appear in a
+ * sender-scoped stream. TWO candidate fixes were considered and REJECTED: (a) merge in the recipient's own
+ * `db.listEventsForWorker` stream here — rejected because it reads the PEER MANAGER's own event stream
+ * across a project trust boundary to answer a question about OUR OWN message, a genuinely weaker ownership
+ * property than "scoped to the caller's own stream" for a PRIVATE product, even though the RETURNED shape
+ * stays narrow; (b) `db.isQueuedMessageDelivered(msgId)` as a boolean existence check — rejected because it
+ * has no timestamp, forcing `at:null` on a resolved "delivered" state and breaking this function's own
+ * "`at` is null only while pending" contract. FIXED AT THE SOURCE INSTEAD: `resolveQueuedMessage` now
+ * threads the real originating sender through (every call site updated, see that method's own doc) instead
+ * of hard-coding `""` — the SAME sender its own paired `session_message_queued` event has ALWAYS carried.
+ * The event simply appears in this function's existing sender-scoped read once stamped correctly; nothing
+ * about this function's OWN scope needed to change.
+ *
+ * (MAJOR) `peer_message_status` is scoped to `managerSessionId`'s own RECYCLE LINEAGE (`ownLineageIds`,
+ * same widening `directiveDeliveriesForCaller` already applies for the recipient side), not just its exact
+ * live session id — a sender that recycles must still be able to resolve a msgId its PREDECESSOR minted;
+ * this is, after all, the card about recycle-awareness.
+ *
+ * (MAJOR) Accepts an unambiguous id-PREFIX (`resolveIdPrefix`, `../id-prefix.js`), not just a full msgId —
+ * the SAME `tasks_get`/`agent_get`/`worker_relink` convention used everywhere else Loom hands a truncated
+ * id to a reader. The `[loom:redelivery-parked]` notice this tool exists to answer only ever prints an
+ * 8-char slice of the msgId (mirrors every other id it slices the same way); requiring an exact full-id
+ * match would make the notice's own prescribed action fail — this card's dead end, reintroduced inside its
+ * own fix. An ambiguous prefix across the lineage returns `found:false` (same as a genuine miss — there is
+ * no legitimate reason to distinguish them for this reader; unlike an id-scoped `*_get`, nothing here is
+ * lost by not naming the candidates).
+ */
+function peerMessageStatusByMsgId(
+  db: Db, managerSessionId: string, ref: string,
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+  const events = ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id));
+  const originCandidates = events
+    .filter((e): e is OrchestrationEvent & { detail: { msgId: string } } =>
+      e.kind === "cross_project_message" && typeof e.detail?.msgId === "string")
+    .map((e) => ({ id: e.detail.msgId, event: e }));
+  const resolved = resolveIdPrefix(originCandidates, ref);
+  if (resolved.kind !== "found") return { msgId: ref, found: false, state: null, at: null };
+  const originEvent = resolved.record.event;
+  const msgId = resolved.record.id;
+
+  const outcome = resolveDirectiveOutcome(events, originEvent, msgId);
+  const at =
+    outcome.state === "parked" ? outcome.parkedAt
+    : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
+    : outcome.state === "delivered" ? outcome.deliveredAt
+    : null;
+  return { msgId, found: true, state: outcome.state, at };
+}
+
+/**
  * Card 35c96aa6 — walk `sessionId`'s OWN `recycledFrom` ancestor chain, self included, bounded/cycle-
  * guarded. Same shape as `lineageRootId` (sessions/platform-lead-prompt.ts), but returns the FULL chain
  * instead of just the root: `directiveDeliveriesForCaller` needs every ancestor's own event history, not
@@ -3706,7 +3773,19 @@ export class OrchestrationMcpRouter {
             "within its OWN project and gains no reach into yours except replying through this same primitive. " +
             "The delivered frame ([loom:from-manager · <name> · projectId:<id> · sessionId:<id>]) stamps YOUR " +
             "project id and this manager session's id, so a recipient can reply with peer_message using that " +
-            "projectId as ITS targetProjectId — no need to ask the owner to relay it.",
+            "projectId as ITS targetProjectId — no need to ask the owner to relay it. Also returns `msgId` " +
+            "(when the target project has a live manager — omitted on a `boarded` send, which has no " +
+            "redelivery chain to track): pass it to `peer_message_status` LATER to check whether this " +
+            "specific send actually landed, independent of anything you send afterward — the primitive that " +
+            "closes the gap a `[loom:redelivery-parked]` notice used to leave open for a cross-project sender " +
+            "(\"may have failed, and you have no way to check\"). `targetSessionId` differing from an EARLIER " +
+            "send's to the SAME targetProjectId is EXPECTED, not a fault — the resolved target is always the " +
+            "peer's CURRENT live manager, which legitimately changes across a recycle at the target; when " +
+            "that happens this call also returns `recycledSincePriorSend:true` plus an `advisory` naming the " +
+            "old/new session prefixes, so you don't have to rediscover that the hard way. A `queued` " +
+            "(not-yet-delivered) result ALSO carries an `advisory`: the peer project's manager may recycle " +
+            "before draining its queue, in which case a SUCCESSOR session reads this, not necessarily the one " +
+            "you've been talking to — write it to be understood cold either way.",
           inputSchema: strictShape({ targetProjectId: z.string(), text: z.string() }),
         },
         async ({ targetProjectId, text }) => {
@@ -3743,6 +3822,46 @@ export class OrchestrationMcpRouter {
             return ok({ error: (e as Error).message });
           }
         },
+      );
+
+      // peer_message_status: card 0f693dea DoD-2, the PRIMARY ask — a sender-side delivery read keyed to
+      // a peer_message's own msgId, closing the dead end a `[loom:redelivery-parked]` notice used to leave
+      // a cross-project sender in ("may have failed, and you have no way to check"). Scoped to YOUR OWN
+      // recycle lineage's event stream (peerMessageStatusByMsgId's own doc, above) — so this can only ever
+      // resolve a msgId your own (or a direct predecessor's own) peer_message calls minted; never a probe
+      // into another manager's sends or the peer's own state.
+      server.registerTool(
+        "peer_message_status",
+        {
+          description:
+            "Check whether a PRIOR peer_message you sent actually landed — the sender-side delivery read " +
+            "peer_message's own `[loom:redelivery-parked]` notice points you to, closing the dead end where " +
+            "you're told delivery may have failed and, in the same breath, told no check exists. Pass the " +
+            "`msgId` a PRIOR peer_message call returned to you (the FULL id, or an unambiguous 8-char " +
+            "id-prefix — the SAME resolution as `tasks_get`/`agent_get`/`worker_relink`, and exactly what " +
+            "the parked notice itself hands you, since it only ever slices a msgId to 8 chars; never a value " +
+            "you invent — see below for what an unrecognized one returns). Returns `{msgId, found, state, " +
+            "at}` (`msgId` is always the FULL resolved id, even when you passed a prefix): `found:false` " +
+            "means this isn't one of YOUR OWN peer_message sends — a typo, an ambiguous prefix, or the send " +
+            "BOARDED (a boarded send has no redelivery chain to track, since it's already a durable task on " +
+            "the target's own board — check the target project's board instead). `found:true` gives `state` " +
+            "— `\"pending\"` (still queued or Loom is still retrying its redelivery internally, not resolved " +
+            "either way yet), `\"delivered\"` (handed off as a turn — NOT proof the recipient manager acted " +
+            "on it, only that Loom got it there), `\"parked\"` (Loom exhausted its own redelivery budget " +
+            "with no confirmed hand-off — NOT proof it was never received, the engine can confirm a write " +
+            "minutes late under load; treat as genuinely uncertain, not as failed), or " +
+            "`\"confirmed-after-park\"` (a late confirming hook proved the original DID land after all, " +
+            "correcting an earlier `parked` reading — do NOT resend once you see this, the original already " +
+            "arrived and a resend would create a real duplicate turn). `at` is the timestamp of whichever " +
+            "state produced this reading, or null while still `\"pending\"`. Resolvable across YOUR OWN " +
+            "recycle lineage too — if you recycled since sending, you can still check a msgId your " +
+            "predecessor's peer_message call returned. This returns ONLY a delivered/undelivered/consumed " +
+            "bit for YOUR OWN message — never the peer's transcript, internals, or any other user-visible " +
+            "surface into that project (the peer stays a PRIVATE product). Non-mutating; safe to re-call " +
+            "any time.",
+          inputSchema: strictShape({ msgId: z.string() }),
+        },
+        async ({ msgId }) => ok(peerMessageStatusByMsgId(db, managerSessionId, msgId)),
       );
     }
 

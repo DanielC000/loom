@@ -4302,11 +4302,17 @@ export class SessionService {
     // A prior re-drive of this exact message is already HELD awaiting drain (this boot's other path, or a
     // near-simultaneous live-flip) → don't enqueue a second copy; its onDeliver will resolve the record.
     if (this.redriveInFlightMsgIds.has(msgId)) return "reEnqueued";
+    // Card 0f693dea CR follow-up: hoisted from further below (it only ever depended on `e`) so the two
+    // EARLY resolveQueuedMessage calls (retired below) can stamp the same real originating sender the LATE
+    // one (the live re-enqueue's own onDeliver, further down) already did — see resolveQueuedMessage's own
+    // doc for why this stamp matters. Mirrors recoverUndeliveredMessagesOnBoot's own fallback (`e.detail.
+    // sender`, else `e.managerSessionId`).
+    const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
 
     const recipient = this.db.getSession(recipientId);
     if (!recipient || this.db.hasSuccessor(recipientId) || recipient.archivedAt) {
       // Gone / recycled-forward / archived → retire so it never re-scans forever.
-      this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded" });
+      this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded", sender });
       return "retired";
     }
 
@@ -4318,7 +4324,7 @@ export class SessionService {
     if (staleReason) {
       // eslint-disable-next-line no-console
       console.log(`[redrive] retiring stale queued message ${msgId} for ${recipientId} — ${staleReason}`);
-      this.resolveQueuedMessage(msgId, { recipientId, reason: staleReason });
+      this.resolveQueuedMessage(msgId, { recipientId, reason: staleReason, sender });
       return "retired";
     }
 
@@ -4343,13 +4349,12 @@ export class SessionService {
       // hit the pre-card bare-drop branch: no re-mint, no park, no event, no sender surface, AND its
       // onDeliver had already fired (see resolveQueuedMessage's doc) so it would never be redriven again
       // either — Specimen Z's exact failure, intact, on this one path. Wired to the SAME handleGiveUpExhausted
-      // policy as every other durable dispatch. `sender` mirrors recoverUndeliveredMessagesOnBoot's own
-      // fallback (`e.detail.sender`, else `e.managerSessionId`).
+      // policy as every other durable dispatch. `sender` (hoisted to the top of this method, card 0f693dea)
+      // mirrors recoverUndeliveredMessagesOnBoot's own fallback (`e.detail.sender`, else `e.managerSessionId`).
       const kind: QueuedMessageKind = e.detail?.kind === "warning" ? "warning" : "agent";
       const giveUpHeldUntil = typeof e.detail?.giveUpHeldUntil === "number" ? e.detail.giveUpHeldUntil : undefined;
       const rootMsgId = typeof e.detail?.rootMsgId === "string" ? e.detail.rootMsgId : msgId;
       const chainDepth = typeof e.detail?.chainDepth === "number" ? e.detail.chainDepth : 0;
-      const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
       // Card 61a012ce: read back `route` the SAME way as kind/giveUpHeldUntil/rootMsgId/chainDepth above —
       // a legacy record (appended before this card) carries no `route` key, so this defaults to undefined
       // and redrives as a plain nudge exactly as it always has.
@@ -4373,7 +4378,7 @@ export class SessionService {
       const r = this.pty.enqueueStdin(
         recipientId, redrivenText, "system", (reason?: string) => {
           this.redriveInFlightMsgIds.delete(msgId);
-          this.resolveQueuedMessage(msgId, { recipientId, reason });
+          this.resolveQueuedMessage(msgId, { recipientId, reason, sender });
         }, route, kind, undefined, undefined, undefined, undefined, {
           giveUpHeldUntil,
           onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
@@ -6361,7 +6366,7 @@ export class SessionService {
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
     // records WHY the durable record closed without being delivered as a turn.
     const r = this.pty.enqueueStdin(
-      recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }),
+      recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason, sender: ctx.sender }),
       ctx.route, kind, undefined, undefined, undefined, undefined, {
         giveUpHeldUntil: ctx.giveUpHeldUntil,
         onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
@@ -6649,8 +6654,24 @@ export class SessionService {
       // clause's own "no read exists" text — a self-contradiction shipped to exactly the peer-sender case
       // card 417cea0a fixed (the recipient may not even BE a worker — a peer manager reached via
       // peer_message — so asserting "this worker's" state in text a peer sender reads was ALSO wrong).
+      // Card 0f693dea DoD-2/mechanics ("update the tool description / any doctrine that teaches the old
+      // workaround"): a `peer_message` sender used to fall straight into the unconditional "no read exists"
+      // branch below — the EXACT dead end card 0f693dea's §NEW-EVIDENCE measured verbatim off this notice.
+      // `peer_message_status` now closes it, so a THIRD branch is needed alongside `canCheckRecipient`'s
+      // worker case, gated on the sender's OWN `cross_project_message` audit event carrying this exact
+      // `rootMsgId` as its `msgId` (stamped by `messagePeerManager`) — the same, tightly-coupled signal
+      // `peer_message_status`'s own resolver (`peerMessageStatusByMsgId`, mcp/orchestration.ts) keys on,
+      // so "this notice offers the pointer" and "the pointer actually resolves" can never drift apart the
+      // way a role-based heuristic (e.g. "recipient is a manager") could — a manager-to-manager delivery
+      // that ISN'T a peer_message (there is none today, but nothing stops one existing later) would never
+      // falsely earn this branch. Computed lazily, INSIDE the ternary's else-arm (CR follow-up, card
+      // 0f693dea) — this `db.listEvents` read is otherwise wasted whenever `canCheckRecipient` already
+      // short-circuits the ternary; the park path is rare, so this was never a hot-path cost, just a
+      // pointless one.
       const recipientCheckClause = canCheckRecipient
         ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status (parkedDirective/directive.state) before assuming it's gone.`
+        : this.db.listEvents(sender).some((e) => e.kind === "cross_project_message" && e.detail?.msgId === rootMsgId)
+        ? `Check ${rootMsgId.slice(0, 8)} via peer_message_status before assuming it's gone.`
         : `Loom has no read you can use to check on ${recipientId.slice(0, 8)} from here — there is no cross-session ` +
           `transcript/state read available to a sender in your position.`;
       // Card 78e4b3f2: the head preview is taken from the tag-STRIPPED text — `text` here may already carry
@@ -6960,8 +6981,21 @@ export class SessionService {
    * PARKS (`handleGiveUpExhausted`) and appends a `session_message_gave_up` event carrying the SAME msgId
    * this method just stamped "delivered" for; `staleDirectiveProjection`'s chain walk (mcp/orchestration.ts)
    * is what actually resolves whether this stamp held up, not this method's name.
+   *
+   * `opts.sender` (card 0f693dea CR follow-up) — this event used to hard-code `managerSessionId:""`
+   * regardless of who originated the message, unlike its own paired `session_message_queued` event (which
+   * has ALWAYS carried the real `ctx.sender`, see `enqueueDurableMessage` above). That asymmetry is what
+   * made a HELD `peer_message` send resolve to "delivered" only via a RECIPIENT-scoped read
+   * (`db.listEventsForWorker`) and never a SENDER-scoped one (`db.listEvents(callerSessionId)`) — the exact
+   * gap `peer_message_status` (mcp/orchestration.ts) hit: reading only its own sender-scoped stream, a
+   * genuinely-delivered held send read "pending" forever, because the ONE event that would have flipped it
+   * was filed under nobody's session. Stamping the real sender here — every caller now threads it through —
+   * closes that WITHOUT widening `peer_message_status`'s own read into any other session's stream; the
+   * fix is at the SOURCE of the mis-attribution, not a workaround around it. Every caller that omits it
+   * (there are none left in this codebase, but a future one could) falls back to `""`, byte-identical to
+   * this method's behavior before this card.
    */
-  private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string } = {}): void {
+  private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string; sender?: string } = {}): void {
     try {
       if (this.db.isQueuedMessageDelivered(msgId)) return; // already resolved — idempotent no-op
       // Card 343441bd: this fires the instant a HELD message is handed off to the recipient
@@ -6977,7 +7011,7 @@ export class SessionService {
       }
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: "", workerSessionId: opts.recipientId ?? null, taskId: null,
+        managerSessionId: opts.sender ?? "", workerSessionId: opts.recipientId ?? null, taskId: null,
         kind: "session_message_delivered", detail,
       });
     } catch { /* delivery-marking must never disturb the host drain or boot */ }
@@ -7507,7 +7541,10 @@ export class SessionService {
     managerSessionId: string,
     targetProjectId: string,
     text: string,
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string } {
+  ): {
+    deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string;
+    msgId?: string; recycledSincePriorSend?: boolean; advisory?: string;
+  } {
     this.requireManager(managerSessionId, "peer_message");
     const caller = this.db.getSession(managerSessionId)!;
     const originProjectId = caller.projectId;
@@ -7536,11 +7573,28 @@ export class SessionService {
       (s) => s.projectId === targetProjectId && s.role === "manager" && s.processState === "live",
     );
 
+    // Card 0f693dea DoD-3: the sender's MOST RECENT prior resolved targetSessionId for THIS
+    // targetProjectId, read BEFORE this send's own cross_project_message event is appended below. A bare
+    // targetSessionId changing across two sends to the same project is a LEGITIMATE manager handoff at the
+    // target (a recycle) — not a routing fault (see this method's own doc: card 0f693dea's misrouting
+    // premise was retracted for exactly this reason). Surfacing it here means a sender never has to
+    // rediscover that the hard way, the way #125 did.
+    const priorTargetSessionId = this.db.listEvents(managerSessionId)
+      .filter((e) => e.kind === "cross_project_message" && e.detail?.targetProjectId === targetProjectId
+        && typeof e.detail?.targetSessionId === "string")
+      .pop()?.detail?.targetSessionId as string | undefined;
+
     const now = new Date().toISOString();
-    let result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string };
+    let result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string; msgId?: string };
+    // Card 0f693dea DoD-3: turnSeq read BEFORE enqueueing — mirrors messageWorker's own immediate-delivery
+    // stamp (submit() never touches turn_seq, so it's still current at hand-off) — so a `delivered-live`
+    // send's audit event below can carry the SAME `turnSeqAtDelivery` shape `resolveDirectiveOutcome`
+    // already knows how to read off a "root directive" event.
+    let turnSeqAtDelivery: number | undefined;
     if (targetManager) {
+      turnSeqAtDelivery = targetManager.turnSeq ?? 0;
       const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: managerSessionId, taskId: targetManager.taskId ?? null });
-      result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id };
+      result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id, msgId: r.msgId };
     } else {
       // No live manager in the target project: board a durable card on ITS OWN board (mirrors
       // deliverSessionMessage's "no live successor" fallback) — the message survives until its manager
@@ -7571,14 +7625,44 @@ export class SessionService {
       result = { deliveryStatus: "boarded", taskId: task.id };
     }
 
+    const recycledSincePriorSend = !!(priorTargetSessionId && result.targetSessionId && priorTargetSessionId !== result.targetSessionId);
+
     this.db.appendEvent({
       id: randomUUID(), ts: now,
       managerSessionId, workerSessionId: result.targetSessionId ?? "", taskId: result.taskId ?? null,
       kind: "cross_project_message",
-      detail: { originProjectId, targetProjectId, targetSessionId: result.targetSessionId ?? null, text, deliveryStatus: result.deliveryStatus },
+      detail: {
+        originProjectId, targetProjectId, targetSessionId: result.targetSessionId ?? null, text,
+        deliveryStatus: result.deliveryStatus,
+        ...(result.msgId ? { msgId: result.msgId } : {}),
+        ...(result.deliveryStatus === "delivered-live" ? { turnSeqAtDelivery } : {}),
+      },
     });
 
-    return result;
+    // Card 0f693dea DoD-3/DoD-4: two INDEPENDENT, additive advisories — a bare targetSessionId change vs.
+    // your last send to this project (a recycle that already happened) and a queued send's exposure to a
+    // FUTURE successor read (a recycle that hasn't happened yet, but might before this drains) are
+    // different facts and can both apply to the same send; combine rather than let one hide the other.
+    const advisories: string[] = [];
+    if (recycledSincePriorSend) {
+      advisories.push(
+        `the peer project's manager session changed since your last send to it (was ${priorTargetSessionId!.slice(0, 8)}, ` +
+        `now ${result.targetSessionId!.slice(0, 8)}) — likely a recycle at the target, not a routing fault.`,
+      );
+    }
+    if (result.deliveryStatus === "queued") {
+      advisories.push(
+        "queued, not yet delivered — if the peer project's manager recycles before draining its queue, a " +
+        "SUCCESSOR session reads this, not necessarily the one you've been talking to; write it to be " +
+        "understood cold.",
+      );
+    }
+
+    return {
+      ...result,
+      ...(recycledSincePriorSend ? { recycledSincePriorSend: true } : {}),
+      ...(advisories.length ? { advisory: advisories.join(" ") } : {}),
+    };
   }
 
   /**
