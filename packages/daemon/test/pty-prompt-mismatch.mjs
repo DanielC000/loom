@@ -35,15 +35,36 @@ process.env.LOOM_HOME = tmpHome;
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
+const fakesById = new Map(); // sessionId -> fake pty ({ writes, ... }) — card 201d0d95's new scenarios need
+// to inspect what actually got submitted to a SPECIFIC session's pty, not just whether a console.log fired.
 class TestPtyHost extends createSeamHost(PtyHost) {
   createPty(opts) {
     const base = super.createPty(opts);
     const writes = [];
-    return { ...base, write: (d) => { writes.push(d); }, writes };
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakesById.set(opts.sessionId, fake);
+    return fake;
   }
 }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 1addef27 (fixed-wait-negative-guard) / card 201d0d95 manager review: a bounded POLL on the actual
+// completion signal, not a fixed clock — mirrors paste-placeholder-tripwire.mjs's own `waitUntil`. The
+// guard's own header names this shape as its documented blind spot ("a locally-reimplemented waitUntil/
+// poll-loop... usually safe"), because it IS a genuinely different shape from a blind sleep: it retries
+// against an observed condition rather than assuming a fixed duration was enough.
+const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await sleep(stepMs);
+  }
+  return false;
+};
+// Whether ANY pending entry for `sid` is the prompt-mismatch notice — reads PtyHost's own queue state
+// directly (host.getPendingEntries), not an indirect symptom like pty writes.
+const hasPendingMismatchNotice = (sid) => host.getPendingEntries(sid).some((e) => e.text.includes("[loom:prompt-mismatch]"));
 
 function newSession(name) {
   const sid = `sess-${name}`;
@@ -172,12 +193,163 @@ try {
     check("6: divergesAtChar sits at the END of the shorter string (near both lengths), not at 0", new RegExp(`divergesAtChar=${intended.length}\\b`).test(warnings[0] ?? ""));
     check("6: BOTH tails are tiny here (0 and 1) — visibly different from scenario 1's large-tail splice shape", /tailReportedLen=1\b/.test(warnings[0] ?? "") && /tailIntendedLen=0\b/.test(warnings[0] ?? ""));
   }
+
+  // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
+  // just to daemon-output.log. Reproduces the real incident's shape (session 363002b9, 2026-08-04): an
+  // EARLIER generation's own already-confirmed text reappears, byte-for-byte, as what the engine reports
+  // submitting for a LATER, unrelated generation. Must land as the notice's OWN pty submission (never
+  // appended to the mismatched turn's own payload), naming BOTH the possible loss (intended text did not
+  // reach the engine) and the possible duplicate (the submitted content matches an earlier generation) —
+  // and must identify WHICH earlier generation, since `live.recentWrittenTurns` still holds it. =====
+  {
+    const sid = newSession("G"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const genAText = "[loom:worker-report] worker AAAA — generation A's own real report";
+    const genBText = "[loom:worker-report] worker BBBB — generation B's own real report, never actually delivered";
+
+    // Generation A: an ordinary, cleanly-confirmed turn — establishes the entry in recentWrittenTurns that
+    // generation B's replay will later match.
+    host.enqueueStdin(sid, genAText);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText }); // byteIdentical=true, gen=1
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // completes turn A cleanly, queue empty
+
+    // Generation B: Loom writes genBText, but the engine reports back genAText verbatim — the exact-replay
+    // shape from the real incident (reportedHash equals a PRIOR generation's writtenHash, not this one's).
+    host.enqueueStdin(sid, genBText); // gen=2, live.lastPrompt = genBText
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText }); // byteIdentical=false
+    // Manager review, card 201d0d95 (fixed-wait-negative-guard caught the ORIGINAL fixed-duration wait
+    // here): a BARRIER, not a delay — poll for the REAL positive event the deferred setTimeout(0) produces
+    // (the notice actually landing in host.getPendingEntries), rather than waiting a guessed duration and
+    // hoping it landed in time. The negative check right below runs the INSTANT that poll observes it.
+    const enqueued7 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7: the deferred notice actually enqueues (a real observed event, not assumed)", enqueued7);
+    check("7: the deferred notice does not write DURING the mismatched turn itself (queued, not appended to it)",
+      fake.writes.length === writesBeforeMismatch);
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // completes the mismatched (genA-content) turn, drains the queued notice as its OWN new turn
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7: a mismatch now produces a corrective turn on the pty (previously LOG-ONLY, card 201d0d95 Q1)",
+      noticeWrite.includes("[loom:prompt-mismatch]"));
+    check("7: the notice names the LOSS half (Loom's intended text may not have reached the engine)",
+      /may not have reached you/.test(noticeWrite) && new RegExp(`${genBText.length} chars`).test(noticeWrite));
+    check("7: the notice names the DUPLICATE half AND identifies the specific earlier generation replayed",
+      /DUPLICATE/.test(noticeWrite) && /gen=1\b/.test(noticeWrite));
+    check("7: the notice reports OBSERVED FIELDS (both hashes present) and asserts no CLI-internal cause",
+      /writtenHash=\w+/.test(noticeWrite) && /reportedHash=\w+/.test(noticeWrite) && !/\bthe (cli|CLI) (did|dropped|collapsed)\b/i.test(noticeWrite));
+    // Manager correction 2026-08-05: a Platform sweep measured this exact shape 15 times (14 sessions) and
+    // found it is ALWAYS a replay of the IMMEDIATELY PRECEDING recorded generation — the notice should now
+    // say so (a reader can go straight to "the message just before this one"), stated as an observed
+    // REGULARITY, never as a claimed mechanism.
+    check("7: since the matched entry IS the immediately preceding generation, the notice says so explicitly",
+      /IMMEDIATELY PRECEDING/.test(noticeWrite));
+    check("7: the regularity is framed as MEASURED/OBSERVED, never as an asserted cause",
+      /measured|shown so far/i.test(noticeWrite) && !/\bbecause\b/i.test(noticeWrite));
+  }
+
+  // ===== 7b. Card 201d0d95 Q1 — the FALLBACK wording when no exact match is found in recentWrittenTurns
+  // (e.g. the replayed content isn't from this session's own recent writes at all, or fell outside the
+  // ring's window) still gives the reader the same measured guidance — check the immediately preceding
+  // message — rather than a bare "unknown". =====
+  {
+    const sid = newSession("G2"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const genText = "[loom:worker-report] worker CCCC — this session's own only real report";
+    const unrelatedReported = "content that never came from anything this session itself wrote";
+    host.enqueueStdin(sid, genText); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedReported }); // byteIdentical=false, no ring match
+    // Same barrier as scenario 7 above (not flagged by the guard's own 5-line window here, but the SAME
+    // shape/risk — fixed for real consistency, not just to satisfy the scanner).
+    const enqueued7b = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7b: the deferred notice actually enqueues (a real observed event, not assumed)", enqueued7b);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7b: an unmatched replay still fires the notice", noticeWrite.includes("[loom:prompt-mismatch]"));
+    check("7b: the fallback still points at the IMMEDIATELY PRECEDING submission as the measured pattern",
+      /IMMEDIATELY PRECEDING/.test(noticeWrite) && /could not be matched directly/.test(noticeWrite));
+    check("7b: the fallback never asserts a cause either", !/\bbecause\b/i.test(noticeWrite));
+  }
+
+  // ===== 7c. Card 201d0d95 Q1 — manager review: `findLast`, not `find`. Loom's own `warning`-kind nudges
+  // re-send byte-identical text by construction, so the SAME text can legitimately appear at more than one
+  // generation in `recentWrittenTurns`. Identical text at a NON-ADJACENT earlier generation (gen 1) and the
+  // immediately-preceding one (gen 3), then a replay of gen 3's text at gen 4: `find` would return the
+  // OLDEST match (gen 1) and wrongly take the "unusual shape" branch; `findLast` must return gen 3 and take
+  // the "IMMEDIATELY PRECEDING" branch — the correct, actual replay generation. =====
+  {
+    const sid = newSession("G3"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const repeated = "[loom:idle] this session appears idle — checking in"; // realistic repeated-nudge shape
+    const distinct = "[loom:worker-report] worker DDDD — unrelated distinct content";
+    const genFourText = "[loom:worker-report] worker EEEE — generation 4's own real report, never delivered";
+
+    host.enqueueStdin(sid, repeated); // gen=1: repeated text, first occurrence
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: repeated });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, distinct); // gen=2: unrelated, sits between the two repeated occurrences
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: distinct });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, repeated); // gen=3: repeated text AGAIN — this is the true "immediately preceding" occurrence
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: repeated });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, genFourText); // gen=4: Loom writes genFourText, but the engine replays gen=3's text
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: repeated }); // byteIdentical=false
+    // Same barrier as scenario 7 (manager review, card 201d0d95 — fixed-wait-negative-guard caught this
+    // site's ORIGINAL fixed-duration wait too): poll for the real enqueue event, don't guess a duration.
+    const enqueued7c = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7c: the deferred notice actually enqueues (a real observed event, not assumed)", enqueued7c);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7c: findLast picks the MOST RECENT match (gen=3), not the oldest (gen=1)", /gen=3\b/.test(noticeWrite));
+    check("7c: correctly takes the IMMEDIATELY PRECEDING branch, not the misleading 'unusual shape' one",
+      /IMMEDIATELY PRECEDING/.test(noticeWrite) && !/not the immediately preceding one/.test(noticeWrite));
+    check("7c: does NOT manufacture false counter-evidence by citing the stale gen=1 match", !/gen=1\b/.test(noticeWrite));
+  }
+
+  // ===== 8. Card 201d0d95 Q1 — NEGATIVE (positive control's other direction, mandatory per this project's
+  // own standing rule): an ORDINARY, byteIdentical=true turn must produce NO notice at all — proving the
+  // new surfacing logic doesn't fire on every turn regardless of correctness. This is the half most likely
+  // to break while building the first (per the kickoff's own warning), since it's easy to accidentally hang
+  // the new code off a broader condition than "mismatch only". =====
+  {
+    const sid = newSession("H"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const text = "an entirely ordinary, correctly-delivered turn";
+    host.enqueueStdin(sid, text);
+    const writesBeforeTurn = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: text }); // byteIdentical=true — the mismatch-scheduling branch in host.ts is never entered
+    // Manager review, card 201d0d95: this is the "coin that lands heads" case flagged by fixed-wait-negative-
+    // guard — there is no POSITIVE event to poll for here, since we're proving the ABSENCE of exactly that
+    // event, so a `waitUntil` barrier (as used in scenarios 7/7b/7c above) doesn't apply. Instead of guessing
+    // a duration, wait for a PROVEN-sufficient, deterministic ordering fact: the ONLY thing that could
+    // produce a false positive is the SAME `setTimeout(fn, 0)` the real notice uses (host.ts, scheduled
+    // synchronously inside THIS hook's own handling if it were ever wrongly called) — by the time a
+    // LATER-registered `setTimeout(_, 0)` resolves, any such callback is GUARANTEED to have already run,
+    // since macrotasks execute FIFO. One tick is not a guess; it's the exact bound this mechanism can ever
+    // need. The check reads host.getPendingEntries SYNCHRONOUSLY right after, with no further await in
+    // between — the same "observe, then assert instantly" shape as the barrier above, just anchored to a
+    // proven tick-count instead of an observed flag.
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — waits only for the KNOWN-required single macrotask tick
+    // (see the paragraph above for why exactly one tick is provably sufficient, not assumed); the negative
+    // check below runs synchronously immediately after, with no further await in between.
+    await new Promise((r) => setTimeout(r, 0));
+    check("8: NEGATIVE CONTROL — an ordinary byteIdentical=true turn never enqueues a prompt-mismatch notice",
+      !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // completes the turn and drains — queue already proven empty of any notice
+    const afterTurn = fake.writes.slice(writesBeforeTurn).join("");
+    check("8: and correspondingly nothing resembling the notice ever reached the pty either",
+      !afterTurn.includes("[loom:prompt-mismatch]"));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the frame-splice detector (card 7114838d) FIRES on a synthesized mismatch and names the divergence point (self-classifying via lenDelta + both tail lengths — a real splice's large tails read differently from a benign trailing artifact's tiny ones), stays SILENT on a matching pair, is correctly GATED on submitWasOutstanding (never misfires a raw human-typed turn against a stale lastPrompt), and is SELF-DIAGNOSING when the engine sends no usable prompt field (logs once per session, not once per turn). NOTE: this suite synthesizes every hook payload — it proves the detector's own logic, not that Claude Code actually sends `prompt` or reports it byte-identical; only the first real hook after deploy answers that."
+  ? "\n✅ ALL PASS — the frame-splice detector (card 7114838d) FIRES on a synthesized mismatch and names the divergence point (self-classifying via lenDelta + both tail lengths — a real splice's large tails read differently from a benign trailing artifact's tiny ones), stays SILENT on a matching pair, is correctly GATED on submitWasOutstanding (never misfires a raw human-typed turn against a stale lastPrompt), and is SELF-DIAGNOSING when the engine sends no usable prompt field (logs once per session, not once per turn). Card 201d0d95 Q1: a mismatch now SURFACES as its own pty submission to the affected session (previously LOG-ONLY) naming both the possible LOSS and the possible DUPLICATE (identifying the specific earlier generation when `recentWrittenTurns` still holds it) — and, the positive control's other, easier-to-break direction, an ordinary byteIdentical=true turn schedules no such notice at all. NOTE: this suite synthesizes every hook payload — it proves the detector's own logic, not that Claude Code actually sends `prompt` or reports it byte-identical; only the first real hook after deploy answers that."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
