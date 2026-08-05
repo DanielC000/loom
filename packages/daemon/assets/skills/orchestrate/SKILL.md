@@ -27,7 +27,7 @@ there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md
 
 The `loom-orchestration` MCP surface — no human relay:
 `worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_message`, `worker_redirect`,
-`worker_stop`, `worker_recycle`, and the two-step `worker_merge` → `worker_merge_confirm`.
+`worker_flush`, `worker_stop`, `worker_recycle`, and the two-step `worker_merge` → `worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
 while you're mid-turn is held in your inbox and otherwise drains ONE-per-turn as a separate (often
 already-handled) turn — call **`inbox_pull`** to return AND clear your whole queued inbox in one shot.
@@ -374,7 +374,15 @@ away real accumulated work for nothing.
 
 **The free discriminator: something ADVANCING, or a real turn-end.** `turnSeq`/`ctxTurns` moving between two reads, or a `Stop` hook having already fired for the worker, both prove a turn genuinely ran — check either before trusting the composerDirtyLen+lastActivity pairing above. Better still, when daemon logs are readable: a `[submit] … CONFIRMED` line followed by `[prompt-echo] byteIdentical=true` for that worker settles it outright — that is the daemon's own decisive, already-acted-upon proof of delivery, and once you see it, treat the worker as genuinely running.
 
-**Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening before you reach for stop-and-respawn; treat it as a last resort, not a first response to an idle-looking row.
+**A confirmed dirty composer has a submit-only remedy — try it before anything more destructive.**
+`worker_flush` presses Enter on that worker's OWN composer, writing nothing new: it's a third option
+alongside `worker_message` (which APPENDS, compounding an already-oversized unconfirmed payload) and
+`worker_stop` + respawn (which DISCARDS whatever the worker had accumulated). It's a remedy to try, not a
+guaranteed recovery — a `confirmed:false` result means this attempt didn't land, not that nothing can be
+done — and it's a documented no-op on a genuinely clean composer, so calling it speculatively costs
+nothing.
+
+**Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 
 **Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
 proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if

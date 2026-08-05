@@ -348,13 +348,15 @@ too, so prefer absolute paths there as well.
 
 Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
 `run_gate` (your DoD gate — see step 4), `gate_status` (a read-only check on your OWN gate op — see step
-4's note on checking vs re-firing), and `my_context` (you RECEIVE `worker_message`, and your manager
+4's note on checking vs re-firing), `gate_queue` (a read-only, daemon-wide snapshot of the shared gate
+cap — see step 4's note on checking a lane is free before firing), and `my_context` (you RECEIVE
+`worker_message`, and your manager
 may `worker_recycle` you — neither is a
 tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`; and the `mcp__loom-tasks__`
 namespace also gives you `wake_me` (schedule a wake — `delaySeconds` OR `minutes`, plus a `note`/`reason`;
 `wake_cancel` / `wake_list` manage pending wakes) and `task_requests_list` / `task_request_get` (read your
 card's connected Requests). Load them in ONE ToolSearch:
-`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__gate_status,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
+`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__gate_status,mcp__loom-orchestration__gate_queue,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
 (`authenticated_request` — a proxied outbound HTTP call over a human-granted connection — exists **only
 when your session was provisioned such a connection**; assume it's absent unless your brief says otherwise.)
 
