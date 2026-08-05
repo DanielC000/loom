@@ -2309,6 +2309,17 @@ interface Live {
   // (called + emptied) by markMcpSeen on success and by pty.onExit on death, so a waiter never outlives
   // its pty instance.
   mcpSeenWaiters: Array<(seen: boolean) => void>;
+  // Card 68459420 (sender-directed arm for [loom:prompt-mismatch]): set the instant a mismatch is
+  // identified as a REPLAY of a prior generation — `reported` matched an entry in `recentWrittenTurns`
+  // byte-for-byte, the shape the notice's own replayNote already asserts as a loss, not a mere
+  // possibility. A recipient can never verify this half itself (it only ever sees what arrived, not what
+  // was intended for it) — this is a PULL surface (see getLastMismatchReplay) for the party who CAN act,
+  // read at the point it already looks (worker_list/worker_status), rather than a longer session-facing
+  // notice: a precondition at the point of use beats an advisory in the attention path (see pinned
+  // memory `shipping-a-detector-is-not-someone-reading-it`). Deliberately never cleared once set — a
+  // manager that hasn't yet looked should still see it on a LATER read; this is a discovery aid, not a
+  // live/transient flag, and overwritten (not accumulated) on a subsequent occurrence.
+  lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
 }
 
 export interface SpawnOpts {
@@ -3687,6 +3698,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
+      lastMismatchReplay: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -3854,6 +3866,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
+      lastMismatchReplay: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -3933,6 +3946,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentWrittenLineCounts: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
+      lastMismatchReplay: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -4607,10 +4621,45 @@ export class PtyHost {
               const stalePlaceholderPrefixMatch = /^(?:\[Pasted text #\d+(?: \+\d+ lines)?\])+/.exec(reported);
               const isStalePlaceholderPrefix = stalePlaceholderPrefixMatch !== null && reported.slice(stalePlaceholderPrefixMatch[0].length) === intended;
               if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix) {
+                // Card 68459420 — DoD-3: a Platform sweep (2026-08-05) found a FOURTH population outside
+                // the three characterized above: reported LONGER than intended AND matching NO recent
+                // write of this session (first specimen: gen=12, wrote 2985 reported 3829 — the notice's
+                // OWN replayNote text below already flags this shape as unusual, since every OTHER
+                // measured occurrence replayed the immediately preceding generation). Characterize it
+                // ONLY — tag it so it can be swept and counted, exactly like the sweep note above this
+                // block already does for the replay shape. Do NOT fold it into that shape (it explicitly
+                // failed the replay match) and do NOT invent a suppression for it: this population is not
+                // yet understood, and cf2fef73's own worker set the precedent for refusing to guess here
+                // (card 2b57b5a9, the form-feed specimen).
+                if (replayedEntry === undefined && reported.length > intended.length) {
+                  // eslint-disable-next-line no-console
+                  console.log(`[prompt-mismatch-unmatched-longer] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} — UNCHARACTERIZED population (card 68459420): reported LONGER than intended, matches none of this session's recent writes, and is neither of the two known benign prefix/whitespace shapes above. Distinct from the measured replay-of-immediately-preceding-generation regularity — do not assume a mechanism or fold this into that shape.`);
+                }
+                // Card 68459420 — DoD-1: the SENDER-directed arm. When `replayedEntry` is found, the
+                // notice's own replayNote below already asserts this as a replay of a prior generation —
+                // an ESTABLISHED loss, not a possible one — but the RECIPIENT can never verify that: it
+                // only ever sees what arrived, never what was intended for it. Record it here (read-only
+                // PULL surface, see getLastMismatchReplay) so the party who CAN act — this session's
+                // manager/parent, via worker_list/worker_status — learns of it the next time it already
+                // looks, per DoD-4 (a precondition at the point of use beats a longer advisory).
+                if (replayedEntry !== undefined) {
+                  live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
+                }
+                // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
+                // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
+                // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
+                // own live specimen) — kept unchanged. What changes is the loss claim: when `replayedEntry`
+                // is found, state the loss as ESTABLISHED (not "possible") and say plainly the recipient
+                // cannot confirm it themselves; otherwise keep the more cautious "possible" framing, since
+                // an unmatched mismatch (see the uncharacterized-population tag above) is not yet a
+                // confirmed replay the way a recognized one is.
+                const lossClause = replayedEntry !== undefined
+                  ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you: an ESTABLISHED loss, not a possible one. You cannot verify that yourself: you only ever see what arrived, never what was intended for you — only the SENDER can confirm it and re-send. If you are a Loom-driven session, say so in your next report up.`
+                  : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
                 const mismatchText =
                   `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                  `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). This means the text Loom intended for this turn may not have reached you at all — a possible LOSS. ${replayNote} ` +
-                  `Before trusting the turn that just ran: check it against what you actually intended to act on, and check your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same thing twice.`;
+                  `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
+                  `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
                 // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
                 // this must land as the notice's OWN pty submission, never appended to another payload — the
                 // standing rule this very finding established, since the whole point is that a payload can
@@ -7944,6 +7993,18 @@ export class PtyHost {
     if (!live) return undefined;
     if (live.enterConfirmed || live.currentGenFirstWrittenAt === null) return null;
     return Date.now() - live.currentGenFirstWrittenAt;
+  }
+
+  /** Card 68459420: the most recent occurrence of this session's `[loom:prompt-mismatch]` notice being
+   *  identified as a REPLAY of a prior generation (`Live.lastMismatchReplay` — see that field's own doc),
+   *  or `null` if none has fired since this session went live, or `undefined` if the session isn't live
+   *  in this process. This is the SENDER-directed arm of the notice: the recipient session can never
+   *  verify a loss it never saw, so this getter exists to be read by the party who CAN — worker_list/
+   *  worker_status, at the point its manager already looks — rather than relying solely on a longer
+   *  session-facing notice. Never cleared once set (see the field's own doc for why); a subsequent
+   *  occurrence overwrites rather than accumulates, so this always reflects the LATEST replay only. */
+  getLastMismatchReplay(sessionId: string): Live["lastMismatchReplay"] | undefined {
+    return this.live.get(sessionId)?.lastMismatchReplay;
   }
 
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on

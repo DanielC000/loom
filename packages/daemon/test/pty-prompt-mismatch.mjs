@@ -85,6 +85,19 @@ function captureMismatchWarnings(fn) {
   return lines;
 }
 
+// Card 68459420 DoD-3: captures the DISTINCT [prompt-mismatch-unmatched-longer] tag — the uncharacterized
+// "gen=12" population (reported LONGER than intended, matching no recent write). Deliberately a SEPARATE
+// tag/filter from captureMismatchWarnings above (that filter's exact-substring match "[prompt-mismatch]"
+// does not accidentally catch this one — the closing bracket differs), so a test can assert this
+// population's own log fired without conflating it with the ordinary diagnostic.
+function captureUnmatchedLongerWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-unmatched-longer]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
 const SIDS = [];
 
 try {
@@ -240,6 +253,9 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
     check("6b: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    // Card 68459420 regression: a benign, suppressed mismatch must NOT set the sender-directed signal
+    // either — there is no real loss here for a manager to act on.
+    check("6b: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
   }
 
   // ===== 6c. Card cf2fef73 (manager review, second population — the LARGEST single benign class measured
@@ -277,6 +293,7 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
     check("6c: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("6c: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
   }
 
   // ===== 6d. Card cf2fef73 (manager review CORRECTION — the first placeholder regex given was incomplete
@@ -305,6 +322,7 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
     check("6d: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("6d: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
   }
 
   // ===== 6e. Card cf2fef73 (manager review CORRECTION #2 — a single-shot strip is FAIL-OPEN): placeholders
@@ -335,6 +353,7 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
     check("6e: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("6e: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
@@ -373,8 +392,13 @@ try {
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
     check("7: a mismatch now produces a corrective turn on the pty (previously LOG-ONLY, card 201d0d95 Q1)",
       noticeWrite.includes("[loom:prompt-mismatch]"));
-    check("7: the notice names the LOSS half (Loom's intended text may not have reached the engine)",
-      /may not have reached you/.test(noticeWrite) && new RegExp(`${genBText.length} chars`).test(noticeWrite));
+    check("7: the notice names the LOSS half, ESTABLISHED (not merely possible) since this IS a recognized replay",
+      /did not reach you/.test(noticeWrite) && /ESTABLISHED/.test(noticeWrite));
+    // Card 68459420 DoD-2: the RECIPIENT cannot verify the loss half itself — only the SENDER can. The
+    // notice must say so explicitly rather than asking the recipient to check something it structurally
+    // cannot check.
+    check("7: the notice tells the RECIPIENT it cannot verify this loss itself, and names the SENDER as the party who can",
+      /cannot verify that yourself/.test(noticeWrite) && /SENDER/.test(noticeWrite));
     check("7: the notice names the DUPLICATE half AND identifies the specific earlier generation replayed",
       /DUPLICATE/.test(noticeWrite) && /gen=1\b/.test(noticeWrite));
     check("7: the notice reports OBSERVED FIELDS (both hashes present) and asserts no CLI-internal cause",
@@ -387,6 +411,19 @@ try {
       /IMMEDIATELY PRECEDING/.test(noticeWrite));
     check("7: the regularity is framed as MEASURED/OBSERVED, never as an asserted cause",
       /measured|shown so far/i.test(noticeWrite) && !/\bbecause\b/i.test(noticeWrite));
+    // ===== 7d. Card 68459420 DoD-1/DoD-4 — THE SENDER-DIRECTED ARM: a recognized replay must record a
+    // durable, read-only signal (getLastMismatchReplay) that this session's manager/parent — the only
+    // party who can actually tell what it meant to send — can discover the NEXT time it looks (e.g. via
+    // worker_list/worker_status), rather than depending solely on the session-facing notice text above. =====
+    {
+      const replay = host.getLastMismatchReplay(sid);
+      check("7d: getLastMismatchReplay records the replay (a durable PULL signal, not just the notice text)",
+        replay !== null && replay !== undefined);
+      check("7d: it names the CURRENT generation (gen=2, genBText's own) and the REPLAYED generation (gen=1, genAText's own)",
+        replay?.gen === 2 && replay?.replayedGen === 1);
+      check("7d: it records both the reported and intended lengths",
+        replay?.reportedLen === genAText.length && replay?.intendedLen === genBText.length);
+    }
   }
 
   // ===== 7b. Card 201d0d95 Q1 — the FALLBACK wording when no exact match is found in recentWrittenTurns
@@ -411,6 +448,15 @@ try {
     check("7b: the fallback still points at the IMMEDIATELY PRECEDING submission as the measured pattern",
       /IMMEDIATELY PRECEDING/.test(noticeWrite) && /could not be matched directly/.test(noticeWrite));
     check("7b: the fallback never asserts a cause either", !/\bbecause\b/i.test(noticeWrite));
+    // Card 68459420 DoD-2/DoD-3: an UNMATCHED mismatch is NOT an established replay — the notice must keep
+    // the more cautious "possible LOSS" framing (never "ESTABLISHED"), since this specific content could
+    // not be matched to any of this session's own recent writes.
+    check("7b: an unmatched mismatch keeps the cautious 'possible LOSS' framing, never asserts ESTABLISHED",
+      /may not have reached you/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
+    // Card 68459420 DoD-1: the sender-directed signal is SPECIFIC to a recognized replay — an unmatched
+    // mismatch must NOT set it (there is no confirmed prior generation to name as replayed).
+    check("7b: getLastMismatchReplay stays null for an UNMATCHED mismatch (nothing to attribute the replay to)",
+      host.getLastMismatchReplay(sid) === null);
   }
 
   // ===== 7c. Card 201d0d95 Q1 — manager review: `findLast`, not `find`. Loom's own `warning`-kind nudges
@@ -451,6 +497,14 @@ try {
     check("7c: correctly takes the IMMEDIATELY PRECEDING branch, not the misleading 'unusual shape' one",
       /IMMEDIATELY PRECEDING/.test(noticeWrite) && !/not the immediately preceding one/.test(noticeWrite));
     check("7c: does NOT manufacture false counter-evidence by citing the stale gen=1 match", !/gen=1\b/.test(noticeWrite));
+    // Card 68459420 DoD-1: the durable signal must agree with findLast's own correct pick (gen=3), not the
+    // stale gen=1 match — proving the sender-directed arm shares the SAME discriminator as the notice text,
+    // never a separately (and possibly differently) computed one.
+    {
+      const replay = host.getLastMismatchReplay(sid);
+      check("7c: getLastMismatchReplay also picks the MOST RECENT match (replayedGen=3), not the stale gen=1",
+        replay?.replayedGen === 3 && replay?.gen === 4);
+    }
   }
 
   // ===== 8. Card 201d0d95 Q1 — NEGATIVE (positive control's other direction, mandatory per this project's
@@ -592,6 +646,40 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
     check("12: the notice actually reached the pty", noticeWrite.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 13. Card 68459420 DoD-3 — CHARACTERIZE (never suppress) the FOURTH population: reported LONGER
+  // than intended AND matching NO recent write of this session (the manager's own gen=12 specimen: wrote
+  // 2985, reported 3829). Distinct from every other shape above — not a benign whitespace re-render, not a
+  // stale-placeholder prefix (doesn't start with the placeholder token), not a recognized replay (doesn't
+  // match anything in recentWrittenTurns). Must: (a) log a DISTINCT, greppable diagnostic tag so this
+  // population can be measured going forward, (b) still fire the ordinary session-facing notice with the
+  // cautious "possible LOSS" framing (never ESTABLISHED — this is NOT a recognized replay), and (c) NOT set
+  // the sender-directed getLastMismatchReplay signal (there's no confirmed prior generation to attribute it
+  // to) — proving DoD-3's own constraint that no rule/suppression was invented for this shape. =====
+  {
+    const sid = newSession("UnmatchedLonger"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager] some real, correctly-submitted message content";
+    const reported = intended + " — plus unexplained trailing content that came from nowhere this session wrote";
+    host.enqueueStdin(sid, intended); // gen=1 — the only entry in recentWrittenTurns, and it does NOT equal `reported`
+    const writesBeforeMismatch = fake.writes.length;
+    const unmatchedWarnings = captureUnmatchedLongerWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("13: reported is LONGER than intended (the shape this population is defined by)", reported.length > intended.length);
+    check("13: the DISTINCT [prompt-mismatch-unmatched-longer] characterization tag fires exactly once", unmatchedWarnings.length === 1);
+    check("13: the tag reports the observed fields (lengths + delta) and names it UNCHARACTERIZED",
+      /reportedLen=\d+/.test(unmatchedWarnings[0] ?? "") && /intendedLen=\d+/.test(unmatchedWarnings[0] ?? "") &&
+      /lenDelta=\d+/.test(unmatchedWarnings[0] ?? "") && /UNCHARACTERIZED/.test(unmatchedWarnings[0] ?? ""));
+    const enqueued13 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("13: the ordinary session-facing notice still fires (characterization is additive, not a suppression)", enqueued13);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("13: the notice keeps the cautious 'possible LOSS' framing — this is NOT a recognized replay",
+      /may not have reached you/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
+    check("13: no rule/suppression was invented for this shape — getLastMismatchReplay stays null",
+      host.getLastMismatchReplay(sid) === null);
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
