@@ -31,10 +31,16 @@ const noTmpLeft = (dir) => fs.readdirSync(dir).every((f) => !f.includes(".loom.t
 const root = path.join(os.tmpdir(), `loom-claude-config-test-${Date.now()}-${process.pid}`);
 fs.mkdirSync(root, { recursive: true });
 
-// Snapshot the real ~/.claude.json (captured with the REAL homedir, before any env tweaks)
-// so we can prove at the end that the whole test left it byte-for-byte unchanged.
+// Real ~/.claude.json path (captured with the REAL homedir, before any env tweaks). We do NOT diff
+// its whole content before/after (card ccd6153c): that file is a live, host-shared resource — any
+// OTHER concurrently-spawned Loom session's own real ensureTrusted() call (createPty's spawn
+// chokepoint calls it on every fresh/resume/fork/recycle/boot) can legitimately write its own entry
+// into it while THIS test runs, and a whole-file byte census would flag that unrelated, correct
+// activity as a failure of this test. Instead we track only the specific keys THIS test's own
+// ensureTrusted() calls could have written here — every one of them lives under `root`, so no real
+// caller could ever collide with one — and assert their ABSENCE below, not that nothing at all changed.
 const realJson = path.join(os.homedir(), ".claude.json");
-const realBefore = fs.existsSync(realJson) ? fs.readFileSync(realJson) : null;
+const ownDirs = [];
 
 const saved = { cfg: process.env.CLAUDE_CONFIG_DIR, up: process.env.USERPROFILE, home: process.env.HOME };
 const restoreEnv = () => {
@@ -51,6 +57,7 @@ try {
   const projA = path.join(root, "projA");
   process.env.CLAUDE_CONFIG_DIR = configDir;
 
+  ownDirs.push(projA);
   ensureTrusted(projA);
   check("CLAUDE_CONFIG_DIR set → trust written to <dir>/.claude.json", fs.existsSync(isoJson) && trusted(isoJson, keyFor(projA)));
   check("CLAUDE_CONFIG_DIR set → atomic temp file cleaned up (no .loom.tmp left)", noTmpLeft(configDir));
@@ -62,6 +69,7 @@ try {
   // a second project lands its own entry; both coexist, still no temp leftover (unique-suffix
   // temp name — fast-follow #3 — means concurrent calls can't collide on a shared .loom.tmp).
   const projB = path.join(root, "projB");
+  ownDirs.push(projB);
   ensureTrusted(projB);
   check("CLAUDE_CONFIG_DIR set → second project trusted, both entries coexist",
     trusted(isoJson, keyFor(projA)) && trusted(isoJson, keyFor(projB)));
@@ -77,6 +85,7 @@ try {
   process.env.HOME = fakeHome;
   if (os.homedir() === fakeHome) {
     const projC = path.join(root, "projC");
+    ownDirs.push(projC);
     ensureTrusted(projC);
     const homeJson = path.join(fakeHome, ".claude.json");
     check("CLAUDE_CONFIG_DIR unset → trust written to <homedir>/.claude.json", fs.existsSync(homeJson) && trusted(homeJson, keyFor(projC)));
@@ -106,6 +115,7 @@ try {
     // 4a. Discovery walks up from a nested worktree to home and collects both server names.
     const wt = path.join(mcpHome, ".loom", "worktrees", "abc", "sub");
     fs.mkdirSync(wt, { recursive: true });
+    ownDirs.push(wt);
     const discovered = discoverProjectMcpServerNames(wt).sort();
     check("discoverProjectMcpServerNames → finds up-tree ~/.mcp.json servers",
       discovered.length === 2 && discovered[0] === "docker" && discovered[1] === "sentry");
@@ -126,6 +136,7 @@ try {
     // 4d. An existing manual disable is MERGED (union), not clobbered.
     const wt2 = path.join(mcpHome, ".loom", "worktrees", "def", "sub");
     fs.mkdirSync(wt2, { recursive: true });
+    ownDirs.push(wt2);
     const cfg = JSON.parse(fs.readFileSync(mcpIsoJson, "utf8"));
     cfg.projects ??= {};
     cfg.projects[keyFor(wt2)] = { disabledMcpjsonServers: ["prior"] };
@@ -145,6 +156,7 @@ try {
       process.env.CLAUDE_CONFIG_DIR = plainCfgDir;
       const plainWt = path.join(plainHome, ".loom", "worktrees", "ghi");
       fs.mkdirSync(plainWt, { recursive: true });
+      ownDirs.push(plainWt);
       ensureTrusted(plainWt);
       const pe = entryFor(path.join(plainCfgDir, ".claude.json"), keyFor(plainWt));
       check("ensureTrusted → no up-tree .mcp.json ⇒ trust-only entry, no MCP keys",
@@ -158,10 +170,13 @@ try {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-// === 3. The whole test never mutated the real ~/.claude.json. ===
-const realAfter = fs.existsSync(realJson) ? fs.readFileSync(realJson) : null;
-check("real ~/.claude.json byte-identical before/after the whole test",
-  (realBefore === null && realAfter === null) || (!!realBefore && !!realAfter && realBefore.equals(realAfter)));
+// === 3. The test never wrote any of ITS OWN entries into the real ~/.claude.json. ===
+// Scoped to `ownDirs` rather than a whole-file diff (card ccd6153c) — see the comment at `ownDirs`'
+// declaration above for why a before/after byte census of this shared, host-wide file is falsifiable
+// by unrelated, concurrent, legitimate Loom activity and must not be used here.
+const realCfg = fs.existsSync(realJson) ? JSON.parse(fs.readFileSync(realJson, "utf8")) : null;
+const leaked = ownDirs.map(keyFor).filter((key) => realCfg?.projects && key in realCfg.projects);
+check("real ~/.claude.json gained none of this test's own project entries", leaked.length === 0);
 
 console.log(failures === 0
   ? "\nALL PASS — ensureTrusted honors CLAUDE_CONFIG_DIR and never touches the real ~/.claude.json."
