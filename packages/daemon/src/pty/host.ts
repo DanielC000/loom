@@ -6054,6 +6054,27 @@ export class PtyHost {
     // QueuedMessage with no `giveUpGen` of its own yet, so it still takes the full clear+repaste below,
     // unchanged), and it is bounded by the SAME `GIVE_UP_REQUEUE_LIMIT`/chainDepth cycle count as before —
     // this does not remove the cap, it removes the wasted bytes inside each already-capped cycle.
+    //
+    // Card 2960c3bf (2026-08-05, worker `a9b67b0d`): a SECOND occurrence of exactly the residue
+    // 3ce3fa39's comment above predicted ("first-hand confirmed: two specimens' abandoned text
+    // survived a backspace-clear... only to resurface — once doubled") — this time via THIS deferred
+    // clear (the branch below), not the immediate one 3ce3fa39 moved away from. A re-minted give-up
+    // retry (44283 stranded + a fresh 44323-char repaste, the 40-char excess being the
+    // `[loom:possible-duplicate root:…]` tag `framePossibleDuplicate` adds) landed at
+    // `composerDirtyLen === 88606` (`= 44283 + 44323`, exact) after ITS OWN Enter also never
+    // confirmed. ⚠️ THAT NUMBER IS NOT COMPOSER EVIDENCE — `composerDirtyLen` is pure write-side
+    // bookkeeping (verified: every mutation site is either `+= lastPrompt.length`, the length of
+    // what LOOM wrote, at 5673/6315/6363, or a full reset to 0 gated on `composerDirtyLenClearedByGen`
+    // trusting a CONFIRMED hook — never a read-back of real terminal/composer content). `88606` is
+    // therefore what this accounting produces whenever a clear-then-repaste generation's OWN Enter
+    // also fails to confirm, REGARDLESS of whether the backspace burst actually cleared anything —
+    // it says nothing about what the engine's real composer held. Two open candidates, not
+    // established either way from static logs alone: (a) the un-bracketed `BACKSPACE.repeat(dirty)`
+    // burst below gets misinterpreted as literal paste content once/if the engine processes it; (b)
+    // the engine simply stopped consuming stdin after rendering the specimen's first large paste (its
+    // raw per-session output log recorded ~0 bytes of further output for the rest of that session's
+    // life — consistent with nothing sent afterward, backspaces included, ever being read at all).
+    // A live experiment is needed to discriminate them; this comment records the evidence, not a fix.
     const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
     if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery) {
       // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
