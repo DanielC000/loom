@@ -3638,26 +3638,37 @@ export class OrchestrationMcpRouter {
       "escalation_status",
       {
         description:
-          "READ-ONLY: check whether the Platform Lead has picked up / resolved an escalation YOUR PROJECT " +
-          "filed via platform_escalate — closes the gap where a manager re-escalates work the Lead already " +
-          "claimed. Pass `taskId` (the id platform_escalate returned, OR an unambiguous 8-char id-prefix — " +
-          "the paste-able short id Loom displays) to check one escalation; omit it to LIST your project's " +
-          "escalations. The list defaults to OPEN escalations only — status pending or in_progress — most-" +
-          "recent first; pass `includeResolved:true` to get the full history back (every escalation ever " +
-          "filed, including resolved/closed). Scoped server-side to YOUR OWN project's origin — a taskId " +
-          "outside that set (another project's escalation, or unknown) returns `{found:false}` uniformly, " +
-          "never an error, so this can't be used to probe another project's escalations; an AMBIGUOUS " +
-          "prefix that matches more than one of YOUR OWN escalations returns a \"did you mean\" error " +
-          "naming the candidates (pass more characters or the full id) — " +
-          "Each escalation reports its CURRENT title (the Lead may have refined it — " +
-          "itself a sign it was seen), a `status` of pending (still in the landing lane — not yet picked " +
-          "up), in_progress (moved into a working lane — picked up), resolved (in a done/terminal column), " +
-          "or closed (the task was deleted/archived), its columnKey, and updatedAt. No writes.",
+          "READ-ONLY: check whether the Platform Lead has picked up / triaged / resolved an escalation YOUR " +
+          "PROJECT filed via platform_escalate — closes the gap where a manager re-escalates work the Lead " +
+          "already claimed. Pass `taskId` (the id platform_escalate returned, OR an unambiguous 8-char " +
+          "id-prefix — the paste-able short id Loom displays) to check one escalation; omit it to LIST your " +
+          "project's escalations. The list defaults to OPEN escalations only — status pending, in_progress, " +
+          "or triaged — most-recent first; pass `includeResolved:true` to get the full history back (every " +
+          "escalation ever filed, including resolved/closed). Scoped server-side to YOUR OWN project's " +
+          "origin — a taskId outside that set (another project's escalation, or unknown) returns " +
+          "`{found:false}` uniformly, never an error, so this can't be used to probe another project's " +
+          "escalations; an AMBIGUOUS prefix that matches more than one of YOUR OWN escalations returns a " +
+          "\"did you mean\" error naming the candidates (pass more characters or the full id).\n" +
+          "Each escalation reports its CURRENT title (the Lead may have refined it — itself a sign it was " +
+          "seen), a `status` of pending (still in the landing lane — not yet picked up), in_progress (moved " +
+          "into a working lane — picked up), triaged (the Lead verified it and filed the fix as a card " +
+          "elsewhere — see `triagedTo` — but that destination card is NOT yet proven merged), resolved " +
+          "(the destination card IS git-verified merged — DERIVED, never asserted from the Platform board's " +
+          "own column), or closed (the escalation task itself was deleted/archived), its columnKey, and " +
+          "updatedAt.\n" +
+          "READ `triaged` CAREFULLY: it means \"verified and filed, fix not yet PROVEN landed\" — it does " +
+          "NOT mean \"confirmed still broken\". `triagedTo.merged` is git-derived (the same check " +
+          "project_task_get/tasks_get expose): null there means not proven merged, which covers three very " +
+          "different cases — genuinely not fixed yet, fixed but landed outside the merge-detection scan " +
+          "window, or a transient git-read failure — never treat a `triaged` reading as proof the underlying " +
+          "defect is still present. `triagedTo` (present once the Lead has linked a destination via " +
+          "`project_task_create`'s `resolvesEscalation`) names {projectId, projectName, taskId, taskTitle, " +
+          "merged} so you can go verify the real state yourself instead of trusting this field alone. No writes.",
         inputSchema: strictShape({ taskId: z.string().optional(), includeResolved: z.boolean().optional() }),
       },
       async ({ taskId, includeResolved }) => {
         try {
-          return ok(sessions.escalationStatus(managerSessionId, { taskId, includeResolved }));
+          return ok(await sessions.escalationStatus(managerSessionId, { taskId, includeResolved }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

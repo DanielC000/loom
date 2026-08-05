@@ -5253,6 +5253,24 @@ export class Db {
     ).all(originProjectId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * The latest `escalation_triaged` link recorded for one Platform escalation task (card ba04d607) — the
+   * source `escalation_status` derives its `triagedTo`/`resolved` from. `escalationTaskId` is matched
+   * against the plain `task_id` column (the link event is written with the ESCALATION's own id as its
+   * `taskId`, never the destination's — see `OrchestrationEventKind.escalation_triaged`'s doc), so this is
+   * a simple equality read, not a `json_extract` scan. `seq DESC` picks the most recent link if the Lead
+   * ever re-links the same escalation. Returns null if no link has ever been recorded, or the stored
+   * detail is malformed (fail-safe: never assert a link that isn't fully there).
+   */
+  findEscalationTriage(escalationTaskId: string): { destinationProjectId: string; destinationTaskId: string } | null {
+    const row = this.db.prepare(
+      "SELECT detail_json AS detailJson FROM orchestration_events WHERE kind = 'escalation_triaged' AND task_id = ? ORDER BY seq DESC LIMIT 1",
+    ).get(escalationTaskId) as { detailJson: string | null } | undefined;
+    if (!row?.detailJson) return null;
+    const detail = JSON.parse(row.detailJson) as { destinationProjectId?: string; destinationTaskId?: string };
+    if (!detail.destinationProjectId || !detail.destinationTaskId) return null;
+    return { destinationProjectId: detail.destinationProjectId, destinationTaskId: detail.destinationTaskId };
+  }
+  /**
    * One worker's audit trail in chronological order — used by boot-reconcile's dangling-merge
    * detector to pair a `merge_request` with its later terminal `merge_done`/`merge_rejected`
    * regardless of which manager id the events were filed under (rowid breaks same-ts ties).

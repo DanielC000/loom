@@ -40,6 +40,7 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
  *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
 export const DEFAULT_EVENTS_SEARCH_CAP = 50;
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
+import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -1854,7 +1855,18 @@ export class PlatformMcpRouter {
           "relationship on the new card's body — the superseded/related card's OWN body is back-noted too " +
           "(\"Superseded by: <newId>\" / \"Related to: <newId>\"), so either card is discoverable from the other. " +
           "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
-          "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.",
+          "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.\n" +
+          "`resolvesEscalation` (card ba04d607): when this new card IS the fix for a `platform_escalate` " +
+          "you triaged, pass that escalation's taskId (full id or unambiguous prefix, resolved on YOUR OWN " +
+          "\"" + PLATFORM_PROJECT_NAME + "\" board — never a task on the destination board) to STRUCTURALLY " +
+          "link the two. This is what lets `escalation_status` DERIVE `resolved` from this new card's own " +
+          "git-verified merged state instead of asserting it from your Platform board's own terminal column " +
+          "— the exact defect ba04d607 exists to fix. Skipping this on an escalation's fix leaves that " +
+          "escalation reading `triaged` forever, even after the fix ships — a body-text note is NOT a " +
+          "substitute (that remedy already failed twice; see the card). An unknown/ambiguous/out-of-scope " +
+          "escalation id is REJECTED with {error} and nothing is written (the whole create fails, not just " +
+          "the link — a card claiming to resolve an escalation it isn't actually linked to would be worse " +
+          "than no link at all).",
         inputSchema: strictShape({
           projectId: z.string(),
           title: z.string(),
@@ -1865,14 +1877,38 @@ export class PlatformMcpRouter {
           allowDuplicate: z.boolean().optional(),
           supersedes: z.string().optional(),
           relatedTo: z.string().optional(),
+          resolvesEscalation: z.string().optional(),
         }),
       },
-      async ({ projectId, title, body, priority, columnKey, repoKey, allowDuplicate, supersedes, relatedTo }) => {
+      async ({ projectId, title, body, priority, columnKey, repoKey, allowDuplicate, supersedes, relatedTo, resolvesEscalation }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(createProjectTaskChecked(
+        // Resolve + validate the escalation link BEFORE creating anything — a rejected link must fail the
+        // WHOLE create (see the tool doc above), not leave an unlinked card sitting on the destination board.
+        let escalationTaskId: string | undefined;
+        if (resolvesEscalation !== undefined) {
+          const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+          if (!home) return ok({ error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" });
+          const escTask = getByIdPrefix(
+            resolvesEscalation,
+            (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
+            () => db.listTasks(home.id),
+            "escalation task",
+          );
+          if ("error" in escTask) return ok(escTask);
+          escalationTaskId = escTask.id;
+        }
+        const created = createProjectTaskChecked(
           db, project.id, { title, body, priority, columnKey, repoKey }, { allowDuplicate, supersedes, relatedTo },
-        ));
+        );
+        if (escalationTaskId && "id" in created) {
+          db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: callerSessionId ?? "",
+            taskId: escalationTaskId, kind: "escalation_triaged",
+            detail: { destinationProjectId: project.id, destinationTaskId: created.id },
+          });
+        }
+        return ok(created);
       },
     );
 

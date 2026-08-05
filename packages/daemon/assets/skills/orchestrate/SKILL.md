@@ -192,6 +192,12 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   Lead's cross-project reach — goes to **`platform_escalate`** instead; then poll **`escalation_status`**
   for the Lead's pickup/answer. Don't relay a platform concern through an owner `question_ask`, and don't
   sit on a Loom bug you can't fix — file it where the Lead will see it.
+- **`escalation_status`'s `triaged` is not `resolved`, and it is not "still broken" either — read
+  `triagedTo`, don't guess from the word alone.** `triaged` means the Lead verified your escalation and
+  filed the fix somewhere (`triagedTo` names where); it does NOT mean the fix landed. `resolved` is
+  reserved for a fix the Lead's board itself can prove shipped — never assert your own conclusion on top
+  of a `triaged` reading in either direction. If you need to know whether it actually shipped, follow
+  `triagedTo` and check yourself rather than treating a stale `triaged` as either good or bad news.
 - **A Claude Code "Stage 2 classifier error" (worded "blocking based on stage 1 assessment") is usually
   TRANSIENT upstream flakiness, not a genuine denial** — retry the identical action once before treating
   it as a blocker worth escalating at all.

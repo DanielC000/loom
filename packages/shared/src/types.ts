@@ -904,6 +904,14 @@ export type OrchestrationEventKind =
   // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make
   // to the reserved Platform home — see `cross_project_message` below for the LINKED-peer-project channel.
   | "platform_escalate"
+  // Platform Lead → escalation triage LINK (`project_task_create`'s `resolvesEscalation` param, card
+  // ba04d607): records that a `platform_escalate` task's actual fix work was filed as a NEW task on
+  // ANOTHER project's board. `taskId` is the ESCALATION's own id (not the destination's), so a lookup by
+  // task_id resolves the link directly; `detail` carries { destinationProjectId, destinationTaskId }. Read
+  // by `escalation_status` to DERIVE its `resolved` state from the destination card's own git-verified
+  // merged state instead of asserting it from the Platform board's own terminal column — which only ever
+  // proved the Lead finished TRIAGING, never that the underlying defect actually shipped.
+  | "escalation_triaged"
   // Manager↔manager cross-project message (orchestration `peer_message`, board card 2349d90c) — a manager
   // messaging a LINKED peer project's LIVE MANAGER (never a worker/platform/auditor session). `detail`
   // carries { originProjectId, targetProjectId, targetSessionId, deliveryStatus }; managerSessionId is the

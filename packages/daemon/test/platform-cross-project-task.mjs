@@ -13,6 +13,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) TRUST GATE — project_task_create is PRESENT on loom-platform but ABSENT from the agent-facing
 //       surfaces: loom-orchestration (manager AND worker) and loom-setup. A project orchestrator/
 //       worker/setup-operator must NOT gain cross-project write.
+//   (8) card ba04d607 — project_task_create's `resolvesEscalation` structurally links a new card to the
+//       `platform_escalate` task it fixes (db.findEscalationTriage resolves it back), accepts an
+//       unambiguous id-prefix, and REJECTS the whole create (nothing written) for an unknown escalation
+//       id OR a real taskId that isn't actually on the Platform board (scoped, never a bare unscoped
+//       lookup). escalation-status.mjs proves the READ side this link feeds.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-cross-project-task.mjs
 import fs from "node:fs";
@@ -436,6 +441,44 @@ try {
   check("(7) replace:true swaps the WHOLE override (obsidian gone, only docLint remains)",
     db.getProject("pCfg").config.docLint === false && db.getProject("pCfg").config.obsidian === undefined);
 
+  // ===================== (8) resolvesEscalation — the structural triage link (card ba04d607) ============
+  // File a real escalation from pTarget's manager onto the reserved pHome board, then link a NEW
+  // project_task_create card to it via resolvesEscalation — the SAME param the Platform Lead uses when
+  // filing an escalation's actual fix. This is the WRITE side of card ba04d607; escalation-status.mjs
+  // proves the READ side (status deriving resolved/triaged off this link).
+  const esc = svc.platformEscalate("M", { title: "resolvesEscalation test escalation", detail: "evidence", severity: "medium" });
+  check("(8) setup: a real escalation was filed on the Platform board", !!esc.taskId && !esc.error);
+
+  const fixCard = await call("project_task_create", {
+    projectId: "pTarget", title: "fix(x): the actual fix for the escalation", body: "v1",
+    resolvesEscalation: esc.taskId,
+  });
+  check("(8) resolvesEscalation: the create still succeeds and returns the destination Task row", !!fixCard.id && !fixCard.error);
+  const link = db.findEscalationTriage(esc.taskId);
+  check("(8) resolvesEscalation: db.findEscalationTriage resolves to the NEW destination card",
+    link !== null && link.destinationProjectId === "pTarget" && link.destinationTaskId === fixCard.id);
+
+  // An unambiguous 8-char id-prefix of the escalation resolves too (mirrors every other *_get id-prefix
+  // convention on this surface).
+  const escPrefix = esc.taskId.slice(0, 8);
+  const fixCard2 = await call("project_task_create", { projectId: "pTarget", title: "fix via prefix", resolvesEscalation: escPrefix });
+  check("(8) resolvesEscalation accepts an unambiguous 8-char id-prefix", !!fixCard2.id && !fixCard2.error);
+
+  // An unknown escalation id is REJECTED — the WHOLE create fails, nothing is written (never an unlinked
+  // card that silently drops the caller's stated intent).
+  const nBefore8 = db.listTasks("pTarget").length;
+  const badLink = await call("project_task_create", { projectId: "pTarget", title: "should not be created", resolvesEscalation: "not-a-real-task-id-at-all" });
+  check("(8) resolvesEscalation: an unknown escalation id is REJECTED with {error}", typeof badLink.error === "string" && !badLink.id);
+  check("(8) resolvesEscalation: the rejected create inserted NO card", db.listTasks("pTarget").length === nBefore8);
+
+  // A taskId that IS real but lives on a DIFFERENT board (not the Platform home) must ALSO be rejected —
+  // proves the resolver is scoped to pHome, never a bare unscoped db.getTask lookup that would silently
+  // accept any task anywhere as an "escalation".
+  const outOfScopeLink = await call("project_task_create", { projectId: "pTarget", title: "should not be created either", resolvesEscalation: fixCard.id });
+  check("(8) resolvesEscalation: a taskId that exists but is NOT on the Platform board is rejected (scoped, no cross-board leak)",
+    typeof outOfScopeLink.error === "string" && !outOfScopeLink.id);
+  check("(8) resolvesEscalation: that rejected create ALSO inserted no card", db.listTasks("pTarget").length === nBefore8);
+
   await client.close();
 
   // ===================== (3) TRUST GATE — ABSENT from every agent-facing surface =====================
@@ -470,6 +513,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). project_task_create ALSO runs the SAME cross-channel duplicate check as the in-project tasks_create (M1, card 0ef0270b) — checked against the TARGET project's board (not the Lead's own pHome), overridable via allowDuplicate/supersedes/relatedTo, and a supersedes override back-links the superseded card too (m7). tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
+  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). project_task_create ALSO runs the SAME cross-channel duplicate check as the in-project tasks_create (M1, card 0ef0270b) — checked against the TARGET project's board (not the Lead's own pHome), overridable via allowDuplicate/supersedes/relatedTo, and a supersedes override back-links the superseded card too (m7). resolvesEscalation (card ba04d607) structurally links a new card to the escalation it fixes (id-prefix accepted, unknown/out-of-scope ids rejected with nothing written) — the write side of escalation_status's derived resolved/triaged. tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

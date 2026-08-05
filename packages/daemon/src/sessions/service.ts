@@ -15,7 +15,7 @@ import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.j
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -1111,9 +1111,21 @@ export interface EscalationStatusItem {
   /** The task's CURRENT title — the Lead may have refined it, itself a signal it was seen. Falls back to
    *  the originally-filed title once the task is `closed` (deleted/archived — no live row to read). */
   title: string;
-  status: "pending" | "in_progress" | "resolved" | "closed";
+  /**
+   * `triaged` (card ba04d607) means the Lead verified the escalation and filed the fix elsewhere — it does
+   * NOT mean the fix landed, and it does NOT mean the fix hasn't landed either: `triagedTo.merged` is
+   * git-derived and `null` there means only NOT PROVEN merged (never merged, landed outside the scan
+   * window, or a git read failure), never an authoritative "still broken". `resolved` is DERIVED from that
+   * same field being non-null — never asserted from the Platform board's own column — so it can never
+   * overclaim the way the old terminal-column-only reading did.
+   */
+  status: "pending" | "in_progress" | "triaged" | "resolved" | "closed";
   columnKey: string | null;
   updatedAt: string;
+  /** Where the Lead's fix work actually went, once linked via `project_task_create`'s `resolvesEscalation`
+   *  — null until a link is recorded. `merged` is that destination card's OWN git-derived ship state (the
+   *  SAME check `project_task_get`/`tasks_get` expose) — see `status`'s doc for how to read a null here. */
+  triagedTo: { projectId: string; projectName: string; taskId: string; taskTitle: string; merged: MergedCommitInfo | null } | null;
 }
 
 /** Bounded scan window for {@link findShippedCardMatch} — recent mainline history only, not a full-repo
@@ -7135,7 +7147,7 @@ export class SessionService {
       const filedTitle = (e.detail?.title as string | undefined) ?? "";
       if (!e.taskId || norm(filedTitle) !== key) continue;
       const existingTask = this.db.getTask(e.taskId);
-      if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
+      if (existingTask && this.columnEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
         const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
         if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
           // Mode A fix (card 9315ddf9): this used to return here with the new `detail` silently
@@ -7190,7 +7202,7 @@ export class SessionService {
       for (const e of this.db.listEscalationsForProject(caller.projectId)) {
         if (e.managerSessionId !== managerSessionId || !e.taskId) continue;
         const t = this.db.getTask(e.taskId);
-        if (t && this.classifyEscalationStatus(home.id, t.columnKey) !== "resolved") candidateTaskIds.add(e.taskId);
+        if (t && this.columnEscalationStatus(home.id, t.columnKey) !== "resolved") candidateTaskIds.add(e.taskId);
       }
       const candidates = [...candidateTaskIds];
 
@@ -7565,10 +7577,10 @@ export class SessionService {
    * it only needed the open ones). Pass `includeResolved:true` to opt back into the full unfiltered
    * history. The single-`taskId` lookup above is unaffected either way — it's already cheap.
    */
-  escalationStatus(
+  async escalationStatus(
     managerSessionId: string,
     input: { taskId?: string; includeResolved?: boolean },
-  ): { found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } | { error: string } {
+  ): Promise<{ found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } | { error: string }> {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("escalation_status is a manager-only surface");
 
@@ -7584,33 +7596,90 @@ export class SessionService {
         return { error: `ambiguous escalation id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
       }
       if (r.kind === "none") return { found: false };
-      return { found: true, escalation: this.describeEscalation(r.record.event) };
+      return { found: true, escalation: await this.describeEscalation(r.record.event) };
     }
-    const all = events.map((e) => this.describeEscalation(e));
-    const scoped = input.includeResolved ? all : all.filter((it) => it.status === "pending" || it.status === "in_progress");
+    const all = await Promise.all(events.map((e) => this.describeEscalation(e)));
+    // "Open" = not yet CONFIRMED fixed and not gone — pending/in_progress/triaged all still warrant a
+    // manager's attention (card ba04d607: `triaged` is deliberately NOT lumped in with `resolved` here,
+    // since it makes no stronger claim than "the Lead acted" — a manager checking in on an open escalation
+    // still wants to see it by default).
+    const scoped = input.includeResolved ? all : all.filter((it) => it.status !== "resolved" && it.status !== "closed");
     return { found: true, escalations: scoped };
   }
 
   /** One `platform_escalate` event → its current escalation status, read fresh off the live Platform task
    *  (its title/column may have moved since filing — a refined title is itself a signal the Lead saw it). */
-  private describeEscalation(event: OrchestrationEvent): EscalationStatusItem {
+  private async describeEscalation(event: OrchestrationEvent): Promise<EscalationStatusItem> {
     const taskId = event.taskId ?? "";
     const filedTitle = (event.detail?.title as string | undefined) ?? "";
     const platformProjectId = (event.detail?.platformProjectId as string | undefined) ?? "";
     const task = this.db.getTask(taskId);
-    if (!task) return { taskId, title: filedTitle, status: "closed", columnKey: null, updatedAt: event.ts };
-    return { taskId, title: task.title, status: this.classifyEscalationStatus(platformProjectId, task.columnKey), columnKey: task.columnKey, updatedAt: task.updatedAt };
+    if (!task) return { taskId, title: filedTitle, status: "closed", columnKey: null, updatedAt: event.ts, triagedTo: null };
+    const { status, triagedTo } = await this.deriveEscalationStatus(platformProjectId, task.columnKey, taskId);
+    return { taskId, title: task.title, status, columnKey: task.columnKey, updatedAt: task.updatedAt, triagedTo };
   }
 
-  /** Column → escalation status, role-resolved against the Platform project's OWN column roles (never a
-   *  hardcoded "inbox"/"backlog"/"done" key) — mirrors the landing-lane fallback `platformEscalate` files
-   *  new escalations into, so a task still sitting in that exact lane reads back as "pending". */
-  private classifyEscalationStatus(platformProjectId: string, columnKey: string): "resolved" | "pending" | "in_progress" {
+  /**
+   * Column → escalation status, role-resolved against the Platform project's OWN column roles (never a
+   * hardcoded "inbox"/"backlog"/"done" key) — mirrors the landing-lane fallback `platformEscalate` files
+   * new escalations into, so a task still sitting in that exact lane reads back as "pending". Terminal
+   * column reads back "resolved" here — this is the CHEAP, column-only classification `platformEscalate`'s
+   * own internal "is there a still-open escalation under this title" dedupe/reuse gate uses (unchanged
+   * behavior from before card ba04d607).
+   *
+   * ⚠️ DELIBERATE DIVERGENCE FROM {@link deriveEscalationStatus} — read before "fixing" either one.
+   * `deriveEscalationStatus` is the manager-facing `escalation_status` read: it does NOT trust the column
+   * alone for "resolved" (that was the defect ba04d607 fixes), so a LINKED-but-not-yet-merged terminal
+   * escalation reads `triaged` there while THIS function still returns `resolved` for the exact same
+   * column state. That is BY DESIGN, not a bug in either one: this function is an internal reuse
+   * heuristic never reported to a manager, so it doesn't carry the same asserted-vs-derived trust problem
+   * `escalation_status`'s reported `status` does, and column-only is the correct, cheap answer for "should
+   * I reuse this still-open card" here. Keeping this sync + narrow also means the write path
+   * (platformEscalate, and its ~30 synchronous test call sites) never has to go async just to file an
+   * escalation. If you're tempted to make the two agree, don't — see EscalationStatusItem's doc for why
+   * the read path must never assert `resolved` from the column, and this doc for why the write path is
+   * fine doing exactly that.
+   */
+  private columnEscalationStatus(platformProjectId: string, columnKey: string): "resolved" | "pending" | "in_progress" {
     const terminalKey = this.columnKeyForProjectRole(platformProjectId, "terminal");
     if (terminalKey !== undefined && columnKey === terminalKey) return "resolved";
     const landingKey = this.columnKeyForProjectRole(platformProjectId, "defaultLanding") ?? "backlog";
     if (columnKey === landingKey) return "pending";
     return "in_progress";
+  }
+
+  /**
+   * The manager-facing `escalation_status` read's FULL classification (card ba04d607) — below the terminal
+   * column, identical to {@link columnEscalationStatus} (pending/in_progress). ONCE in the terminal column,
+   * `resolved` is no longer asserted from the column alone — it's DERIVED from the linked destination
+   * task's own git-verified merged state (`db.findEscalationTriage` + `getTaskMergedInfo`, the SAME check
+   * `project_task_get`/`tasks_get` expose as `merged`). No link, or a link whose destination isn't proven
+   * merged, reads `triaged`: the Lead finished its OWN triage on the Platform board, nothing more is
+   * claimed — see EscalationStatusItem's doc for why a `triaged` reading must never be misread as
+   * "confirmed still broken".
+   */
+  private async deriveEscalationStatus(
+    platformProjectId: string, columnKey: string, taskId: string,
+  ): Promise<{ status: "resolved" | "triaged" | "pending" | "in_progress"; triagedTo: EscalationStatusItem["triagedTo"] }> {
+    const terminalKey = this.columnKeyForProjectRole(platformProjectId, "terminal");
+    if (terminalKey !== undefined && columnKey === terminalKey) {
+      const link = this.db.findEscalationTriage(taskId);
+      if (!link) return { status: "triaged", triagedTo: null };
+      const destProject = this.db.getProject(link.destinationProjectId);
+      const destTask = this.db.getTask(link.destinationTaskId);
+      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId) : null;
+      const triagedTo: EscalationStatusItem["triagedTo"] = {
+        projectId: link.destinationProjectId,
+        projectName: destProject?.name ?? "",
+        taskId: link.destinationTaskId,
+        taskTitle: destTask?.title ?? "",
+        merged,
+      };
+      return { status: merged ? "resolved" : "triaged", triagedTo };
+    }
+    const landingKey = this.columnKeyForProjectRole(platformProjectId, "defaultLanding") ?? "backlog";
+    if (columnKey === landingKey) return { status: "pending", triagedTo: null };
+    return { status: "in_progress", triagedTo: null };
   }
 
   /**

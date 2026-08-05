@@ -7,10 +7,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   (a) a manager sees its OWN project's escalation, and its `status` transitions correctly as the
 //       Platform task's column moves: pending (still in the landing lane) → in_progress (moved off
-//       landing into a working lane) → resolved (moved into the terminal/done-role column) → closed
-//       (the Platform task is deleted). The CURRENT title (post-move) is read back, not the filed one —
-//       except once `closed`, where there's no live row left, so it falls back to the originally-filed
-//       title.
+//       landing into a working lane) → triaged (moved into the terminal/done-role column, no destination
+//       link recorded) → closed (the Platform task is deleted). The CURRENT title (post-move) is read
+//       back, not the filed one — except once `closed`, where there's no live row left, so it falls back
+//       to the originally-filed title.
 //   (b) SCOPING — a manager filing from project A cannot see project B's escalation: neither via a direct
 //       taskId query (returns {found:false}, not an error — never confirms/denies existence) nor in its
 //       own list.
@@ -23,6 +23,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       from a different project still returns found:false (no leak); an AMBIGUOUS in-scope prefix
 //       returns a named "did you mean" error rather than a silent pick; a full id is unaffected even when
 //       its prefix collides with another escalation's.
+//   (f) card ba04d607 — the terminal column ALONE no longer asserts "resolved" (reaching it with no
+//       destination link reads `triaged`, never `resolved`: the regression check DoD #5 names). Once the
+//       Lead links a destination task (the `escalation_triaged` event `project_task_create`'s
+//       `resolvesEscalation` writes), `triagedTo` exposes WHERE the work went; `status` stays `triaged`
+//       while that destination is unmerged, and flips to `resolved` ONLY once a REAL squash commit lands
+//       for it (a genuine `getTaskMergedInfo` git-derived check, not a mock) — `resolved` is DERIVED from
+//       the destination's own ship state, never asserted from the Platform board's column.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/escalation-status.mjs
 import fs from "node:fs";
@@ -53,6 +60,8 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { createProjectTask } = await import("../dist/mcp/tasks.js");
+const { taskKey } = await import("../dist/git/worktrees.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -154,10 +163,40 @@ try {
     st1b.escalation.status === "in_progress" && st1b.escalation.columnKey === "review" &&
     st1b.escalation.title === "Fix: worker_merge gate hangs on slow build (picked up)");
 
-  // The Lead resolves it: moves the card into the terminal/done-role column.
+  // The Lead moves the card into the terminal/done-role column WITHOUT linking a destination yet — this
+  // is the exact defect card ba04d607 fixes: reaching "done" on the Platform board must NOT, on its own,
+  // read back as "resolved" anymore.
   db.updateTask(t1, { columnKey: "done" });
   const st1c = await callAs("MGR_A", "manager", "escalation_status", { taskId: t1 });
-  check("(a) moved into the terminal column → status resolved", st1c.escalation.status === "resolved" && st1c.escalation.columnKey === "done");
+  check("(a)/(f) moved into the terminal column with NO destination link → status triaged, NEVER resolved (the defect this card fixes)",
+    st1c.escalation.status === "triaged" && st1c.escalation.columnKey === "done" && st1c.escalation.triagedTo === null);
+
+  // ===================== (f) escalation_triaged link + git-derived `resolved` (card ba04d607) =====================
+  // The Lead links t1 to a NEW destination task on project A — the SAME event kind/shape
+  // `project_task_create`'s `resolvesEscalation` param writes.
+  const destTask = createProjectTask(db, "pA", { title: "fix: the actual bug behind T1" });
+  check("(f) destination task created on project A", !("error" in destTask));
+  db.appendEvent({
+    id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "LEAD",
+    taskId: t1, kind: "escalation_triaged",
+    detail: { destinationProjectId: "pA", destinationTaskId: destTask.id },
+  });
+  const st1e = await callAs("MGR_A", "manager", "escalation_status", { taskId: t1 });
+  check("(f) linked but destination NOT YET merged → still triaged, NEVER resolved (regression check, DoD #5)",
+    st1e.escalation.status === "triaged" &&
+    st1e.escalation.triagedTo?.taskId === destTask.id &&
+    st1e.escalation.triagedTo?.projectId === "pA" &&
+    st1e.escalation.triagedTo?.projectName === "Project A" &&
+    st1e.escalation.triagedTo?.merged === null);
+
+  // Land a REAL squash commit for the destination task, carrying the `Loom-Worker-Branch:` trailer
+  // getTaskMergedInfo keys off — the SAME recipe test/task-merged-state.mjs uses, so this proves a genuine
+  // git-derived merge, never a mocked one.
+  const destBranch = `loom/${taskKey(destTask.id)}`;
+  execSync(`git -c user.email=x@loom -c user.name=x commit --allow-empty -q -m "fix(x): landed the real fix" -m "Loom-Worker-Branch: ${destBranch}"`, { cwd: repo });
+  const st1f = await callAs("MGR_A", "manager", "escalation_status", { taskId: t1 });
+  check("(f) destination now git-verified merged → status DERIVES to resolved from the destination's own ship state",
+    st1f.escalation.status === "resolved" && typeof st1f.escalation.triagedTo?.merged?.sha === "string");
 
   // The task is later deleted/archived off the board entirely.
   db.deleteTask(t1);
@@ -227,9 +266,11 @@ try {
   check("(e) a FULL id still resolves unambiguously even when its prefix is shared with another escalation",
     fullDespiteCollision.found === true && fullDespiteCollision.escalation.taskId === dupId1);
 
-  // Defense in depth: the service method itself rejects a non-manager caller.
+  // Defense in depth: the service method itself rejects a non-manager caller. escalationStatus is now
+  // async (card ba04d607 — deriving `resolved` needs an awaited git-derived merged check), so its guard
+  // throw surfaces as a REJECTED promise, not a synchronous throw — await it inside the try.
   let svcRejected = false;
-  try { svc.escalationStatus("W_A", {}); } catch (e) { svcRejected = /manager-only/.test(e.message); }
+  try { await svc.escalationStatus("W_A", {}); } catch (e) { svcRejected = /manager-only/.test(e.message); }
   check("(d) svc.escalationStatus rejects a non-manager caller (manager-only guard)", svcRejected);
 } finally {
   db.close();
@@ -238,6 +279,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→resolved→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed, and taskId now accepts an unambiguous 8-char id-prefix scoped to the caller's own escalation set (ambiguous named, out-of-scope still found:false) — claude-free, network-free."
+  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→triaged→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed, taskId accepts an unambiguous 8-char id-prefix scoped to the caller's own escalation set (ambiguous named, out-of-scope still found:false), and (card ba04d607) reaching the terminal column alone reads triaged/never resolved — resolved is DERIVED only once a linked destination task is git-verified merged — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
