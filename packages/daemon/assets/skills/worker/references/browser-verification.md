@@ -41,7 +41,9 @@ settling for a weaker functional check.
 not `ref` (`ref` is a different browser tool's arg name); if a click is rejected asking for `target`,
 that's the mix-up.
 
-When you self-verify, point Playwright at the dev server's **actual bound URL** — read the port from
-the framework's startup line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If
-that port is already held by another process, the dev server binds a different one or fails —
-verifying the default would silently drive the wrong, *stale* server and report a false pass.
+When you self-verify, point Playwright at the dev server's **actual bound URL** — assert the bound
+port from the tracked server process itself, by whatever means your OS exposes (the framework's own
+startup banner, when captured — e.g. vite's `Local: http://…:PORT` — is one way but not the only one);
+never assume a default port. If that port is already held by another process, the dev server binds a
+different one or fails — verifying the default would silently drive the wrong, *stale* server and
+report a false pass.

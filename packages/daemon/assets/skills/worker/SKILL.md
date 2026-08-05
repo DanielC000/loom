@@ -217,8 +217,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    button, input, menu), a render-only check is not enough: **EXERCISE it** and confirm an **observable
    state change** — DOM/network/text differs before vs. after — not just that the page renders without
    console errors. When you self-verify, point Playwright at the dev server's **actual bound URL** —
-   read the port from the framework's startup line, never assume a default (a stale server already
-   holding the default port would silently verify the wrong thing and report a false pass). Even the
+   assert the bound port from the tracked server process itself, by whatever means your OS exposes (the
+   framework's own startup banner, when captured, is one way but not the only one); never assume a
+   default (a stale server already holding the default port would silently verify the wrong thing and
+   report a false pass). Even the
    right port isn't proof of the right data — a server can fall back onto another live default and serve
    someone else's data with everything still rendering correctly, so **assert the fixture's identity** (a
    count, sentinel, or id) rather than just that the page looks right. **Pick the control by the POLARITY

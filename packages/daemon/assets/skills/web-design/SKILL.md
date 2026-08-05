@@ -158,10 +158,11 @@ consent copy.
 testing available (a browser-testing-capable profile — a QA or web-design rig with a Playwright/browser
 MCP — spawns with one), use it:
 
-1. Render the page or component in the browser — at the dev server's **actual bound URL**. Read the
-   port from the framework's startup line (e.g. vite's `Local: http://…:PORT`); never assume a default
-   port. If that port is already held by another process, the dev server binds another port or fails, so
-   eyeballing the default would render the wrong, *stale* server.
+1. Render the page or component in the browser — at the dev server's **actual bound URL**. Assert the
+   bound port from the tracked server process itself, by whatever means your OS exposes (the framework's
+   own startup banner, when captured — e.g. vite's `Local: http://…:PORT` — is one way but not the only
+   one); never assume a default port. If that port is already held by another process, the dev server
+   binds another port or fails, so eyeballing the default would render the wrong, *stale* server.
    For a **static on-disk HTML file** with no dev server (a CV, a rendered report), don't navigate
    `file://` — Playwright's `browser_navigate` blocks it outright — and don't hand-roll a web server
    per render cycle. Serve its directory over loopback with the bundled helper and open the printed
