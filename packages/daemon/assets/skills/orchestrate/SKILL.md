@@ -630,8 +630,11 @@ what you checked. Found none? Treat it as live.
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
    **Size budget + rotate-and-archive — never lose old notes.** Keep the ACTIVE doc comfortably inside
-   ONE `Read` page: target ~150 lines, hard-cap ~400 (an oversized doc breaks a cold successor's very
-   first read). Carry forward only CURRENT state. **Check size BEFORE each rewrite, not after** — if the
+   ONE `Read` page: target ~150 lines, hard-cap ~400 lines (~40KB) — an oversized doc breaks a cold
+   successor's very first read. **Count lines from the `Read` tool's own line numbers** — if you've
+   already opened the doc, the correct total is right there at zero extra cost — or the file size in
+   bytes; a shell line-count may report only non-empty lines, so verify what yours counts before
+   trusting it. Carry forward only CURRENT state. **Check size BEFORE each rewrite, not after** — if the
    doc is near the hard-cap, ROTATE FIRST (move the current doc to a dated archive sibling, start a
    FRESH active doc holding only live state), then write; **never trim-and-lose old notes.** The exact
    rotation procedure, archive naming, and the incident behind the budget are in

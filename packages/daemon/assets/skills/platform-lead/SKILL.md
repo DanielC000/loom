@@ -192,8 +192,11 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    rewritten in place — what's been set up, the prioritised backlog, open escalations, key decisions and
    gotchas — so a successor reads it COLD and loses nothing. **Size budget + rotate-and-archive — never
    lose old notes.** Keep the ACTIVE doc comfortably inside ONE `Read` page: target ~150 lines, hard-cap
-   ~400, well under the 256KB / ~25k-token Read caps (a doc that exceeds them breaks a successor's very
-   first read). **Rewrite in place, never append** (an ever-growing log defeats the budget), carrying
+   ~400 lines (~40KB), well under the 256KB / ~25k-token Read caps (a doc that exceeds them breaks a
+   successor's very first read). **Count lines from the `Read` tool's own line numbers** — if you've
+   already opened the doc, the correct total is right there at zero extra cost — or the file size in
+   bytes; a shell line-count may report only non-empty lines, so verify what yours counts before
+   trusting it. **Rewrite in place, never append** (an ever-growing log defeats the budget), carrying
    forward only CURRENT state. **When a rewrite would push the doc past the budget, ROTATE rather than
    trim-and-lose:** (1) move the current doc to a dated archive sibling — `<name>.archive/<YYYY-MM-DD>-NN.md`
    — old notes preserved intact, nothing deleted; (2) start a FRESH active doc holding only the live state
