@@ -489,6 +489,93 @@ try {
       Number.isFinite(alarmFloorTokens) && alarmFloorTokens === noteB.neverDropStatus.floorTokens);
   }
 
+  // ===================== card 046c721e: floor-tier (pinned+never-drop) byte cap is a REJECTING precondition =====================
+  {
+    const capProj = "proj-floor-cap";
+    db.insertProject({ id: capProj, name: "Floor Cap Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    const under2000 = "y".repeat(1900); // under the 2000-byte floor-tier cap, under the general 4000 cap too
+    const over2000under4000 = "y".repeat(3000); // over the floor cap, still under the general cap
+
+    // POSITIVE: a pinned+never-drop note over the LOWER cap (but under the general 4000-byte cap) is REJECTED.
+    const floorTooLong = writeProjectMemory(db, capProj, {
+      key: "floor-too-long", text: over2000under4000, pinned: true, tags: [NEVER_DROP_TAG],
+    });
+    check("(floor-cap) a pinned+never-drop note over 2000 bytes (but under the general 4000 cap) is REJECTED",
+      "error" in floorTooLong && /too long/i.test(floorTooLong.error) && /never-drop/i.test(floorTooLong.error));
+    check("(floor-cap) the rejection reports bytesOver against the LOWER 2000-byte cap, not the general 4000",
+      floorTooLong.bytesOver === Buffer.byteLength(over2000under4000, "utf8") - 2000);
+    check("(floor-cap) the rejected write never actually persisted", db.getProjectMemoryByKey(capProj, "floor-too-long") === undefined);
+    // Manager review: the rejection must offer NON-DESTRUCTIVE escapes alongside "trim" — compressing
+    // dense safety prose to satisfy a byte cap risks silently dropping a load-bearing clause, so the
+    // message must never read as "your only way out is to cut the note down."
+    check("(floor-cap) the rejection names SPLIT (a separate cross-linked key) as an alternative to trimming",
+      /split/i.test(floorTooLong.error) && /separate key|cross-link/i.test(floorTooLong.error));
+    check("(floor-cap) the rejection names DE-FLOOR (drop the tag, keep pinned) as an alternative, with its evictability tradeoff stated",
+      /drop the ".*never-drop.* tag|drop.*never-drop/i.test(floorTooLong.error) && /evictable/i.test(floorTooLong.error));
+
+    // NEGATIVE CONTROL (unpinned): the SAME oversized text, tagged never-drop but NOT pinned, is NOT
+    // subject to the floor cap (inert per the packer) — only the general 4000-byte cap applies, and this
+    // text is under it.
+    const unpinnedOver = writeProjectMemory(db, capProj, {
+      key: "unpinned-over-floor-cap", text: over2000under4000, tags: [NEVER_DROP_TAG], // pinned omitted ⇒ false
+    });
+    check("(floor-cap) NEGATIVE CONTROL: an UNPINNED never-drop note over 2000 bytes is NOT rejected by the floor cap",
+      !("error" in unpinnedOver) && !("conflict" in unpinnedOver));
+
+    // NEGATIVE CONTROL (ordinary pinned): a pinned note WITHOUT the never-drop tag, over 2000 bytes, is NOT
+    // subject to the floor cap either — only the general 4000-byte cap applies.
+    const ordinaryPinnedOver = writeProjectMemory(db, capProj, {
+      key: "ordinary-pinned-over-floor-cap", text: over2000under4000, pinned: true, // no never-drop tag
+    });
+    check("(floor-cap) NEGATIVE CONTROL: an ordinary pinned note (no never-drop tag) over 2000 bytes is NOT rejected by the floor cap",
+      !("error" in ordinaryPinnedOver) && !("conflict" in ordinaryPinnedOver));
+
+    // POSITIVE: a pinned+never-drop note UNDER the floor cap succeeds normally.
+    const floorFits = writeProjectMemory(db, capProj, {
+      key: "floor-fits", text: under2000, pinned: true, tags: [NEVER_DROP_TAG],
+    });
+    check("(floor-cap) a pinned+never-drop note UNDER 2000 bytes succeeds", !("error" in floorFits) && !("conflict" in floorFits));
+
+    // DoD-3: an EXISTING floor note that becomes over-cap on its NEXT UPDATE is rejected too (no
+    // grandfather clause) — first land it just under the cap while unpinned/untagged (so the write itself
+    // isn't blocked), then flip it to pinned+never-drop via an update carrying oversized text.
+    const preExisting = writeProjectMemory(db, capProj, { key: "existing-floor-note", text: under2000 });
+    check("(floor-cap) setup: a plain under-cap note is created first", !("error" in preExisting));
+    const flipToOversizedFloor = writeProjectMemory(db, capProj, {
+      key: "existing-floor-note", text: over2000under4000, pinned: true, tags: [NEVER_DROP_TAG], baseVersion: preExisting.version,
+    });
+    check("(floor-cap) DoD-3: an update that would make an EXISTING note pinned+never-drop AND over-cap is REJECTED, not grandfathered",
+      "error" in flipToOversizedFloor && /too long/i.test(flipToOversizedFloor.error));
+    check("(floor-cap) DoD-3: the rejected flip-update never actually applied — note is still its original text/state",
+      db.getProjectMemoryByKey(capProj, "existing-floor-note").text === under2000 && db.getProjectMemoryByKey(capProj, "existing-floor-note").pinned === false);
+
+    // DoD-3 continued: an update to an ALREADY pinned+never-drop, ALREADY over-cap note (created via the
+    // blind e2e-seed upsert path, which has no cap check) is rejected on its next memory_write touch, even
+    // when that touch only changes `title` and resupplies the SAME oversized text — proving there is no
+    // path that lets an over-cap floor note escape the cap once memory_write touches it again.
+    const seedProj2 = "proj-floor-cap-seed";
+    db.insertProject({ id: seedProj2, name: "Floor Cap Seed Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    db.upsertProjectMemory(seedProj2, { key: "pre-oversized-floor", text: over2000under4000, pinned: true, tags: [NEVER_DROP_TAG] }, 500);
+    const preOversized = db.getProjectMemoryByKey(seedProj2, "pre-oversized-floor");
+    check("(floor-cap) setup: the blind seed path landed an over-cap floor note with no cap check", preOversized.text === over2000under4000);
+    const touchExisting = writeProjectMemory(db, seedProj2, {
+      key: "pre-oversized-floor", text: over2000under4000, title: "just relabeling", baseVersion: preOversized.version,
+    });
+    check("(floor-cap) DoD-3: touching an ALREADY over-cap floor note (even title-only intent) is REJECTED, forcing a trim",
+      "error" in touchExisting && /too long/i.test(touchExisting.error));
+
+    // Effective-state edge case: omitting `pinned`/`tags` on an update PRESERVES the existing floor-tier
+    // status (PATCH semantics) — an over-cap content-only update to an ALREADY pinned+never-drop note must
+    // still be caught even though this call never explicitly names `pinned`/`tags`.
+    const patchProj2 = "proj-floor-cap-patch";
+    db.insertProject({ id: patchProj2, name: "Floor Cap Patch Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    const patchFloorNote = writeProjectMemory(db, patchProj2, { key: "patch-floor", text: under2000, pinned: true, tags: [NEVER_DROP_TAG] });
+    check("(floor-cap) setup: a fresh pinned+never-drop note under the cap is created", !("error" in patchFloorNote));
+    const contentOnlyOversized = writeProjectMemory(db, patchProj2, { key: "patch-floor", text: over2000under4000, baseVersion: patchFloorNote.version });
+    check("(floor-cap) an omitted-pinned/tags update that PRESERVES pinned+never-drop and goes over-cap is REJECTED",
+      "error" in contentOnlyOversized && /too long/i.test(contentOnlyOversized.error));
+  }
+
   // ===================== card e6d270b3: linked request state resolved at RECALL time, never write time =====================
   {
     const mkQuestion = (over) => ({

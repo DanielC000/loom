@@ -28,6 +28,25 @@ const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const MAX_TEXT_BYTES = 4000;
 const MAX_TITLE_CHARS = 200;
 
+/**
+ * Card 046c721e, off the `5469ec08` investigation — the FLOOR TIER (pinned && `never-drop`, see
+ * `isNeverDrop`/`computeFloorTierStatus` in project-memory-recall.ts) is not "one more note among many":
+ * every such note rides on EVERY future kickoff, unconditionally, so its byte cost is fixed overhead paid
+ * by every session on the project, not just a cost to the note's own author. The investigation measured
+ * the floor consuming ~91% of an 8000-tok digest budget with all 7 floor notes sized right up against
+ * MAX_TEXT_BYTES — this dedicated, LOWER cap for that tier (≈500 est-tok vs the general ≈1000) roughly
+ * halves that cost, enforced as a REJECTING write-time precondition, never an advisory: the pre-existing
+ * `neverDropStatus` signal below (computeNeverDropStatus) is computed strictly AFTER the write already
+ * succeeded, so it could inform but never prevent this exact problem — and the project's own
+ * `shipping-a-detector-is-not-someone-reading-it` memory note found blocking preconditions 2-for-2 acted
+ * on against advisories 0-for-many. The cap applies only when the note's EFFECTIVE post-write state is
+ * genuinely `pinned && never-drop` (see the `isFloorTierNote` computation below) — a `never-drop` tag on
+ * an unpinned note is INERT in the packer, confirmed by reading project-memory-recall.ts directly rather
+ * than trusting the tool description, so this cap must stay silent for that case or it would fire on a
+ * note the packer never actually puts in the floor tier.
+ */
+const MAX_NEVER_DROP_TEXT_BYTES = 2000;
+
 export interface MemoryWriteInput {
   key: string;
   text: string;
@@ -59,7 +78,9 @@ export interface MemoryWriteConflict {
 
 export interface MemoryWriteTooLong {
   error: string;
-  /** How many bytes over MAX_TEXT_BYTES the submitted text is — trim without needing a re-fetch. */
+  /** How many bytes over the applicable cap the submitted text is — trim without needing a re-fetch.
+   *  Card 046c721e: the applicable cap is MAX_TEXT_BYTES in general, or the lower MAX_NEVER_DROP_TEXT_BYTES
+   *  when the note is (effectively, post-write) `pinned && never-drop` — this shape is shared by both. */
   bytesOver: number;
   /** The EXISTING note (if this key already has one) to trim against — omitted for a brand-new key. */
   current?: ProjectMemoryEntry;
@@ -127,11 +148,46 @@ export function writeProjectMemory(
   const text = input.text?.trim();
   if (!text) return { error: "text is required" };
   const textBytes = Buffer.byteLength(text, "utf8");
+  const existing = db.getProjectMemoryByKey(projectId, key);
   if (textBytes > MAX_TEXT_BYTES) {
     return {
       error: `text is too long (${textBytes} bytes, max ${MAX_TEXT_BYTES}) — memory notes are short, curated facts, not a dumping ground; trim ${textBytes - MAX_TEXT_BYTES} bytes and retry`,
       bytesOver: textBytes - MAX_TEXT_BYTES,
-      current: db.getProjectMemoryByKey(projectId, key),
+      current: existing,
+    };
+  }
+  // Card 046c721e — computed from the EFFECTIVE post-write state, not the raw `input` fields: this is a
+  // PATCH (mirrors upsertProjectMemory's own COALESCE semantics exactly), so an omitted `pinned`/`tags`
+  // means "keep whatever this key already has", not "false"/"[]". Getting this wrong either direction is a
+  // real bug: reading raw `input.pinned` would let an update that only OMITS `pinned` slip an over-cap
+  // floor note through (false negative), while defaulting a missing `existing` note to floor-tier status
+  // would wrongly reject an ordinary brand-new pinned note before `tags` even names `never-drop`.
+  const effectivePinned = input.pinned !== undefined ? input.pinned : (existing?.pinned ?? false);
+  const effectiveTags = input.tags !== undefined ? input.tags : (existing?.tags ?? []);
+  const isFloorTierNote = effectivePinned && effectiveTags.includes(NEVER_DROP_TAG);
+  // DoD-3: an EXISTING floor note already over this cap (today's 7 notes, all ~1000 est-tok) is REJECTED
+  // on its very next update, never grandfathered — `text` is a required field on every write, so any
+  // future touch of that key (even one only changing `title`/`tags`) must resupply the full body and will
+  // be forced through this same check. Deliberate: grandfathering would make the cap unenforceable exactly
+  // where the problem the investigation measured already lives, and a cap that only bites brand-new notes
+  // never converges the existing floor tier down. §SCOPE forbids touching those 7 notes to demonstrate
+  // this — it takes effect the first time anyone else edits one.
+  if (isFloorTierNote && textBytes > MAX_NEVER_DROP_TEXT_BYTES) {
+    // Manager review (post-046c721e): "trim N bytes and retry" is the RIGHT remedy for a throwaway note,
+    // but today's real floor notes are dense operational/safety prose — for those, "trim" reads as
+    // "delete ~half the note to make a one-word correction," and compressing safety prose risks silently
+    // dropping a load-bearing clause. Name two NON-DESTRUCTIVE escapes alongside trim so the rejection
+    // never becomes de-facto pressure to damage a note just to satisfy it (a refusal you can't satisfy
+    // without damage is worse than a notice you ignore).
+    return {
+      error: `text is too long for a "${NEVER_DROP_TAG}" floor-tier note (${textBytes} bytes, max ${MAX_NEVER_DROP_TEXT_BYTES} — ` +
+        `lower than the general ${MAX_TEXT_BYTES}-byte cap because a pinned "${NEVER_DROP_TAG}" note rides on EVERY future ` +
+        `kickoff); trim ${textBytes - MAX_NEVER_DROP_TEXT_BYTES} bytes and retry, or — prefer this for dense safety/operational ` +
+        `prose — SPLIT the overflow into a separate key (unpinned, or pinned without "${NEVER_DROP_TAG}") and cross-link the two ` +
+        `with a [[wikilink]]-style reference so no clause is lost, or drop the "${NEVER_DROP_TAG}" tag (keeping pinned:true) to ` +
+        `exit this cap entirely — at the cost of the note becoming evictable like any other pinned note`,
+      bytesOver: textBytes - MAX_NEVER_DROP_TEXT_BYTES,
+      current: existing,
     };
   }
   const title = input.title?.trim() || undefined;

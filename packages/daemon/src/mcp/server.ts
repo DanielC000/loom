@@ -341,6 +341,18 @@ export class TaskMcpRouter {
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
           "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +
           "is rejected with `bytesOver` + the current note (if any) so you can trim without re-fetching. " +
+          "A note that is (effectively, after this write) `pinned:true` AND tagged `\"never-drop\"` — i.e. " +
+          "actually IN the floor tier — is held to a LOWER, SEPARATE cap of 2000 bytes instead, and this " +
+          "one BLOCKS (it is not the `neverDropStatus` advisory above): that tier rides on EVERY future " +
+          "kickoff regardless of relevance, so its cost is fixed overhead for every session on the " +
+          "project, not just this note's own author. Rejected the same way as the general cap " +
+          "(`bytesOver` + `current`). Fires on ANY write that leaves the note pinned+never-drop and over " +
+          "2000 bytes — including an update that only changes `title`/`tags` on an already-oversized floor " +
+          "note, since `text` must be resupplied on every write; there is no grandfather clause. For dense " +
+          "safety/operational prose, PREFER splitting the overflow into a separate cross-linked key over " +
+          "trimming (trimming risks silently dropping a load-bearing clause) — the rejection names this. " +
+          "Unpinning the note, or dropping the `\"never-drop\"` tag, also exempts it and falls back to the " +
+          "general 4000-byte cap, at the cost of the note becoming evictable. " +
           "UPDATING AN EXISTING KEY IS A TRUE PATCH: `title`/`pinned`/`tags` you OMIT are left UNCHANGED " +
           "from the stored note, never reset to a default — pass only `key`+`text`+`baseVersion` to edit " +
           "the body alone. To deliberately CLEAR a field, pass it explicitly (`pinned:false` unpins, " +
