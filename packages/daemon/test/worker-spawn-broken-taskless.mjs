@@ -109,7 +109,10 @@ function cleanup(e) {
   // Card 92902cc2's remedy order (site A's shape, reused): don't recommend worker_message until verified.
   check("(T1) does NOT recommend worker_message before verification (mirrors site A's remedy order)",
     !!broken && /do NOT worker_message it/.test(broken.text));
-  check("(T1) points at worker_transcript as the decisive verify-first check", !!broken && /VERIFY FIRST via worker_transcript/.test(broken.text));
+  // Card 738f2109 DoD-2: worker_status now LEADS as the cheap non-destructive check, but worker_transcript
+  // is still named the decisive one — wording changed, the verify-before-destructive-remedy order didn't.
+  check("(T1) leads with worker_status as the cheap non-destructive check", !!broken && /worker_status\(\{workerSessionId/.test(broken.text));
+  check("(T1) points at worker_transcript as the decisive verify-first check", !!broken && /worker_transcript wkr-t1 — the DECISIVE check/.test(broken.text));
   check("(T1) exactly ONE nudge fires (no double-signal)", e.enqueued.filter((x) => x.id === "mgr-t1").length === 1);
   cleanup(e);
 }

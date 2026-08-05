@@ -836,17 +836,84 @@ function giveUpConfirmationHedge(subject: string): string {
  */
 function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
   const composerDirtyLen = typeof pty.getComposerDirtyLen === "function" ? (pty.getComposerDirtyLen(w.id) ?? null) : null;
+  const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(w.id) : null;
+  const elapsedClause = startedAt !== null ? `~${Math.round((Date.now() - startedAt) / 1000)}s since this pty last (re)started` : "elapsed time unknown (not live in this process)";
   const cause = w.engineSessionId
     ? "an engine session WAS established but never ran a turn — a stranded-composer candidate, not a missing session"
     : "no engine session was ever established — the spawn kickoff never ran";
-  return `[loom:worker-spawn-broken] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn: ${cause}. ` +
+  return `[loom:worker-spawn-broken] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn (${elapsedClause}): ${cause}. ` +
+    `Engine confirmation is NOT bounded to seconds — across 177 give-up-driven confirmations measured for this card, 90% landed within ~46s but the tail ` +
+    `reaches minutes (max observed ~16min); a short elapsed time above is routine, not itself evidence of breakage (see memory ` +
+    `engine-confirmation-can-lag-minutes-timeouts-assume-seconds). ` +
     `Observed (single point-in-time read): engineSessionId=${w.engineSessionId ?? "none"}, turnSeq=${w.turnSeq ?? 0} ` +
-    `(confirm via a second worker_status/worker_transcript read before treating this as settled — a lone reading can't rule out a race still resolving), ` +
+    `(confirm via a second read before treating this as settled — a lone reading can't rule out a race still resolving), ` +
     `composerDirtyLen=${composerDirtyLen ?? "n/a"} (>0 confirms an unsent kickoff sitting in the composer; 0 or n/a does NOT rule that out — the ` +
     `counter is only set once Loom's own retry budget exhausts, and n/a means not live in this process), resumability=${w.resumability}. ` +
-    `${giveUpConfirmationHedge("the kickoff")} This is NOT a benign idle park. VERIFY FIRST via worker_transcript before acting — until verified, ` +
-    `do NOT worker_message it (returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it; only if ` +
-    `worker_transcript shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
+    `${giveUpConfirmationHedge("the kickoff")} This is NOT a benign idle park, but it is also not proof of a broken one. VERIFY, cheapest first: ` +
+    `(1) worker_status({workerSessionId:"${w.id}"}) for a fresh composerDirtyLen/unconfirmedDeliveryMs/turnSeq read — free, no risk; ` +
+    `(2) worker_transcript ${w.id} — the DECISIVE check. Until BOTH agree nothing happened, do NOT worker_message it (returns a false ` +
+    `delivered:true against a session that never started a turn) and do NOT worker_merge it; only if worker_transcript shows truly nothing ` +
+    `(0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
+}
+
+/**
+ * Card 738f2109 DoD-1 measurement (worker report, 2026-08-05): `notifyManagerOfIdleWorker` fires on a
+ * worker's busy(false) edge with ZERO holdoff (index.ts's `onBusy` hook calls it synchronously right
+ * after `db.setBusy`) — so `classifyIdleWorker`'s `broken-spawn` kind used to be eligible on the VERY
+ * FIRST give-up cycle, ~5-7s after a fresh kickoff write, regardless of how routinely long real engine
+ * confirmation can take under load. Measured across n=177 give-up-driven, CONTENT-MATCHED confirmations
+ * (`purgeConfirmedGiveUpRequeue`'s `"CONFIRMED logicalId=… latencyMs=…"` line — deliberately NOT the far
+ * more common single-generation `"CONFIRMED gen=N …"` line, which fires on every ordinary confirmed turn
+ * and is a different, much larger population that would understate the tail) pooled from 4
+ * daemon-output.log rotations (~2026-07-29–08-05): p50=8.5s, p90=45.9s, p95=342s, p99=675s, max=970s
+ * (16min) — a genuinely unbounded tail (see pinned memory
+ * engine-confirmation-can-lag-minutes-timeouts-assume-seconds). A live false positive (worker
+ * `67ee24fb`, card `03016805`) fired at ~22s — UNDER p90 — with the engine confirming ~1.5s after the
+ * notice had already drained to the manager.
+ *
+ * Set just above p90 so `classifyIdleWorker` stops asserting "broken" while confirmation is still
+ * ROUTINE (this card's own title) — not to chase the tail: at 60s, 17/177 (9.6%) of the same population
+ * still confirm later. That residual is mechanism (1) from the same DoD-1 report — the give-up/requeue
+ * BUDGET itself (`GIVE_UP_REQUEUE_LIMIT`/`GIVE_UP_REMINT_LIMIT`/`GIVE_UP_HOLD_MS`) being shorter than the
+ * tail — separately carded and deliberately NOT touched here (a budget raise can't close a tail this
+ * heavy without making the notice uselessly slow; that's a design question for that card, not a tuning
+ * nudge for this one).
+ *
+ * NO env override (card 738f2109 CR follow-up): an ORIGINAL draft added `LOOM_BROKEN_SPAWN_HOLDOFF_MS`
+ * via the repo's usual `Number(process.env.X) || default` idiom — but that idiom silently coerces `0`
+ * (the ONE value an operator would plausibly reach for, to restore the old immediate-fire behaviour
+ * during an incident) and any non-numeric value back to the default, doing the OPPOSITE of what was
+ * asked with no error and no log line. Nothing else needs this seam (this suite's own tests mock
+ * `pty.liveStartedAt` directly rather than shrinking the constant), so removed rather than fixed —
+ * an untested, undocumented escape hatch that lies when pulled is worse than no escape hatch.
+ */
+const BROKEN_SPAWN_HOLDOFF_MS = 60_000;
+
+/**
+ * True once `BROKEN_SPAWN_HOLDOFF_MS` has elapsed since `workerSessionId`'s CURRENT live pty PROCESS
+ * started — see `BROKEN_SPAWN_HOLDOFF_MS`'s own doc for the measurement. Shared by `classifyIdleWorker`'s
+ * two broken-spawn branches AND `notifyManagerOfIdleWorker`'s taskless direct check (below) — all three
+ * are the SAME notice firing on the SAME busy(false) edge with no holdoff of their own, so all three gate
+ * identically.
+ *
+ * Measured from `pty.liveStartedAt` — the CURRENT live pty PROCESS's own start, fresh on every
+ * spawn/resume/fork/recycle — deliberately NOT `w.lastActivity` (DB `sessions.last_activity`, restamped
+ * by `db.setBusy` on EVERY busy transition, true OR false: a worker mid a give-up/retry chain flips busy
+ * repeatedly, which would reset that clock to ~0 on every single edge and make this holdoff never elapse
+ * at all on the edge-triggered call — the exact call this exists to hold back) and NOT `w.createdAt` (the
+ * DB session ROW's creation time, unchanged across a `resume` of the SAME row — stale/old for a resumed
+ * session even though its live pty process, and `hasFirstTurnStarted`, both just restarted fresh).
+ *
+ * `typeof`-guarded (mirrors `buildBrokenSpawnMsg`'s own `getComposerDirtyLen` guard, same reason): this
+ * codebase's test suite is full of hermetic PtyStub fakes that duck-type only the subset of the real
+ * PtyHost contract their own scenario needs. A stub that hasn't opted into `liveStartedAt` reads as
+ * unmeasurable here, and unmeasurable defaults to PAST the holdoff (never suppress) — preserving every
+ * existing test's pre-holdoff behavior unchanged; only a stub that explicitly implements `liveStartedAt`
+ * (this card's own new coverage) ever exercises the suppression branch.
+ */
+function pastBrokenSpawnHoldoff(pty: PtyHost, workerSessionId: string): boolean {
+  const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(workerSessionId) : null;
+  return startedAt === null ? true : Date.now() - startedAt >= BROKEN_SPAWN_HOLDOFF_MS;
 }
 
 /**
@@ -8380,7 +8447,9 @@ export class SessionService {
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
     if (!task || task.columnKey !== activeKey) return { kind: "not-stranded" }; // reported/merged, or no active lane
 
-    if (!w.engineSessionId) return { kind: "broken-spawn" };
+    if (!w.engineSessionId) {
+      return pastBrokenSpawnHoldoff(this.pty, workerSessionId) ? { kind: "broken-spawn" } : { kind: "not-stranded" };
+    }
 
     // Card 2281009d: `engineSessionId` being SET only proves the SessionStart hook fired (an engine
     // session was established) — it does NOT prove a turn ever actually ran. The genuine spawn-broken
@@ -8414,7 +8483,12 @@ export class SessionService {
       !this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report") &&
       readTranscript(w.cwd, w.engineSessionId).length === 0
     ) {
-      return { kind: "broken-spawn" };
+      // BROKEN_SPAWN_HOLDOFF_MS (its own doc, above buildBrokenSpawnMsg): the three conditions above can
+      // all be true for a perfectly healthy spawn still inside its normal confirmation window — don't
+      // assert "broken" until real time has passed. Falls through to `not-stranded` rather than fabricating
+      // a new kind: the caller already treats that as "no signal yet, nothing to do" (see its own gate).
+      if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) return { kind: "broken-spawn" };
+      return { kind: "not-stranded" };
     }
 
     // Card 78e4b3f2: strip a leading possible-duplicate tag before this prefix match. Unlike an in-session
@@ -8512,7 +8586,15 @@ export class SessionService {
     if (!w.taskId) {
       if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
       if (!w.engineSessionId) {
-        try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
+        // Same busy(false)-edge race classifyIdleWorker's broken-spawn branches guard against (see
+        // BROKEN_SPAWN_HOLDOFF_MS's own doc) — this taskless path bypasses that classifier entirely (its
+        // own comment above explains why), so it needs the SAME holdoff applied directly here. No periodic
+        // re-check exists for a taskless worker, but a genuinely-stuck spawn keeps producing fresh
+        // busy(false) edges of its own (each give-up-recovery cycle) — once real elapsed time clears the
+        // holdoff, the NEXT such edge fires this correctly; nothing is silently dropped forever.
+        if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) {
+          try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
+        }
         return;
       }
       // It DID start a turn — has it EVER called worker_report? If not, it finished silently with no
