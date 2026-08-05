@@ -7150,9 +7150,13 @@ function gateTypeForKind(kind: string): GateType {
  *  `passed` (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed
  *  run is `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`)
  *  detail only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance lives
- *  on the sibling merge_rejected event, not surfaced here. */
+ *  on the sibling merge_rejected event, not surfaced here.
+ *  Card db9b0130: `skipped` is checked BEFORE `passed` — an inert-diff skip stamps `passed:true` too (so
+ *  `gateResult.passed` still drives the merge proceeding), but must never be reported as a `"pass"`
+ *  outcome (see `GateOutcome`'s own doc) — checking it first means that stamp can never shadow this one. */
 function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
   if (detail.cancelled === true) return "cancelled";
+  if (detail.skipped === true) return "skipped";
   if (detail.passed === true || detail.ok === true) return "pass";
   if (detail.timedOut === true) return "timeout";
   if (typeof detail.signal === "string" && detail.signal.length > 0) return "kill";

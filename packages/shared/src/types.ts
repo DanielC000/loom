@@ -1354,8 +1354,13 @@ export interface GatesActive {
  *  {@link Db.listGateEvents} reads — a cancelled MERGE gate emits a separate `merge_cancelled` kind that
  *  `GATE_HISTORY_KINDS` excludes entirely, so it never reached this enum at all) fell through
  *  `gateOutcomeFromDetail`'s fallback and read as `"reject"`, silently inflating any rejection rate
- *  computed from this field. */
-export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled";
+ *  computed from this field.
+ *  Card db9b0130: `"skipped"` is likewise a DISTINCT non-verdict, not a `"pass"` — a merge whose diff was
+ *  proven inert (see `isInertMergeDiff`) never spawned a gate process at all, so recording it as a pass
+ *  would reintroduce the exact defect `gateRan` (below) was added to fix, via a new door: a rate computed
+ *  from `outcome === "pass"` alone would silently count a non-run as a measurement. Always paired with
+ *  `gateRan:false` on the same row. */
+export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled" | "skipped";
 
 /** One settled gate run in the HISTORY table — reconstructed from a gate-related orchestration_event
  *  (`worker_gate` / `build_gate` / `deploy`), enriched via a JOIN to the keyed session's project/task. */
@@ -1404,12 +1409,21 @@ export interface GateHistoryRow {
    *  `outcome === "reject"`, never on `passed === false` alone, or a cancellation is silently counted as
    *  a failure — exactly the defect this card fixes. This field's own boolean shape is deliberately left
    *  unchanged (still just `outcome === "pass"`) rather than widened to a tri-state; `outcome` is where
-   *  the real granularity lives. */
+   *  the real granularity lives.
+   *  ⚠️ Card db9b0130: `outcome:"skipped"` (an inert-diff merge that never spawned a gate) lands in this
+   *  IDENTICAL trap — its underlying event stamps `detail.passed:true` (so the merge could proceed to
+   *  squash), but THIS field reads `false` for it too (derived from `outcome`, not from that raw
+   *  `detail.passed`), for the same reason `cancelled` does: no gate verdict was ever reached, so it must
+   *  never be counted as a pass OR a rejection. The same "filter on `outcome`, never on `passed` alone"
+   *  rule from the paragraph above applies here without modification. */
   passed: boolean;
   /** Card 3a6f04cc: whether a gate PROCESS actually spawned for this op — `false` for a merge that
-   *  REUSED an already-green worker self-check (no process spawned at merge time) or a worker self-check
-   *  cancelled BEFORE it was ever admitted past the queue (also no process spawned); `true` for every
-   *  other row, INCLUDING one cancelled WHILE running that DID spawn a step (real wall time consumed,
+   *  REUSED an already-green worker self-check (no process spawned at merge time), a worker self-check
+   *  cancelled BEFORE it was ever admitted past the queue (also no process spawned), or (card db9b0130) a
+   *  merge whose ENTIRE changed-path set was proven inert (`outcome:"skipped"` — see that field's own doc;
+   *  same "no process spawned" fact as the reuse case, for a different reason: nothing to reuse, the gate
+   *  was never even attempted); `true` for every other row, INCLUDING one cancelled WHILE running that DID
+   *  spawn a step (real wall time consumed,
    *  even though no verdict was reached). Exists so a duration series built from this table can exclude
    *  non-runs without a per-row pivot to `gate_status(opId)` — a reused/never-spawned row's `durationMs`
    *  reflects bookkeeping overhead, not real gate work, and biases a naive average toward "getting

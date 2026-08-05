@@ -1943,10 +1943,51 @@ async function branchContentLandedInCommit(
 const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 
 /**
- * Deterministic digest (sha256) over the SORTED set of paths changed between `base` and `ref` — `git diff
- * --name-only`, `--no-renames` so a rename is counted as its two raw paths rather than resolved through
- * git's own rename-detection heuristic (keeps the digest independent of that heuristic ever changing),
- * newline-joined after sorting so traversal order never matters.
+ * The raw changed-path list between `base` and `ref` — the single git-diff invocation {@link
+ * changedPathSetDigest} and {@link isInertMergeDiff} BOTH build on (Code Review, card db9b0130: extracted
+ * after the two calls were found to have drifted into byte-identical copies of the same `git diff` args —
+ * two copies of a load-bearing flag is precisely the mechanism that makes losing one dangerous, see
+ * `--no-renames` below).
+ *
+ * `--no-renames` is LOAD-BEARING for BOTH callers, for two DIFFERENT reasons — neither is optional:
+ * - {@link changedPathSetDigest}: counts a rename as its two raw (deleted, added) paths rather than
+ *   resolving it through git's own rename-detection heuristic, so the digest stays independent of that
+ *   heuristic ever changing (its own similarity threshold, algorithm, etc.).
+ * - {@link isInertMergeDiff}: PROVEN on git 2.47.0 (Code Review) — with git's default rename detection
+ *   left ON, `git diff --name-only` after `git mv src/x.ts docs/x.ts` prints ONLY `docs/x.ts`; the deleted
+ *   `src/x.ts` vanishes from the list entirely. Without `--no-renames`, a branch that RELOCATES a real
+ *   source file into an allowlisted prefix would misclassify as an inert docs-only diff and the gate would
+ *   be skipped while that source file silently leaves main un-gated — see `merge-gate-inert-diff.mjs`
+ *   scenario (F), which pins this: it renames a source file committed on the BASE into `docs/` and
+ *   asserts the diff still full-gates, so dropping `--no-renames` turns that arm RED.
+ *
+ * `-c core.quotePath=false` disables git's default C-style octal-escaping of non-ASCII path bytes (Code
+ * Review, PROVEN: with the default `core.quotePath=true`, a path like `docs/café-findings.md` is emitted
+ * quoted/escaped, e.g. `"docs/caf\303\251-findings.md"`). Without this, {@link isInertMergeDiff}'s own
+ * `startsWith` allowlist check would silently miss a non-ASCII docs filename — FAILS CLOSED (safe: it just
+ * forces an unnecessary full gate), but with no visible signal as to why, so disabling the quoting removes
+ * the gap rather than merely tolerating it.
+ *
+ * Each raw line has only its trailing `\r` stripped (never a generic `.trim()`, which could in principle
+ * widen an allowlist prefix match against a hypothetical directory literally named with leading/trailing
+ * whitespace, e.g. `" docs"` — reasoned, not observed, but zero-cost to close): git's own `--name-only`
+ * output uses `\n` line endings even on Windows, so this only ever strips a stray CR, never real path
+ * content.
+ */
+async function changedPathsBetween(
+  git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
+): Promise<string[]> {
+  const args = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${base}..${ref}`];
+  const raw = timeoutMs === undefined
+    ? await git.raw(args)
+    : await withTimeout(git.raw(args), timeoutMs, "git diff --name-only (changed paths)");
+  return raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean);
+}
+
+/**
+ * Deterministic digest (sha256) over the SORTED set of paths changed between `base` and `ref` —
+ * newline-joined after sorting so traversal order never matters. See {@link changedPathsBetween} for the
+ * shared git invocation (incl. why `--no-renames` matters for this specific caller).
  *
  * WHY A PATH SET AND NOT A CONTENT HASH (card f621f185 — the deleted-branch residual of e076d2a2's
  * content-reachability check): the obvious next move — hash the branch's changed (path, blob-sha) pairs
@@ -1983,12 +2024,56 @@ const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 async function changedPathSetDigest(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string> {
-  const args = ["diff", "--name-only", "--no-renames", `${base}..${ref}`];
-  const raw = timeoutMs === undefined
-    ? await git.raw(args)
-    : await withTimeout(git.raw(args), timeoutMs, "git diff --name-only (path-set fingerprint)");
-  const paths = raw.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+  const paths = (await changedPathsBetween(git, base, ref, timeoutMs)).sort();
   return createHash("sha256").update(paths.join("\n")).digest("hex");
+}
+
+/**
+ * Path prefixes PROVEN to hold nothing compiled, tested, or read at runtime by the daemon test suite —
+ * card db9b0130. Verified 2026-08-05: `grep -rnE "(readFileSync|existsSync|readdirSync|createReadStream)
+ * \([^)]*docs" packages/daemon/test/*.mjs` ⇒ zero hits (the identical pattern against `assets` ⇒ non-zero,
+ * so the zero is a real absence, not a broken pattern — see the card for the full positive control), and
+ * the one `docs/` path a test file's own comment cites (`test-daemon-gate-timing.mjs`) is a provenance
+ * citation, never a real read. Deliberately narrow and NOT extension-based: `assets/**` is markdown too,
+ * and IS heavily tested (10 test files reference it) — an extension check would wrongly classify a
+ * `SKILL.md` change as inert. ⛔ Do not widen this list without re-running that same grep against the new
+ * prefix first — the whole point is that every entry here is a MEASURED absence, not an assumption.
+ */
+const INERT_MERGE_PATH_PREFIXES = ["docs/"];
+
+/**
+ * Whether every path changed between `baseSha` and `ref` falls under an {@link
+ * INERT_MERGE_PATH_PREFIXES} prefix — a provable property of the changed file SET, not a prediction about
+ * test coverage (card db9b0130; this is a strict, safe subset of the deferred "scope the gate to the
+ * diff" idea, `1055f5e3`, which infers coverage and is NOT what this does). A `true` result means a merge
+ * gate for this diff cannot change any test outcome, so running one is pure wasted lane time; `false`
+ * means "not proven inert" and the caller must run the gate exactly as before this existed. See {@link
+ * changedPathsBetween} for the shared git invocation this is built on, INCLUDING why `--no-renames` is
+ * load-bearing here specifically (a rename that relocates a real source file into an allowlisted prefix
+ * would otherwise misclassify as inert) — carried there, not duplicated here, so it can't silently drift
+ * out of sync between this function and {@link changedPathSetDigest}'s own copy again.
+ *
+ * FAILS CLOSED on every uncertain case, deliberately — a false `false` costs one ordinary gate run (safe,
+ * the status quo); a false `true` would land an un-gated change that could have broken tests:
+ * - A git error or timeout (can't read the diff at all) ⇒ `false`.
+ * - Zero changed paths ⇒ `false` — nothing to prove inert from; let the ordinary no-op-merge handling
+ *   (STAGE_EMPTY/ALREADY_MERGED) deal with a genuinely empty diff rather than special-casing it here.
+ * - Any single changed path outside the allowlist ⇒ `false`. A brand-new/unknown top-level directory is
+ *   not on the allowlist by construction, so it fails closed too — satisfying "an unrecognized path gates"
+ *   without a separate check for it.
+ */
+export async function isInertMergeDiff(
+  repoPath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
+): Promise<boolean> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  let paths: string[];
+  try {
+    paths = await changedPathsBetween(git, baseSha, ref, timeoutMs);
+  } catch {
+    return false;
+  }
+  if (paths.length === 0) return false;
+  return paths.every((p) => INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)));
 }
 
 /**

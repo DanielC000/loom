@@ -15,7 +15,7 @@ import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.j
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -10637,6 +10637,12 @@ export class SessionService {
     // doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
+    // Card db9b0130: whether this merge's gate was skipped because its ENTIRE changed-path set is proven
+    // inert (see `isInertMergeDiff`) — declared at THIS outer scope for the same reason `gateRan` is (the
+    // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block where this is
+    // decided). Mutually exclusive with the reuse producer: checked only when reuse did NOT already apply
+    // (a reused self-check is a REAL prior verdict, strictly cheaper to trust than re-deriving inertness).
+    let inertSkip = false;
     // Card a2873f7e: per-step durations from whichever gate run actually settles below (the first attempt,
     // or the transient-kill retry if one fires) — declared at THIS outer scope for the same reason `gateRan`
     // is: the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined`
@@ -10966,6 +10972,38 @@ export class SessionService {
       }
       gateRan = !reuseResult;
 
+      // INERT-DIFF SKIP (card db9b0130 — owner-proposed: "running the full merge gate for a merge that
+      // only contains docs is not needed"). Considered only when reuse did NOT already apply — a reused
+      // self-check is a REAL prior verdict and strictly cheaper to trust than re-deriving inertness.
+      // `gateBaseMainHead` is main's tip captured above — the union-merge's own sha (a PROVABLE ancestor of
+      // `branch`: the union-merge literally merged it in), or — on the preLanded path — a plain HEAD read
+      // at the same point, where NO union-merge ran (deliberately, to protect ALREADY_MERGED classification
+      // — see that producer's own doc above) and main is therefore NOT necessarily an ancestor of `branch`.
+      // Code Review correction, card db9b0130: an earlier version of this comment claimed
+      // `isInertMergeDiff` "diffs exactly the branch's OWN net changes" on BOTH producers — false on the
+      // preLanded path, where the two-dot diff can also include whatever main independently diverged by.
+      // The actual safety property, true on BOTH producers: a two-tree diff between `gateBaseMainHead` and
+      // `branch` is always a SUPERSET-OR-EQUAL of whatever `git merge --squash` could ever stage onto main
+      // from this branch — so over-reporting changed paths (the preLanded case) only ever makes
+      // `isInertMergeDiff` MORE likely to find a path outside the allowlist and gate for real, never less;
+      // it can never UNDER-report and wrongly skip. `false` here — including the `!gateBaseMainHead` case
+      // (a failed resolve) — simply leaves `gateRan` as set above and the gate runs exactly as before this
+      // existed; see `isInertMergeDiff`'s own doc for the full fail-closed contract.
+      //
+      // WHAT THIS SKIP DOES NOT DO (Code Review, card db9b0130; design question carded separately, do not
+      // fix here): unlike the reuse and gateless paths, an inert-diff skip never even calls
+      // `this.gateSemaphore.runExclusive(...)`, so it takes no per-repo merge-admission guard at all — a
+      // same-repo sibling mid-gate can still be admitted concurrently, and if that sibling's own squash
+      // lands before THIS merge reaches its own squash-lock, `requireCanonicalHead`'s in-lock re-check can
+      // force this merge to refuse and re-confirm (a real, if unlikely, ~14-minute re-gate cost for what
+      // would otherwise have been an instant skip). Fail-closed either way — never an unverified merge,
+      // only a possible extra round-trip — and structurally the SAME gap the reuse producer's own TOCTOU
+      // note already accepts, not a new one.
+      if (!reuseResult && gateBaseMainHead) {
+        inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+        if (inertSkip) gateRan = false;
+      }
+
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -11151,7 +11189,12 @@ export class SessionService {
       };
       let gateResult: GateSequentialResult;
       try {
-        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+        // INERT-DIFF SKIP (card db9b0130): `{ passed: true, steps: [] }` mirrors the reuse producer's own
+        // shape above (card a2873f7e) for the identical reason — nothing spawned, so there is no per-step
+        // duration to report. `passed:true` here drives ONLY this method's own squash decision below; the
+        // `build_gate` event recorded right after this block stamps `skipped:true` explicitly so
+        // `gate_history` never reads this as a real pass (see `gateOutcomeFromDetail`'s own doc).
+        gateResult = reuseResult ?? (inertSkip ? { passed: true, steps: [] } : await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
           gateStartedAt = startedAt;
           concurrentAtStart = this.gateSemaphore.snapshot().active;
           getConcurrentGatesMax = getMaxConcurrentGates;
@@ -11169,7 +11212,7 @@ export class SessionService {
           // release this same hold. A failing gate never reaches squash, so it's left to release normally.
           if (r.passed) holdRepoGuardOnExit();
           return r;
-        }, "high");
+        }, "high"));
       } catch (err) {
         if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
         // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
@@ -11224,7 +11267,12 @@ export class SessionService {
         // `gate_history`'s `gateRan` field needs — stamped explicitly rather than left to the `reused`
         // flag's absence, so a future change to the reuse shape can't silently desync the two.
         gateSpawned: gateRan,
-        ...(gateRan ? {} : { reused: true, reusedOpId }),
+        // Card db9b0130: `inertSkip` and the pre-existing reuse producer are mutually exclusive (see
+        // `inertSkip`'s own doc above) — branched explicitly so an inert-diff skip is NEVER stamped
+        // `reused:true` (it reused nothing; there was no prior run at all) and a genuine reuse is never
+        // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
+        // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
+        ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
       });
       if (gateRan) {
         if (gateResult.failedTimedOut) {
@@ -11500,20 +11548,28 @@ export class SessionService {
     // since `withCanonicalIndexLock`/`requireCanonicalHead` remain untouched and still fail-closed inside
     // `mergeBranch`'s own lock either way).
     //
-    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned exactly ONCE in this whole method
-    // (`gateRan = !reuseResult`, right above, inside `if (gate)`) other than its `let gateRan = false`
-    // declaration — so `gateRan === true` here if and only if `reuseResult` was falsy at that point, which
-    // is EXACTLY the condition under which `gateResult = reuseResult ?? await this.gateSemaphore
-    // .runExclusive(...)` actually evaluates its right-hand side. `gateRan` is therefore a precise,
-    // structural proxy for "this call reached `runExclusive` at least once" — never true for the REUSE
-    // path (skipped by the `??`) and never true for a GATELESS project/repo (never reaches `if (gate)` at
-    // all, so this reassignment never runs). SAFE BECAUSE: only a `runExclusive`-admitted op ever holds
+    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned TWICE in this whole method (Code
+    // Review correction, card db9b0130 — a prior version of this comment claimed exactly once, which the
+    // inert-diff skip below falsified) — `gateRan = !reuseResult` first, then `if (inertSkip) gateRan =
+    // false;` immediately after (both inside `if (gate)`), other than its `let gateRan = false`
+    // declaration. The SECOND assignment only ever NARROWS `gateRan` toward `false`, never the reverse, so
+    // the proof still holds in the direction that matters: `gateRan === true` here if and only if BOTH
+    // `reuseResult` was falsy AND `inertSkip` was falsy at that point, which is EXACTLY the condition under
+    // which `gateResult = reuseResult ?? (inertSkip ? { passed: true, steps: [] } : await this
+    // .gateSemaphore.runExclusive(...))` actually evaluates the `runExclusive(...)` branch. `gateRan` is
+    // therefore still a precise, structural proxy for "this call reached `runExclusive` at least once" —
+    // never true for the REUSE path (skipped by the `??`), never true for the INERT-DIFF SKIP path (the
+    // `inertSkip` ternary skips it exactly like reuse does), and never true for a GATELESS project/repo
+    // (never reaches `if (gate)` at all, so neither assignment ever runs). SAFE BECAUSE: only a
+    // `runExclusive`-admitted op ever holds
     // `repoPath` in `activeMergeRepos` now (via `admit`, extended past its own gate's settle by
     // `holdRepoGuardOnExit` — see `runExclusive`'s own doc), and `92e960d1`'s admission guard makes that
     // exclusive — at most one such op per repo at a time — so `beginSquash`/`endSquash`, confined to
-    // exactly that same set of ops, can only ever touch its OWN hold, never a sibling's. The reuse and
-    // gateless paths are DELIBERATELY EXCLUDED and get NO admission-level protection here — unchanged from
-    // before this card, and already covered by the standing TOCTOU note on the reuse producer above (this
+    // exactly that same set of ops, can only ever touch its OWN hold, never a sibling's. The reuse, the
+    // INERT-DIFF SKIP (card db9b0130), and the gateless paths are ALL DELIBERATELY EXCLUDED and get NO
+    // admission-level protection here — unchanged from before this card (for reuse/gateless) or accepted
+    // deliberately (for the inert-diff skip — see that producer's own doc, above, for the named
+    // consequence), and already covered by the standing TOCTOU note on the reuse producer above (this
     // method, `reuseResult`'s own doc: "a SIBLING merge on this same repo can still land before this
     // merge's own squash actually runs... `mergeBranch`'s own lock... refuse[s] instead of silently landing
     // an unverified merge") — `requireCanonicalHead` is what protects them, not this guard, exactly as it
@@ -11648,7 +11704,16 @@ export class SessionService {
     const gateWarning = gate || project.noGateByDesign || targetRepo.noGateByDesign
       ? undefined
       : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
-    const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // INERT-DIFF SKIP WARNING (card db9b0130): distinct from `gateWarning` above — a gate WAS configured,
+    // it was just proven unnecessary for this diff (every changed path under `docs/`), unlike the
+    // gateless case which means "no signal was ever possible here". Surfaced unconditionally (no
+    // `noGateByDesign` suppression — that flag is about a project having no gate at all, not about one
+    // individual merge skipping it) so a manager reading this merge's result can tell it apart from an
+    // ordinary gated pass.
+    const inertSkipWarning = inertSkip
+      ? "merge gate skipped: every changed path is under docs/, proven inert (card db9b0130) — recorded as gateRan:false, not a pass"
+      : undefined;
+    const warning = [nestedWarning, gateWarning, inertSkipWarning].filter((w): w is string => !!w).join(" ") || undefined;
     // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map
     // (card e50600d2) doesn't hold an entry for a session that can never merge again.
     this.lastWorkerGateCheck.delete(workerSessionId);

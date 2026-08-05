@@ -55,8 +55,10 @@ const KIND_COLOR: Record<GateType, string> = { merge: color.phosphor, deploy: co
 const KIND_LABEL: Record<GateType, string> = { merge: "merge", deploy: "deploy", worker: "worker" };
 // "cancelled" (card 3a6f04cc) gets its OWN neutral cyan, matching Board.tsx's own cancelled-outcome tone
 // for a pending-merge cancel — it must never read as a failure (red), since no verdict was reached.
-const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red, cancelled: color.cyan };
-const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false };
+// "skipped" (card db9b0130) shares that same cyan info tone — also a non-verdict (an inert-diff merge
+// gate that never spawned), distinct from cancelled only in WHY nothing ran, not in whether it's a failure.
+const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.phosphor, reject: color.red, timeout: color.red, kill: color.red, cancelled: color.cyan, skipped: color.cyan };
+const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false, skipped: false };
 const PRIORITY_RANK: Record<TaskPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.red, p1: color.red, p2: color.amber, p3: color.textMuted };
 
