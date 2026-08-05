@@ -124,30 +124,21 @@ export interface GateDescriptor {
    * base was already stale by the time it was admitted — it still ran its own gate and then still
    * self-aborted via the fail-closed check, needing a manager re-confirm despite the throughput win this
    * field buys (no more SIMULTANEOUS double-lane loss, and the other cap lane staying free for unrelated
-   * cross-project work during the first merge's run). PARTIALLY addressed by card b798e706 (fast-follow),
-   * and — Code Review correction, same card — the headline same-repo-sibling scenario is NOT the part that
-   * closed: the merge gate's own `runExclusive` callback now RE-DERIVES `gateBaseMainHead` the instant it
-   * is admitted here (`confirmWorkerMerge`'s `reunionAtAdmission`), re-unioning against canonical main's
-   * then-current tip when it moved during the queue wait — but THIS field's own `release()` (below) frees
-   * the admission guard the MOMENT a running merge's gate settles, strictly BEFORE that merge's own squash
-   * (`mergeBranch`, called outside `runExclusive`, afterward). So the ORDINARY same-repo sequence is:
-   * sibling A's gate finishes → the guard frees → the second merge (B) is admitted, essentially
-   * immediately, reads a main A has NOT yet squashed onto → re-derives to a no-op → runs its own full gate
-   * → A's squash lands SOMEWHERE during that run → B still self-aborts at squash time exactly as before
-   * this card. `merge-gate-reuse.mjs` test (K) DOES now assert first-pass success — but by simulating "main
-   * advanced during the queue wait" via a DIRECT commit under test control (deterministic, and mechanically
-   * identical to any OTHER cause of main moving before this op's admission), not via a second real
-   * concurrent merge's own squash — so it proves the genuinely-closed case, not the sibling-squash one.
-   * What IS genuinely closed: main moving during the wait for reasons OTHER than a same-repo sibling's own
-   * squash — an out-of-band/REST commit, cross-project queueing noise, or a sibling whose squash happens to
-   * have already landed before this op reaches admission (possible, just not the guaranteed ordering above)
-   * — and the re-derivation is never worse than doing nothing in any case. A residual TOCTOU window also
-   * remains BY DESIGN even for the closed cases — a landing at the exact instant this run is admitted can
-   * still invalidate the freshly-re-derived base — caught fail-closed by `requireCanonicalHead`'s own
-   * in-lock re-check at squash time, same as ever. Closing the same-repo-sibling-squash case for real needs
-   * holding THIS field's admission guard across the squash phase too, a materially larger change to this
-   * class's release contract (also touching cancel/timeout/queueing) — deliberately out of scope for
-   * b798e706, carded separately as `c24dd48a`.
+   * cross-project work during the first merge's run). PARTIALLY addressed by card b798e706 (fast-follow):
+   * the merge gate's own `runExclusive` callback RE-DERIVES `gateBaseMainHead` the instant it is admitted
+   * here (`confirmWorkerMerge`'s `reunionAtAdmission`), re-unioning against canonical main's then-current
+   * tip when it moved during the queue wait — but b798e706, by itself, left the HEADLINE same-repo-sibling
+   * scenario open: this field's own `release()` used to free the admission guard the MOMENT a running
+   * merge's gate settled, strictly BEFORE that merge's own squash (`mergeBranch`, called outside
+   * `runExclusive`). CLOSED FOR REAL by card c24dd48a: `runExclusive`'s `fn` can now call the
+   * `holdRepoGuardOnExit` callback it's handed (see `runExclusive`'s own doc) to keep THIS field's guard
+   * held past the gate's own settle, and `confirmWorkerMerge` extends that hold across its own squash call
+   * via `beginSquash`/`endSquash` below — so a queued same-repo sibling is not admitted until the holder's
+   * squash commit has actually landed (or failed), closing the exact gap this comment used to describe. A
+   * residual TOCTOU window remains BY DESIGN — a landing at the exact instant a run IS admitted (before
+   * this field's guard is even checked) can still invalidate a freshly-re-derived base — caught fail-closed
+   * by `requireCanonicalHead`'s own in-lock re-check at squash time, same as ever; this field only ever
+   * narrows the ADMISSION window, it was never meant to replace that fail-closed check.
    */
   repoPath?: string | null;
 }
@@ -390,15 +381,71 @@ export class GateSemaphore {
   /** Release a held slot (identified by the SAME entry `runExclusive` admitted, so its worktree — if any
    *  — can be freed from {@link activeWorktrees}, and its repo — if any, card 92e960d1 — from
    *  {@link activeMergeRepos}), then hand the freed slot to the next ELIGIBLE waiter via
-   *  {@link grantNext}. */
-  private release(entry: RegistryEntry): void {
+   *  {@link grantNext}. `holdRepoGuard` (card c24dd48a): when `true` — because this run's own `fn` called
+   *  the `holdRepoGuardOnExit` callback {@link runExclusive} handed it — SKIPS freeing
+   *  {@link activeMergeRepos} for a `merge`-kind descriptor's `repoPath`; everything else (the cap slot,
+   *  the worktree, granting other eligible waiters) releases exactly as normal. The caller is then on the
+   *  hook to free the repo guard explicitly, later, via {@link endSquash}/{@link releaseMergeRepoGuard} —
+   *  see `holdRepoGuardOnExit`'s own doc for why this can never be automatic. */
+  private release(entry: RegistryEntry, holdRepoGuard: boolean): void {
     this.active--;
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.delete(wt);
-    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+    if (!holdRepoGuard && entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
       this.activeMergeRepos.delete(entry.descriptor.repoPath);
     }
     this.grantNext();
+  }
+
+  /** Card c24dd48a: mark `repoPath` as squash-in-flight for merge-admission purposes — the counterpart to
+   *  {@link endSquash}/{@link releaseMergeRepoGuard}, extending a `runExclusive`-admitted merge's own hold
+   *  (already taken at admission via `admit`, kept alive past the gate's own settle by `holdRepoGuardOnExit`
+   *  — see `runExclusive`'s own doc) across `confirmWorkerMerge`'s subsequent `mergeBranch` call.
+   *
+   *  CALLER CONTRACT, NOT MERELY "SAFE TO CALL": `confirmWorkerMerge` calls this ONLY when `gateRan` is
+   *  true — i.e. ONLY for an op that actually went through `this.gateSemaphore.runExclusive(...)` this
+   *  invocation (`gateRan = !reuseResult`, a provable proxy — see that call site's own doc). The REUSE path
+   *  (card e50600d2, `reuseResult` set — its `??` short-circuits `runExclusive` entirely) and a GATELESS
+   *  project/repo (`gate` falsy — never reaches a `runExclusive` call at all) DELIBERATELY NEVER call this:
+   *  an earlier draft called it unconditionally from both, and since NEITHER path is ever checked by
+   *  `mergeRepoFree`/`admit`, either could reach `endSquash` and silently free a DIFFERENT, genuinely-
+   *  admitted op's still-active hold on the SAME repoPath (`activeMergeRepos` has no per-op identity — a
+   *  `Set.delete` here doesn't know whose hold it's clearing) — reopening `92e960d1`'s "at most one running
+   *  merge gate per repo" invariant for exactly the two paths that were supposed to be inert here. Those two
+   *  paths get NO admission-level protection from this mechanism, unchanged from before this card;
+   *  `requireCanonicalHead` (inside `mergeBranch`'s own lock) is what protects them, exactly as it always
+   *  has — see the standing TOCTOU note on `confirmWorkerMerge`'s reuse producer.
+   *
+   *  Because every caller is confined to the `runExclusive`-admitted set, and `92e960d1`'s admission guard
+   *  makes that set exclusive (at most one such op per repo at a time), this call can only ever touch its
+   *  OWN op's hold. `Set.add` being idempotent is retained as a belt-and-braces property — it means a
+   *  redundant call from the SAME op (this hold is typically already present, extended by
+   *  `holdRepoGuardOnExit`) is harmless — it is NOT why a DIFFERENT op's call would be safe; no other op is
+   *  ever expected to call this for a repo it doesn't itself hold. */
+  beginSquash(repoPath: string): void {
+    this.activeMergeRepos.add(repoPath);
+  }
+
+  /** Card c24dd48a: end a `beginSquash` hold (the squash has settled — landed or failed, doesn't matter
+   *  which) and grant the freed repo to the next eligible queued waiter, if any. Same effect as
+   *  {@link releaseMergeRepoGuard} — kept as a distinctly-named pair with {@link beginSquash} purely for
+   *  readability at the call site (begin/end bracketing one squash call), not a different mechanism. Same
+   *  caller contract as {@link beginSquash} — `confirmWorkerMerge` calls this ONLY when `gateRan` is true,
+   *  for exactly the same reason: `activeMergeRepos` has no per-op identity, so an unconfined caller could
+   *  free a sibling op's still-active hold rather than its own. Idempotent (`Set.delete` on an absent key
+   *  no-ops) so a `gateRan` op's OWN gate-failed early-return path — which never held anything in the first
+   *  place, since a failing gate never calls `holdRepoGuardOnExit` — can still call this unconditionally
+   *  without a double-free; that idempotence is a safety net for THIS op's own no-op case, not a licence for
+   *  a different op to call it. */
+  endSquash(repoPath: string): void {
+    this.releaseMergeRepoGuard(repoPath);
+  }
+
+  /** Card c24dd48a: explicitly free a per-repo merge-admission guard — see {@link endSquash}'s doc (its
+   *  synonym) for when/why to call this. Idempotent: deleting an absent key from a `Set` is a no-op, so
+   *  this can never under- or over-release relative to how many times the guard was actually acquired. */
+  releaseMergeRepoGuard(repoPath: string): void {
+    if (this.activeMergeRepos.delete(repoPath)) this.grantNext();
   }
 
   /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before touching
@@ -460,10 +507,30 @@ export class GateSemaphore {
    * reference inside `fn` and call it any time after — even outside `fn`, once `runExclusive` itself has
    * resolved — and always read the true final max-over-run. A caller whose `fn` ignores it (every call
    * site that predates this param) is byte-identical to before it existed.
+   *
+   * `fn` ALSO receives a fifth param (card c24dd48a), `holdRepoGuardOnExit`: a callback `fn` can call —
+   * synchronously, any time before it returns — to declare that this run's per-repo merge-admission guard
+   * (a `merge`-kind descriptor's `repoPath` in {@link activeMergeRepos}) should survive PAST this call's
+   * own settle instead of releasing automatically in the `finally` below. This exists for EXACTLY ONE
+   * caller shape: `confirmWorkerMerge`'s gate callback, which calls it iff the gate it just ran PASSED —
+   * a passing gate is about to hand off to that caller's own squash phase (`mergeBranch`, called outside
+   * this method entirely), and the whole point is to close the gap where a queued same-repo sibling could
+   * otherwise be admitted the INSTANT this gate settles but strictly BEFORE the squash actually lands (see
+   * `GateDescriptor.repoPath`'s own doc for the incident this closes). Calling it is what makes that
+   * transition ATOMIC: the flag is read by THIS SAME `finally` block, in the SAME synchronous turn `fn`
+   * set it in, so there is no `await`-shaped window between "gate settled" and "guard still held" for a
+   * queued waiter's own `grantNext` to slip through. The caller is then on the hook to release the guard
+   * explicitly, later, once its own squash phase has itself settled — via `endSquash`/
+   * `releaseMergeRepoGuard(repoPath)` — a hold with no matching release is a PERMANENT block on that repo,
+   * so every call site that ever invokes this must have a `finally` that unconditionally reaches the
+   * release, no matter which of throw/cancel/timeout/pass/fail the squash itself hits. A caller whose `fn`
+   * never calls this (every pre-c24dd48a call site, and any FAILING merge gate) is byte-identical to
+   * before this parameter existed — `holdRepoGuard` defaults to `false` and `release()` frees the guard
+   * exactly as it always has.
    */
   async runExclusive<T>(
     cap: number, descriptor: GateDescriptor,
-    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks, getMaxConcurrentGates: () => number) => Promise<T>,
+    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks, getMaxConcurrentGates: () => number, holdRepoGuardOnExit: () => void) => Promise<T>,
     priority: GatePriority = "high",
   ): Promise<T> {
     // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
@@ -492,14 +559,18 @@ export class GateSemaphore {
       onExtend: () => { entry.extended = true; },
     };
     let acquired = false;
+    // Card c24dd48a: closed over by `fn` via the `holdRepoGuardOnExit` param below — see this method's own
+    // doc for why setting this flag and reading it in `finally` must happen in the same synchronous turn.
+    let holdRepoGuard = false;
+    const holdRepoGuardOnExit = (): void => { holdRepoGuard = true; };
     try {
       const outcome = await this.acquire(cap, priority, entry);
       if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail);
       acquired = true;
-      return await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates);
+      return await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
     } finally {
       this.registry.delete(entry.id);
-      if (acquired) this.release(entry);
+      if (acquired) this.release(entry, holdRepoGuard);
     }
   }
 

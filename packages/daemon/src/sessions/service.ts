@@ -10479,6 +10479,29 @@ export class SessionService {
     // until the squash's staged set was known would have needed to move it there, or to duplicate/reorder
     // that side-effect-free guarantee. This is cheaper AND leaves that property untouched.
     let gateBaseBranchHead: string | undefined;
+    // CARD c24dd48a: this whole span — the "if (gate) { ... }" block below, THROUGH the `mergeBranch` call
+    // further down — is wrapped in ONE try/finally so the per-repo merge-admission guard a passing gate
+    // holds via `holdRepoGuardOnExit` can NEVER leak. A narrower wrap (just around `mergeBranch` itself, an
+    // earlier draft of this fix) left a real gap: `evt("build_gate", ...)` (a synchronous `db.appendEvent`
+    // — CAN throw), `recordGateTimeoutOutcome` (an `await`), and the `taskTitle` lookup (a synchronous
+    // `db.getTask` read) below ALL run strictly BETWEEN the gate settling (guard already held, via
+    // `holdRepoGuardOnExit`) and `beginSquash`/`mergeBranch` — any one of them throwing, uncaught, would
+    // leak the guard for the process's lifetime, queueing every later same-repo merge forever (a strictly
+    // worse failure than the starvation this card fixes: starvation eventually resolves, a leaked guard
+    // never does). `endSquash` (in the `finally` below) is idempotent — a `Set.delete` on an absent key
+    // no-ops — so wrapping this ENTIRE span, including every gate-failed early-return path where nothing
+    // was ever held, is always safe and never a double-release bug. `merge` is declared here (not inside
+    // the try) so it's still in scope for the `if (!merge.ok)` handling that follows the `finally`.
+    //
+    // Code Review follow-up, same card: `beginSquash`/`endSquash` themselves (down at the `mergeBranch`
+    // call) are CONFINED to `gateRan` — see that call site's own doc for why an unconditional call was a
+    // real cross-op hazard for the REUSE/gateless paths specifically. This try/finally's OWN scope (this
+    // comment) is unaffected by that confinement: it still wraps the whole span regardless of `gateRan`,
+    // because a throw anywhere in here must still be caught to keep `merge` well-defined for the code
+    // after — the `finally`'s `endSquash` call is simply a no-op for a `gateRan:false` op that never held
+    // anything in the first place.
+    let merge: Awaited<ReturnType<typeof mergeBranch>>;
+    try {
     if (gate) {
       // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
       // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
@@ -10878,7 +10901,7 @@ export class SessionService {
       };
       let gateResult: GateSequentialResult;
       try {
-        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
           gateStartedAt = startedAt;
           concurrentAtStart = this.gateSemaphore.snapshot().active;
           getConcurrentGatesMax = getMaxConcurrentGates;
@@ -10888,7 +10911,14 @@ export class SessionService {
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
           // event, not a second independently-computed signal.
           const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-          return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
+          const r = await runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
+          // CARD c24dd48a: a passing gate is about to hand off to this method's own squash phase
+          // (`mergeBranch`, below, outside this call) — keep the per-repo admission guard held so a queued
+          // same-repo sibling isn't admitted into the gap between this gate settling and that squash
+          // actually landing. `beginSquash`/`endSquash` (right before/after `mergeBranch`) extend and then
+          // release this same hold. A failing gate never reaches squash, so it's left to release normally.
+          if (r.passed) holdRepoGuardOnExit();
+          return r;
         }, "high");
       } catch (err) {
         if (err instanceof AdmissionReunionFailedError) return rejectAdmissionReunionFailure(err);
@@ -10995,7 +11025,7 @@ export class SessionService {
         try {
           gateResult = await this.gateSemaphore.runExclusive(
             gateCap, gateDescriptor,
-            async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+            async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
               retryStartedAt = startedAt;
               concurrentAtStart = this.gateSemaphore.snapshot().active;
               getConcurrentGatesMax = getMaxConcurrentGates;
@@ -11003,7 +11033,11 @@ export class SessionService {
               // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
               // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
               await reunionAtAdmission();
-              return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
+              const r = await runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
+              // CARD c24dd48a: same "about to hand off to squash" hold as the first attempt above — see
+              // that call site's identical comment.
+              if (r.passed) holdRepoGuardOnExit();
+              return r;
             },
             "high",
           );
@@ -11200,7 +11234,54 @@ export class SessionService {
     // stability proof supplied" and enforces `requireCanonicalHead` exactly as it always has — this call
     // site is the ONLY place `gateBaseBranchHead` is read, so that `undefined` is what keeps both other
     // producers byte-identical to their pre-b0ab78d6 behavior.
-    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead);
+    //
+    // CARD c24dd48a: mark the repo squash-in-flight before the actual squash call — CONFINED to the
+    // `gateRan` path only (Code Review finding, same card: an earlier draft called this unconditionally,
+    // which let the REUSE path (card e50600d2) and a GATELESS project/repo — NEITHER of which ever calls
+    // `this.gateSemaphore.runExclusive(...)`, so NEITHER is ever checked by `mergeRepoFree`/`admit` —
+    // silently DELETE a DIFFERENT, genuinely-admitted op's still-active hold via `endSquash`'s own
+    // unconditional `activeMergeRepos.delete`, letting a THIRD queued op get admitted while the first was
+    // still mid-gate: a real regression of `92e960d1`'s "at most one running merge gate per repo"
+    // invariant, not merely a missed optimization for those two paths — though NOT a data-loss regression,
+    // since `withCanonicalIndexLock`/`requireCanonicalHead` remain untouched and still fail-closed inside
+    // `mergeBranch`'s own lock either way).
+    //
+    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned exactly ONCE in this whole method
+    // (`gateRan = !reuseResult`, right above, inside `if (gate)`) other than its `let gateRan = false`
+    // declaration — so `gateRan === true` here if and only if `reuseResult` was falsy at that point, which
+    // is EXACTLY the condition under which `gateResult = reuseResult ?? await this.gateSemaphore
+    // .runExclusive(...)` actually evaluates its right-hand side. `gateRan` is therefore a precise,
+    // structural proxy for "this call reached `runExclusive` at least once" — never true for the REUSE
+    // path (skipped by the `??`) and never true for a GATELESS project/repo (never reaches `if (gate)` at
+    // all, so this reassignment never runs). SAFE BECAUSE: only a `runExclusive`-admitted op ever holds
+    // `repoPath` in `activeMergeRepos` now (via `admit`, extended past its own gate's settle by
+    // `holdRepoGuardOnExit` — see `runExclusive`'s own doc), and `92e960d1`'s admission guard makes that
+    // exclusive — at most one such op per repo at a time — so `beginSquash`/`endSquash`, confined to
+    // exactly that same set of ops, can only ever touch its OWN hold, never a sibling's. The reuse and
+    // gateless paths are DELIBERATELY EXCLUDED and get NO admission-level protection here — unchanged from
+    // before this card, and already covered by the standing TOCTOU note on the reuse producer above (this
+    // method, `reuseResult`'s own doc: "a SIBLING merge on this same repo can still land before this
+    // merge's own squash actually runs... `mergeBranch`'s own lock... refuse[s] instead of silently landing
+    // an unverified merge") — `requireCanonicalHead` is what protects them, not this guard, exactly as it
+    // always has.
+    //
+    // The `finally` below (closing the try opened above, at this method's own `if (gate)` line) is what
+    // actually frees a queued same-repo sibling once this settles — deliberately scoped to end HERE (not
+    // extending through `finalizeMerge`/branch deletion/worktree removal below): none of that bookkeeping
+    // moves canonical main's HEAD, which is the only thing a sibling's own admission-time re-derivation
+    // (`reunionAtAdmission`) reads. Bounded: `mergeBranch` itself is timeout-bounded (`this.gitOpMs`), so
+    // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
+    // bookkeeping above it in this same try.
+    if (gateRan) this.gateSemaphore.beginSquash(repoPath);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead);
+    } finally {
+      // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
+      // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
+      // touches a key it never acquired. Safe to call for EVERY `gateRan` exit (including a gate-failed
+      // early return, where `holdRepoGuardOnExit` was never invoked and nothing is held): `Set.delete` on
+      // an absent key is a no-op, so this only ever releases THIS op's own hold if one exists.
+      if (gateRan) this.gateSemaphore.endSquash(repoPath);
+    }
     if (!merge.ok) {
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated

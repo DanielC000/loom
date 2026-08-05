@@ -30,6 +30,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (F) A LATER FAILING SELF-CHECK SUPERSEDES AN EARLIER GREEN ONE — run_gate passes, then run_gate is
 //       called again at the SAME commit and FAILS: confirmWorkerMerge must re-gate (the LATEST self-check
 //       is what's on record, not the stale earlier green).
+//   (Q) card c24dd48a's own DoD-2(i), written LITERALLY (not simulated via a synthetic runExclusive
+//       holder — see (K)/(P)'s own honest caveats about what they do and don't prove): two REAL branches
+//       of the SAME canonical repo, two REAL confirmWorkerMerge calls fired genuinely concurrently. The
+//       one admitted second must land on its FIRST PASS (merged:true, no gateBaseInvalidated, no manager
+//       re-confirm) — proving the per-repo admission guard is now held across the FIRST merge's own squash,
+//       not just its gate.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-reuse.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -886,6 +892,188 @@ try {
       check("(P) task moved to done on the retry", db.getTask(P.taskId).columnKey === "done");
     }
   }
+
+  // ── (Q) TWO GENUINELY CONCURRENT confirmWorkerMerge CALLS ON THE SAME REPO — card c24dd48a's own
+  //        DoD-2(i), written LITERALLY. Unlike (K)/(P) above (an unrelated synthetic `runExclusive` holder
+  //        standing in for "some other gate occupies the lane" — see those blocks' own honest caveats),
+  //        this is a REAL second merge: two different branches of the SAME canonical repo, two REAL
+  //        `confirmWorkerMerge` calls started with zero `await` between them, each running its OWN real
+  //        gate through the SAME `GateSemaphore`. Whichever is admitted second used to be admitted the
+  //        INSTANT the first gate settled — strictly BEFORE the first's own squash landed (the exact defect
+  //        this card fixes) — re-derive to a no-op against the still-unmoved main, run its own full gate
+  //        against that now-stale base, then self-abort at squash time once the first's squash actually
+  //        lands mid-run, forcing a manager re-confirm. With the fix (`holdRepoGuardOnExit` +
+  //        `beginSquash`/`endSquash`), the second is held OUT of admission until the first's squash has
+  //        actually landed, so its own admission-time re-union sees the true current main and it lands on
+  //        the FIRST PASS. RED-verified against pre-fix code (git stash of this card's src/ diff, rebuild,
+  //        re-run): with the guard release moved back to the gate's own settle, one of the two confirms
+  //        below comes back `merged:false` with a `gateBaseInvalidated` refusal — this suite's center of
+  //        gravity is that refusal never happening here, not the happy-path shape alone.
+  {
+    const qRepo = path.join(os.tmpdir(), `loom-mgru-q-${sfx}`);
+    fs.mkdirSync(qRepo, { recursive: true });
+    fs.writeFileSync(path.join(qRepo, "README.md"), "# mgru-q\n");
+    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: qRepo });
+
+    const qProjId = `mgru-q-proj-${sfx}`, qAgentId = `mgru-q-agent-${sfx}`;
+    const db = new Db(); dbs.push(db);
+    db.insertProject({ id: qProjId, name: "MGRU-Q", repoPath: qRepo, vaultPath: qRepo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: qAgentId, projectId: qProjId, name: "t", startupPrompt: "", position: 0 });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let qGateCalls = 0;
+    // A real (short) delay on EVERY gate call so the two confirms have a genuine window to overlap —
+    // long enough that the second confirm's own union-merge/admission attempt is provably still in
+    // flight while the first is mid-gate, never a coincidence of both settling in the same tick.
+    const fakeGate = async () => { qGateCalls++; await sleep(150); return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    async function makeQWorker(label, file) {
+      const taskId = `mgru-q-task-${label}-${sfx}`, mgrId = `mgru-q-mgr-${label}-${sfx}`, workerId = `mgru-q-wkr-${label}-${sfx}`;
+      const { worktreePath, branch } = await createWorktree(qRepo, qProjId, taskId);
+      worktrees.push(worktreePath);
+      fs.writeFileSync(path.join(worktreePath, file), `work for ${label}\n`);
+      execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+      db.insertTask({ id: taskId, projectId: qProjId, title: `MGRU-Q-${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      db.insertSession({ id: mgrId, projectId: qProjId, agentId: qAgentId, engineSessionId: null, title: null, cwd: qRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+      db.insertSession({ id: workerId, projectId: qProjId, agentId: qAgentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+      return { taskId, mgrId, workerId };
+    }
+
+    const qOne = await makeQWorker("one", "feature-q1.txt");
+    const qTwo = await makeQWorker("two", "feature-q2.txt");
+
+    const qMainHeadBefore = execSync("git rev-parse HEAD", { cwd: qRepo }).toString().trim();
+
+    // Fire BOTH confirms genuinely concurrently — no await between them, so both race to admission on the
+    // SAME GateSemaphore instance sharing this repo's `activeMergeRepos` guard.
+    const [qResultOne, qResultTwo] = await Promise.all([
+      sessions.confirmWorkerMerge(qOne.mgrId, qOne.workerId),
+      sessions.confirmWorkerMerge(qTwo.mgrId, qTwo.workerId),
+    ]);
+
+    check("(Q) confirmWorkerMerge[one] landed on the FIRST pass", qResultOne.merged === true);
+    check("(Q) confirmWorkerMerge[two] landed on the FIRST pass", qResultTwo.merged === true);
+    check("(Q) confirmWorkerMerge[one] never reports a stale-base refusal reason", qResultOne.reason === undefined);
+    check("(Q) confirmWorkerMerge[two] never reports a stale-base refusal reason", qResultTwo.reason === undefined);
+    check("(Q) both gates ran for real (no reuse short-circuit on either side)", qGateCalls === 2);
+    const qCommitsAhead = execSync(`git rev-list --count ${qMainHeadBefore}..HEAD`, { cwd: qRepo }).toString().trim();
+    check("(Q) canonical repo gained exactly 2 squash commits — no wasted/aborted attempt on either side", qCommitsAhead === "2");
+    check("(Q) both tasks moved to done — neither needed a manager re-confirm",
+      db.getTask(qOne.taskId).columnKey === "done" && db.getTask(qTwo.taskId).columnKey === "done");
+  }
+
+  // ── (R) card c24dd48a, Code Review follow-up — LEAK-PROOF: a THROW landing strictly between the gate
+  //        settling (guard already held via `holdRepoGuardOnExit`) and `beginSquash`/`mergeBranch` must
+  //        NOT leak the per-repo admission guard for the process's lifetime. An earlier draft of this fix
+  //        wrapped only `mergeBranch` itself in try/finally — leaving `evt("build_gate", ...)` (a
+  //        synchronous `db.appendEvent` call, which CAN throw), `recordGateTimeoutOutcome` (an `await`),
+  //        and the `taskTitle` lookup (a synchronous `db.getTask` read) all exposed in that gap. This
+  //        injects a throw at the FIRST of those (`db.appendEvent` for kind "build_gate") and proves TWO
+  //        things: (i) the throw genuinely propagates out of `confirmWorkerMerge` (the control fires — this
+  //        isn't vacuously green because nothing actually threw), and (ii) a SECOND, ORDINARY
+  //        `confirmWorkerMerge` for a DIFFERENT branch of the SAME repo still completes promptly
+  //        afterward — a leaked guard would instead queue it forever (bounded here so a real regression
+  //        fails the check rather than hanging the whole file).
+  {
+    const R = mk("r", "feature-r.txt");
+    makeRepo(R);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const fakeGate = async () => ({ passed: true });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(R.repo, R.projId, R.taskId);
+    R.worktreePath = worktreePath; R.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, R.file), "work for R\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${R.file}"`, { cwd: worktreePath });
+    seed(db, R, "pnpm gate");
+
+    // Inject the throw at the exact vulnerable call site named in Code Review: the FIRST "build_gate"
+    // event append, which fires strictly after `holdRepoGuardOnExit` (inside the passing gate's own `fn`)
+    // but strictly before `beginSquash`/`mergeBranch`.
+    const originalAppendEvent = db.appendEvent.bind(db);
+    let armed = true;
+    db.appendEvent = (event) => {
+      if (armed && event.kind === "build_gate") {
+        armed = false;
+        throw new Error("[R] injected throw between gate-settle and beginSquash");
+      }
+      return originalAppendEvent(event);
+    };
+
+    let threw = false;
+    try {
+      await sessions.confirmWorkerMerge(R.mgrId, R.workerId);
+    } catch (e) {
+      threw = typeof e?.message === "string" && e.message.includes("[R] injected throw");
+    }
+    check("(R) the injected throw genuinely propagated out of confirmWorkerMerge (control is not vacuous)", threw);
+    db.appendEvent = originalAppendEvent;
+
+    // Second, ORDINARY worker/task on the SAME repo — must not queue forever behind a leaked guard.
+    const r2TaskId = `mgru-r2-task-${sfx}`, r2MgrId = `mgru-r2-mgr-${sfx}`, r2WorkerId = `mgru-r2-wkr-${sfx}`;
+    const { worktreePath: r2Worktree, branch: r2Branch } = await createWorktree(R.repo, R.projId, r2TaskId);
+    worktrees.push(r2Worktree);
+    fs.writeFileSync(path.join(r2Worktree, "feature-r2.txt"), "work for r2\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feature-r2.txt"`, { cwd: r2Worktree });
+    db.insertTask({ id: r2TaskId, projectId: R.projId, title: "MGRU-R2-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: r2MgrId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: R.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: r2WorkerId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: r2Worktree, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: r2MgrId, taskId: r2TaskId, worktreePath: r2Worktree, branch: r2Branch });
+
+    const LEAK_PROBE_TIMEOUT_MS = 5_000;
+    const r2Result = await Promise.race([
+      sessions.confirmWorkerMerge(r2MgrId, r2WorkerId),
+      new Promise((resolve) => setTimeout(() => resolve("TIMED_OUT"), LEAK_PROBE_TIMEOUT_MS)),
+    ]);
+    check("(R) a second, ordinary same-repo merge completes promptly after the injected throw — the guard did not leak",
+      r2Result !== "TIMED_OUT" && r2Result?.merged === true);
+  }
+
+  // ── (S) card c24dd48a Code Review follow-up — CONFINEMENT: a GATELESS merge must NEVER touch
+  //        `activeMergeRepos` via `beginSquash`/`endSquash`. An earlier draft called them unconditionally
+  //        at the shared `mergeBranch` call site, which let a gateless op (never checked by
+  //        `mergeRepoFree` — it never calls `runExclusive` at all) silently free a DIFFERENT, genuinely
+  //        `runExclusive`-admitted op's still-active hold via `endSquash`'s own `activeMergeRepos.delete`.
+  //        Spies on both methods (not a snapshot-shape inference) to prove NEITHER is ever called for a
+  //        project with no `gateCommand` configured at all.
+  {
+    const S = mk("s", "feature-s.txt");
+    fs.mkdirSync(S.repo, { recursive: true });
+    fs.writeFileSync(path.join(S.repo, "README.md"), "# mgru-s\n");
+    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: S.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+    const { worktreePath, branch } = await createWorktree(S.repo, S.projId, S.taskId);
+    S.worktreePath = worktreePath; S.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, S.file), "work for S\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${S.file}"`, { cwd: worktreePath });
+    // config: {} (no `orchestration.gateCommand` key at all) — mirrors the already-verified gateless setup
+    // in merge-confirm-stale-retry-idempotent.mjs's own `seed(B, undefined)`, rather than this file's own
+    // `seed()` (which always sets the key, just to `undefined`) — belt-and-braces against any resolver
+    // difference between an absent key and a key explicitly set to `undefined`.
+    db.insertProject({ id: S.projId, name: "MGRU-S", repoPath: S.repo, vaultPath: S.repo, config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: S.agentId, projectId: S.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: S.taskId, projectId: S.projId, title: "MGRU-S-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: S.mgrId, projectId: S.projId, agentId: S.agentId, engineSessionId: null, title: null, cwd: S.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: S.workerId, projectId: S.projId, agentId: S.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: S.mgrId, taskId: S.taskId, worktreePath, branch });
+
+    let beginSquashCalls = 0, endSquashCalls = 0;
+    const originalBegin = sessions.gateSemaphore.beginSquash.bind(sessions.gateSemaphore);
+    const originalEnd = sessions.gateSemaphore.endSquash.bind(sessions.gateSemaphore);
+    sessions.gateSemaphore.beginSquash = (rp) => { beginSquashCalls++; return originalBegin(rp); };
+    sessions.gateSemaphore.endSquash = (rp) => { endSquashCalls++; return originalEnd(rp); };
+
+    const confirm = await sessions.confirmWorkerMerge(S.mgrId, S.workerId);
+    check("(S) precondition: this really was a gateless merge (gateRan is falsy, an explicit no-gate warning is present)",
+      !confirm.gateRan && typeof confirm.warning === "string" && /no gateCommand/i.test(confirm.warning));
+    check("(S) confirmWorkerMerge still succeeded", confirm.merged === true);
+    check("(S) beginSquash was NEVER called for the gateless path", beginSquashCalls === 0);
+    check("(S) endSquash was NEVER called for the gateless path", endSquashCalls === 0);
+
+    sessions.gateSemaphore.beginSquash = originalBegin;
+    sessions.gateSemaphore.endSquash = originalEnd;
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -893,6 +1081,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge whose inputs are provably identical to a green, current self-check skips the redundant gate run (gateRan:false + reusedOpId), while a moved main, a stale base, a racy/UNVERIFIED settle, a dirty worktree, or a superseding later failure ALL still force a real re-gate (gateRan:true, no reusedOpId)."
+  ? "\n✅ ALL PASS — a merge whose inputs are provably identical to a green, current self-check skips the redundant gate run (gateRan:false + reusedOpId), while a moved main, a stale base, a racy/UNVERIFIED settle, a dirty worktree, or a superseding later failure ALL still force a real re-gate (gateRan:true, no reusedOpId); two genuinely concurrent same-repo merges (Q) both land on the first pass, the per-repo admission guard now held across the squash phase; a throw between gate-settle and beginSquash never leaks that guard (R); and beginSquash/endSquash are confined to gateRan, never touched by a gateless merge (S)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
