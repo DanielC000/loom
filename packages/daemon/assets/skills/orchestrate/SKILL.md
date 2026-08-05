@@ -390,6 +390,8 @@ nothing.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 
+**`staleReport` (on `worker_list`/`worker_status`) is the reverse-direction signal — about YOUR OWN session, not the worker's.** It fires once you've kept taking turns since a worker's report landed without ever resolving it, which can mean the report never actually surfaced in your own context even though it was durably recorded — don't assume you already handled it just because turns have passed since. Pull `worker_transcript(lastN:2)` to read it in full before deciding there's nothing to act on.
+
 **Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
 proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if
 it lands while the worker is mid-report, it trips the `worker_report(done)` pending-guard (the daemon

@@ -8189,6 +8189,17 @@ export class SessionService {
       if (col) this.db.updateTask(taskId, { columnKey: col });
     }
 
+    // `managerTurnSeqAtReport` (card 4491bd3b, DoD-1): the MANAGER's own turnSeq at the instant this
+    // report is recorded — a baseline, stamped the same way messageWorker/redirectWorker already stamp
+    // `turnSeqAtDelivery` for the reverse direction. Read back by reportedProjection (mcp/orchestration.ts)
+    // to derive `staleReport`: a manager that has since completed further turns of its OWN (proof its pty
+    // kept cycling, independent of WHY this specific report never surfaced) while `awaitingReview` stays
+    // true is a server-side-derivable inconsistency — observed fields only, no claim about cause or
+    // mechanism. Stamped unconditionally (not gated on delivery outcome) because the baseline we want is
+    // "the manager's turn count at the moment the worker reported", regardless of whether the report was
+    // delivered live, queued, or boarded — a boarded report's own strand backstop (recordUndeliveredReport,
+    // below) is a DIFFERENT, narrower signal (no live taker at all); this one also catches the
+    // delivered-live-yet-unconsumed case that backstop cannot.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
@@ -8197,7 +8208,12 @@ export class SessionService {
       // recorded ONLY when it's the non-default "background" (card c36bac53) — classifyIdleWorker below
       // reads it back to tell a self-attributed background-task park apart from a genuine awaiting-manager
       // checkpoint; an absent key means "manager" (the default), same normalize-on-read shape as noChanges.
-      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}), ...(report.awaiting === "background" ? { awaiting: "background" } : {}) },
+      detail: {
+        status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs,
+        ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}),
+        ...(report.awaiting === "background" ? { awaiting: "background" } : {}),
+        ...(managerSessionId ? { managerTurnSeqAtReport: this.db.getSession(managerSessionId)?.turnSeq ?? 0 } : {}),
+      },
     });
 
     // No parent to route to (a parentless worker — practically impossible, but if it happens the report
