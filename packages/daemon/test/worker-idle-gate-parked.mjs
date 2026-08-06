@@ -30,16 +30,33 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // the op's own `opId`, the same lookup `gate_status` uses) to get the real phase and, for a RUNNING
 // (admitted) gate, its true admission timestamp — see (c2) below for the queued-never-stale case this adds.
 //
+// CARD 422d3003 (p2 follow-up, origin finding: a real gate read elapsedMs 24.8min / idleMs 1.3s — actively
+// producing output — and the OLD rule here, admission-elapsed alone, called it "may be wedged" and
+// headlined `worker_stop`; obeying it would have destroyed correct in-progress work): admission-elapsed
+// alone STILL never establishes a wedge even once card 865c528e fixed WHICH elapsed clock is read — a
+// long-running gate is routinely just working hard (gate-runner.ts's own auto-extend). `idleMs`
+// (`Date.now() - lastOutputAt`, the SAME liveness clock gate_status/gate_queue expose) is now an
+// ADDITIONAL, required precondition: parked-gate-stale only fires once idleMs has ALSO crossed
+// `GATE_EXTEND_IDLE_MS` — the same point the gate's own machinery would stop rescuing it — never off
+// elapsed time alone. See (c) [now idle-AND-elapsed] and the new (c3) below.
+//
 // Asserts:
 //   (a) a FRESH pending gate, worker NEVER called worker_report at all → NO nudge (was: false "did NOT
 //       call worker_report" alarm) and isWorkerGenuinelyStranded() is FALSE.
 //   (b) a FRESH pending gate even when the worker DID call worker_report(progress) with no `awaiting`
 //       flag → STILL no nudge (the structural signal wins over/needs no self-report at all).
-//   (c) a STALE pending gate — genuinely ADMITTED (running) > BACKGROUND_PARK_STALE_MINUTES ago — → a
-//       nudge IS sent, names the staleness, points at worker_transcript, and does NOT claim "no reply
-//       owed" or "awaiting your reply" (neither is known to be true for a possibly-wedged gate).
+//   (c) a STALE pending gate — genuinely ADMITTED (running) > BACKGROUND_PARK_STALE_MINUTES ago AND idle
+//       (no output) for longer than GATE_EXTEND_IDLE_MS — → a nudge IS sent, names both the elapsed AND
+//       idle figures, points at gate_status/gate_queue for a live re-check before worker_transcript, and
+//       does NOT claim "no reply owed" or "awaiting your reply" (neither is known to be true for a
+//       possibly-wedged gate). POSITIVE CONTROL for the idleMs rule (card 422d3003 DoD-4).
 //   (c2) a QUEUED (never admitted) gate, however long it's been queued → NO nudge, ever — the origin bug
 //       this card fixes, reproduced directly.
+//   (c3) a STALE-BY-ELAPSED-ALONE pending gate — admitted > BACKGROUND_PARK_STALE_MINUTES ago, but with
+//       RECENT output (idleMs well under GATE_EXTEND_IDLE_MS, mirroring the card 422d3003 origin finding's
+//       24.8min/1.3s reading) → NO nudge — the exact false positive this card fixes, reproduced directly.
+//       NEGATIVE CONTROL for the idleMs rule (card 422d3003 DoD-5): a long-but-healthy gate must never
+//       trip the wedge nudge on elapsed time alone.
 //   (d) once the gate op is gone (settled/evicted) with no report on record, classification correctly
 //       reverts to the ORIGINAL stranded nudge — the gate check doesn't leak past the op's real lifecycle.
 //   (e) card 50c1e0d0's settle-grace RETENTION window (still peek()-able briefly after settle, unlike (d)'s
@@ -127,7 +144,11 @@ function cleanup(e) {
 // semaphore entry is ADMITTED ("running", `startedAt` stamped now) or still QUEUED ("queued",
 // `startedAt` stays null) — the exact distinction classifyIdleWorker's fix reads to tell a genuinely
 // wedged gate apart from an unbounded, perfectly healthy queue wait.
-async function seedRunningGate(e, workerId, { phase = "running" } = {}) {
+// `lastOutputAt` (card 422d3003) mirrors GateSemaphore's own liveness-mirror field — null (the default)
+// means "no liveness event recorded yet" (the genuine, brief post-admission gap classifyIdleWorker must
+// read as "not evidence of a wedge", never a fabricated 0); a caller wanting an idleMs reading passes an
+// explicit epoch-ms.
+async function seedRunningGate(e, workerId, { phase = "running", lastOutputAt = null } = {}) {
   await e.sessions.pendingOps.attach(
     `gate:${workerId}`, "gate", workerId, 10,
     () => new Promise(() => { /* never resolves */ }),
@@ -139,6 +160,7 @@ async function seedRunningGate(e, workerId, { phase = "running" } = {}) {
     priority: "low",
     enqueuedAt: Date.now(),
     startedAt: phase === "running" ? Date.now() : null,
+    lastOutputAt,
   });
   return opId;
 }
@@ -178,25 +200,35 @@ async function seedRunningGate(e, workerId, { phase = "running" } = {}) {
   cleanup(e);
 }
 
-// ============ (c) STALE pending gate — ADMITTED (running) > BACKGROUND_PARK_STALE_MINUTES ago → nudge ===
+// ============ (c) STALE pending gate — ADMITTED long ago AND genuinely idle (no output) → nudge =========
+// POSITIVE CONTROL (card 422d3003 DoD-4): both preconditions hold — admission-elapsed past
+// BACKGROUND_PARK_STALE_MINUTES AND idleMs past GATE_EXTEND_IDLE_MS (no output for minutes, a real wedge
+// signature) — proves the new idleMs-gated rule still fires on a genuinely wedged gate, not just that it
+// stopped firing on the false-positive shape (c3) below covers.
 {
   const e = makeEnv();
   seedManager(e, "mgr-c");
   seedTask(e, "tk-c", "in_progress");
   seedWorker(e, "wkr-c", "mgr-c", "tk-c", { idleMin: 60 });
-  const opId = await seedRunningGate(e, "wkr-c", { phase: "running" });
   // Backdate the LIVE GATESEMAPHORE entry's admission `startedAt` (card 865c528e fix target) — NOT
   // PendingOpRegistry's own `startedAt`, which is registration time and must play no part in staleness
   // any more. classifyIdleWorker computes staleness off the REAL wall clock (Date.now()), not this
   // file's fixed NOW constant (which only paces seedManager/seedWorker's lastActivity fields) — so the
-  // backdate must be relative to the real clock too, or the offset (and thus which side of the 20-min
-  // bound it lands on) would depend on how far NOW happens to drift from whenever this test actually runs.
-  e.sessions.gateSemaphore.registry.get(opId).startedAt = Date.now() - 25 * 60_000;
+  // backdate must be relative to the real clock too, or the offset (and thus which side of the threshold
+  // it lands on) would depend on how far NOW happens to drift from whenever this test actually runs.
+  // `lastOutputAt` backdated THE SAME amount (card 422d3003): genuinely no output since well before
+  // admission's own staleness threshold — the actual wedge signature, not merely "running a long time".
+  const startedAt = Date.now() - 25 * 60_000;
+  await seedRunningGate(e, "wkr-c", { phase: "running", lastOutputAt: startedAt });
+  const opId = e.sessions.pendingOps.entries.get("gate:wkr-c").opId;
+  e.sessions.gateSemaphore.registry.get(opId).startedAt = startedAt;
 
   e.sessions.notifyManagerOfIdleWorker("wkr-c");
   const nudge = e.enqueued.find((x) => x.id === "mgr-c" && /worker-idle/.test(x.text));
-  check("(c) a [loom:worker-idle] nudge IS sent for a genuinely stale (admitted, still running) gate park", !!nudge);
-  check("(c) it names the staleness (~N min) and the run_gate op", !!nudge && /run_gate/.test(nudge.text) && /min/.test(nudge.text));
+  check("(c) a [loom:worker-idle] nudge IS sent for a genuinely stale AND idle gate park", !!nudge);
+  check("(c) it names the elapsed staleness (~N min) and the run_gate op", !!nudge && /run_gate/.test(nudge.text) && /min/.test(nudge.text));
+  check("(c) it ALSO names the idle figure, the actual discriminator (card 422d3003)", !!nudge && /idle/i.test(nudge.text));
+  check("(c) it points at gate_status/gate_queue for a live re-check before escalating", !!nudge && /gate_status/.test(nudge.text) && /gate_queue/.test(nudge.text));
   check("(c) it points at worker_transcript to check what actually happened", !!nudge && /worker_transcript/.test(nudge.text));
   check("(c) it does NOT falsely promise 'no reply owed'", !!nudge && !/no reply owed/.test(nudge.text));
   check("(c) it does NOT falsely claim 'awaiting your reply' either", !!nudge && !/awaiting your reply/.test(nudge.text));
@@ -230,6 +262,30 @@ async function seedRunningGate(e, workerId, { phase = "running" } = {}) {
   e.sessions.notifyManagerOfIdleWorker("wkr-c2");
   check("(c2) NO nudge at all is sent — a queued gate must never be misread as wedged/stale",
     !e.enqueued.some((x) => x.id === "mgr-c2"));
+  cleanup(e);
+}
+
+// ============ (c3) STALE-BY-ELAPSED-ALONE — admitted long ago, but STILL producing output → NO nudge ===
+// NEGATIVE CONTROL (card 422d3003 DoD-5) — the exact origin false positive, reproduced directly: a real
+// gate read elapsedMs 24.8min / idleMs 1.3s (actively producing output seconds before the read) and the
+// OLD rule (admission-elapsed alone) called this "may be wedged" and headlined `worker_stop`, which would
+// have destroyed correct in-progress work holding a shared gate lane. A long-but-healthy gate — high
+// elapsed, LOW idle — must never trip the wedge nudge.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-c3");
+  seedTask(e, "tk-c3", "in_progress");
+  seedWorker(e, "wkr-c3", "mgr-c3", "tk-c3", { idleMin: 60 });
+  const startedAt = Date.now() - 25 * 60_000; // well past BACKGROUND_PARK_STALE_MINUTES
+  const lastOutputAt = Date.now() - 1_300; // ~1.3s ago — mirrors the origin finding's idleMs reading
+  const opId = await seedRunningGate(e, "wkr-c3", { phase: "running", lastOutputAt });
+  e.sessions.gateSemaphore.registry.get(opId).startedAt = startedAt;
+
+  check("(c3) isWorkerGenuinelyStranded is FALSE for a long-running-but-actively-producing gate",
+    e.sessions.isWorkerGenuinelyStranded("wkr-c3") === false);
+  e.sessions.notifyManagerOfIdleWorker("wkr-c3");
+  check("(c3) NO nudge at all is sent — high elapsedMs with low idleMs is healthy, not a wedge",
+    !e.enqueued.some((x) => x.id === "mgr-c3"));
   cleanup(e);
 }
 
@@ -287,6 +343,6 @@ async function seedRunningGate(e, workerId, { phase = "running" } = {}) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a worker parked on its OWN pending run_gate is auto-classified straight from PendingOpRegistry with zero self-report; a fresh gate park costs its manager no nudge at all; a stale one escalates with honest wording; classification correctly reverts to plain stranded once the gate op is actually gone; and card 50c1e0d0's settle-grace retention window never makes a just-settled gate misread as still-parked."
+  ? "\n✅ ALL PASS — a worker parked on its OWN pending run_gate is auto-classified straight from PendingOpRegistry with zero self-report; a fresh gate park costs its manager no nudge at all; a genuinely stale-AND-idle one escalates with honest, idleMs-anchored wording (card 422d3003); a stale-by-elapsed-alone-but-still-producing-output one does NOT (the origin false positive, fixed); classification correctly reverts to plain stranded once the gate op is actually gone; and card 50c1e0d0's settle-grace retention window never makes a just-settled gate misread as still-parked."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

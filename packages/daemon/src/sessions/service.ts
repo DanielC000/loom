@@ -47,7 +47,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -9126,18 +9126,31 @@ export class SessionService {
    *   consumes, so repeated ticks see the SAME running entry until it genuinely settles (evicted the
    *   instant it does — see PendingOpRegistry's class doc), at which point this branch simply stops
    *   matching and classification falls through to whatever the worker's own report (if any) says.
-   * - `parked-gate-stale` — mirrors `parked-background-stale`'s reasoning: a `run_gate` op that's been
-   *   RUNNING for `BACKGROUND_PARK_STALE_MINUTES` or more is past this repo's own ~8-10 minute real-gate
-   *   runtime — likely wedged rather than genuinely still executing — so classification stops asserting
-   *   "no reply owed" and falls through to this actionable kind instead. **Measured from GateSemaphore
-   *   ADMISSION, never from `PendingOpRegistry`'s own `startedAt`** (card 865c528e): the registry stamps
-   *   `startedAt` the moment `run_gate` is CALLED, which for a queued gate (the daemon-global
-   *   `maxConcurrentGates` cap already saturated) can be arbitrarily long before the gate is actually
-   *   admitted and starts running — comparing that against a threshold calibrated to RUN time misclassifies
-   *   an unbounded, perfectly healthy queue wait as a wedged gate. The live `GateSemaphore` registry
-   *   (looked up by the op's own `opId` via `findByOpId`, the same lookup `gate_status` uses) distinguishes
-   *   "queued" (never admitted — this branch never fires, no matter how long the wait) from "running"
-   *   (admitted — `since` IS the admission timestamp, exactly what the threshold is calibrated against).
+   * - `parked-gate-stale` — mirrors `parked-background-stale`'s reasoning, with a card 422d3003 fix:
+   *   `minutesSinceStart` (elapsed since GateSemaphore ADMISSION — see the paragraph below) alone NEVER
+   *   establishes a wedge. `gate-runner.ts`'s own auto-extend keeps a step's timeout alive for as long as
+   *   the child keeps producing output (`GATE_EXTEND_IDLE_MS`), so a long-running gate is routinely just
+   *   working hard — origin finding: a real gate read `elapsedMs` 24.8min / `idleMs` 1.3s (actively
+   *   producing output) and the OLD elapsed-only rule here called it "may be wedged" and headlined
+   *   `worker_stop`, which would have destroyed genuinely in-progress work. `idleMs` — `Date.now() -
+   *   lastOutputAt`, the SAME liveness clock `gate_status`/`gate_queue` already expose and that mirrors
+   *   `gate-runner.ts`'s own internal auto-extend decision, never a second independently-computed number —
+   *   is the actual discriminator, so this only fires once idleMs has crossed `GATE_EXTEND_IDLE_MS`: the
+   *   SAME point past which the gate's OWN machinery would also stop rescuing it. `minutesSinceStart >=
+   *   BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL, necessary-but-not-sufficient precondition (an
+   *   idle blip seconds into a run — e.g. a slow install step with no output yet — shouldn't alone read as
+   *   a wedge either); both must hold. `lastOutputAt` is null for the brief window between admission and
+   *   the runner's first liveness event (see {@link GateSnapshotEntry.lastOutputAt}'s own doc) — that
+   *   reads as "not yet evidence of a wedge" (idleMs stays null, this branch doesn't fire), never a
+   *   fabricated 0. **`minutesSinceStart` measured from GateSemaphore ADMISSION, never from
+   *   `PendingOpRegistry`'s own `startedAt`** (card 865c528e): the registry stamps `startedAt` the moment
+   *   `run_gate` is CALLED, which for a queued gate (the daemon-global `maxConcurrentGates` cap already
+   *   saturated) can be arbitrarily long before the gate is actually admitted and starts running —
+   *   comparing that against a threshold calibrated to RUN time misclassifies an unbounded, perfectly
+   *   healthy queue wait as a wedged gate. The live `GateSemaphore` registry (looked up by the op's own
+   *   `opId` via `findByOpId`, the same lookup `gate_status` uses) distinguishes "queued" (never admitted —
+   *   this branch never fires, no matter how long the wait) from "running" (admitted — `since` IS the
+   *   admission timestamp, exactly what the threshold is calibrated against).
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -9147,7 +9160,7 @@ export class SessionService {
     | { kind: "parked-background"; status: string }
     | { kind: "parked-background-stale"; status: string; minutesSinceReport: number }
     | { kind: "parked-gate" }
-    | { kind: "parked-gate-stale"; minutesSinceStart: number } {
+    | { kind: "parked-gate-stale"; minutesSinceStart: number; idleMs: number } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -9184,8 +9197,21 @@ export class SessionService {
       const liveGate = this.gateSemaphore.findByOpId(pendingGate.opId, workerSessionId);
       if (liveGate.kind === "found" && liveGate.record.phase === "running") {
         const minutesSinceStart = (Date.now() - liveGate.record.since) / 60_000;
-        if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES) {
-          return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart) };
+        // IDLE-VS-ELAPSED FIX (card 422d3003, origin finding: elapsedMs 24.8min / idleMs 1.3s misread as
+        // "may be wedged"): elapsed time alone never establishes a wedge — gate-runner.ts's own auto-extend
+        // keeps a step's timeout alive for as long as it keeps producing output. `idleMs` (`Date.now() -
+        // lastOutputAt`, the SAME liveness clock gate_status/gate_queue already expose, mirroring
+        // gate-runner.ts's own internal decision) is the actual discriminator — only suspect a wedge once
+        // idleMs has crossed GATE_EXTEND_IDLE_MS, the SAME point past which the gate's own machinery would
+        // also stop rescuing it. `lastOutputAt` (and so idleMs) is null for the brief window between
+        // admission and the runner's first liveness event (see GateSnapshotEntry.lastOutputAt's own doc) —
+        // that's "not yet evidence of a wedge", not a fabricated 0, so this branch doesn't fire on it.
+        // `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL precondition (an idle
+        // blip seconds into a run — e.g. a slow install step with nothing printed yet — shouldn't alone
+        // read as a wedge either); both must hold.
+        const idleMs = liveGate.record.lastOutputAt != null ? Date.now() - liveGate.record.lastOutputAt : null;
+        if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES && idleMs != null && idleMs >= GATE_EXTEND_IDLE_MS) {
+          return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart), idleMs: Math.round(idleMs) };
         }
       }
       // Still QUEUED (never admitted — no matter how long the wait), OR admitted but under the threshold,
@@ -9383,8 +9409,16 @@ export class SessionService {
     // point-in-time-read fields `buildBrokenSpawnMsg` (above) already reports for the sibling broken-spawn
     // notice — reused here rather than inventing a second idiom. Report OBSERVED fields only; do not assert
     // a cause from them (the reader decides whether the elapsed time is routine for this worker or not).
+    // ELAPSED-FIGURE RECONCILIATION (card 422d3003 DoD-3, origin finding: the nudge said "~21 min" while
+    // gate_queue read 24.8 min seconds later): NOT two different clocks — `minutesSinceStart`/`idleMs` here
+    // are computed from the SAME GateSemaphore fields `gate_status`/`gate_queue` read live (`since`/
+    // `lastOutputAt`). The gap is DELIVERY LAG: this message is enqueued via `pty.enqueueStdin`, which
+    // (per its own doc) waits for the target's turn to end if the manager is mid-turn when the watchdog
+    // fires — so the embedded numbers are a snapshot from CLASSIFICATION time, not from whenever the
+    // manager actually reads them, and can be visibly stale by then. The message says so explicitly and
+    // points at a live re-check rather than asking the reader to trust the embedded figures as current.
     const msg = cls.kind === "parked-gate-stale"
-      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) has a run_gate op that's been running ~${cls.minutesSinceStart} min — past this project's plausible gate runtime, so it may be wedged rather than genuinely still executing. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the gate is stuck.`
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) has a run_gate op that's been running ~${cls.minutesSinceStart} min (past this project's plausible gate runtime) AND idle ~${Math.round(cls.idleMs / 1000)}s with no output — past GATE_EXTEND_IDLE_MS, the same point the gate's OWN auto-extend machinery would also stop rescuing it — so this may be a genuine wedge, not just a slow-but-healthy run. Both figures are a snapshot from when this nudge was generated and can already be stale by the time you read it (delivery lags behind classification if you were mid-turn) — re-check LIVE first: gate_status/gate_queue for this op's CURRENT idleMs, the number that actually matters (a large elapsedMs alone is routine, not a wedge signal). Only if idleMs is still high there, escalate: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it, or worker_stop/worker_recycle it only once the gate is confirmed stuck.`
       : cls.kind === "parked-wake"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and is parked on its OWN scheduled wake (self-resumes at ${cls.wakeAt}) — no reply owed; it will continue on its own. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
       : cls.kind === "parked-background"
