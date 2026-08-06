@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Merge-gate SINGLE-FILE RETRY test (card 344ce950 — the single largest MEASURED waste in the merge
-// pipeline: mgr #127's gate_history read, n=14, found 5 of the last 14 merge-gate runs REJECTED, all five
-// followed by a PASS on the same branch, each costing a full ~12-18min second run of the whole suite).
+// Merge-gate SINGLE-FILE RETRY test (card 344ce950 — a measured source of waste in the merge pipeline: a
+// failure narrowed to one identifiable, re-runnable test file that then passes in isolation costs a full
+// second run of the whole suite when the manager just re-fires worker_merge_confirm by hand instead).
 // HERMETIC, no daemon — mirrors merge-gate-retry.mjs's in-process style: REAL git + an INJECTED `runGate`
 // seam (this daemon's own test suite is far too heavy to actually spawn here), with dummy
 // `packages/daemon/scripts/test-daemon.mjs` + `packages/daemon/test/<name>.mjs` files planted in the
@@ -21,11 +21,34 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) `identifyRetriableTestFile` unit coverage — undefined input, a candidate whose files don't exist on
 //       disk (fail-closed), a real match, an unsafe/path-shaped name (Jest-style `FAIL src/foo.test.js`)
 //       correctly refused by the bare-identifier guard.
+//   (G) THE GUARD IS HELD THROUGH THE RETRY (Code Review CRITICAL, card b9e07a4a): the single-file retry
+//       now re-admits through runExclusive and holds the per-repo merge-admission guard on a pass — before
+//       that fix, the FIRST attempt's own failure had already freed the guard, leaving this retry's own
+//       window unguarded. A same-repo sibling fired while the retry is genuinely running must wait for it.
+//   (H) CANCELLING THE RETRY'S OWN QUEUED ADMISSION (Code Review, card b9e07a4a — a NEW throw path this
+//       card introduced, previously unexercised by any test): since the retry now mints its OWN separate
+//       `runExclusive` admission (see (G) above), it is independently reachable via `gate_cancel` while
+//       QUEUED, exactly like any other merge-gate admission — `GateCancelledError` must be caught and
+//       settle `confirmWorkerMerge` as a clean `cancelled:true`, never a thrown/misreported crash.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-gate-single-file-retry.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Poll instead of a blind fixed sleep — mirrors gate-cancel.mjs's own `waitUntil` verbatim (same
+// reasoning: a blind sleep is the wall-clock-coincidence flake this suite's own DoD rejects). Bounded
+// generously (8s) so a real bug still fails fast rather than hanging.
+async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
+  const start = Date.now();
+  for (;;) {
+    const v = predicate();
+    if (v) return v;
+    if (Date.now() - start > timeoutMs) return predicate(); // one last try, then give up honestly
+    await sleep(intervalMs);
+  }
+}
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-sfr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -121,6 +144,246 @@ try {
     })());
     check("(A) NO merge_rejected event — the manager was never told a rejection happened", eventsOfKind(db, A.mgrId, "merge_rejected").length === 0);
     check("(A) task moved to done", db.getTask(A.taskId).columnKey === "done");
+  }
+
+  // ── (G) THE GUARD IS HELD THROUGH THE RETRY — see this file's own header for the summary. Two real
+  //        workers sharing one repo: worker1 fails once then retries a single file; worker2 (a real,
+  //        non-inert change) fires ITS OWN confirm while worker1's retry is genuinely running and must
+  //        wait for it, exactly as it would for worker1's ORIGINAL gate run. ───────────────────────────────
+  {
+    const G = mk("g", "feature-g1.txt");
+    makeRepo(G);
+    const db = new Db(); dbs.push(db);
+    // DISCRIMINATE THE REPO GUARD FROM THE CAP (Code Review, card b9e07a4a): `maxConcurrentGates`
+    // defaults to 1 and is daemon-global — at the default, worker2 (a REAL merge, admitted through the
+    // ordinary CAP-gated `runExclusive`, unlike (H) in merge-gate-inert-diff.mjs, whose inert-skip sibling
+    // goes through `acquireRepoGuardOnly` and never touches the cap at all) would queue behind BOTH the
+    // cap AND the per-repo guard while worker1's single-file retry holds a slot — so a red here would go
+    // red for either reason, and this test's whole point (the RETRY specifically holds the repo guard) is
+    // exactly what a cap-1 default cannot distinguish from "the cap only allows 1 concurrent gate anyway".
+    // Raising the cap to 2 removes cap contention as a candidate explanation (worker1's retry + worker2
+    // both fit under cap 2), leaving the repo guard as the ONLY thing that can still make worker2 wait.
+    db.setPlatformConfig({ maxConcurrentGates: 2 });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+
+    let calls = 0;
+    let retryAdmittedResolve;
+    const retryAdmitted = new Promise((res) => { retryAdmittedResolve = res; });
+    let releaseRetry;
+    const fakeGate = async () => {
+      calls++;
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-g", failingTestCount: 1 };
+      if (calls === 2) {
+        // THE single-file retry's own runGateSeq call — held open so we can prove the per-repo guard is
+        // held (a same-repo sibling stays queued) while this is still running.
+        retryAdmittedResolve();
+        await new Promise((res) => { releaseRetry = res; });
+        return { passed: true };
+      }
+      // calls >= 3: worker2's own (real, non-inert) gate — must NOT pause, this is the sibling whose
+      // admission timing is exactly what this test is proving.
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    db.insertProject({ id: G.projId, name: "SFR-G", repoPath: G.repo, vaultPath: G.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: G.agentId, projectId: G.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertSession({ id: G.mgrId, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: G.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const task1Id = `${G.taskId}-1`, task2Id = `${G.taskId}-2`;
+    const worker1Id = `${G.workerId}-1`, worker2Id = `${G.workerId}-2`;
+    db.insertTask({ id: task1Id, projectId: G.projId, title: "SFR-G-RETRY", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertTask({ id: task2Id, projectId: G.projId, title: "SFR-G-SIBLING", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now });
+
+    const wt1 = await createWorktree(G.repo, G.projId, task1Id);
+    worktrees.push(wt1.worktreePath);
+    plantTestFile(wt1.worktreePath, "flaky-g");
+    fs.writeFileSync(path.join(wt1.worktreePath, G.file), "work for g1\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: wt1.worktreePath });
+    db.insertSession({ id: worker1Id, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: G.mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
+
+    const wt2 = await createWorktree(G.repo, G.projId, task2Id);
+    worktrees.push(wt2.worktreePath);
+    fs.writeFileSync(path.join(wt2.worktreePath, "feature-g2.txt"), "work for g2\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feature-g2.txt"`, { cwd: wt2.worktreePath });
+    db.insertSession({ id: worker2Id, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: G.mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
+
+    const p1 = sessions.confirmWorkerMerge(G.mgrId, worker1Id);
+    await retryAdmitted; // worker1's single-file retry has genuinely admitted and is mid-run
+
+    let worker2Settled = false;
+    const p2 = sessions.confirmWorkerMerge(G.mgrId, worker2Id).then((r) => { worker2Settled = true; return r; });
+
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(G) worker2 does NOT settle while worker1's single-file retry is still running",
+      check: () => worker2Settled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(G) worker2 PROVABLY waited — the single-file retry's own admission holds the per-repo guard", neverSettled);
+
+    releaseRetry("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(G) worker1's retry passed and merged", confirm1.merged === true && confirm1.retryPassed === true);
+    // DETERMINISTIC, not racy (Code Review, card b9e07a4a): worker2 is blocked on the per-repo guard the
+    // entire time worker1's retry is admitted+running — nothing else is ever concurrently admitted against
+    // this repo that could invalidate worker1's own base, so `confirm1.reason` can never observe
+    // `gate_base_invalidated` regardless of timing. Unlike (H) in merge-gate-inert-diff.mjs (where the
+    // SECOND worker's own base is what's at risk), here worker1 is the one holding the guard throughout —
+    // there is no window in which anything else could move main out from under IT.
+    check("(G) worker1 was not force-invalidated by worker2 racing ahead", confirm1.reason !== "gate_base_invalidated");
+    // DETERMINISTIC ASSERTION COVERING THE RETRY-SETTLE -> mergeBranch WINDOW (Code Review, card
+    // b9e07a4a — contrast (H):377-380 in merge-gate-inert-diff.mjs, which names the SAME kind of guarantee
+    // for the inert-skip case): worker2 is a REAL, non-inert merge, so once it is finally admitted (after
+    // worker1's retry has released the guard by landing its own squash), worker2's FIRST attempt runs its
+    // own `reunionAtAdmission()` (unlike worker1's single-file retry, which deliberately skips that call —
+    // see this card's own service.ts doc) BEFORE its own gate ever runs. That re-union observes main has
+    // moved (worker1 landed while worker2 waited), re-bases worker2's worktree onto the new head, and
+    // advances worker2's own `gateBaseMainHead` — all before worker2's mocked gate (call #3, `passed:true`)
+    // even runs. So worker2 is GUARANTEED to merge cleanly here, never `gate_base_invalidated`: unlike (H)'s
+    // inert skip (which captures its base once and never re-unions, so a moved main deterministically fails
+    // its later re-check), a REAL merge's own first-attempt admission is exactly where that staleness gap
+    // is closed.
+    check("(G) worker2 eventually settled once worker1's retry released the guard", worker2Settled === true && confirm2 != null);
+    check("(G) worker2's own re-union at admission absorbed worker1's landed squash — merged cleanly, never invalidated",
+      confirm2.merged === true && confirm2.reason !== "gate_base_invalidated");
+  }
+
+  // ── (H) CANCELLING THE RETRY'S OWN QUEUED ADMISSION — see this file's own header for the summary. The
+  //        retry's `runExclusive` call is a BRAND NEW admission cycle (Item 1/(G) above), so it can queue
+  //        behind an unrelated cap-1 contender exactly like any other merge gate, and `gate_cancel` must be
+  //        able to withdraw it there. Mirrors gate-cancel.mjs's B2-2 block (the ORDINARY first-attempt
+  //        case) for the RETRY's own admission specifically.
+  //
+  //        ORDERING IS DETERMINISTIC, NOT RACY: worker H's own first attempt is held open (blocking on
+  //        `releaseCall1`) until AFTER the holder has been fired and is confirmed QUEUED (step order below)
+  //        — so the holder is a genuinely PRE-QUEUED waiter by the time worker H's first attempt is finally
+  //        released to fail. `GateSemaphore.release()` (called from worker H's OWN settling `runExclusive`)
+  //        grants the freed cap-1 slot to that pre-queued waiter SYNCHRONOUSLY, inside `grantNext()`,
+  //        BEFORE control ever returns to `confirmWorkerMerge`'s own continuation (which is what would go
+  //        on to attempt the retry's fresh `acquire()`) — a plain consequence of `release()`/`grantNext()`
+  //        being synchronous, non-async functions: the holder's `admit()` call happens-before
+  //        `confirmWorkerMerge`'s microtask ever resumes, so the retry's own `acquire()` call always finds
+  //        `active === cap` and queues. There is no window in which the retry could instead win the race. ──
+  {
+    const H = mk("h", "feature-h1.txt");
+    makeRepo(H);
+    const db = new Db(); dbs.push(db);
+    db.setPlatformConfig({ maxConcurrentGates: 1 });
+
+    let call1AdmittedResolve;
+    const call1Admitted = new Promise((res) => { call1AdmittedResolve = res; });
+    let releaseCall1;
+    let holderAdmittedResolve;
+    const holderAdmitted = new Promise((res) => { holderAdmittedResolve = res; });
+    let releaseHolder;
+    // Counts calls scoped to worker H's OWN worktree only — the proof that the retry's gate command never
+    // spawns a SECOND time once its admission is cancelled. Deliberately NOT a shared/global counter: the
+    // holder's own gate call (a different cwd, asserted separately below) must never inflate this.
+    let callsForH = 0;
+    const sharedGate = async (_gate, cwd) => {
+      if (cwd === H.worktreePath) {
+        callsForH++;
+        call1AdmittedResolve();
+        await new Promise((res) => { releaseCall1 = res; });
+        // The genuine, identifiable failure that would normally trigger the single-file retry — but the
+        // retry's OWN admission gets cancelled below before this function is ever called a second time.
+        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1 };
+      }
+      // The holder's own gate — held open once admitted (mirrors worker H's own call1 above) so it keeps
+      // occupying the cap-1 slot long enough for the retry's own admission to genuinely queue behind it and
+      // be observed/cancelled, instead of racing to finish and free the slot again before either happens.
+      holderAdmittedResolve();
+      await new Promise((res) => { releaseHolder = res; });
+      return { passed: true };
+    };
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+
+    db.insertProject({ id: H.projId, name: "SFR-H", repoPath: H.repo, vaultPath: H.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: H.agentId, projectId: H.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: H.taskId, projectId: H.projId, title: "SFR-H-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: H.mgrId, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: H.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
+    H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-h");
+    fs.writeFileSync(path.join(worktreePath, H.file), "work for h\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${H.file}"`, { cwd: worktreePath });
+    db.insertSession({ id: H.workerId, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: H.taskId, worktreePath, branch });
+
+    // A SEPARATE, unrelated project/worker to occupy the cap-1 slot once it frees — mirrors gate-cancel.mjs
+    // B2-2's own holder setup exactly.
+    const holderRepo = path.join(os.tmpdir(), `loom-sfr-h-holder-${sfx}`);
+    const holderProjId = `sfr-h-holder-proj-${sfx}`, holderAgentId = `sfr-h-holder-agent-${sfx}`;
+    const holderTaskId = `sfr-h-holder-task-${sfx}`, holderWorkerId = `sfr-h-holder-wkr-${sfx}`;
+    makeRepo({ repo: holderRepo });
+    db.insertProject({ id: holderProjId, name: "SFR-H-HOLDER", repoPath: holderRepo, vaultPath: holderRepo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: holderAgentId, projectId: holderProjId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: holderTaskId, projectId: holderProjId, title: "SFR-H-HOLDER-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wtHolder = await createWorktree(holderRepo, holderProjId, holderTaskId);
+    worktrees.push(wtHolder.worktreePath);
+    fs.writeFileSync(path.join(wtHolder.worktreePath, "holder.txt"), "holder\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "holder.txt"`, { cwd: wtHolder.worktreePath });
+    const holderMgrId = `${holderWorkerId}-mgr`;
+    db.insertSession({ id: holderMgrId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: holderRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: holderWorkerId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: holderMgrId, taskId: holderTaskId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+    // 1) Worker H's first attempt admits (cap 1, nothing else contending yet) and blocks mid-run.
+    const p1 = sessions.confirmWorkerMerge(H.mgrId, H.workerId);
+    await call1Admitted;
+
+    // 2) The holder fires NOW, while worker H's first attempt still occupies the cap-1 slot — it QUEUES.
+    const pHolder = sessions.confirmWorkerMerge(holderMgrId, holderWorkerId);
+    const holderQueued = await waitUntil(() => sessions.gateQueueForManager(holderProjId).queued.find((e) => e.gateType === "merge"));
+    check("(H) the holder is genuinely QUEUED behind worker H's first attempt (setup sanity)", !!holderQueued);
+
+    // 3) Release worker H's first attempt to fail for real — its slot frees, and (per this block's own
+    //    ordering doc above) the ALREADY-QUEUED holder deterministically wins it, forcing the single-file
+    //    retry's own fresh admission to queue instead of running immediately. The holder is held open
+    //    (never resolves on its own) so it keeps occupying the slot until explicitly released below —
+    //    otherwise it would finish and free the slot again before the retry's own admission (and this
+    //    test's own observation of it) ever happens.
+    releaseCall1("go");
+    await holderAdmitted;
+    const retryEntry = await waitUntil(() => sessions.gateQueueForManager(H.projId).queued.find((e) => e.gateType === "merge"));
+    check("(H) the single-file retry's OWN admission is genuinely QUEUED (setup sanity)", !!retryEntry);
+
+    if (retryEntry) {
+      const cancelResult = await sessions.cancelGateOp(H.mgrId, retryEntry.opId);
+      check("(H) cancelling the retry's QUEUED admission SUCCEEDS", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
+
+      const confirmH = await p1;
+      check("(H) confirmWorkerMerge settles cleanly with cancelled:true, never a thrown/misreported crash", confirmH.merged === false && confirmH.cancelled === true);
+      check("(H) the cancel is tagged 'manual' (gate_cancel, not an automatic supersede)", confirmH.cancelKind === "manual");
+      check("(H) it is NEVER misreported as a crash-shaped 'gate cancelled' error string", !/errored:.*gate cancelled/i.test(String(confirmH.reason ?? "")));
+      const mergeCancelledEvts = eventsOfKind(db, H.mgrId, "merge_cancelled");
+      check("(H) a merge_cancelled event was recorded (never a merge_rejected/merge-failed shape)", mergeCancelledEvts.length === 1 && mergeCancelledEvts[0].detail?.cancelKind === "manual");
+
+      // Let the holder's own gate proceed and settle — cleanup hygiene, not itself asserted on.
+      releaseHolder("go");
+      const holderResult = await pHolder;
+      check("(H) the holder itself merged normally once it won the freed slot", holderResult.merged === true);
+      check("(H) the retry's OWN gate command never actually spawned — cancelled while queued, before admission (fn is never invoked for a withdrawn admission)", callsForH === 1);
+    } else {
+      // SETUP SANITY FAILED (Code Review #4, card b9e07a4a): release the holder and let both confirms
+      // settle BEFORE moving on, instead of leaving `p1`/`pHolder` dangling — without this, a genuine
+      // regression in the exact property this test exists to catch (the retry's admission never showing up
+      // QUEUED) would leave worker H's `confirmWorkerMerge` parked forever behind a holder nobody ever
+      // releases, hanging this whole run instead of producing a named red. `allSettled` (not `all`): the
+      // point here is cleanup, not a second round of assertions — a red is already recorded above.
+      console.log("SKIP  (H) cancel/settle assertions — setup sanity check above already failed");
+      releaseHolder("go");
+      await Promise.allSettled([p1, pHolder]);
+    }
   }
 
   // ── (F) MULTI-FAILURE — manager review (#128): createFailingTestTracker keeps only the LAST matching ────

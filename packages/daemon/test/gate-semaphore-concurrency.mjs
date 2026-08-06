@@ -333,6 +333,307 @@ const worktrees = [];
   }
 }
 
+// ── REPO-GUARD-ONLY PRIMITIVE (card b9e07a4a): acquireRepoGuardOnly ────────────────────────────────
+// Built for the `db9b0130` inert-diff skip: it never calls runExclusive (no gate to run), so it was
+// structurally invisible to the per-repo merge-admission guard entirely — b9e07a4a's reachability
+// finding was that this is reachable by an ORDINARY manager slip (firing a second same-repo
+// worker_merge_confirm while a first is still mid-gate), not just a deliberate protocol violation, and
+// closing it needed a NEW primitive: the reviewer's original suggestion (route the inert skip through
+// `runExclusive`) does not work, because `runExclusive`'s `acquire()` gates on `cap` AND `mergeRepoFree`
+// TOGETHER — an inert merge routed through it would queue behind CAP contention too, reintroducing
+// exactly the gate-lane wait the inert-diff skip exists to avoid. `acquireRepoGuardOnly` waits ONLY on
+// the repo guard, never on cap — these tests prove that split holds, in both directions, and that the
+// release path is exhaustive (a leaked hold here would PERMANENTLY deadlock every future merge on that
+// repo, same severity as the existing `beginSquash`/`endSquash` release-path tests above).
+{
+  // Descriptor helper: acquireRepoGuardOnly now takes a full RepoGuardOnlyDescriptor (card b9e07a4a Code
+  // Review — projectId/sessionId/taskId/branch let gate_queue label + redact a repo-guard-only entry
+  // exactly like a real gate run; opId is REQUIRED, since it's what makes the entry findable by
+  // gate_cancel, even though the ACTUAL acquire/release identity is an internally-minted token,
+  // independent of this value — see that method's own doc).
+  const rgoDesc = (repoPath, opId, extra) => ({ repoPath, projectId: "p", sessionId: `sess-${opId}`, opId, ...extra });
+
+  const repoFreedAfter = async (sem, repoPath) => {
+    const started = Date.now();
+    const release = await sem.acquireRepoGuardOnly(rgoDesc(repoPath, `probe-${Date.now()}`));
+    release();
+    return Date.now() - started < 200;
+  };
+
+  // (a) NEVER TOUCHES CAP: a cap-1 semaphore fully saturated by an UNRELATED op (no repoPath) must not
+  // block acquireRepoGuardOnly for a free repoPath at all — proving DoD-2's "must never touch the cap"
+  // property directly, not merely by absence of a counter-example.
+  {
+    const sem = new GateSemaphore();
+    let releaseHolder;
+    const holder = () => new Promise((res) => { releaseHolder = res; });
+    const pHolder = sem.runExclusive(1, { gateType: "worker", projectId: "p", sessionId: "cap-holder" }, () => holder());
+    await sleep(20);
+    check("(repo-guard-only, a) precondition: cap is fully saturated (active === cap === 1)", sem.snapshot().active === 1);
+
+    const started = Date.now();
+    const release = await sem.acquireRepoGuardOnly(rgoDesc("/repo/uncontended", "op-a"));
+    const elapsedMs = Date.now() - started;
+    check("(repo-guard-only, a) acquireRepoGuardOnly resolves near-instantly DESPITE a fully saturated cap (never queues behind it)", elapsedMs < 200);
+    release();
+    check("(repo-guard-only, a) it never touched `active` at all (still exactly the one unrelated cap-holder)", sem.snapshot().active === 1);
+
+    releaseHolder("done");
+    await pHolder;
+  }
+
+  // (b) CONTENDED BY A REAL, runExclusive-ADMITTED MERGE (the headline scenario this card fixes): the
+  // repo-guard-only acquire must NOT resolve while a real merge gate holds the SAME repoPath — including
+  // past the gate's own settle, since a real merge extends its hold via `holdRepoGuardOnExit` through its
+  // own squash phase (`endSquash`) exactly as `confirmWorkerMerge` does. Only once `endSquash` fires does
+  // the waiter resolve. The admit-side descriptor MUST carry a real `opId` (card b9e07a4a Code Review):
+  // `admit()`'s stored identity is `descriptor.opId ?? entry.id` (see `repoHolderId`'s own doc), and only
+  // an opId this test ALSO presents to `endSquash` can ever match it — an admit with no opId would fall
+  // back to the internal `entry.id`, which this test has no way to present externally, and `endSquash`
+  // would be a safe no-op FOREVER (the exact identity-mismatch guard this card added, now correctly
+  // exercised rather than accidentally defeating the test).
+  {
+    const sem = new GateSemaphore();
+    let releaseGate;
+    const pGate = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "real-gate", repoPath: "/repo/contended", opId: "real-gate-op" },
+      async (_startedAt, _cancelSignal, _hooks, _getMax, holdRepoGuardOnExit) => {
+        holdRepoGuardOnExit(); // real confirmWorkerMerge shape: hold survives the gate's own settle
+        await new Promise((res) => { releaseGate = res; });
+        return "gate-done";
+      });
+    await sleep(20);
+    check("(repo-guard-only, b) the real gate admits and holds the repo (extended past its own settle)", sem.snapshot().active === 1);
+
+    let acquired = false;
+    const pAcquire = sem.acquireRepoGuardOnly(rgoDesc("/repo/contended", "inert-op")).then((release) => { acquired = true; return release; });
+
+    const WINDOW_MS = 150;
+    const neverAcquired = await assertNeverWithControl({
+      label: "(repo-guard-only, b) the inert-skip's acquire never resolves while the real gate holds the repo",
+      check: () => acquired,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        const controlSem = new GateSemaphore();
+        let controlAcquired = false;
+        const pControl = controlSem.acquireRepoGuardOnly(rgoDesc("/repo/uncontended-control", "ctrl")).then((r) => { controlAcquired = true; return r; });
+        const observed = await observeOnce({ check: () => controlAcquired, windowMs: WINDOW_MS });
+        (await pControl)(); // release the control's own hold
+        return observed;
+      },
+    });
+    check("(repo-guard-only, b) PROVABLY did not acquire while contended — the same window just proved (via the control) capable of catching a real acquire", neverAcquired);
+
+    // The gate itself settles (releases its cap slot) — the repo hold SURVIVES (holdRepoGuardOnExit was
+    // declared), so the waiter must STILL not be acquired yet. NO sleep here (a fixed wait guarding this
+    // negative assertion would be unfalsifiable — "hasn't happened yet" vs "never will"): `await pGate`
+    // itself IS the deterministic wait — `runExclusive`'s `finally` (registry.delete then release(), see
+    // that method's own doc) runs fully synchronously with no yield point, and since `holdRepoGuard` is
+    // true here, `release()`'s own repo-freeing branch is skipped entirely — nothing between `pGate`
+    // settling and this line could possibly free the repo or resolve `pAcquire`. Sound the instant `pGate`
+    // resolves, not merely "probably true by then" (mirrors gate-semaphore-concurrency.mjs's own
+    // "(join) (3)" precedent for the same reasoning).
+    releaseGate("go");
+    await pGate;
+    check("(repo-guard-only, b) still not acquired after the gate's own settle — the hold survives past it", acquired === false);
+
+    // Only `endSquash` (the deferred release confirmWorkerMerge calls after its own squash) actually frees
+    // the repo — this is the `releaseMergeRepoGuard` routing through `freeRepoPath`'s hand-off. The opId
+    // MUST match what `runExclusive`'s own descriptor above carried ("real-gate-op") — see this block's
+    // own header comment for why a mismatch here would silently defeat the test instead of failing it.
+    sem.endSquash("/repo/contended", "real-gate-op");
+    const release = await pAcquire;
+    check("(repo-guard-only, b) acquired the instant endSquash frees the repo (direct hand-off)", acquired === true);
+    release();
+    check("(repo-guard-only, b) repo genuinely free afterward", await repoFreedAfter(sem, "/repo/contended"));
+  }
+
+  // (c) HANDOFF TO A QUEUED REAL GATE (the reverse direction of (b)): a real merge gate queued behind an
+  // inert-skip's OWN hold must be admitted the instant that hold releases — proving the two mechanisms
+  // compose in both directions, not just one.
+  {
+    const sem = new GateSemaphore();
+    const release1 = await sem.acquireRepoGuardOnly(rgoDesc("/repo/reverse", "inert-1"));
+    check("(repo-guard-only, c) the inert-skip acquires the free repo immediately", true);
+
+    // NO sleep here, deliberately (mirrors the existing "(repo-mutex, e)" precedent above in this same
+    // file): `acquire()`'s admission decision — including a QUEUED waiter's registry push, inside the `new
+    // Promise` executor — is entirely SYNCHRONOUS, completing before `runExclusive(...)` ever returns
+    // control to this line. A fixed wait here would be a genuine TIMING-GUARD violation (an unfalsifiable
+    // "hasn't happened yet" vs "never will"); checking synchronously is not a race because there is
+    // nothing async to race.
+    let gateStarted = false;
+    const pGate = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "queued-gate", repoPath: "/repo/reverse" },
+      async () => { gateStarted = true; return "gate-done"; });
+    check("(repo-guard-only, c) the real gate is genuinely QUEUED behind the inert-skip's hold (cap has headroom)",
+      sem.snapshot().queued === 1 && sem.snapshot().active === 0);
+    const queuedEntry = sem.snapshot().entries.find((e) => e.phase === "queued");
+    check("(repo-guard-only, c) visibly repoContended, not a silent unexplained wait", !!queuedEntry && queuedEntry.repoContended === true);
+
+    release1();
+    const gateResult = await pGate;
+    check("(repo-guard-only, c) the queued real gate is admitted and settles once the inert-skip releases", gateStarted === true && gateResult === "gate-done");
+  }
+
+  // (d) RELEASE-PATH EXHAUSTIVENESS — a leaked hold here PERMANENTLY deadlocks every future merge on that
+  // repo (no timeout, no self-heal), same severity class as the beginSquash/endSquash coverage above. Two
+  // shapes: a clean release, and — the throw/cancel path a fixed-wait or happy-path-only test would miss
+  // (card 1f1f3d12) — a release fired from a `finally` after the surrounding caller code throws, the EXACT
+  // idiom `confirmWorkerMerge`'s own try/finally uses around this primitive.
+  {
+    // (d1) clean release
+    const sem = new GateSemaphore();
+    const release = await sem.acquireRepoGuardOnly(rgoDesc("/repo/d1", "op-d1"));
+    release();
+    check("(repo-guard-only, d1) a clean release frees the repo hold", await repoFreedAfter(sem, "/repo/d1"));
+  }
+  {
+    // (d2) THROW PATH: release fired from a `finally` after the caller's own code throws between acquire
+    // and its intended cleanup — mirrors confirmWorkerMerge's `try { ... } finally { releaseInertRepoGuard
+    // ?.(); }` bracket exactly. A release that only ever fires on the CLEAN path (the gap card 1f1f3d12
+    // flagged for the per-worktree guard) would leave this repo permanently held.
+    const sem = new GateSemaphore();
+    let release;
+    const threw = await (async () => {
+      try {
+        release = await sem.acquireRepoGuardOnly(rgoDesc("/repo/d2", "op-d2"));
+        throw new Error("simulated failure between acquire and mergeBranch");
+      } finally {
+        release?.();
+      }
+    })().then(() => "resolved", (e) => e.message);
+    check("(repo-guard-only, d2) the surrounding code genuinely threw (this test exercises the throw path, not a no-op)",
+      threw === "simulated failure between acquire and mergeBranch");
+    check("(repo-guard-only, d2) the repo hold is STILL freed even though the caller threw", await repoFreedAfter(sem, "/repo/d2"));
+  }
+  {
+    // (d3) double-release idempotency: a second call to the returned release() must be a harmless no-op,
+    // never a double-free that could hand the same hold to two different waiters.
+    const sem = new GateSemaphore();
+    const release = await sem.acquireRepoGuardOnly(rgoDesc("/repo/d3", "op-d3"));
+    release();
+    release(); // must not throw, must not double-grant
+    check("(repo-guard-only, d3) a second release() call is a harmless no-op", await repoFreedAfter(sem, "/repo/d3"));
+  }
+  {
+    // (d4) a QUEUED repo-guard-only waiter, released via the SAME idempotent-release contract as (d3) —
+    // proves the FIFO hand-off path (not just the uncontended fast path) also tolerates a double-release
+    // from either side without corrupting the next waiter's turn.
+    const sem = new GateSemaphore();
+    const releaseFirst = await sem.acquireRepoGuardOnly(rgoDesc("/repo/d4", "op-d4-first"));
+    // NO sleep here, same reasoning as (c) above: `acquireRepoGuardOnly`'s contended branch pushes onto
+    // `repoGuardOnlyWaiters` SYNCHRONOUSLY, inside the `new Promise` executor, before this call even
+    // returns control to this line — checking immediately is sound, not a race.
+    let secondAcquired = false;
+    const pSecond = sem.acquireRepoGuardOnly(rgoDesc("/repo/d4", "op-d4-second")).then((r) => { secondAcquired = true; return r; });
+    check("(repo-guard-only, d4) precondition: the second waiter is genuinely queued", secondAcquired === false);
+    releaseFirst();
+    releaseFirst(); // redundant — must not corrupt the hand-off to the second waiter
+    const releaseSecond = await pSecond;
+    check("(repo-guard-only, d4) the second waiter is granted exactly once via hand-off, unaffected by the first's redundant release", secondAcquired === true);
+    releaseSecond();
+    check("(repo-guard-only, d4) repo genuinely free after both settle", await repoFreedAfter(sem, "/repo/d4"));
+  }
+
+  // (e) THE EXACT CRITICAL CASCADE (Code Review, card b9e07a4a): op A's real gate FAILS (never calls
+  // holdRepoGuardOnExit) → its own release() frees/hands off repoPath to a queued repo-guard-only waiter
+  // B → but confirmWorkerMerge's OUTER finally still unconditionally fires `endSquash(repoPath, A's
+  // opId)` (gated on `gateRan`, which was set true BEFORE the gate ever ran — see that flag's own doc for
+  // why it's true regardless of pass/fail). Before the identity fix, this deleted B's now-live hold — this
+  // test reproduces that exact sequence at the semaphore level and proves B's hold survives A's redundant
+  // endSquash call untouched.
+  {
+    const sem = new GateSemaphore();
+    let releaseA;
+    const pA = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "A", repoPath: "/repo/e", opId: "op-A" },
+      async () => { await new Promise((res) => { releaseA = res; }); return { passed: false }; }); // A's gate FAILS — holdRepoGuardOnExit is never called, mirroring runGateSeq's own contract
+    await sleep(20);
+    check("(repo-guard-only, e) precondition: A admits and holds /repo/e", sem.snapshot().active === 1);
+
+    let bAcquired = false;
+    const pB = sem.acquireRepoGuardOnly(rgoDesc("/repo/e", "op-B")).then((r) => { bAcquired = true; return r; });
+    await sleep(20);
+    check("(repo-guard-only, e) precondition: B is genuinely queued behind A", bAcquired === false);
+
+    // A's gate settles (failed) — release() fires with holdRepoGuard:false (never declared), hands
+    // /repo/e DIRECTLY to B via freeRepoPath's hand-off (inside that SAME `runExclusive` finally, so B is
+    // already granted by the time `pA` itself settles).
+    releaseA("done");
+    await pA;
+    const releaseB = await pB;
+    check("(repo-guard-only, e) B is acquired once A's FAILED gate settles (hand-off from release(), not endSquash)", bAcquired === true);
+
+    // THE BUG: confirmWorkerMerge's own finally still calls endSquash with A's opId regardless of
+    // pass/fail — reproduce that exact call here, against B's now-live hold.
+    sem.endSquash("/repo/e", "op-A");
+
+    // B's hold must be COMPLETELY UNAFFECTED — provably, not by absence of a counter-example: a THIRD
+    // same-repo merge gate must still be BLOCKED (queued, not admitted) after A's redundant endSquash,
+    // exactly as it would be if B's hold were untouched.
+    let cStarted = false;
+    const pC = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "C", repoPath: "/repo/e" },
+      async () => { cStarted = true; return "c-done"; });
+    const WINDOW_MS = 150;
+    const neverStarted = await assertNeverWithControl({
+      label: "(repo-guard-only, e) a THIRD same-repo merge stays blocked — A's stale endSquash did NOT free B's live hold",
+      check: () => cStarted,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        const controlSem = new GateSemaphore();
+        let controlStarted = false;
+        const pControl = controlSem.runExclusive(2, { gateType: "worker", projectId: "ctrl", sessionId: "ctrl" }, async () => { controlStarted = true; return "control"; });
+        const observed = await observeOnce({ check: () => controlStarted, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(repo-guard-only, e) PROVABLY still blocked — B's hold survived A's stale endSquash intact", neverStarted);
+
+    releaseB();
+    const cResult = await pC;
+    check("(repo-guard-only, e) once B genuinely releases, C is finally admitted", cStarted === true && cResult === "c-done");
+  }
+
+  // (f) PRIORITY INVERSION, DOCUMENTED (Code Review, card b9e07a4a — see `repoGuardOnlyWaiters`'s own
+  // doc): a repo-guard-only waiter for a contended repoPath is handed the NEXT release BEFORE a
+  // `highWaiters` entry for the SAME repoPath, even when that cap-based waiter queued FIRST and has been
+  // waiting LONGER. Deliberate and accepted (a repo-guard-only wait is bounded by, at worst, another op's
+  // near-instant squash, never a full gate run) — this test asserts the documented behavior directly
+  // rather than merely asserting it isn't a crash.
+  {
+    const sem = new GateSemaphore();
+    let releaseHolder;
+    const pHolder = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "holder", repoPath: "/repo/f", opId: "op-holder" },
+      async () => { await new Promise((res) => { releaseHolder = res; }); return { passed: false }; });
+    await sleep(20);
+    check("(repo-guard-only, f) precondition: the holder admits", sem.snapshot().active === 1);
+
+    // The CAP-BASED waiter queues FIRST.
+    let capWaiterStarted = false;
+    const pCapWaiter = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "cap-waiter", repoPath: "/repo/f" },
+      async () => { capWaiterStarted = true; return "cap-waiter-done"; });
+    await sleep(20);
+    check("(repo-guard-only, f) precondition: the cap-based waiter is genuinely queued FIRST", sem.snapshot().queued === 1);
+
+    // The repo-guard-only waiter queues SECOND, strictly after.
+    let rgoAcquired = false;
+    const pRgoWaiter = sem.acquireRepoGuardOnly(rgoDesc("/repo/f", "op-rgo-waiter")).then((r) => { rgoAcquired = true; return r; });
+    await sleep(20);
+    check("(repo-guard-only, f) precondition: the repo-guard-only waiter is genuinely queued SECOND (strictly later)", rgoAcquired === false);
+
+    // The holder's gate fails and releases — despite the cap-based waiter having queued FIRST, the
+    // repo-guard-only waiter (queued SECOND) wins the hand-off.
+    releaseHolder("done");
+    await pHolder;
+    const releaseRgo = await pRgoWaiter;
+    check("(repo-guard-only, f) the LATER repo-guard-only waiter wins the hand-off over the EARLIER cap-based waiter", rgoAcquired === true);
+    check("(repo-guard-only, f) the cap-based waiter (queued first) has NOT started yet — inversion confirmed", capWaiterStarted === false);
+
+    releaseRgo();
+    const capResult = await pCapWaiter;
+    check("(repo-guard-only, f) the cap-based waiter is eventually admitted once the repo-guard-only waiter releases", capWaiterStarted === true && capResult === "cap-waiter-done");
+  }
+}
+
 // ── CAP CHECK ON A NON-RELEASE-SHAPED grantNext() CALLER (card d9d5057f) ───────────────────────────
 // grantNext() used to grant to the next eligible waiter by checking ONLY worktreeFree/mergeRepoFree,
 // never `this.active < cap` — safe only under the assumption that both its callers are "release-shaped"
@@ -352,7 +653,7 @@ const worktrees = [];
   // repo hold survives PAST its own release() — the real confirmWorkerMerge shape (gateRan -> beginSquash
   // held via holdRepoGuardOnExit -> mergeBranch -> endSquash), see runExclusive's own doc.
   let releaseA;
-  const pA = sem.runExclusive(cap, { gateType: "merge", projectId: "p", sessionId: "A", repoPath: "/repo/R" },
+  const pA = sem.runExclusive(cap, { gateType: "merge", projectId: "p", sessionId: "A", repoPath: "/repo/R", opId: "opA" },
     async (_startedAt, _cancelSignal, _hooks, _getMax, holdRepoGuardOnExit) => {
       holdRepoGuardOnExit();
       await new Promise((res) => { releaseA = res; });

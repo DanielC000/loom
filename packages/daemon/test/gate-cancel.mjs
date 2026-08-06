@@ -829,8 +829,129 @@ function makeRepo(repo) {
     controlFailures === 0);
 }
 
+// ── (b) gate_cancel resolves a QUEUED repo-guard-only wait — Code Review MAJOR, card b9e07a4a: a
+// brand-new throw path through the merge entry point (confirmWorkerMerge's own GateCancelledError catch
+// around acquireRepoGuardOnly) with ZERO coverage before this. Two real workers sharing a repo: worker1
+// holds it with a real, injected-slow gate; worker2's inert-diff skip queues behind it; the manager
+// cancels worker2's wait via gate_cancel, and worker2's confirmWorkerMerge call must settle CLEANLY as a
+// cancellation, never a crash-shaped generic failure. ──────────────────────────────────────────────────
+{
+  const sfx = `rgo-b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const repo = path.join(os.tmpdir(), `loom-gc-rgo-b-${sfx}`);
+  makeRepo(repo);
+  const db = new Db(); dbs.push(db);
+  const P1 = `gc-rgo-b-proj-${sfx}`;
+  db.insertProject({ id: P1, name: "RGO-B", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P1}-agent`, projectId: P1, name: "t", startupPrompt: "", position: 0 });
+  const mgrId = `${P1}-mgr`;
+  db.insertSession({ id: mgrId, projectId: P1, agentId: `${P1}-agent`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  let gate1AdmittedResolve;
+  const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+  let releaseGate1;
+  const fakeGate = async () => {
+    gate1AdmittedResolve();
+    await new Promise((res) => { releaseGate1 = res; });
+    return { passed: true };
+  };
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+  const task1Id = `${P1}-task-1`, task2Id = `${P1}-task-2`;
+  const worker1Id = `${P1}-wkr-1`, worker2Id = `${P1}-wkr-2`;
+  db.insertTask({ id: task1Id, projectId: P1, title: "RGO-B-REAL", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertTask({ id: task2Id, projectId: P1, title: "RGO-B-INERT", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now });
+
+  const wt1 = await createWorktree(repo, P1, task1Id);
+  worktrees.push(wt1.worktreePath);
+  fs.mkdirSync(path.join(wt1.worktreePath, "src"), { recursive: true });
+  fs.writeFileSync(path.join(wt1.worktreePath, "src", "index.ts"), "export const x = 1;\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "feat: real change"`, { cwd: wt1.worktreePath });
+  db.insertSession({ id: worker1Id, projectId: P1, agentId: `${P1}-agent`, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
+
+  const wt2 = await createWorktree(repo, P1, task2Id);
+  worktrees.push(wt2.worktreePath);
+  fs.mkdirSync(path.join(wt2.worktreePath, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(wt2.worktreePath, "docs", "note.md"), "notes\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: wt2.worktreePath });
+  db.insertSession({ id: worker2Id, projectId: P1, agentId: `${P1}-agent`, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
+
+  const p1 = sessions.confirmWorkerMerge(mgrId, worker1Id);
+  await gate1Admitted; // worker1's real gate is genuinely mid-run, holding the repo guard
+
+  const p2 = sessions.confirmWorkerMerge(mgrId, worker2Id); // worker2's inert skip queues behind worker1
+
+  const waiterEntry = await waitUntil(() => sessions.gateQueueForManager(P1).repoGuardOnly.find((e) => e.phase === "queued"));
+  check("(b) precondition: worker2's inert-skip wait is genuinely QUEUED and visible in gate_queue", !!waiterEntry);
+
+  if (waiterEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, waiterEntry.opId);
+    check("(b) gate_cancel resolves worker2's QUEUED repo-guard-only wait", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
+
+    const confirm2 = await p2;
+    check("(b) worker2's confirmWorkerMerge settles as a CLEAN cancellation, not a crash/generic failure", confirm2.merged === false && confirm2.cancelled === true && confirm2.cancelKind === "manual");
+    check("(b) worker2's cancellation names a real reason (the cancelGateOp detail text)", typeof confirm2.reason === "string" && confirm2.reason.length > 0);
+  }
+
+  releaseGate1("go");
+  const confirm1 = await p1;
+  check("(b) worker1 (the sibling) merged successfully, unaffected by worker2's cancellation", confirm1.merged === true);
+}
+
+// ── (c) gate_cancel: a FOREIGN project's QUEUED repo-guard-only wait is REFUSED — Code Review MAJOR,
+// card b9e07a4a: mirrors the existing cross-project refusal for the ordinary registry above, now also
+// proven for the fallback lookup. ──────────────────────────────────────────────────────────────────────
+{
+  const sfx = `rgo-c-${Date.now()}`;
+  const db = new Db(); dbs.push(db);
+  const P1 = `gc-rgo-c-own-${sfx}`, P2 = `gc-rgo-c-foreign-${sfx}`;
+  db.insertProject({ id: P1, name: "RGO-C Own", repoPath: "/tmp/rgo-c-own", vaultPath: "/tmp/rgo-c-own", config: {}, createdAt: now, archivedAt: null });
+  db.insertProject({ id: P2, name: "RGO-C Foreign", repoPath: "/tmp/rgo-c-foreign", vaultPath: "/tmp/rgo-c-foreign", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P1}-a`, projectId: P1, name: "t", startupPrompt: "", position: 0 });
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+  const mgr1 = `${P1}-mgr`;
+  db.insertSession({ id: mgr1, projectId: P1, agentId: `${P1}-a`, engineSessionId: null, title: null, cwd: "/tmp/rgo-c-own", processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  // P2's own op HOLDS repoPath R, then a SECOND P2 op QUEUES behind it (opId "rgo-c-waiter") — P1's
+  // manager should never be able to touch either.
+  const releaseHolder = await sessions.gateSemaphore.acquireRepoGuardOnly({ repoPath: "/tmp/rgo-c-foreign/repo", projectId: P2, sessionId: "holder", opId: "rgo-c-holder" });
+  const pWaiter = sessions.gateSemaphore.acquireRepoGuardOnly({ repoPath: "/tmp/rgo-c-foreign/repo", projectId: P2, sessionId: "waiter", opId: "rgo-c-waiter" }).catch((e) => e);
+  await waitUntil(() => sessions.gateQueueForManager(P2).repoGuardOnly.some((e) => e.phase === "queued"));
+
+  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-c-waiter"); // P1's manager, P2's opId
+  check("(c) a DIFFERENT project's QUEUED repo-guard-only wait is REFUSED", cancelResult.outcome === "refused");
+  check("(c) the refusal names the cross-project reason", /different project/i.test(cancelResult.reason ?? ""));
+
+  releaseHolder();
+  const waiterResult = await pWaiter;
+  check("(c) the waiter itself was NEVER touched by the refused attempt — it still resolves normally (not a GateCancelledError)", typeof waiterResult === "function");
+  waiterResult();
+}
+
+// ── (d) gate_cancel: a HOLDING repo-guard-only entry is REFUSED (not_cancelled) — Code Review MAJOR,
+// card b9e07a4a: interrupting an in-flight hold risks the same staged-residue hazard a RUNNING merge gate
+// cancel is already refused for; only a QUEUED wait is ever zero-risk. ───────────────────────────────────
+{
+  const sfx = `rgo-d-${Date.now()}`;
+  const db = new Db(); dbs.push(db);
+  const P1 = `gc-rgo-d-${sfx}`;
+  db.insertProject({ id: P1, name: "RGO-D", repoPath: "/tmp/rgo-d", vaultPath: "/tmp/rgo-d", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P1}-a`, projectId: P1, name: "t", startupPrompt: "", position: 0 });
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+  const mgr1 = `${P1}-mgr`;
+  db.insertSession({ id: mgr1, projectId: P1, agentId: `${P1}-a`, engineSessionId: null, title: null, cwd: "/tmp/rgo-d", processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const release = await sessions.gateSemaphore.acquireRepoGuardOnly({ repoPath: "/tmp/rgo-d/repo", projectId: P1, sessionId: "holder-d", opId: "rgo-d-holder" });
+  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-d-holder");
+  check("(d) cancelling a HOLDING repo-guard-only wait is REFUSED (not_cancelled)", cancelResult.outcome === "not_cancelled");
+  check("(d) the refusal names the staged-residue/HOLDING reason, not a generic one", /staged-residue|HOLDING/i.test(cancelResult.reason ?? ""));
+  release();
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, and gate_cancel is project-scoped + never frees a slot over an unverified kill."
+  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const db of dbs) try { db.close(); } catch { /* ignore */ }

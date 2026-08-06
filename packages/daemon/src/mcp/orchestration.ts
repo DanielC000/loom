@@ -438,7 +438,18 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call BEFORE firing " +
         "`run_gate`/`worker_merge_confirm` to confirm a lane is actually free instead of firing blind into " +
         "a saturated cap, and again right after either comes back `pending` to see the full picture instead " +
-        "of only your own op's state.",
+        "of only your own op's state. " +
+        "ALSO returns `repoGuardOnly` (card b9e07a4a) - a SEPARATE array, not folded into `running`/" +
+        "`queued`: an inert-diff-skip merge (db9b0130) holding or waiting on a same-repo sibling's per-repo " +
+        "guard without ever admitting through the ordinary cap/registry above. Each entry is " +
+        "{id, phase:\"holding\"|\"queued\", since, elapsedMs, queuePosition, opId, projectId, " +
+        "projectName, repoPath?, taskId?, branch?, workerLabel?} - `repoPath`/`taskId`/`branch`/" +
+        "`workerLabel` are OWN-PROJECT ONLY (never redacted-to-null - simply absent for a foreign entry, " +
+        "same as `running`/`queued`'s own redaction; `repoPath` is an absolute host filesystem path, never " +
+        "disclosed cross-project). Explains a queued `merge`-kind entry above reporting " +
+        "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
+        "contending holder is here, not there. Cancel a QUEUED one via `gate_cancel(opId)` - see that tool's own doc for the fallback " +
+        "resolution it uses.",
       inputSchema: strictShape({}),
     },
     async () => {
@@ -3177,6 +3188,13 @@ export class OrchestrationMcpRouter {
           "order-dependent/cross-test-pollution bug can produce) — never read it as an ordinary green. " +
           "`retryPassed:false` alongside a non-null `retriedFile` means the retry ALSO failed and this row " +
           "rejected exactly as it would have with no retry mechanism at all. " +
+          "⚠️ ON A NON-NULL `retriedFile` ROW, `durationMs` AND THE `gateCap`/`concurrentGates`/" +
+          "`concurrentGatesMax` TRIPLE DESCRIBE TWO DIFFERENT ADMISSIONS, DELIBERATELY — the SAME kind of " +
+          "trap `concurrentGates` vs `concurrentGatesMax` already carries below, one level up: `durationMs` " +
+          "is attempt 1's own run time ALONE (bounded to the failure that triggered the retry), while " +
+          "`passed` and the triple describe the RETRY's own admission (the one that actually produced this " +
+          "row's verdict) — never difference `durationMs` against the triple as if both described one run. " +
+          "On every other row (`retriedFile` null) both describe the same, single admission as usual. " +
           "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
           "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
           "Before this card a cancelled `\"worker\"` row (the only gate type whose cancel shares the plain " +
@@ -3300,7 +3318,15 @@ export class OrchestrationMcpRouter {
           "continues under its own existing timeout) rather than risking a freed slot over work that may " +
           "still be running. A cancelled worker self-check or QUEUED merge settles as a distinct `cancelled` " +
           "outcome, never a failure — the `[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge says so " +
-          "explicitly, so don't read one as a red to chase.",
+          "explicitly, so don't read one as a red to chase. " +
+          "ALSO REACHES a repo-guard-only wait (card b9e07a4a - an inert-diff-skip merge waiting on a " +
+          "same-repo sibling's guard, surfaced in gate_queue's separate repoGuardOnly array, never in " +
+          "running/queued): tried automatically when the opId doesn't match anything in the ordinary " +
+          "gate registry, same unscoped-then-project-scoped ambiguity handling as above. A QUEUED one " +
+          "cancels with zero process risk exactly like a queued merge; a currently-HOLDING one is refused " +
+          "for the same reason a RUNNING merge gate is (interrupting it risks the same staged-residue " +
+          "hazard) - gateType on a successful cancel here always reads \"merge\" (this IS a merge op, " +
+          "just one that never reached the ordinary gate registry).",
         inputSchema: strictShape({ opId: z.string() }),
       },
       async ({ opId }) => {

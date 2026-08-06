@@ -156,14 +156,67 @@ export interface GateQueueEntry {
   recentTimeoutStreak?: number;
 }
 
+/** Card b9e07a4a Code Review: one repo-guard-only holder/waiter in {@link GateQueueSnapshot.repoGuardOnly}
+ *  — the `db9b0130` inert-diff skip's own hold/wait (`GateSemaphore.acquireRepoGuardOnly`), which is NOT a
+ *  cap-admitted run and so never appears in {@link GateQueueSnapshot.running}/`.queued` at all. Before
+ *  this existed, a repo-guard-only holder was entirely invisible to `gate_queue`: an operator could see a
+ *  queued `merge`-kind `GateQueueEntry` reporting `repoContended:true` while `activeCount`/`running` showed
+ *  ZERO running merges on that repo, with no explanation available anywhere in this snapshot. Same
+ *  cross-project redaction rule as {@link GateQueueEntry}: `taskId`/`branch`/`workerLabel` present ONLY
+ *  for the calling manager's own project.
+ *
+ *  `repoPath` (Code Review MAJOR fix, card b9e07a4a): an earlier version emitted this UNCONDITIONALLY,
+ *  for every project — an absolute HOST FILESYSTEM PATH, disclosing another project's repo directory name
+ *  and this host's own directory layout to a caller who has no business seeing either. `GateQueueEntry`
+ *  has no `repoPath` field at all (this is the ONE field that only exists on this new type), so that was
+ *  a brand-new cross-project disclosure with no counterpart in the sanctioned set this daemon otherwise
+ *  ships (project + gate kind + age + queue position — never a raw host path). Present ONLY for the
+ *  calling manager's own project, same as `taskId`/`branch`/`workerLabel` below — this daemon serves a
+ *  private peer product; a leaked absolute path is treated as a real disclosure, not a nit. */
+export interface RepoGuardOnlyQueueEntry {
+  /** CORRECTED (Code Review, card b9e07a4a — an earlier version of this doc claimed the OPPOSITE and was
+   *  false): pass `opId` (below), NOT this internal `id`, to `gate_cancel` — `cancelGateOp` resolves a
+   *  caller-supplied id via {@link GateSemaphore.findRepoGuardOnlyByOpId}, which is keyed on `opId`; this
+   *  field is this daemon's own internal registry key (only ever translated to it internally, via
+   *  {@link GateSemaphore.cancelRepoGuardOnlyWait}) and passing it to `gate_cancel` returns `not_found`.
+   *  This does NOT mirror {@link GateQueueEntry.opId}'s own doc, despite this field's name resembling that
+   *  one's `id` field — {@link RepoGuardOnlyEntry.id} (a DIFFERENT type) is where that "pass the internal
+   *  id, not opId" shape actually applies (`cancelRepoGuardOnlyWait` itself takes that internal id); this
+   *  is the queue-SNAPSHOT type a caller reads from `gate_queue`, and `gate_cancel`'s own tool description
+   *  (mcp/orchestration.ts) already states the opId-based contract correctly — this comment now matches
+   *  it. */
+  id: string;
+  /** "holding" while it actually holds the guard; "queued" while waiting for a same-repo holder (real gate
+   *  OR another repo-guard-only op) to release it. Mirrors {@link RepoGuardOnlyEntry.phase} verbatim. */
+  phase: "holding" | "queued";
+  since: string;
+  elapsedMs: number;
+  /** 1-based position within THIS repoPath's OWN repo-guard-only queue; null while holding — see
+   *  {@link RepoGuardOnlyEntry.queuePosition}'s own doc for why this is scoped per-repoPath, not a single
+   *  shared cap-ordered position the way `GateQueueEntry.queuePosition` is. */
+  queuePosition: number | null;
+  opId: string | null;
+  projectId: string;
+  projectName: string;
+  /** Own-project ONLY — see this interface's own doc for why an absolute host path is never disclosed
+   *  cross-project. */
+  repoPath?: string;
+  taskId?: string | null;
+  branch?: string | null;
+  workerLabel?: string | null;
+}
+
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
- *  into running/queued so a manager reads queue depth and admission order without counting entries itself. */
+ *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
+ *  `repoGuardOnly` (card b9e07a4a) is a SEPARATE array, deliberately not folded into `running`/`queued` —
+ *  see {@link RepoGuardOnlyQueueEntry}'s own doc for why it's a genuinely different resource. */
 export interface GateQueueSnapshot {
   cap: number;
   activeCount: number;
   queuedCount: number;
   running: GateQueueEntry[];
   queued: GateQueueEntry[];
+  repoGuardOnly: RepoGuardOnlyQueueEntry[];
 }
 
 /** The near-free identity {@link SessionService.reconcileOrchestrationOnBoot}'s Pass B already has in
@@ -387,12 +440,14 @@ type ConfirmMergeResult = {
    *  caveat on these same two fields — restated here rather than assumed, since this is a different read
    *  path). `undefined` for a gateless project or a REUSED gate (`gateRan:false` — nothing was ever
    *  admitted, so there's nothing to report), same discipline as `gateExtended`/`gateProximity`.
-   *  ⚠️ THIRD SPAN CAVEAT (Code Review, card e2b6f900): the SINGLE-FILE RETRY (card 344ce950) does NOT
-   *  re-admit through `runExclusive` — it calls the gate runner directly, no slot, no fresh snapshot — so
-   *  on a merge that ends `retriedFile` + `retryPassed:true` (5 of 14 merge gates, per 344ce950's own
-   *  measured n=14), this triple describes ONLY the FIRST, FAILED admission, never the admission the
-   *  eventual PASS verdict is actually about. Cross-check `retriedFile` before trusting this triple as
-   *  "the condition the pass ran under" on such a row. */
+   *  RESOLVED (Code Review, card b9e07a4a): the SINGLE-FILE RETRY (card 344ce950) used to bypass
+   *  `runExclusive` entirely — no slot, no fresh snapshot — leaving this triple describing only the FIRST,
+   *  FAILED admission on a merge that ended `retriedFile` + `retryPassed:true`, never the admission the
+   *  eventual PASS verdict was actually about (the SAME gap left the per-repo merge-admission guard
+   *  unheld through that retry's own squash — the Critical card b9e07a4a fixed). It now re-admits through
+   *  `runExclusive` exactly like the TRANSIENT-KILL AUTO-RETRY already did, so this triple correctly
+   *  describes whichever admission the FINAL verdict is actually about, on every retry path alike — no
+   *  cross-check against `retriedFile` needed for this reason anymore. */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
@@ -3698,7 +3753,29 @@ export class SessionService {
     const running: GateQueueEntry[] = [];
     const queued: GateQueueEntry[] = [];
     for (const e of snap.entries) (e.phase === "running" ? running : queued).push(toEntry(e));
-    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued };
+    // Card b9e07a4a: repo-guard-only holders/waiters — a SEPARATE resource from the cap-admitted registry
+    // above (see RepoGuardOnlyQueueEntry's own doc), same redaction rule as toEntry().
+    const repoGuardOnly: RepoGuardOnlyQueueEntry[] = this.gateSemaphore.repoGuardOnlySnapshot().map((e) => {
+      const project = this.db.getProject(e.projectId);
+      const entry: RepoGuardOnlyQueueEntry = {
+        id: e.id, phase: e.phase, since: new Date(e.since).toISOString(),
+        elapsedMs: Date.now() - e.since, queuePosition: e.queuePosition, opId: e.opId,
+        projectId: e.projectId, projectName: project?.name ?? e.projectId,
+      };
+      // Card b9e07a4a Code Review MAJOR fix: `repoPath` (an absolute HOST FILESYSTEM PATH) is own-project
+      // ONLY — see this type's own doc. It used to sit outside this block, disclosed unconditionally.
+      if (e.projectId === callerProjectId) {
+        const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
+        const session = this.db.getSession(e.sessionId);
+        const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+        entry.repoPath = e.repoPath;
+        entry.taskId = e.taskId;
+        entry.branch = e.branch;
+        entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+      }
+      return entry;
+    });
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly };
   }
 
   /** Default bound for `gate_cancel`'s own manager-facing response (card 8d585277) — long enough for a
@@ -3781,6 +3858,32 @@ export class SessionService {
       }
     }
     if (found.kind === "none") {
+      // Card b9e07a4a Code Review: `findByOpId` only ever sees cap-admitted RegistryEntry rows — a
+      // repo-guard-only wait (the `db9b0130` inert-diff skip's own hold, GateSemaphore.acquireRepoGuardOnly)
+      // is structurally invisible to it (see that primitive's own doc). Before this fallback, such a wait
+      // had NO cancellation path at all — unlike every other way to hold this guard — so a wedge here had
+      // no operator remedy short of a daemon restart. Mirrors the registry lookup's own ambiguity handling
+      // immediately above: an unscoped match first, re-scoped to the caller's own project only if THAT
+      // comes back ambiguous.
+      let rgoFound = this.gateSemaphore.findRepoGuardOnlyByOpId(opId);
+      if (rgoFound.kind === "ambiguous") {
+        rgoFound = caller?.projectId ? this.gateSemaphore.findRepoGuardOnlyByOpId(opId, caller.projectId) : { kind: "none" };
+        if (rgoFound.kind === "ambiguous") {
+          return { outcome: "ambiguous", reason: `ambiguous opId prefix '${opId}' — it matches ${rgoFound.ids.join(", ")}; pass more characters or the full id`, opId };
+        }
+      }
+      if (rgoFound.kind === "found") {
+        const rgoEntry = rgoFound.record;
+        if (rgoEntry.projectId !== caller?.projectId) {
+          return { outcome: "refused", reason: "this op belongs to a different project", opId: rgoEntry.opId ?? opId };
+        }
+        if (rgoEntry.phase === "holding") {
+          return { outcome: "not_cancelled", reason: "cancelling a HOLDING repo-guard-only wait is not supported — interrupting one risks the same staged-residue hazard a RUNNING merge gate cancel is refused for; a QUEUED repo-guard-only wait can still be cancelled cleanly (nothing was ever spawned for it)", opId: rgoEntry.opId ?? opId };
+        }
+        const cancelled = this.gateSemaphore.cancelRepoGuardOnlyWait(rgoEntry.id, "manual", `cancelled by manager ${managerSessionId} via gate_cancel`);
+        if (!cancelled) return { outcome: "not_cancelled", reason: "no longer queued (it was granted or settled moments ago) — re-check gate_queue", opId: rgoEntry.opId ?? opId };
+        return { outcome: "cancelled", phase: "queued", opId: rgoEntry.opId ?? opId, gateType: "merge" };
+      }
       return { outcome: "not_found", reason: "no live gate op matches this id — it may have already settled (check the [loom:gate-*]/[loom:merge-*] nudge) or never existed", opId };
     }
     const entry = found.record;
@@ -11124,10 +11227,12 @@ export class SessionService {
     // `holdRepoGuardOnExit`) and `beginSquash`/`mergeBranch` — any one of them throwing, uncaught, would
     // leak the guard for the process's lifetime, queueing every later same-repo merge forever (a strictly
     // worse failure than the starvation this card fixes: starvation eventually resolves, a leaked guard
-    // never does). `endSquash` (in the `finally` below) is idempotent — a `Set.delete` on an absent key
-    // no-ops — so wrapping this ENTIRE span, including every gate-failed early-return path where nothing
-    // was ever held, is always safe and never a double-release bug. `merge` is declared here (not inside
-    // the try) so it's still in scope for the `if (!merge.ok)` handling that follows the `finally`.
+    // never does). `endSquash` (in the `finally` below) is idempotent — `GateSemaphore.freeRepoPath`
+    // (card b9e07a4a) refuses a repoPath it doesn't own as a safe no-op, so it never under- or
+    // over-releases relative to how many times THIS op actually acquired it — so wrapping this ENTIRE
+    // span, including every gate-failed early-return path where nothing was ever held, is always safe and
+    // never a double-release bug. `merge` is declared here (not inside the try) so it's still in scope for
+    // the `if (!merge.ok)` handling that follows the `finally`.
     //
     // Code Review follow-up, same card: `beginSquash`/`endSquash` themselves (down at the `mergeBranch`
     // call) are CONFINED to `gateRan` — see that call site's own doc for why an unconditional call was a
@@ -11136,10 +11241,17 @@ export class SessionService {
     // because a throw anywhere in here must still be caught to keep `merge` well-defined for the code
     // after — the `finally`'s `endSquash` call is guarded by that SAME `if (gateRan)` (card 96d5f76b
     // DoD-4 correction: it is NOT called at all for a `gateRan:false` op — describing it as a no-op call
-    // described the pre-confinement design this card replaced; `Set.delete`'s idempotence is still real
-    // and still the reason a REDUNDANT call from THIS op's own gate-failed early-return path is harmless,
-    // it just never arises for reuse/gateless in the first place).
+    // described the pre-confinement design this card replaced). Card b9e07a4a: a REDUNDANT call from THIS
+    // op's own gate-failed early-return path (which never arises for reuse/gateless in the first place) is
+    // harmless for the SAME reason any mismatched call is — `freeRepoPath`'s identity check, not mere
+    // membership idempotence.
     let merge: Awaited<ReturnType<typeof mergeBranch>>;
+    // Card b9e07a4a: the inert-diff skip's OWN repo-guard release, set only when `acquireRepoGuardOnly`
+    // below actually acquired one — mirrors `merge`'s own "declared outside the try, so it's still in
+    // scope for what runs after" reasoning. Released unconditionally in the `finally` (a no-op when still
+    // `undefined` — the ordinary gate-ran or reuse path never sets it), the SAME "every exit path" bracket
+    // `beginSquash`/`endSquash` already rely on for the gate-ran case — see that call site's own doc.
+    let releaseInertRepoGuard: (() => void) | undefined;
     try {
     if (gate) {
       // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
@@ -11373,18 +11485,68 @@ export class SessionService {
       // (a failed resolve) — simply leaves `gateRan` as set above and the gate runs exactly as before this
       // existed; see `isInertMergeDiff`'s own doc for the full fail-closed contract.
       //
-      // WHAT THIS SKIP DOES NOT DO (Code Review, card db9b0130; design question carded separately, do not
-      // fix here): unlike the reuse and gateless paths, an inert-diff skip never even calls
-      // `this.gateSemaphore.runExclusive(...)`, so it takes no per-repo merge-admission guard at all — a
-      // same-repo sibling mid-gate can still be admitted concurrently, and if that sibling's own squash
-      // lands before THIS merge reaches its own squash-lock, `requireCanonicalHead`'s in-lock re-check can
-      // force this merge to refuse and re-confirm (a real, if unlikely, ~14-minute re-gate cost for what
-      // would otherwise have been an instant skip). Fail-closed either way — never an unverified merge,
-      // only a possible extra round-trip — and structurally the SAME gap the reuse producer's own TOCTOU
-      // note already accepts, not a new one.
+      // WHAT THIS SKIP NOW DOES ABOUT PER-REPO ADMISSION (card db9b0130 shipped the skip; card b9e07a4a
+      // — READ IT before changing this — investigated its reachability and added the fix below; this
+      // paragraph describes the CURRENT code, not the historical gap): an inert-diff skip still never
+      // calls `this.gateSemaphore.runExclusive(...)` (there's no gate to run), so it's still structurally
+      // outside the CAP-based admission path a real gate goes through. But it DOES now take the per-repo
+      // MERGE-admission guard on its own, narrower terms — see `GateSemaphore.acquireRepoGuardOnly`'s own
+      // doc for the full mechanism. b9e07a4a's reachability finding was that NOTHING above this point (or
+      // anywhere earlier in `confirmWorkerMerge`) serializes two same-repo `confirmWorkerMerge` calls
+      // against each other — the only thing that had ever prevented a same-repo sibling from landing
+      // between this skip and its own squash-lock was manager discipline (the standing rule never to fire
+      // two same-repo merge-confirms concurrently), never code — and that gap is ordinary to hit by
+      // accident, not just by deliberate violation, because the async pending design of
+      // `worker_merge_confirm` exists specifically to let a manager work on other workers while a gate
+      // runs elsewhere. `acquireRepoGuardOnly` closes it: WHEN a same-repo sibling is genuinely mid-gate
+      // right now, this waits for it (never touching `cap` — see that method's own doc for why routing
+      // through `runExclusive` instead, the reviewer's original suggestion, would have reintroduced
+      // exactly the queueing the inert-diff skip exists to avoid); when the repo is uncontended (the
+      // overwhelmingly common case), this resolves instantly, byte-identical to before this existed. The
+      // acquired guard is released in the `finally` below (`releaseInertRepoGuard`), the SAME bracket
+      // `beginSquash`/`endSquash` use for the gate-ran case, so it can never outlive this call regardless
+      // of how it exits. `withCanonicalIndexLock`/`requireCanonicalHead` (git/worktrees.ts) remain the
+      // fail-closed backstop underneath this, exactly as they always have — this guard never replaces
+      // that check.
+      //
+      // WHAT CONTENTION ACTUALLY COSTS (manager correction, card b9e07a4a — an earlier version of this
+      // paragraph said this guard "narrows the window in which a race could force a wasted re-gate",
+      // which OVERSTATES it: `inertSkip` and `gateBaseMainHead` are BOTH computed BEFORE this wait, so
+      // when a contended sibling lands during it, THIS op's own squash-lock re-check is DETERMINISTIC,
+      // not probabilistic — it WILL see a stale `gateBaseMainHead` and refuse with `gate_base_invalidated`
+      // once it's finally granted the guard). This is not a narrower race window — it's a RELOCATION of
+      // the invalidation from the expensive side (a real gate's own ~11-21 min re-gate) to the cheap side
+      // (THIS op's own near-instant re-confirm, since there was never a gate to re-run here either way).
+      // Still a good trade — the sibling is fully protected, and this side only ever pays a cheap retry —
+      // but say what it actually does: the next reader looking for a race here won't find one.
+      //
+      // FIELD EVIDENCE (manager, card b9e07a4a, 2026-08-06): the PRECONDITION this guard protects
+      // against — an inert merge ready to land while a same-repo sibling holds `gateBaseMainHead` mid-gate
+      // — arose naturally on this project's own board within a single manager seat, unprompted, the same
+      // day this card was investigated (the manager held the inert merge deliberately rather than firing
+      // it). The DEFECT itself was never triggered — n=0 occurrences stands — but the precondition is
+      // ordinary to reach in normal operation, not a contrived scenario reserved for a doctrine violation.
       if (!reuseResult && gateBaseMainHead) {
         inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
-        if (inertSkip) gateRan = false;
+        if (inertSkip) {
+          gateRan = false;
+          try {
+            releaseInertRepoGuard = await this.gateSemaphore.acquireRepoGuardOnly({
+              repoPath, projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId,
+            });
+          } catch (err) {
+            // CANCELLED-WHILE-QUEUED (card b9e07a4a, mirrors the REAL gate's identical
+            // GateCancelledError catch around `runExclusive` further below — same reasoning: a manager's
+            // `gate_cancel` withdrew this wait before it was ever granted, so nothing was ever acquired
+            // and there is nothing to release. Squash phase is never reached (this throws strictly before
+            // it), so the canonical repo is untouched.
+            if (err instanceof GateCancelledError) {
+              evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, repoGuardOnly: true });
+              return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
+            }
+            throw err;
+          }
+        }
       }
 
       // EMIT-COMPARE REDUCED GATE (card 2154b6ad): considered only when the diff wasn't ALREADY proven
@@ -11652,29 +11814,115 @@ export class SessionService {
       // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
       // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
       concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-      // SINGLE-FILE RETRY (card 344ce950 — the single largest MEASURED waste in the merge pipeline: mgr
-      // #127's `gate_history` read, n=14, found 5 of the last 14 merge-gate runs REJECTED, all five
-      // followed by a PASS on the same branch, each costing a full ~12-18min second run of the whole
-      // suite). Fires ONLY for a "genuine" classification (a clean non-zero exit — never a kill/timeout,
-      // which the TRANSIENT-KILL AUTO-RETRY below already owns, and never twice: this runs exactly once,
-      // before that section, so the two retries can never both fire for the same gate attempt) that names
-      // one identifiable, re-runnable file (see gate-runner.ts's `identifyRetriableTestFile` for the
+      // DURATIONMS COHERENCE FIX (card b9e07a4a): captured HERE — right after attempt 1's own admission
+      // has settled, and BEFORE the single-file retry below can run its own separate `runExclusive`
+      // admission — and used verbatim as `build_gate`'s `durationMs` further down, instead of
+      // `Date.now() - gateStartedAt` computed at that later call site. Before this fix, computing it late
+      // meant a retried merge's `build_gate.durationMs` spanned attempt-1's admission all the way through
+      // the single-file retry's own (separately queued) admission and run — an unbounded, mixed span that
+      // does not correspond to either admission the REST of that same row describes. Capturing it here
+      // bounds it to attempt 1's own run, unconditionally, whether or not a retry later fires.
+      const gateAttempt1DurationMs = Date.now() - gateStartedAt;
+      // SINGLE-FILE RETRY (card 344ce950 — a MEASURED source of waste in the merge pipeline: a failure
+      // narrowed to one identifiable, re-runnable test file that then passes in isolation costs a full
+      // second run of the whole suite when the manager just re-fires worker_merge_confirm by hand instead).
+      // Fires ONLY for a "genuine" classification (a clean non-zero exit — never a kill/timeout, which the
+      // TRANSIENT-KILL AUTO-RETRY below already owns, and never twice: this runs exactly once, before that
+      // section, so the two retries can never both fire for the same gate attempt) that names one
+      // identifiable, re-runnable file (see gate-runner.ts's `identifyRetriableTestFile` for the
       // deliberately narrow, fail-closed match — a project without this exact suite, or a failure that
       // doesn't name a real file, always returns `undefined` here and this block is a no-op, byte-identical
-      // to before this card). NO CAUSE IS ASSERTED anywhere in this block or its wording — see the card's
-      // own "measured n=30: neither concurrent gates nor fleet size discriminates pass from fail" finding.
-      // MANAGER REVIEW (sibling p0 report): `identifyRetriableTestFile` ALSO requires
-      // `gateResult.failingTestCount === 1` — this daemon's own test runner has no fail-fast, so a run can
-      // genuinely fail on MULTIPLE files while the live tracker's own "last match per tier" shape reports
-      // only one of them. Passing `failingTestCount` through is what lets that function refuse to retry a
-      // collapsed multi-failure signal (see its own doc for the full reasoning).
+      // to before this card). NO CAUSE IS ASSERTED anywhere in this block or its wording. `identifyRetriableTestFile`
+      // ALSO requires `gateResult.failingTestCount === 1` — this daemon's own test runner has no fail-fast,
+      // so a run can genuinely fail on MULTIPLE files while the live tracker's own "last match per tier"
+      // shape reports only one of them. Passing `failingTestCount` through is what lets that function
+      // refuse to retry a collapsed multi-failure signal (see its own doc for the full reasoning).
+      //
+      // ROUTED THROUGH runExclusive (Code Review CRITICAL, card b9e07a4a): an earlier version of this
+      // block called `runGateSeq` directly, bypassing the semaphore entirely — the FIRST attempt's own gate
+      // had already FAILED inside its own `runExclusive` callback (so `holdRepoGuardOnExit` was never
+      // called), meaning `release()` already freed/handed off the per-repo guard the instant that attempt
+      // settled. A same-repo sibling could then be admitted into the exact window this retry ran in, and
+      // this retry's own eventual PASS would reach `mergeBranch` with the guard held by NOBODY — the same
+      // wasted-lane harm class this card exists to fix, just relocated to a different trigger. This now
+      // mirrors the TRANSIENT-KILL AUTO-RETRY below in its `runExclusive`/`holdRepoGuardOnExit`/
+      // `GateCancelledError` shape (see that block's own doc for why each piece is there) — its OWN
+      // admission cycle, holding the guard through to `mergeBranch` on a pass, exactly like the first
+      // attempt and the transient-kill retry do. It does NOT mirror that retry's `reunionAtAdmission`
+      // call, deliberately — see the callback below for why.
       if (gateRan && !gateResult.passed && classifyGateFailure(gateResult) === "genuine") {
         const candidate = identifyRetriableTestFile(gateResult.failingTest, worktreePath, gateResult.failingTestCount);
         if (candidate) {
           retriedFile = candidate.name;
-          const retryResult = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false);
-          retryPassed = retryResult.passed;
-          evt("build_gate_single_file_retry", { retriedFile, retryPassed, priorFailingTest: gateResult.failingTest });
+          let singleFileRetryStartedAt = 0;
+          try {
+            const retryResult = await this.gateSemaphore.runExclusive(
+              gateCap, gateDescriptor,
+              async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+                singleFileRetryStartedAt = startedAt;
+                concurrentAtStart = this.gateSemaphore.snapshot().active;
+                getConcurrentGatesMax = getMaxConcurrentGates;
+                // DELIBERATELY NO `reunionAtAdmission()` HERE (Code Review + manager decision, card
+                // b9e07a4a — corrects an earlier version of this comment that claimed this retry "mirrors
+                // the transient-kill retry exactly," which was false on exactly this point). The
+                // transient-kill retry below re-runs the WHOLE `effectiveGate`, so re-unioning onto a
+                // moved main and advancing `gateBaseMainHead` there is safe — every test file re-observes
+                // the new base. This retry runs ONLY `candidate.command`, a single test file: if a
+                // same-repo sibling landed and freed the guard between the first attempt and this
+                // admission, re-unioning here would advance `gateBaseMainHead` to that new head while only
+                // ONE file gets re-run against it — a pass would then let `requireCanonicalHead` match and
+                // the squash land on a base the other N-1 files never ran against, silently. Leaving this
+                // call out means a moved base instead fails closed exactly as before this card (a stale
+                // `gateBaseMainHead` trips `requireCanonicalHead`'s own re-check at squash time), which is
+                // the correct, conservative outcome for a single-file re-run.
+                // FORWARD `hooks` (card b9e07a4a follow-up): without this, `gate_queue`'s live registry
+                // entry for this retry's admission showed `phase:"running"` with `idleMs:null`,
+                // `liveness:"pending"` for the retry's ENTIRE duration — `hooks.onStepStart`/`onOutput`/
+                // `onExtend` (see `GateSemaphore.runExclusive`'s own doc) are what mirror a run's real
+                // idle/extend state into that registry entry, and this call was the only merge-gate
+                // `runGateSeq` site NOT forwarding them, contradicting `liveness`'s own doc (which tells a
+                // manager reading `gate_queue` mid-retry to expect a brief sub-second pre-flight, not an
+                // unexplained multi-minute `pending`). `_cancelSignal` stays intentionally unforwarded here
+                // (`undefined` below), matching BOTH sibling merge-gate call sites above (the first attempt
+                // and the transient-kill retry) — every merge-gate `runGateSeq` call passes `undefined` for
+                // cancelSignal; only the WORKER-gate call site forwards a live one. Wiring merge-gate
+                // cancellation through `runGateSequential` itself, if ever wanted, is a separate change —
+                // out of this card's scope, and not needed to fix the liveness-visibility gap this closes.
+                const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false, undefined, hooks);
+                // CARD c24dd48a / b9e07a4a: same "about to hand off to squash" hold as the first attempt —
+                // THIS is the fix: a pass here now keeps the per-repo guard held all the way to
+                // `mergeBranch`, instead of leaving the window this retry runs in unguarded.
+                if (r.passed) holdRepoGuardOnExit();
+                return r;
+              },
+              "high",
+            );
+            retryPassed = retryResult.passed;
+          } catch (err) {
+            // NO `AdmissionReunionFailedError` CATCH HERE (Code Review #4, card b9e07a4a): that error is
+            // thrown from exactly one place, `reunionAtAdmission` — and this retry deliberately never calls
+            // it (see the callback above). A handler here would be unreachable dead code, and on a branch
+            // whose whole subject is "which retry calls reunionAtAdmission," a live-looking one is exactly
+            // the misleading-signal shape prior reviews on this card kept catching. Removed rather than
+            // retained-as-defensive: if this retry is ever changed to re-union again, that change is the
+            // right place to re-add this catch, deliberately, alongside it.
+            // CANCELLED-WHILE-QUEUED — same reasoning as the first attempt's own catch above: this retry
+            // mints a BRAND NEW admission cycle, so it can independently be withdrawn while it queues even
+            // though the first attempt already ran.
+            if (err instanceof GateCancelledError) {
+              concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+              evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+              return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
+            }
+            throw err;
+          }
+          concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+          // Card b9e07a4a: this now carries gateCap/concurrentGates/concurrentGatesMax/durationMs too — it
+          // didn't before, since this retry never had its own admission to report on.
+          evt("build_gate_single_file_retry", {
+            retriedFile, retryPassed, priorFailingTest: gateResult.failingTest,
+            gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - singleFileRetryStartedAt,
+          });
           // THE NON-NEGOTIABLE PART (card 344ce950 §3): a pass-after-retry is WEAKER evidence than a clean
           // pass — an order-dependent/cross-test-pollution bug can pass in isolation and fail in the full
           // suite, which is EXACTLY the class this single-file retry would otherwise mask. `retriedFile`/
@@ -11694,7 +11942,7 @@ export class SessionService {
       // double-stamp with the identical value and contradict the closure's own "no future evt() call can
       // forget it" comment.
       evt("build_gate", {
-        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+        passed: gateResult.passed, durationMs: gateAttempt1DurationMs, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
         // `gateSpawned` (card 3a6f04cc): this method's own `gateRan` local IS the did-a-process-spawn bit
         // `gate_history`'s `gateRan` field needs — stamped explicitly rather than left to the `reused`
         // flag's absence, so a future change to the reuse shape can't silently desync the two.
@@ -11833,15 +12081,25 @@ export class SessionService {
       // rejection branch below AND the plain-green return further down can read — mirrors
       // `gateStepsResult`/`gateExtended`/`gateProximity`/`gateOutputTailForRecord`'s own "set once here,
       // read from either branch" pattern, one line above. `concurrentAtStart`/`concurrentGatesMax` already
-      // hold their FINAL values here — but "final" needs a caveat, Code Review finding (card e2b6f900): the
-      // TRANSIENT-KILL AUTO-RETRY below DOES re-run through `runExclusive` and re-assigns both (a fresh
-      // admission, its own concurrency snapshot). The SINGLE-FILE RETRY above (card 344ce950) does NOT —
-      // it calls `runGateSeq` directly, no `runExclusive`, no slot admission — so on a merge that ends
-      // `retriedFile` + `retryPassed:true` (5 of 14 merge gates, per 344ce950's own measured n=14), the
-      // triple captured here describes ONLY the FIRST, FAILED admission, not the admission the eventual
-      // PASS verdict is really about. Not fabricated, not a regression — an unnamed span caveat in exactly
-      // the dataset this card exists to make trustworthy; see `ConfirmMergeResult.gateCap`'s own doc for
-      // where this is now named for a reader of the persisted value, not just this comment.
+      // hold their FINAL values here. RESOLVED (Code Review, card b9e07a4a): both retry paths — the
+      // TRANSIENT-KILL AUTO-RETRY below AND the SINGLE-FILE RETRY above (card 344ce950, re-admitted
+      // through `runExclusive` since card b9e07a4a's Critical fix — see that block's own doc) — re-run
+      // through `runExclusive` and re-assign both (a fresh admission, its own concurrency snapshot), so
+      // this triple correctly describes whichever admission the FINAL verdict is actually about on EITHER
+      // retry path, not just the first attempt. See `ConfirmMergeResult.gateCap`'s own doc for the
+      // now-resolved caveat this used to carry.
+      // ⚠️ `durationMs` on the `build_gate` audit event (below) is NOT part of "this triple" and does NOT
+      // share its resolution above — it is a SEPARATE field with its own fix (card b9e07a4a, follow-up to
+      // this one): `gateAttempt1DurationMs`, captured right after attempt 1's own admission settles and
+      // BEFORE the single-file retry can run. On a merge the single-file retry saved, that means
+      // `build_gate.durationMs` describes attempt 1's own run ALONE, while the triple right beside it on
+      // that SAME row describes the RETRY's admission — a deliberate, DIFFERENT scope for each field, not
+      // a bug: `durationMs` answers "how long did the run that actually failed take", the triple answers
+      // "what concurrency produced the verdict this row's `passed`/`retriedFile`/`retryPassed` describe".
+      // Before this fix `durationMs` was neither of those — it was `Date.now()` read at THIS call site,
+      // AFTER the retry had already queued and run, so it silently spanned both admissions at once (queue
+      // wait included) while the triple beside it described only the second. Read them as two independent
+      // measurements on the same row, never as jointly describing one admission.
       gateCapForRecord = gateRan ? gateCap : undefined;
       concurrentGatesForRecord = gateRan ? concurrentAtStart : undefined;
       concurrentGatesMaxForRecord = gateRan ? concurrentGatesMax : undefined;
@@ -12034,23 +12292,39 @@ export class SessionService {
     // therefore still a precise, structural proxy for "this call reached `runExclusive` at least once" —
     // never true for the REUSE path (skipped by the `??`), never true for the INERT-DIFF SKIP path (the
     // `inertSkip` ternary skips it exactly like reuse does), and never true for a GATELESS project/repo
-    // (never reaches `if (gate)` at all, so neither assignment ever runs). SAFE BECAUSE: only a
-    // `runExclusive`-admitted op ever holds
-    // `repoPath` in `activeMergeRepos` now (via `admit`, extended past its own gate's settle by
-    // `holdRepoGuardOnExit` — see `runExclusive`'s own doc), and `92e960d1`'s admission guard makes that
-    // exclusive — at most one such op per repo at a time — so `beginSquash`/`endSquash`, confined to
-    // exactly that same set of ops, can only ever touch its OWN hold, never a sibling's. The reuse, the
-    // INERT-DIFF SKIP (card db9b0130), and the gateless paths are ALL DELIBERATELY EXCLUDED and get NO
-    // admission-level protection here — unchanged from before this card (for reuse/gateless) or accepted
-    // deliberately (for the inert-diff skip — see that producer's own doc, above, for the named
-    // consequence), and already covered by the standing TOCTOU note on the reuse producer above (this
-    // method, `reuseResult`'s own doc: "a SIBLING merge on this same repo can still land before this
-    // merge's own squash actually runs... `mergeBranch`'s own lock... refuse[s] instead of silently landing
-    // an unverified merge") — `requireCanonicalHead` is what protects them, not this guard, exactly as it
-    // always has.
+    // (never reaches `if (gate)` at all, so neither assignment ever runs).
+    //
+    // SAFE BECAUSE (Code Review CORRECTION, card b9e07a4a — an earlier version of this paragraph claimed
+    // `92e960d1`'s admission-exclusivity guard ALONE was what kept `beginSquash`/`endSquash` from ever
+    // touching a sibling's hold; that claim is what the reviewer's reproduced Critical falsified: a
+    // `gateRan:true` op whose gate FAILED, or whose single-file retry raced a real admission window (both
+    // gated on `gateRan`, neither ever `admit()`-ed for THIS specific call), still fires `endSquash`
+    // unconditionally in this `finally` — admission exclusivity says nothing about a call that was never
+    // admitted at all). The ACTUAL guarantee is `GateSemaphore.freeRepoPath`'s identity check (card
+    // b9e07a4a): `beginSquash`/`endSquash` present `thisOpId`, and `activeMergeRepos` only ever mutates
+    // when that matches whoever CURRENTLY holds `repoPath` — a call from an op that never admitted, or
+    // whose own hold already released, is refused as a safe no-op instead of touching whatever a
+    // DIFFERENT, genuinely-admitted op (or a handed-off repo-guard-only waiter) holds there right now.
+    // `gateRan`'s role is narrower than the old claim implied: it's still what confines these calls to
+    // "an op that at least ATTEMPTED a real gate", not proof of a live hold — see `beginSquash`'s own doc
+    // for the full identity mechanism. The reuse and the
+    // gateless paths are DELIBERATELY EXCLUDED from `beginSquash`/`endSquash` and get NO admission-level
+    // protection from THEM — unchanged from before this card — and stay covered by the standing TOCTOU
+    // note on the reuse producer above (this method, `reuseResult`'s own doc: "a SIBLING merge on this
+    // same repo can still land before this merge's own squash actually runs... `mergeBranch`'s own
+    // lock... refuse[s] instead of silently landing an unverified merge") — `requireCanonicalHead` is what
+    // protects them, not this guard, exactly as it always has.
+    //
+    // THE INERT-DIFF SKIP (card db9b0130) IS NO LONGER IN THAT GROUP (card b9e07a4a): it is excluded from
+    // `beginSquash`/`endSquash` for the SAME structural reason (it never calls `runExclusive`, so
+    // `mergeRepoFree`/`admit` never see it) — but it now takes its OWN, separately-acquired admission-
+    // level guard via `GateSemaphore.acquireRepoGuardOnly`, at the inert-diff-skip decision point above,
+    // released below via `releaseInertRepoGuard`. See that method's own doc for why this had to be a
+    // distinct primitive rather than routing through `beginSquash`/`endSquash` or `runExclusive` itself.
     //
     // The `finally` below (closing the try opened above, at this method's own `if (gate)` line) is what
-    // actually frees a queued same-repo sibling once this settles — deliberately scoped to end HERE (not
+    // actually frees a queued same-repo sibling once this settles — for the gate-ran case via `endSquash`,
+    // for the inert-diff-skip case via `releaseInertRepoGuard` — deliberately scoped to end HERE (not
     // extending through `finalizeMerge`/branch deletion/worktree removal below): none of that bookkeeping
     // moves canonical main's HEAD, which is the only thing a sibling's own admission-time re-derivation
     // (`reunionAtAdmission`) reads. Bounded: `mergeBranch` itself is timeout-bounded (`this.gitOpMs`), so
@@ -12062,9 +12336,18 @@ export class SessionService {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never
       // touches a key it never acquired. Safe to call for EVERY `gateRan` exit (including a gate-failed
-      // early return, where `holdRepoGuardOnExit` was never invoked and nothing is held): `Set.delete` on
-      // an absent key is a no-op, so this only ever releases THIS op's own hold if one exists.
+      // early return, where `holdRepoGuardOnExit` was never invoked and nothing is held, and the
+      // single-file-retry admission below, whose own guard may have already been freed/handed off by the
+      // FIRST attempt's own release — card b9e07a4a): `GateSemaphore.freeRepoPath`'s identity check refuses
+      // a repoPath THIS op doesn't currently own as a safe no-op, so this only ever releases THIS op's own
+      // hold if one still exists under its own identity — never a sibling's.
       if (gateRan) this.gateSemaphore.endSquash(repoPath, thisOpId);
+      // Card b9e07a4a: the inert-diff skip's OWN guard release — `undefined` (a no-op optional call) for
+      // every path except a same-repo-contended inert skip, which is the only one that ever set it. Runs
+      // on EVERY exit from this try (clean resolve, a throw from `mergeBranch`/`evt`/anything else in this
+      // span, an early return) — the exact "throw/cancel path, not just the clean resolve" coverage this
+      // card's own kickoff called out, mirroring `endSquash`'s adjacent unconditional-safety-net call.
+      releaseInertRepoGuard?.();
     }
     if (!merge.ok) {
       if (merge.gateBaseInvalidated) {

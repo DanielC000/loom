@@ -358,7 +358,55 @@ function makeRepo(repo) {
   }
 }
 
+// ── (unit, repoGuardOnly) Code Review MAJOR fix, card b9e07a4a: a foreign-project repoGuardOnly entry
+// omits taskId/branch/workerLabel AND repoPath entirely — an earlier version leaked `repoPath` (an
+// absolute HOST FILESYSTEM PATH) unconditionally, disclosing another project's repo directory name and
+// this host's own layout. Written to the SAME standard as the (unit) block above ("the foreign task's
+// title never appears anywhere in the snapshot") — a foreign repoPath test written to that standard fails
+// on the leak immediately, which is exactly what this proves didn't ship. ──────────────────────────────
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P1 = `gq-rgo-own-${Date.now()}`, P2 = `gq-rgo-foreign-${Date.now()}`;
+    db.insertProject({ id: P1, name: "RGO Own", repoPath: "/tmp/rgo-own", vaultPath: "/tmp/rgo-own", config: {}, createdAt: now, archivedAt: null });
+    db.insertProject({ id: P2, name: "RGO Foreign", repoPath: "/tmp/rgo-foreign-secret-path", vaultPath: "/tmp/rgo-foreign-secret-path", config: {}, createdAt: now, archivedAt: null });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+
+    const release = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: "/tmp/rgo-foreign-secret-path/repo", projectId: P2, sessionId: "foreign-sess",
+      taskId: "foreign-task", branch: "loom/foreign", opId: "rgo-op-1",
+    });
+    try {
+      const view = sessions.gateQueueForManager(P1); // P1 is NOT the owner of this hold
+      check("(unit, repoGuardOnly) exactly 1 repoGuardOnly entry visible", view.repoGuardOnly.length === 1);
+      const foreign = view.repoGuardOnly[0];
+      check("(unit, repoGuardOnly) foreign entry is phase:holding", foreign.phase === "holding");
+      check("(unit, repoGuardOnly) foreign entry OMITS taskId/branch/workerLabel/repoPath entirely (never redacted-to-null)",
+        !("taskId" in foreign) && !("branch" in foreign) && !("workerLabel" in foreign) && !("repoPath" in foreign));
+      check("(unit, repoGuardOnly) the foreign repo path never appears anywhere in the snapshot",
+        !JSON.stringify(view).includes("rgo-foreign-secret-path"));
+      check("(unit, repoGuardOnly) opId/projectId/projectName still present (the sanctioned set)",
+        foreign.opId === "rgo-op-1" && foreign.projectId === P2 && foreign.projectName === "RGO Foreign");
+
+      // From P2's OWN view, the same entry carries full detail — including repoPath.
+      const ownView = sessions.gateQueueForManager(P2);
+      const own = ownView.repoGuardOnly[0];
+      check("(unit, repoGuardOnly) from P2's own view, repoPath/taskId/branch ARE present",
+        own.repoPath === "/tmp/rgo-foreign-secret-path/repo" && own.taskId === "foreign-task" && own.branch === "loom/foreign");
+    } finally {
+      release();
+    }
+    const afterRelease = sessions.gateQueueForManager(P1);
+    check("(unit, repoGuardOnly) empty once released (no leaked entry)", afterRelease.repoGuardOnly.length === 0);
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_queue() answers cap/activeCount/queuedCount + running/queued detail from ONE read, redacts taskId/branch/workerLabel for a cross-project entry (never redacted-to-null — omitted), is registered on BOTH the manager AND worker surfaces with the SAME project-scoped redaction either way (the worker's pinned 5-tool depth-1 surface holds), never reports 2 entries as \"running\" at cap 1 across a real hold/queue/handoff/settle sequence (corroborating gate-semaphore-concurrency.mjs's structural proof that the cap genuinely bounds concurrency), and — answering escalation 4f151331's design ask — surfaces the independent gate-timeout-streak signal so a fresh op on a recently-timed-out branch carries a visible anomaly flag instead of looking indistinguishable from a clean one."
+  ? "\n✅ ALL PASS — gate_queue() answers cap/activeCount/queuedCount + running/queued detail from ONE read, redacts taskId/branch/workerLabel for a cross-project entry (never redacted-to-null — omitted), is registered on BOTH the manager AND worker surfaces with the SAME project-scoped redaction either way (the worker's pinned 5-tool depth-1 surface holds), never reports 2 entries as \"running\" at cap 1 across a real hold/queue/handoff/settle sequence (corroborating gate-semaphore-concurrency.mjs's structural proof that the cap genuinely bounds concurrency), surfaces the independent gate-timeout-streak signal so a fresh op on a recently-timed-out branch carries a visible anomaly flag instead of looking indistinguishable from a clean one, and — card b9e07a4a — the separate repoGuardOnly array applies the SAME redaction, including the absolute host repoPath a foreign caller must never see."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

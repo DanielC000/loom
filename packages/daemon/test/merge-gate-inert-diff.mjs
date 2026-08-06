@@ -25,11 +25,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) UNKNOWN TOP-LEVEL DIRECTORY — a brand-new, never-seen-before directory is not on the allowlist by
 //       construction — MUST run the full gate (DoD-2's fail-closed default, exercised directly rather than
 //       merely asserted).
+//   (F)/(G) added later, see their own inline headers below (rename safety case; docs/-prefix boundary).
+//   (H) SAME-REPO SIBLING MID-GATE (card b9e07a4a): an inert-diff skip must WAIT for a same-repo sibling
+//       that is genuinely running a real gate right now, never race ahead of it — proving the
+//       reachability fix (GateSemaphore.acquireRepoGuardOnly) actually closes the gap: the sibling
+//       (running a real, injected-slow gate) is NOT force-invalidated by the inert merge landing first.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-inert-diff.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgid-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -262,6 +269,115 @@ try {
     const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
     check("(G) the gate command WAS called — docs-internal/ and docsfoo.md are NOT under docs/", calls === 1);
     check("(G) gateRan:true", confirm.gateRan === true);
+  }
+
+  // ── (H) SAME-REPO SIBLING MID-GATE (card b9e07a4a) — see this file's own header for the summary.
+  //        TWO workers sharing ONE repo, deliberately (unlike gate-semaphore-concurrency.mjs's
+  //        seedTwoWorkers, which keeps two workers on SEPARATE repos to avoid coupling an unrelated
+  //        gate-CAP test to real squash-merge ordering): this test's whole point IS that ordering, and the
+  //        fix under test (acquireRepoGuardOnly) is exactly what makes it deterministic instead of a race
+  //        — worker2 (inert) never even attempts its squash until worker1's (the real gate) has already
+  //        landed, so there is no genuine concurrent-squash race for git to flake on. ─────────────────────
+  {
+    const H = mk("h");
+    makeRepo(H);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+
+    let gate1Calls = 0;
+    let gate1AdmittedResolve;
+    const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+    let releaseGate1;
+    const fakeGate = async () => {
+      gate1Calls++;
+      gate1AdmittedResolve();
+      await new Promise((res) => { releaseGate1 = res; });
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    db.insertProject({ id: H.projId, name: "MGID-H", repoPath: H.repo, vaultPath: H.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: H.agentId, projectId: H.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertSession({ id: H.mgrId, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: H.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const task1Id = `${H.taskId}-1`, task2Id = `${H.taskId}-2`;
+    const worker1Id = `${H.workerId}-1`, worker2Id = `${H.workerId}-2`;
+    db.insertTask({ id: task1Id, projectId: H.projId, title: "MGID-H-REAL", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertTask({ id: task2Id, projectId: H.projId, title: "MGID-H-INERT", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now });
+
+    // worker1: a REAL (non-inert) change — the sibling that must NOT be force-invalidated.
+    const wt1 = await createWorktree(H.repo, H.projId, task1Id);
+    worktrees.push(wt1.worktreePath);
+    mkdirp(path.join(wt1.worktreePath, "src"));
+    fs.writeFileSync(path.join(wt1.worktreePath, "src", "index.ts"), "export const x = 1;\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: real change"`, { cwd: wt1.worktreePath });
+    db.insertSession({ id: worker1Id, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
+
+    // worker2: a docs-only (inert) change — cut from the SAME main tip, before worker1 ever squashes.
+    const wt2 = await createWorktree(H.repo, H.projId, task2Id);
+    worktrees.push(wt2.worktreePath);
+    mkdirp(path.join(wt2.worktreePath, "docs"));
+    fs.writeFileSync(path.join(wt2.worktreePath, "docs", "note.md"), "notes\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: wt2.worktreePath });
+    db.insertSession({ id: worker2Id, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
+
+    // Fire worker1's confirm first — a REAL gate, held open until we manually release it.
+    const p1 = sessions.confirmWorkerMerge(H.mgrId, worker1Id);
+    await gate1Admitted; // worker1 has genuinely admitted and is mid-gate, holding the repo guard
+
+    // Fire worker2's confirm — the ORDINARY manager slip b9e07a4a's reachability finding describes:
+    // firing a second same-repo confirm while the first is still mid-gate. Before this card, the
+    // inert-diff skip never touched the repo guard at all and could squash BEFORE worker1 reached its own
+    // squash-lock, forcing worker1 to eat a full re-gate.
+    let worker2Settled = false;
+    const p2 = sessions.confirmWorkerMerge(H.mgrId, worker2Id).then((r) => { worker2Settled = true; return r; });
+
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(H) the inert worker2 confirm does NOT settle while worker1's real gate is still running",
+      check: () => worker2Settled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(H) worker2's inert confirm PROVABLY waited — did not race ahead of worker1's real gate", neverSettled);
+
+    // Release worker1's gate — it passes, squashes, and its repo hold releases only after ITS OWN squash
+    // has landed (endSquash, called after mergeBranch — see confirmWorkerMerge's own finally).
+    releaseGate1("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(H) worker1 (the sibling, mid-gate) merged successfully", confirm1.merged === true);
+    check("(H) worker1 ran a real gate exactly once", confirm1.gateRan === true && gate1Calls === 1);
+    check("(H) worker1 was NOT force-invalidated by the inert merge racing ahead — the whole point of this card",
+      confirm1.merged === true && confirm1.reason !== "gate_base_invalidated");
+
+    check("(H) worker2's inert skip never spawned a gate of its own", confirm2.gateRan !== true);
+    // DETERMINISTIC, not a possible residual (manager correction, card b9e07a4a — an earlier draft of this
+    // test accepted EITHER outcome here, which is exactly what let a broken guard go undetected: it would
+    // pass whichever branch happened to fire). worker2's `gateBaseMainHead`/`inertSkip` are BOTH computed
+    // BEFORE `acquireRepoGuardOnly`'s wait (see that call site's own doc) — this test fires worker2's
+    // confirm immediately after worker1's gate admits, well before `releaseGate1` (which only fires after
+    // the assertNeverWithControl window above), so worker2's own capture is GUARANTEED to happen before
+    // worker1's squash lands. By the time worker2's wait ends and it reaches its OWN squash-lock, main has
+    // ALREADY moved (worker1 landed) — `requireCanonicalHead`'s re-check WILL see a stale base and refuse.
+    // Confirmed empirically across repeated runs before pinning this (never observed any other outcome).
+    // This is the "relocated, not narrowed" trade the manager's own correction names: worker2 (cheap, no
+    // gate to re-run) pays a near-instant re-confirm so worker1 (expensive, ~11-21 min re-gate) doesn't
+    // have to. `confirmWorkerMerge`'s OWN return shape for this rejection carries the human-readable
+    // `reason` string (from `mergeBranchLocked`'s `gate_base_invalidated` classification), never the short
+    // symbolic tag itself — that tag is only used as `rejectNotify`'s FIRST arg (the notification's own
+    // classification), never copied onto the returned object — so this matches on the prose instead.
+    check("(H) worker2 DETERMINISTICALLY needs a re-confirm — the BENIGN gate-base-invalidated shape (zero side effects, just re-confirm), never a real failure",
+      confirm2.merged === false
+      && typeof confirm2.reason === "string" && confirm2.reason.includes("canonical main advanced since this merge's gate-validated tree was fixed")
+      && confirm2.detailText?.includes("canonical repo AND worktree untouched"));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
