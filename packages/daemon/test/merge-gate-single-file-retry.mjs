@@ -30,6 +30,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `runExclusive` admission (see (G) above), it is independently reachable via `gate_cancel` while
 //       QUEUED, exactly like any other merge-gate admission — `GateCancelledError` must be caught and
 //       settle `confirmWorkerMerge` as a clean `cancelled:true`, never a thrown/misreported crash.
+//       EXTENDED (card 318ac7b2): attempt 1 already genuinely ran and failed a full suite by the time this
+//       retry is queued — the cancel must ALSO record that real run as a `build_gate` gate_history row
+//       (`cancelled:true`, real `durationMs`), not just settle cleanly; before this card the row never
+//       existed at all and a real, completed full-suite run silently vanished from the duration/rejection
+//       series.
 //   (J) card 0e5b2045, THE failingTest/failTierTest DECOUPLING END-TO-END: a run where the diagnostic-
 //       winning `failingTest` and the retry-target `failTierTest` genuinely DIVERGE (mirrors a real
 //       UNCAUGHT-idiom failure) must still retry using `failTierTest`'s name — proves the decoupling holds
@@ -416,6 +421,24 @@ try {
       check("(H) it is NEVER misreported as a crash-shaped 'gate cancelled' error string", !/errored:.*gate cancelled/i.test(String(confirmH.reason ?? "")));
       const mergeCancelledEvts = eventsOfKind(db, H.mgrId, "merge_cancelled");
       check("(H) a merge_cancelled event was recorded (never a merge_rejected/merge-failed shape)", mergeCancelledEvts.length === 1 && mergeCancelledEvts[0].detail?.cancelKind === "manual");
+
+      // ── CARD 318ac7b2 — POSITIVE CONTROL: attempt 1's own gate call (`callsForH === 1`, asserted below)
+      //    genuinely spawned and genuinely failed a full suite before this retry's admission was ever
+      //    queued/cancelled. Before this card, that real run left NO `gate_history` row at all — only the
+      //    `merge_cancelled` event above (excluded from `GATE_HISTORY_KINDS`) was recorded. A record for a
+      //    rare path that is never exercised is indistinguishable from one that doesn't work, so this MUST
+      //    be forced to fire here rather than merely asserted never to regress. ──
+      const buildGateEvts = eventsOfKind(db, H.mgrId, "build_gate");
+      check("(H) attempt 1's real run is now recorded as a build_gate row instead of vanishing entirely", buildGateEvts.length === 1);
+      check("(H) that row is stamped cancelled:true — DoD-2: distinguishable from a genuine rejection", buildGateEvts[0]?.detail?.cancelled === true);
+      check("(H) it carries attempt 1's own real measured duration (never 0/undefined)", typeof buildGateEvts[0]?.detail?.durationMs === "number" && buildGateEvts[0].detail.durationMs >= 0);
+      check("(H) it names the retry that was identified but never completed — retriedFile set, retryPassed absent (never ran to a verdict)", buildGateEvts[0]?.detail?.retriedFile === "flaky-h" && buildGateEvts[0]?.detail?.retryPassed === undefined);
+      check("(H) it carries attempt 1's own gateCap/concurrency triple, not left unset", buildGateEvts[0]?.detail?.gateCap === 1 && typeof buildGateEvts[0]?.detail?.concurrentGates === "number");
+      check("(H) the real gate_history read (listGateEvents/toGateHistoryRow) surfaces this run as outcome:'cancelled' — NEVER 'reject' (would inflate the rejection rate) or 'pass' (would hide the real failure)", (() => {
+        const page = db.listGateEvents({ projectId: H.projId, limit: 100, offset: 0 });
+        const row = page.items.find((r) => r.gateType === "merge");
+        return row?.outcome === "cancelled" && row?.retriedFile === "flaky-h" && typeof row?.durationMs === "number" && row?.gateRan === true;
+      })());
 
       // Let the holder's own gate proceed and settle — cleanup hygiene, not itself asserted on.
       releaseHolder("go");

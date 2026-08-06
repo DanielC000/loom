@@ -7190,14 +7190,24 @@ function gateTypeForKind(kind: string): GateType {
 
 /** Derive the settled outcome from a gate event's detail. Card 3a6f04cc: `detail.cancelled === true` is
  *  checked FIRST and returns the distinct `"cancelled"` outcome — a withdrawn run (`gate_cancel`, queued
- *  or running) reached no verdict at all and must never fall through to `"reject"`. This is the ONLY
- *  cancel shape reachable here: a cancelled MERGE gate emits a separate `merge_cancelled` event kind that
- *  `GATE_HISTORY_KINDS` excludes entirely, so only a cancelled WORKER self-check (which shares the plain
- *  `worker_gate` kind with a real run) ever reaches this function with `cancelled:true`. Otherwise, truthy
- *  `passed` (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed
- *  run is `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`)
- *  detail only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance lives
- *  on the sibling merge_rejected event, not surfaced here.
+ *  or running) reached no verdict at all and must never fall through to `"reject"`. A cancelled MERGE gate
+ *  ALSO emits a separate `merge_cancelled` event kind that `GATE_HISTORY_KINDS` excludes entirely — that
+ *  kind exists for OTHER consumers (companion attention-push, crash-orphaned-workers, EventTriggers; see
+ *  its own emit sites) and never reaches this function. CORRECTED (card 318ac7b2 — an earlier version of
+ *  this doc claimed a cancelled MERGE gate NEVER reaches this function with `cancelled:true`, i.e. that a
+ *  cancelled WORKER self-check was the ONLY shape that could; that was true until this card): the single-
+ *  file retry's own cancel-while-queued path (sessions/service.ts) now ADDITIONALLY emits a `build_gate`
+ *  row stamped `cancelled:true` whenever that retry's admission is withdrawn AFTER attempt 1 already ran a
+ *  real, genuinely-failed full suite — recording that real run instead of letting it vanish from
+ *  `gate_history` with no row at all. So a `build_gate` row can now ALSO carry `cancelled:true`, read here
+ *  identically to a cancelled `worker_gate` row — `build_gate_retry` CANNOT: its one emit site
+ *  (sessions/service.ts, the transient-kill auto-retry's own success path) never stamps `cancelled`, and
+ *  that retry's OWN cancel-while-queued catch emits only `merge_cancelled`, no `build_gate_retry` row at
+ *  all (a separate, sibling gap — not fixed by card 318ac7b2, tracked on its own card). Otherwise, truthy `passed`
+ *  (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed run is
+ *  `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`) detail
+ *  otherwise only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance
+ *  lives on the sibling merge_rejected event, not surfaced here.
  *  Card db9b0130: `skipped` is checked BEFORE `passed` — an inert-diff skip stamps `passed:true` too (so
  *  `gateResult.passed` still drives the merge proceeding), but must never be reported as a `"pass"`
  *  outcome (see `GateOutcome`'s own doc) — checking it first means that stamp can never shadow this one. */

@@ -397,12 +397,17 @@ type ConfirmMergeResult = {
    *  drift apart. `undefined` only for the plain GREEN merge return (there is no rejection detail to carry). */
   detailText?: string;
   /** Card 361520a0, Half Two: a distinct "no verdict" outcome — mirrors {@link WorkerGateResult.cancelled}.
-   *  `merged` is always `false` alongside this, but this must NEVER be read as a rejection: no gate ever
-   *  ran for this attempt (`gate_cancel` withdrew it while it was still QUEUED, before admission — see
-   *  `GateSemaphore.cancelQueued`'s doc), so there is nothing to diagnose and nothing to hold against the
-   *  branch. `cancelKind` distinguishes an automatic supersede from a manager's explicit `gate_cancel`; see
-   *  {@link GateCancelKind}'s own doc. Only reachable while QUEUED — a RUNNING merge gate still refuses
-   *  cancellation entirely (see `cancelGateOp`'s own doc for why those two phases deliberately differ). */
+   *  `merged` is always `false` alongside this, but this must NEVER be read as a rejection: THIS specific
+   *  cancelled admission never ran (`gate_cancel` withdrew it while it was still QUEUED, before admission —
+   *  see `GateSemaphore.cancelQueued`'s doc), so there is nothing to diagnose and nothing to hold against
+   *  the branch for THAT admission. CAVEAT (card 318ac7b2): for the single-file retry's own cancel-while-
+   *  queued path specifically, attempt 1 — a SEPARATE, EARLIER admission — already genuinely ran and
+   *  genuinely failed before this retry was ever queued; that real run is what the sibling `build_gate`
+   *  event (stamped `cancelled:true`, emitted right before this same return) records, so it is NOT lost —
+   *  just not carried on this particular return value's own fields. `cancelKind` distinguishes an automatic
+   *  supersede from a manager's explicit `gate_cancel`; see {@link GateCancelKind}'s own doc. Only reachable
+   *  while QUEUED — a RUNNING merge gate still refuses cancellation entirely (see `cancelGateOp`'s own doc
+   *  for why those two phases deliberately differ). */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
   /** Card 344ce950: the bare name of a single test file this merge's gate retried in isolation before
@@ -12225,6 +12230,40 @@ export class SessionService {
             // though the first attempt already ran.
             if (err instanceof GateCancelledError) {
               concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+              // CARD 318ac7b2 — DoD-1/2: unlike the FIRST attempt's own identical-shaped catch above (where
+              // a cancel here means the gate never got to run at all — merge-gate `runGateSeq` calls never
+              // forward a live `cancelSignal`, so a merge gate can only ever be withdrawn WHILE QUEUED, never
+              // mid-run; see the `_cancelSignal` doc on this retry's own callback above), a cancel HERE is
+              // different: attempt 1 already genuinely spawned and failed a full suite (`gateRan &&
+              // classifyGateFailure(gateResult) === "genuine"` gated us into this retry in the first place),
+              // and this retry's own `evt("build_gate", ...)` call further below (the one every OTHER outcome
+              // of this method reaches) is never reached on this return path — so without this, that real,
+              // measured run vanishes from `gate_history` entirely (the defect this card fixes).
+              //
+              // Emit `build_gate` (unlike `merge_cancelled` below, `build_gate` IS in `GATE_HISTORY_KINDS` —
+              // db.ts) carrying attempt 1's own real numbers, with `cancelled: true` set explicitly.
+              // `gateOutcomeFromDetail` (db.ts) checks `detail.cancelled === true` BEFORE `detail.passed` —
+              // the exact precedence a mid-run WORKER-gate cancel already relies on (see that function's own
+              // doc) — so this row reads as the distinct `"cancelled"` outcome, never `"pass"` and never
+              // `"reject"` (DoD-2: a cancelled op must be distinguishable from a genuine rejection — folding
+              // it into `"reject"` would inflate the rejection rate with an op that reached no real verdict;
+              // dropping the row, as before this fix, silently deflates both the rejection rate AND the
+              // duration series by discarding a real, completed full-suite run). `passed: gateResult.passed`
+              // (always `false` here — the guard above requires a genuine, i.e. non-passing, attempt 1) rides
+              // along purely as an honest record of what attempt 1 itself produced; it never wins the outcome
+              // classification over `cancelled:true`. `durationMs: gateAttempt1DurationMs` is attempt 1's own
+              // real measured run time (captured right after its admission settled, above) — the exact figure
+              // that used to vanish from the duration series. `gateSpawned: gateRan` mirrors every other
+              // `build_gate` emission in this method (`gateRan` is provably `true` to have reached this
+              // retry at all). `retriedFile` (already assigned above) records that a retry WAS identified and
+              // attempted; `retryPassed` is deliberately omitted — the retry never ran to completion, so
+              // there is no verdict to report for it (never assume `retriedFile` alone implies a pass — see
+              // `ConfirmMergeResult.retriedFile`'s own doc).
+              evt("build_gate", {
+                passed: gateResult.passed, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
+                durationMs: gateAttempt1DurationMs, gateSpawned: gateRan, gateCap, concurrentGates: concurrentAtStart,
+                concurrentGatesMax, retriedFile,
+              });
               evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
               return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
             }

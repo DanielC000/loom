@@ -1376,10 +1376,18 @@ export interface GatesActive {
  *  all (withdrawn via `gate_cancel`, or auto-superseded), so it must never be counted as a failure when
  *  computing a pass/fail or rejection RATE from a series of {@link GateHistoryRow}s. Before this card,
  *  a cancelled `"worker"` row (the ONLY gate type whose cancel event shares the SAME `worker_gate` kind
- *  {@link Db.listGateEvents} reads — a cancelled MERGE gate emits a separate `merge_cancelled` kind that
+ *  {@link Db.listGateEvents} reads — a cancelled MERGE gate emitted a separate `merge_cancelled` kind that
  *  `GATE_HISTORY_KINDS` excludes entirely, so it never reached this enum at all) fell through
  *  `gateOutcomeFromDetail`'s fallback and read as `"reject"`, silently inflating any rejection rate
  *  computed from this field.
+ *  CORRECTED (card 318ac7b2): a cancelled MERGE gate can now ALSO reach this enum, in one specific shape
+ *  — the single-file retry's own admission cancelled while queued, AFTER attempt 1 already genuinely ran
+ *  and failed (see {@link GateHistoryRow.retriedFile}'s own doc). That row is stamped `cancelled:true` on
+ *  the SAME `build_gate` kind (not a second `merge_cancelled`-kind row — `GATE_HISTORY_KINDS` still
+ *  excludes that kind entirely), so it reads `"cancelled"` here too, recording attempt 1's real run
+ *  instead of losing it. The sibling transient-kill-retry cancel-while-queued shape does NOT yet do this
+ *  (attempt 1 there is already recorded as an ordinary `"reject"` before that retry is ever reached) —
+ *  tracked as a separate, later card, not fixed here.
  *  Card db9b0130: `"skipped"` is likewise a DISTINCT non-verdict, not a `"pass"` — a merge whose diff was
  *  proven inert (see `isInertMergeDiff`) never spawned a gate process at all, so recording it as a pass
  *  would reintroduce the exact defect `gateRan` (below) was added to fix, via a new door: a rate computed
@@ -1501,7 +1509,12 @@ export interface GateHistoryRow {
    *  `null` (nothing to report); `true`/`false` alongside a non-null `retriedFile`. A `false` here means
    *  the retry ALSO failed and this row rejects exactly as it would have with no retry mechanism at all —
    *  `retriedFile`/`retryPassed:false` are still recorded on a rejected row so a reader can see a retry was
-   *  attempted, not just on the weaker-pass case. */
+   *  attempted, not just on the weaker-pass case.
+   *  ⚠️ ONE EXCEPTION TO THAT PAIRING (card 318ac7b2): `retriedFile` non-null with `retryPassed: null` — a
+   *  retry that was IDENTIFIED and attempted but never ran to a verdict, because its OWN admission was
+   *  cancelled while still queued. Always paired with `outcome:"cancelled"` on that same row (never `"pass"`
+   *  /`"reject"`) — see {@link GateOutcome}'s own doc. Every OTHER non-null `retriedFile` row still pairs it
+   *  with a real `true`/`false`. */
   retryPassed: boolean | null;
 }
 

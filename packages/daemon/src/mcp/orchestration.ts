@@ -3193,18 +3193,34 @@ export class OrchestrationMcpRouter {
           "order-dependent/cross-test-pollution bug can produce) — never read it as an ordinary green. " +
           "`retryPassed:false` alongside a non-null `retriedFile` means the retry ALSO failed and this row " +
           "rejected exactly as it would have with no retry mechanism at all. " +
+          "⚠️ CARD 318ac7b2 EXCEPTION TO THAT PAIRING: `retriedFile` can now be non-null with " +
+          "`retryPassed: null` (never `true`/`false`) — this is a single-file retry that was IDENTIFIED and " +
+          "attempted, then had its OWN admission cancelled while still queued, before it ever ran to a " +
+          "verdict; the row's `outcome` reads `\"cancelled\"` in this shape (see below), never `\"pass\"`/" +
+          "`\"reject\"`. Every OTHER non-null `retriedFile` row still pairs it with a real `true`/`false`. " +
           "⚠️ ON A NON-NULL `retriedFile` ROW, `durationMs` AND THE `gateCap`/`concurrentGates`/" +
           "`concurrentGatesMax` TRIPLE DESCRIBE TWO DIFFERENT ADMISSIONS, DELIBERATELY — the SAME kind of " +
           "trap `concurrentGates` vs `concurrentGatesMax` already carries below, one level up: `durationMs` " +
           "is attempt 1's own run time ALONE (bounded to the failure that triggered the retry), while " +
           "`passed` and the triple describe the RETRY's own admission (the one that actually produced this " +
           "row's verdict) — never difference `durationMs` against the triple as if both described one run. " +
+          "EXCEPT on the card 318ac7b2 cancelled-retry shape just above: there the retry's OWN admission " +
+          "never happened at all (withdrawn while still queued, its callback never invoked), so `durationMs` " +
+          "AND the triple BOTH describe attempt 1's admission — the \"two different admissions\" framing " +
+          "only holds once the retry has genuinely run. " +
           "On every other row (`retriedFile` null) both describe the same, single admission as usual. " +
           "⚠️ CARD 3a6f04cc — `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
           "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
-          "Before this card a cancelled `\"worker\"` row (the only gate type whose cancel shares the plain " +
-          "`worker_gate` event kind with a real run — a cancelled MERGE gate emits a separate excluded event " +
-          "kind and never reaches this table at all) silently fell through to `outcome:\"reject\"`. A caller " +
+          "Before card 3a6f04cc a cancelled `\"worker\"` row (the only gate type whose cancel shared the " +
+          "plain `worker_gate` event kind with a real run — a cancelled MERGE gate emitted a separate " +
+          "excluded event kind and never reached this table at all) silently fell through to " +
+          "`outcome:\"reject\"`. CARD 318ac7b2 (later): a cancelled MERGE gate CAN now also reach this " +
+          "table, in ONE specific shape — the single-file-retry-cancellation just described above, where " +
+          "attempt 1 already genuinely ran and failed before the retry's own (withdrawn) admission — so " +
+          "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. A SIBLING shape (the " +
+          "transient-kill auto-retry's own cancel-while-queued case) does NOT yet do this — attempt 1 there " +
+          "is already recorded as an ordinary `\"reject\"` before that retry is ever reached, tracked " +
+          "separately (not this card's scope). A caller " +
           "computing a pass/fail or REJECTION RATE from this table must filter on `outcome===\"reject\"`, " +
           "never on `passed===false` alone — `passed` stays `outcome===\"pass\"` exactly as before (so a " +
           "cancelled row still reads `passed:false`, since it is also not a pass), but `passed:false` on a " +
