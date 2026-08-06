@@ -1,0 +1,20 @@
+TIER 1 (positive-polarity fixed-wait candidates): 26 sites across 1 files
+TIER 2 (load-bearing subset — second-clock or in-flight-promise signal): 10 sites across 1 files
+
+--- TIER 2 file distribution ---
+  pending-ops-registry.pre-003a1080.mjs.specimen: 10
+
+--- TIER 2 site detail ---
+  pending-ops-registry.pre-003a1080.mjs.specimen:74  [second-clock,in-flight-promise]  "(evict-on-settle) peek shows it WHILE running"
+  pending-ops-registry.pre-003a1080.mjs.specimen:91  [second-clock]  "(failed slow) still running past the short wait budget"
+  pending-ops-registry.pre-003a1080.mjs.specimen:109  [in-flight-promise]  "(listByManager) scoped to the requesting manager only"
+  pending-ops-registry.pre-003a1080.mjs.specimen:134  [second-clock]  "(nudge slow-ok) degrades to pending first"
+  pending-ops-registry.pre-003a1080.mjs.specimen:148  [second-clock]  "(nudge slow-gate-failed) degrades to pending first"
+  pending-ops-registry.pre-003a1080.mjs.specimen:148  [second-clock]  "(nudge slow-gate-failed) callback fires once with the gate-failed result (ok:true, merged:false)"
+  pending-ops-registry.pre-003a1080.mjs.specimen:162  [second-clock,in-flight-promise]  "(nudge retry) only the ORIGINAL (entry-creating) call's callback ever fires"
+  pending-ops-registry.pre-003a1080.mjs.specimen:203  [second-clock,in-flight-promise]  "(onSurfacedPending repeat) fires once per call that observes 'still pending' — idempotent-upsert-friendly"
+  pending-ops-registry.pre-003a1080.mjs.specimen:291  [in-flight-promise]  "(retain) the retained view expires after retainMs — peek() reverts to undefined"
+  pending-ops-registry.pre-003a1080.mjs.specimen:429  [in-flight-promise]  "(retain ttl) the re-confirm partway through the window dedupe-hits the cached op-1 result"
+
+--- TIER 1 file distribution (for context) ---
+  pending-ops-registry.pre-003a1080.mjs.specimen: 26

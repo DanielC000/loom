@@ -1,0 +1,212 @@
+TIER 1 (positive-polarity fixed-wait candidates): 240 sites across 78 files
+TIER 2 (load-bearing subset — second-clock or in-flight-promise signal): 90 sites across 36 files
+
+--- TIER 2 file distribution ---
+  pty-mode-convergence.mjs: 16
+  pending-ops-registry.mjs: 9
+  gate-semaphore-concurrency.mjs: 7
+  pty-prompt-mismatch.mjs: 6
+  companion-voice-enable-gate.mjs: 4
+  worker-flush-composer.mjs: 4
+  paste-placeholder-tripwire.mjs: 3
+  worktree-process-reap.mjs: 3
+  agent-runs-rest.mjs: 2
+  codescape-health-probe.mjs: 2
+  companion-voice-tts-provision.mjs: 2
+  gate-cancel.mjs: 2
+  manager-live.mjs: 2
+  mcp-ready-gate.mjs: 2
+  pty-writechunked-done-on-death.mjs: 2
+  worker-session-reap.mjs: 2
+  _probe-paste-resume.mjs: 2
+  _probe-repaint-wedge.mjs: 2
+  codescape-supervisor.mjs: 1
+  gate-status.mjs: 1
+  graceful-stop.mjs: 1
+  merge-confirm-slow-gate-pending.mjs: 1
+  periodic-snapshot.mjs: 1
+  pty-giveup-clear-single-attempt.mjs: 1
+  pty-giveup-clear.mjs: 1
+  pty-human-submit-race.mjs: 1
+  pty-owner-attestation.mjs: 1
+  pty-proactive-turn.mjs: 1
+  run-gate-cancelled-retention.mjs: 1
+  wake.mjs: 1
+  worker-stop-reap.mjs: 1
+  _probe-composer-clear-2.mjs: 1
+  _probe-composer-clear.mjs: 1
+  _probe-paste-companion.mjs: 1
+  _probe-paste-stranded-resume.mjs: 1
+  _probe-session-name.mjs: 1
+
+--- TIER 2 site detail ---
+  agent-runs-rest.mjs:268  [in-flight-promise]  "B4 the cancel webhook fired with status=cancelled"
+  agent-runs-rest.mjs:268  [in-flight-promise]  "B5 cancelRun on a terminal run → idempotent no-op (returns its state)"
+  codescape-health-probe.mjs:872  [second-clock,in-flight-promise]  "(12) at least ${MIN_TICKS} more probe ticks completed after the one allowed restart"
+  codescape-health-probe.mjs:887  [second-clock,in-flight-promise]  "(12) the drift RESOLVING (installed build now matches the running build) announces recovery, exactly ONCE"
+  codescape-supervisor.mjs:144  [in-flight-promise]  "(dbPath) restart-on-death respawns using the SAME remembered dbPath (a 3rd 'serve' call recorded, new pid)"
+  companion-voice-enable-gate.mjs:76  [in-flight-promise]  "3a: isReady() true once the (fake) provision resolves"
+  companion-voice-enable-gate.mjs:76  [in-flight-promise]  "3a: exactly one provision call"
+  companion-voice-enable-gate.mjs:88  [in-flight-promise]  "3b: isReady() true once the (fake) provision resolves"
+  companion-voice-enable-gate.mjs:88  [in-flight-promise]  "3b: exactly one provision call"
+  companion-voice-tts-provision.mjs:75  [in-flight-promise]  "3: exactly two provision attempts were made (the first failure, then the retry)"
+  companion-voice-tts-provision.mjs:77  [in-flight-promise]  "3: exactly two provision attempts were made (the first failure, then the retry)"
+  gate-cancel.mjs:76  [second-clock,in-flight-promise]  "(guard) both eventually complete"
+  gate-cancel.mjs:171  [in-flight-promise]  "(primitive gateType guard) found the queued merge entry via snapshot"
+  gate-semaphore-concurrency.mjs:87  [in-flight-promise]  "(unit, snapshot) reports exactly 1 active + 1 queued"
+  gate-semaphore-concurrency.mjs:244  [in-flight-promise]  "(repo-mutex, d3) precondition: a queued entry exists to cancel"
+  gate-semaphore-concurrency.mjs:246  [in-flight-promise]  "(repo-mutex, d3) precondition: a queued entry exists to cancel"
+  gate-semaphore-concurrency.mjs:246  [in-flight-promise]  "(repo-mutex, d3) cancelQueued reports success"
+  gate-semaphore-concurrency.mjs:266  [in-flight-promise]  "(repo-mutex, d4) precondition: a running entry exists to cancel"
+  gate-semaphore-concurrency.mjs:266  [in-flight-promise]  "(repo-mutex, d4) cancelRunning reports it asked a live entry"
+  gate-semaphore-concurrency.mjs:856  [second-clock]  "(priority) all four ran"
+  gate-status.mjs:149  [in-flight-promise]  "(unit) findByOpId locates the RUNNING entry by its FULL opId"
+  graceful-stop.mjs:136  [in-flight-promise]  "idle: exited cleanly via the double Ctrl-C (Stage 1)"
+  manager-live.mjs:64  [second-clock]  "live manager spawned a worker UNATTENDED (role=worker, parent=manager)"
+  manager-live.mjs:64  [second-clock]  "worker has its worktree on disk"
+  mcp-ready-gate.mjs:83  [in-flight-promise]  "1: still unresolved shortly after spawn — nothing has marked MCP seen yet"
+  mcp-ready-gate.mjs:83  [in-flight-promise]  "1: resolves TRUE promptly once markMcpSeen fires"
+  merge-confirm-slow-gate-pending.mjs:114  [in-flight-promise]  "(3) the retry loop observes the SETTLED result (elapsed=${Date.now() - t1}ms)"
+  paste-placeholder-tripwire.mjs:597  [second-clock]  "(m) THE FIX: the delivered recovery still carries the recovery tag"
+  paste-placeholder-tripwire.mjs:677  [second-clock]  "(n) THE FIX: a FRAMED recovery still carries its possible-duplicate frame verbatim"
+  paste-placeholder-tripwire.mjs:677  [second-clock]  "(n) THE FIX: a FRAMED recovery still carries the recovery tag AFTER the frame"
+  pending-ops-registry.mjs:74  [second-clock,in-flight-promise]  "(evict-on-settle) peek shows it WHILE running"
+  pending-ops-registry.mjs:91  [second-clock]  "(failed slow) still running past the short wait budget"
+  pending-ops-registry.mjs:109  [in-flight-promise]  "(listByManager) scoped to the requesting manager only"
+  pending-ops-registry.mjs:134  [second-clock]  "(nudge slow-ok) degrades to pending first"
+  pending-ops-registry.mjs:148  [second-clock]  "(nudge slow-gate-failed) degrades to pending first"
+  pending-ops-registry.mjs:148  [second-clock]  "(nudge slow-gate-failed) callback fires once with the gate-failed result (ok:true, merged:false)"
+  pending-ops-registry.mjs:162  [second-clock,in-flight-promise]  "(nudge retry) only the ORIGINAL (entry-creating) call's callback ever fires"
+  pending-ops-registry.mjs:301  [in-flight-promise]  "(retain) the retained view expires after retainMs — peek() reverts to undefined"
+  pending-ops-registry.mjs:439  [in-flight-promise]  "(retain ttl) the re-confirm partway through the window dedupe-hits the cached op-1 result"
+  periodic-snapshot.mjs:91  [in-flight-promise]  "(2) several more ticks fired"
+  pty-giveup-clear-single-attempt.mjs:142  [in-flight-promise]  "the redrain (attempt===1 again, MAX_ATTEMPTS=1) also gave up — busy fell back to false a second time"
+  pty-giveup-clear.mjs:183  [in-flight-promise]  "(1) the redrain itself also gave up (nothing in this harness ever confirms) — the redelivery still recovers busy"
+  pty-human-submit-race.mjs:187  [in-flight-promise]  "(E) BACKSTOP: after the bound expires, the reconcile tick delivers the orphaned queued turn — a delayed but successful drain"
+  pty-mode-convergence.mjs:162  [second-clock,in-flight-promise]  "1: the confirmed plan reading issued the SECOND Shift+Tab"
+  pty-mode-convergence.mjs:162  [second-clock,in-flight-promise]  "1: fresh spawn converged to auto in EXACTLY 2 presses (matches resume's acceptEdits→auto contract)"
+  pty-mode-convergence.mjs:165  [second-clock,in-flight-promise]  "1: fresh spawn converged to auto in EXACTLY 2 presses (matches resume's acceptEdits→auto contract)"
+  pty-mode-convergence.mjs:181  [second-clock,in-flight-promise]  "2: 2nd press issued (plan → auto attempt)"
+  pty-mode-convergence.mjs:228  [second-clock,in-flight-promise]  "4: the RAW cycler gave up WITHOUT a 2nd blind press, resting at the boot default (acceptEdits)"
+  pty-mode-convergence.mjs:247  [in-flight-promise]  "4: the widened heal also fires AT MOST ONCE per session (modeLogged guard)"
+  pty-mode-convergence.mjs:264  [second-clock,in-flight-promise]  "5: 2nd press issued (plan → auto attempt)"
+  pty-mode-convergence.mjs:264  [second-clock,in-flight-promise]  "5: 3rd press issued (auto → default attempt)"
+  pty-mode-convergence.mjs:267  [second-clock,in-flight-promise]  "5: 3rd press issued (auto → default attempt)"
+  pty-mode-convergence.mjs:317  [second-clock,in-flight-promise]  "8: main convergence issued its 2nd Shift+Tab (plan → auto attempt)"
+  pty-mode-convergence.mjs:317  [second-clock,in-flight-promise]  "8: main cycle gave up WITHOUT a 3rd blind press, landed at plan"
+  pty-mode-convergence.mjs:320  [in-flight-promise]  "8: main cycle gave up WITHOUT a 3rd blind press, landed at plan"
+  pty-mode-convergence.mjs:320  [in-flight-promise]  "8: the role-gated heal STILL fires and corrects a stuck RESUME to its configured target `auto`"
+  pty-mode-convergence.mjs:361  [in-flight-promise]  "9: clean-manager 2nd press issued"
+  pty-mode-convergence.mjs:361  [in-flight-promise]  "9: clean-manager converged to its target (auto) in 2 presses"
+  pty-mode-convergence.mjs:364  [in-flight-promise]  "9: clean-manager converged to its target (auto) in 2 presses"
+  pty-owner-attestation.mjs:202  [in-flight-promise]  "11: even once the racing submit() genuinely runs (post-backstop), it already cleared the pending raw draft — the system turn attests NULL, exclusively its own attribution"
+  pty-proactive-turn.mjs:91  [in-flight-promise]  "5: attested true once the queued proactive message actually drains as its own turn"
+  pty-prompt-mismatch.mjs:251  [in-flight-promise]  "6b: and nothing resembling the notice ever reached the pty"
+  pty-prompt-mismatch.mjs:291  [in-flight-promise]  "6c: and nothing resembling the notice ever reached the pty"
+  pty-prompt-mismatch.mjs:320  [in-flight-promise]  "6d: NEGATIVE CONTROL — the no-line-count placeholder form is ALSO suppressed (the widened regex catches it, unlike the first regex given)"
+  pty-prompt-mismatch.mjs:320  [in-flight-promise]  "6d: and nothing resembling the notice ever reached the pty"
+  pty-prompt-mismatch.mjs:351  [in-flight-promise]  "6e: NEGATIVE CONTROL — a stacked, mixed-form placeholder run is ALSO fully suppressed (the global strip consumes all three, unlike a single-shot strip which would leave a remainder and wrongly fire)"
+  pty-prompt-mismatch.mjs:351  [in-flight-promise]  "6e: and nothing resembling the notice ever reached the pty"
+  pty-writechunked-done-on-death.mjs:128  [in-flight-promise]  "give-up recovered busy"
+  pty-writechunked-done-on-death.mjs:143  [in-flight-promise]  "sanity: the deferred clear-prefix burst genuinely started"
+  run-gate-cancelled-retention.mjs:178  [in-flight-promise]  "(D) the fresh call degrades to pending (its own gate is genuinely slow)"
+  wake.mjs:229  [in-flight-promise]  "start-reconcile: a past-due wake fired once on start()"
+  worker-flush-composer.mjs:141  [in-flight-promise]  "(2) setup: GIVE-UP RECOVERY landed — busy fell back to false"
+  worker-flush-composer.mjs:141  [in-flight-promise]  "(2) setup: composerDirtyLen marked dirty, exactly the stranded length"
+  worker-flush-composer.mjs:213  [in-flight-promise]  "(3) setup: GIVE-UP RECOVERY landed — busy fell back to false"
+  worker-flush-composer.mjs:213  [in-flight-promise]  "(3) setup: composerDirtyLen marked dirty, exactly the stranded length"
+  worker-session-reap.mjs:169  [in-flight-promise]  "(C) the stray process (rooted in the TARGET worker's worktree) is alive before reap"
+  worker-session-reap.mjs:169  [in-flight-promise]  "(C) the sibling marker (rooted in an UNRELATED worker's worktree) is alive before reap"
+  worker-stop-reap.mjs:100  [in-flight-promise]  "(B) BOTH live workers' worktrees were swept"
+  worktree-process-reap.mjs:324  [in-flight-promise]  "(real) child A (rooted in worktree A) is alive before reap"
+  worktree-process-reap.mjs:324  [in-flight-promise]  "(real) child B (rooted in a DIFFERENT worktree B) is alive before reap"
+  worktree-process-reap.mjs:324  [in-flight-promise]  "(real) child C (cwd rooted in worktree A, script path outside any worktree) is alive before reap"
+  _probe-composer-clear-2.mjs:145  [second-clock]  "engine session id captured"
+  _probe-composer-clear.mjs:188  [second-clock]  "engine session id captured (real hook relay reached us)"
+  _probe-paste-companion.mjs:201  [second-clock]  "engine session id captured"
+  _probe-paste-resume.mjs:139  [second-clock]  "engine session id captured"
+  _probe-paste-resume.mjs:158  [second-clock]  "LIVE turn: model can read back the pasted tail marker"
+  _probe-paste-stranded-resume.mjs:105  [second-clock]  "engine session id captured"
+  _probe-repaint-wedge.mjs:159  [second-clock]  "${SID}: engine session id captured (real hook relay reached us)"
+  _probe-repaint-wedge.mjs:180  [second-clock]  "STEP A: repaint() produced observable output on a known-healthy idle session (MANDATORY control)"
+  _probe-session-name.mjs:67  [second-clock]  "1) the pty is still alive after boot (an unsupported -n would have exited it)"
+
+--- TIER 1 file distribution (for context) ---
+  pending-ops-registry.mjs: 25
+  gate-semaphore-concurrency.mjs: 22
+  pty-mode-convergence.mjs: 16
+  paste-placeholder-tripwire.mjs: 9
+  codescape-supervisor.mjs: 7
+  codescape-health-probe.mjs: 6
+  pty-prompt-mismatch.mjs: 6
+  agent-runs-rest.mjs: 5
+  paste-recovery-boundary-annotation.mjs: 5
+  periodic-snapshot.mjs: 5
+  pty-giveup-requeue.mjs: 5
+  _probe-session-name.mjs: 5
+  companion-voice-enable-gate.mjs: 4
+  gate-cancel.mjs: 4
+  gate-queue.mjs: 4
+  merge-confirm-completion-nudge.mjs: 4
+  worker-flush-composer.mjs: 4
+  agent-runs-primitive.mjs: 3
+  codescape-mcp-spawn.mjs: 3
+  companion-mirror.mjs: 3
+  merge-gate-reuse.mjs: 3
+  pty-interrupt-redirect.mjs: 3
+  worker-liveness-signal.mjs: 3
+  worker-stop-reap.mjs: 3
+  worktree-process-reap.mjs: 3
+  _probe-paste-resume.mjs: 3
+  _probe-paste-stranded-resume.mjs: 3
+  _probe-repaint-wedge.mjs: 3
+  companion-voice-tts-provision.mjs: 2
+  gate-idle-liveness.mjs: 2
+  gate-status.mjs: 2
+  gate-timeout-tree-kill.mjs: 2
+  integration-e2e.mjs: 2
+  kickoff-giveup-exhausted.mjs: 2
+  manager-live.mjs: 2
+  mcp-ready-gate.mjs: 2
+  orch-spawn.mjs: 2
+  pty-giveup-clear-single-attempt.mjs: 2
+  pty-healifstuck-clear.mjs: 2
+  pty-resume-readiness.mjs: 2
+  pty-write-after-kill-race.mjs: 2
+  pty-writechunked-done-on-death.mjs: 2
+  skills-e2e.mjs: 2
+  worker-session-reap.mjs: 2
+  ws-json-hardening.mjs: 2
+  _probe-composer-clear-2.mjs: 2
+  _probe-composer-dirty.mjs: 2
+  _probe-paste-companion.mjs: 2
+  _probe-resume-mode.mjs: 2
+  autonomy-rails.mjs: 1
+  capability-registry.mjs: 1
+  claude-version-prewarm.mjs: 1
+  graceful-stop.mjs: 1
+  merge-confirm-slow-gate-pending.mjs: 1
+  messaging.mjs: 1
+  orch-abort-warn.mjs: 1
+  orchestration-e2e.mjs: 1
+  pty-composer-runaway-bound.mjs: 1
+  pty-giveup-clear.mjs: 1
+  pty-giveup-hold-until-confirmed.mjs: 1
+  pty-human-submit-race.mjs: 1
+  pty-log-stream-error.mjs: 1
+  pty-mode-heal-retry.mjs: 1
+  pty-owner-attestation.mjs: 1
+  pty-proactive-turn.mjs: 1
+  pty-rate-limit-park-drain.mjs: 1
+  pty-restart-nudge-atomicity.mjs: 1
+  pty-route-coalesce.mjs: 1
+  recycle.mjs: 1
+  restart-giveup-hold.mjs: 1
+  run-gate-cancelled-retention.mjs: 1
+  task-defer-until.mjs: 1
+  test-daemon-host-load-sampling.mjs: 1
+  usage-limit-weekly-sentinel.mjs: 1
+  vault-pause-lease.mjs: 1
+  wake.mjs: 1
+  worker-run-gate.mjs: 1
+  _probe-composer-clear.mjs: 1
