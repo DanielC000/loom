@@ -49,8 +49,24 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   not initiate* (e.g. the owner deploying) — don't trust the auto-resume to have put your workers back to work: run `worker_list` and read each live worker's transcript. A worker resumed but left **idle mid-task** (a generic "Continue" just draws "No response requested") needs a **specific** `worker_message` re-nudge naming where it left off — a generic nudge won't revive it. And a low-urgency `daemon_restart` that should wait for the fleet to go quiet is a **park, not a poll**: don't re-run `worker_list` in a wake loop watching for quiet — note the held restart in your resume doc, `idle_report('waiting', minutes=…)`, and resume on the next genuine event (a worker report, a wake), then re-check quietness **once** and fire `daemon_restart`.
 - **Deploy-build gate integrity** (`restart.ts` › `deployBuildSteps`/`buildDaemon`): the deploy rebuild
   is two ordered, fail-closed steps so a stale cache or a missing install can't verify a broken main green. (1) `pnpm install --frozen-lockfile` FIRST — a merged dep-add (package.json + lockfile) gets linked before the build, instead of failing to resolve the new import (`daemon_restart` never used to install). (2) `turbo build … --force` SECOND — `--force` is the **real** cache-defeating invocation ONLY when passed directly to turbo (`node <turbo> build … --force`); `pnpm <pkg> build --force` forwards `--force` to the build *script* (vite), NOT turbo, so the cache is **not** defeated and a stale FULL TURBO replay ships green (the aad5fff3 footgun). A failed install short-circuits the build. (turbo.json also keys all build caches on `pnpm-lock.yaml`, so a dep change busts the cache repo-wide.)
-- **Caveat:** `assets/**` (hook-relay, vault-lint, bundled skills) is read live from the package dir,
-  so asset merges take effect on the next spawn without a restart. For full isolation, run the stable daemon from a separate checkout (shares `~/.loom` state; override `LOOM_HOME`/`LOOM_PORT` for two daemons side by side).
+- **Caveat:** `assets/**` is NOT uniformly live-read — hook-relay and vault-lint are, bundled skills are
+  NOT. A merged `assets/hook-relay.mjs` or `assets/vault-lint/**` change is read straight from the
+  package dir on next use, no restart needed. **Bundled skills route through a separate store, not the
+  package dir:** `skills/inject.ts` delivers a session's `.claude/skills` from the Loom-owned store
+  (`<LOOM_HOME>/skills/<name>/SKILL.md`), and a merged `assets/skills/**` change only reaches that store
+  on **daemon boot/restart** (`seedGlobalSkills()`, called once at boot from `index.ts`) — and even then
+  **only** for a `customized:false` (pristine) skill; a user-edited skill is never auto-advanced and
+  waits for an explicit **adopt** (Skills UI or `POST /api/skills/<name>/adopt`) regardless of restarts
+  (`skills/seed.ts:73`). **Ordering trap:** if the store carries a Skills-UI edit not yet folded into
+  `assets/`, adopting first silently discards it — land the content in `assets/` first, then adopt.
+  **To check whether a merged skill change is actually live, grep the STORE, never a worktree:**
+  `grep -c "<new string>" "$LOOM_HOME/skills/<name>/SKILL.md"` — nonzero means agents get it, zero means
+  merged-and-dead. ⛔ Don't grep a dev worktree's own `.claude/skills` as a proxy — `pnpm build` runs
+  `scripts/sync-claude-skills.mjs`, which mirrors `assets/skills/**` straight into that worktree's
+  `.claude/skills` on every build, independent of the store and independent of any restart; a check
+  against it can read green while the store — what real sessions are actually injected from — is still
+  stale. For full isolation, run the stable daemon from a separate checkout (shares `~/.loom` state;
+  override `LOOM_HOME`/`LOOM_PORT` for two daemons side by side).
 - **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
   relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal).
 
