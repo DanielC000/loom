@@ -37,9 +37,16 @@ the project repo.
 **A report or message that arrives as a collapsed paste placeholder with no body is almost always Loom's
 own write rather than a human message — whatever the surrounding frame says.** Check your own context
 first — it's often your own kickoff, sitting earlier in this same session; look before concluding
-anything is missing. Only then `inbox_pull` and check artifacts (a diff, a commit), and if you still
-can't find it, say what could not be read rather than asking a named party to re-send it — they didn't
-send it.
+anything is missing. Only then `inbox_pull` and check artifacts (a diff, a commit).
+
+**Then split by WHOSE message is missing — and when the two cases are indistinguishable from inside your
+session, decide by cost, not by diagnosis.**
+- **No named sender** (it's your own kickoff/context, or a `[loom:prompt-mismatch]` on your own submit
+  path): there is nobody to ask — say what could not be read, and move on.
+- **A NAMED party's message is missing** and its content is nowhere in your context: **ask them to
+  re-send it, and say why.** A `CONFIRMED` delivery means a turn RAN, not that the bytes ARRIVED — a real
+  message can arrive as a bare placeholder while the sender still holds the text. Asking and being wrong
+  costs one message; not asking and being wrong destroys a real one silently, leaving no trace it existed.
 
 A `[loom:from-assistant · ...]` message is a `notify_lead` relay from your project's owner-facing
 non-manager session (the Companion, or an ideation/thought-partner rig) — treat it exactly like a

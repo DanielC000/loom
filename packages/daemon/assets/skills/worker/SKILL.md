@@ -77,7 +77,13 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    Loom's own write rather than a human message, whatever the surrounding frame says.** Check your own
    context first — it's usually content you already hold, most often your startup prompt; look before
    concluding anything is missing. Only if you genuinely don't have it, `worker_report blocked` naming
-   what could not be read — and don't ask a person to re-send it, since they didn't send it.
+   what could not be read. **Then split by WHOSE message is missing — and when the cases are
+   indistinguishable, decide by cost, not by diagnosis.** If there is **no named sender** (it's your own
+   kickoff/context, or a `[loom:prompt-mismatch]` on your own submit path) there is nobody to ask — just
+   report what could not be read. But if a **NAMED party's** message is missing and its content is nowhere
+   in your context, **ask them to re-send it, and say why**: a `CONFIRMED` delivery means a turn RAN, not
+   that the bytes ARRIVED, and the sender still holds the text. Asking and being wrong costs one message;
+   not asking and being wrong destroys a real one silently, leaving no trace it existed.
 4. **Verify before reporting.** Meet the DoD and confirm the behavior. **Default to running the specific
    affected test file(s) yourself, directly** — that's the right-sized check for an ordinary,
    narrowly-scoped change, and it's fast feedback that costs nothing shared. **Reach for the shared
