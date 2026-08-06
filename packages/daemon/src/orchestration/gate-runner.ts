@@ -44,14 +44,47 @@ const OUTPUT_TAIL_BYTES = 4096;
 
 /** Failing-test/assertion marker patterns, shared by the LIVE per-step scanner (below) and the post-hoc
  *  {@link extractFailingTest} (kept for a caller holding only a raw string, e.g. a test double that bypasses
- *  the real runner). Recognizes cross-ecosystem failure markers: Loom's own `FAIL  <label>` convention,
- *  Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and `error TSxxxx` typechecker
- *  diagnostics. */
+ *  the real runner). Recognizes cross-ecosystem failure markers: an uncaught-throw idiom (below), Loom's own
+ *  `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and
+ *  `error TSxxxx` typechecker diagnostics.
+ *
+ *  Card 0e5b2045: the `UNCAUGHT` tier sits FIRST (highest priority), ABOVE `FAIL`/`not ok` — a deliberate
+ *  priority decision, not an append. `result()` (below) returns the highest-priority tier with any match,
+ *  so insertion position decides which line wins when a run prints both. 9 of this daemon's own test files
+ *  report a genuine (non-`AssertionError`) thrown failure via `console.error("... UNCAUGHT ...")`, and this
+ *  daemon's own `test-daemon.mjs` `runLane` ALSO prints a `FAIL  <name>  (exit N)` wrapper line for every
+ *  failing file, regardless of why it failed — a content-free summary (name + exit code only) that matched
+ *  tier 0 and WON, in the incident that motivated this card, while the actual stack (only reachable via the
+ *  `UNCAUGHT` line, printed later in the same stream, in `test-daemon.mjs`'s own end-of-run `FAILURES:`
+ *  echo) matched no tier at all and was discarded. An explicit uncaught-exception marker names a real thrown
+ *  error with a stack; a bare `FAIL`/`not ok` label is not reliably richer than that (this project's own
+ *  convention proves it can be strictly poorer) — so when both are present, the uncaught-exception detail is
+ *  the more useful line for a human diagnosing a rejection, and wins.
+ *  ⚠️ DECOUPLED FROM RETRY ON PURPOSE (manager review, card 0e5b2045): {@link identifyRetriableTestFile}
+ *  only recognizes a string shaped like `FAIL <name>` (its own bare-identifier regex) to drive the
+ *  single-file merge retry — and `kickoff-real-spawn` (one of the 9 `UNCAUGHT`-idiom files) is this
+ *  daemon's OWN measured source of both weaker-passes ever recorded, at roughly a 1-in-11 rate. Letting
+ *  `result()`'s new UNCAUGHT-wins priority also decide retry eligibility would have turned every one of
+ *  those self-healing retries into a hard merge rejection (~15 extra minutes each) as a SIDE EFFECT of a
+ *  diagnostics fix — a real, recurring cost, and a policy change to fleet-wide merge-gate retry behavior
+ *  that deserves its own deliberate decision, not an accidental one. So retry reads a SEPARATE accessor —
+ *  {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — that returns ONLY the FAIL/
+ *  not-ok tier's own line/count, `FAIL_TIER_INDEX` below, independent of whichever tier `result()` picked
+ *  for display. `result()`'s diagnostic value and identifyRetriableTestFile's retry target can now differ
+ *  on the SAME run (by design) without either one losing information the other already had. */
 const FAILING_TEST_PATTERNS: RegExp[] = [
+  /\bUNCAUGHT\b.*/,
   /^\s*(FAIL|✗|✖|not ok)\b.*/i,
   /AssertionError.*/,
   /error TS\d+:.*/,
 ];
+
+/** Index of the `FAIL|✗|✖|not ok` tier within {@link FAILING_TEST_PATTERNS} — the ONLY tier
+ *  {@link identifyRetriableTestFile} can ever parse a retriable file name out of. Kept as a named constant
+ *  (not re-derived by searching the array) so a future re-ordering of `FAILING_TEST_PATTERNS` can't
+ *  silently repoint `failTierResult()`/`failTierMatchCount()` at the wrong tier without a compile-visible
+ *  review of this line too. */
+const FAIL_TIER_INDEX = 1;
 
 /** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
  *  remainder it holds between `feed()` calls. See that function's own doc for why this must be bounded. */
@@ -99,7 +132,13 @@ const FAILING_TEST_CARRY_CAP_BYTES = 8192;
  * synthetic bare-`\r`/no-delimiter chunks, mirroring how `runGateStep`/`splitGateSteps` are already
  * exported for the same reason.
  */
-export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(): string | undefined; matchCount(): number } {
+export function createFailingTestTracker(): {
+  feed(chunk: Buffer): void;
+  result(): string | undefined;
+  matchCount(): number;
+  failTierResult(): string | undefined;
+  failTierMatchCount(): number;
+} {
   const decoder = new TextDecoder("utf-8");
   let carry = "";
   // Card [manager review, sibling p0 report on 344ce950]: `lastByPattern` alone (below) can only ever
@@ -144,13 +183,31 @@ export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(
     },
     /** How many lines matched the SAME tier {@link result} reports (i.e. the winning, highest-priority
      *  tier that has ANY match) — `0` when nothing matched at all (mirrors `result()`'s own `undefined`).
-     *  Deliberately NOT deduped by exact line content: a tier that matched N times, even if some of those
-     *  lines are textually identical, reports N — over-counting only ever SUPPRESSES a retry (the safe
-     *  direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. */
+     *  PURELY DIAGNOSTIC alongside `result()` (card 0e5b2045 decoupled retry onto `failTierMatchCount()`
+     *  below — this is no longer what {@link identifyRetriableTestFile} reads). Deliberately NOT deduped by
+     *  exact line content: a tier that matched N times, even if some of those lines are textually
+     *  identical, reports N. */
     matchCount(): number {
       flushCarryOnce();
       for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) if (lastByPattern[i]) return countByPattern[i] ?? 0;
       return 0;
+    },
+    /** Card 0e5b2045: the FAIL/not-ok tier's OWN line, independent of whichever tier {@link result} picked
+     *  for display — the single-file merge retry ({@link identifyRetriableTestFile}) reads THIS, never
+     *  `result()`, so a higher-priority diagnostic tier (e.g. `UNCAUGHT`) winning `result()` never silently
+     *  changes which failure the retry targets. `undefined` when no `FAIL <name>`/`not ok`/✗/✖ line was
+     *  ever seen in this step's output at all — an honest miss, same discipline as `result()`. */
+    failTierResult(): string | undefined {
+      flushCarryOnce();
+      return lastByPattern[FAIL_TIER_INDEX];
+    },
+    /** How many lines matched the FAIL/not-ok tier specifically — the count {@link identifyRetriableTestFile}
+     *  actually gates its `=== 1` check on. `0` when `failTierResult()` is `undefined`. Deliberately NOT
+     *  deduped by exact line content, same as `matchCount()` — over-counting only ever SUPPRESSES a retry
+     *  (the safe direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. */
+    failTierMatchCount(): number {
+      flushCarryOnce();
+      return countByPattern[FAIL_TIER_INDEX] ?? 0;
     },
   };
 }
@@ -225,6 +282,16 @@ export interface GateStepResult {
    *  named anywhere in this result — a caller must never treat `failingTest` as "the only failure" without
    *  checking this is exactly `1` first. */
   failingTestCount?: number;
+  /** Card 0e5b2045: the FAIL/not-ok tier's OWN line (see {@link createFailingTestTracker.failTierResult}),
+   *  independent of whichever tier `failingTest` above was drawn from — {@link identifyRetriableTestFile}
+   *  reads THIS field, never `failingTest`, so a higher-priority diagnostic tier (e.g. an `UNCAUGHT` idiom)
+   *  winning `failingTest` never silently changes which failure the single-file merge retry targets.
+   *  `undefined` when no FAIL/not-ok-shaped line was seen in this step's output at all. */
+  failTierTest?: string;
+  /** See {@link createFailingTestTracker.failTierMatchCount} — forwarded alongside `failTierTest`, the
+   *  count {@link identifyRetriableTestFile} actually gates its `=== 1` check on. `undefined` iff
+   *  `failTierTest` is `undefined`. */
+  failTierTestCount?: number;
   decidedAt?: number;
   /** Card 8d585277: true ONLY when this step's settle followed a `cancelSignal` abort AND the step's own
    *  `close`/`error` event actually fired afterward (i.e. the kill was VERIFIED, not merely issued — see
@@ -323,14 +390,16 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // the verification: it can only ever be attached to a genuinely observed close/error, never to the bare
   // act of asking for one.
   let cancelling = false;
-  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "decidedAt">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "failTierTest" | "failTierTestCount" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
     const failingTest = failingTestTracker.result();
+    const failTierTest = failingTestTracker.failTierResult();
     resolve({
       ...result, ...(cancelling ? { cancelled: true } : {}),
       outputTail: tail(), failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
+      failTierTest, failTierTestCount: failTierTest ? failingTestTracker.failTierMatchCount() : undefined,
       decidedAt: performance.now(),
     });
   };
@@ -389,6 +458,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         ? ` (no extend: idle ${Math.round(idleMs)}ms ≥ ${GATE_EXTEND_IDLE_MS}ms threshold — stalled)`
         : " (no extend: extend unavailable for this run)";
     const timeoutFailingTest = failingTestTracker.result();
+    const timeoutFailTierTest = failingTestTracker.failTierResult();
     void killGateProcessTree(child).finally(() => {
       resolve({
         status: null,
@@ -399,6 +469,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         // eventual settle came from the timeout path rather than a fresh close/error after the kill.
         ...(cancelling ? { cancelled: true } : {}),
         outputTail: tail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
+        failTierTest: timeoutFailTierTest, failTierTestCount: timeoutFailTierTest ? failingTestTracker.failTierMatchCount() : undefined,
         decidedAt,
       });
     });
@@ -478,6 +549,11 @@ export interface GateSequentialResult {
   /** See {@link GateStepResult.failingTestCount} — forwarded verbatim alongside `failingTest`. A caller
    *  MUST check this is exactly `1` before treating `failingTest` as a complete account of what failed. */
   failingTestCount?: number;
+  /** See {@link GateStepResult.failTierTest} — forwarded verbatim from the failing step's own result.
+   *  {@link identifyRetriableTestFile} reads THIS field, never `failingTest` above. */
+  failTierTest?: string;
+  /** See {@link GateStepResult.failTierTestCount} — forwarded verbatim alongside `failTierTest`. */
+  failTierTestCount?: number;
   /** Card 8d585277: forwarded from the cancelled step's own VERIFIED {@link GateStepResult.cancelled} — a
    *  distinct "no verdict" outcome a caller must never fold into `passed:false`'s ordinary failure
    *  handling (no retry, no failure classification, no "gate failed" nudge). */
@@ -709,14 +785,16 @@ export async function runGateSequential(
     if (res.cancelled) {
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount, steps,
+        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, steps,
       };
     }
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount, steps,
+        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, steps,
       };
     }
   }
@@ -791,9 +869,10 @@ export function classifyGatePhase(step: string | undefined): "typecheck" | "test
  * real `runGateStep`/`runGateSequential`, or `outputTail` from a caller that never ran the live scan). A
  * real gate run should prefer {@link GateSequentialResult.failingTest} (populated by the LIVE
  * {@link createFailingTestTracker} scan, which is NOT subject to this tail's own truncation) over calling
- * this at all. Scans for the same cross-ecosystem failure markers as that live scan (Loom's own
- * `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and
- * `error TSxxxx` typechecker diagnostics) and returns the FIRST matching line, trimmed. Returns `undefined`
+ * this at all. Scans for the same cross-ecosystem failure markers as that live scan (an uncaught-throw
+ * `UNCAUGHT` idiom, Loom's own `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers,
+ * thrown `AssertionError`s, and `error TSxxxx` typechecker diagnostics) and returns the FIRST matching line,
+ * trimmed. Returns `undefined`
  * when nothing recognizable is found — this is a diagnostic aid, not a parser, so a silent miss just means
  * the raw tail is still surfaced on its own.
  */
@@ -815,32 +894,43 @@ export interface RetriableTestFile {
 }
 
 /**
- * Card 344ce950: given a gate run's own {@link GateStepResult.failingTest}/{@link
- * GateSequentialResult.failingTest} marker and the gate's `cwd`, identify a SINGLE test file this
+ * Card 344ce950: given a gate run's own {@link GateStepResult.failTierTest}/{@link
+ * GateSequentialResult.failTierTest} marker and the gate's `cwd`, identify a SINGLE test file this
  * daemon's own hermetic suite (`packages/daemon/scripts/test-daemon.mjs`) can re-run in ISOLATION via its
  * existing `--only=<name>` selection flag (card 6185fbfc — the same flag `test-daemon-cli-args.mjs`/
  * `test-daemon-gate-timing-sigkill.mjs` already drive directly), so a merge gate can retry ONE failing
  * file instead of the whole ~650-file suite before declaring a rejection.
  *
+ * ⚠️ Card 0e5b2045 — TAKES `failTierTest`/`failTierTestCount`, NOT `failingTest`/`failingTestCount`. The
+ * two diverge on purpose: `failingTest` is whichever tier's line is most diagnostically useful (as of card
+ * 0e5b2045, an `UNCAUGHT`-idiom line outranks a bare `FAIL <name>` summary there), but THIS function can
+ * only ever parse the FAIL/not-ok tier's own bare-identifier shape — so it reads the tier-isolated
+ * `failTierTest`/`failTierTestCount` accessors ({@link createFailingTestTracker.failTierResult}/
+ * `.failTierMatchCount`) instead, independent of whichever tier won `result()` for display. Passing
+ * `failingTest`/`failingTestCount` here would be silently wrong on any run where a higher-priority
+ * diagnostic tier also matched: the retry would appear to "stop firing" for reasons unrelated to whether a
+ * retriable FAIL line actually exists.
+ *
  * DELIBERATELY NARROW AND FAIL-CLOSED: this recognizes ONLY this daemon's own `FAIL  <name>` convention
  * (a bare identifier — letters/digits/hyphen/underscore, no path, no extension — see test-daemon.mjs's own
  * `runLane`: `console.log(\`${result.ok ? "PASS" : "FAIL"}  ${result.name}...\`)`), never the sibling
- * Jest/AVA/tap/`AssertionError`/`error TSxxxx` shapes {@link FAILING_TEST_PATTERNS} also recognizes, and
- * NEVER via a second parser on `failingTest` beyond this one bare-name regex — the caller must pass the
- * SAME `failingTest` the live {@link createFailingTestTracker} scan already extracted, not re-derive one.
- * A candidate name is confirmed against the REAL filesystem (`fs.existsSync`) before ever being reported
- * identifiable — never a regex-only guess — so a name that merely LOOKS like one of ours but doesn't
- * correspond to a real file, or a gate run on a project that doesn't have this suite at this path at all,
- * returns `undefined` (the caller's cue to reject exactly as today — no behavior change on that path).
+ * Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes {@link FAILING_TEST_PATTERNS} also
+ * recognizes, and NEVER via a second parser on `failTierTest` beyond this one bare-name regex — the caller
+ * must pass the SAME `failTierTest` the live {@link createFailingTestTracker} scan already extracted, not
+ * re-derive one. A candidate name is confirmed against the REAL filesystem (`fs.existsSync`) before ever
+ * being reported identifiable — never a regex-only guess — so a name that merely LOOKS like one of ours
+ * but doesn't correspond to a real file, or a gate run on a project that doesn't have this suite at this
+ * path at all, returns `undefined` (the caller's cue to reject exactly as today — no behavior change on
+ * that path).
  *
- * ⚠️ MANAGER REVIEW (sibling p0 report on card 344ce950) — REQUIRES `failingTestCount === 1`: this
+ * ⚠️ MANAGER REVIEW (sibling p0 report on card 344ce950) — REQUIRES `failTierTestCount === 1`: this
  * daemon's own test runner has NO fail-fast (`test-daemon.mjs`'s `Promise.all` over lanes; `failed` is an
  * ARRAY) — a single run can genuinely fail on MULTIPLE files. `createFailingTestTracker` keeps only the
- * LAST matching line per tier, so `failingTest` alone cannot tell "the only failure" apart from "the last
+ * LAST matching line per tier, so `failTierTest` alone cannot tell "the only failure" apart from "the last
  * of several, with the others never named anywhere in this result". Retrying and passing that ONE file
  * would silently let a merge through while an untouched OTHER failure sits in the same run — exactly the
  * order-dependent/cross-test-pollution class this card's own §4 already warned a single-file retry can
- * mask, now via a second, distinct route (a second FILE instead of a second RUN). `failingTestCount` is
+ * mask, now via a second, distinct route (a second FILE instead of a second RUN). `failTierTestCount` is
  * REQUIRED (not optional) specifically so a caller can't forget to pass it — any value other than exactly
  * `1` (including `undefined`, e.g. a test double/legacy shape that never supplies one) fails closed,
  * mirroring this function's existing "ambiguity ⇒ not identifiable" posture. The safe direction is
@@ -848,10 +938,10 @@ export interface RetriableTestFile {
  * would have been fine) — never under-counting, which `createFailingTestTracker`'s one-line-per-file
  * `runLane` convention makes structurally unlikely.
  */
-export function identifyRetriableTestFile(failingTest: string | undefined, cwd: string, failingTestCount: number | undefined): RetriableTestFile | undefined {
-  if (!failingTest) return undefined;
-  if (failingTestCount !== 1) return undefined;
-  const m = /^FAIL\s+(\S+)/.exec(failingTest);
+export function identifyRetriableTestFile(failTierTest: string | undefined, cwd: string, failTierTestCount: number | undefined): RetriableTestFile | undefined {
+  if (!failTierTest) return undefined;
+  if (failTierTestCount !== 1) return undefined;
+  const m = /^FAIL\s+(\S+)/.exec(failTierTest);
   if (!m) return undefined;
   const name = m[1]!;
   // A bare identifier only — never a path separator or shell metacharacter — before this ever reaches a

@@ -30,6 +30,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `runExclusive` admission (see (G) above), it is independently reachable via `gate_cancel` while
 //       QUEUED, exactly like any other merge-gate admission — `GateCancelledError` must be caught and
 //       settle `confirmWorkerMerge` as a clean `cancelled:true`, never a thrown/misreported crash.
+//   (J) card 0e5b2045, THE failingTest/failTierTest DECOUPLING END-TO-END: a run where the diagnostic-
+//       winning `failingTest` and the retry-target `failTierTest` genuinely DIVERGE (mirrors a real
+//       UNCAUGHT-idiom failure) must still retry using `failTierTest`'s name — proves the decoupling holds
+//       through the real confirmWorkerMerge call site, not just the gate-runner.ts unit level.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-gate-single-file-retry.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -111,7 +115,7 @@ try {
     const seenGates = [];
     const fakeGate = async (gate) => {
       calls++; seenGates.push(gate);
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1 };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1 };
       return { passed: true };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
@@ -146,6 +150,51 @@ try {
     check("(A) task moved to done", db.getTask(A.taskId).columnKey === "done");
   }
 
+  // ── (J) THE DECOUPLING, END-TO-END (manager review, card 0e5b2045): `failingTest` (the diagnostic-
+  //        winning field — an UNCAUGHT-idiom line can now outrank a bare FAIL <name> summary there, see
+  //        gate-runner.ts's FAILING_TEST_PATTERNS doc) and `failTierTest` (the FAIL-tier-ISOLATED field
+  //        `identifyRetriableTestFile` actually reads) DIVERGE on this run — mirrors exactly what a real
+  //        UNCAUGHT-idiom failure now produces from `runGateSequential`. confirmWorkerMerge must still
+  //        retry using `failTierTest`'s name, completely ignoring the differing diagnostic `failingTest`,
+  //        proving the decoupling holds through the REAL service.ts call site, not just the tracker/
+  //        identifyRetriableTestFile unit level already covered in gate-runner-failing-test-truncation.mjs. ──
+  {
+    const J = mk("j", "feature-j.txt");
+    makeRepo(J);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const seenGates = [];
+    const fakeGate = async (gate) => {
+      calls++; seenGates.push(gate);
+      if (calls === 1) return {
+        passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "",
+        // Deliberately DIFFERENT strings — a real UNCAUGHT-idiom run's `failingTest` names no file at all,
+        // while `failTierTest` is the SAME `FAIL <name>` line that always won pre-decoupling.
+        failingTest: "💥 UNCAUGHT — Error: waitUntil timed out after 8000ms", failingTestCount: 1,
+        failTierTest: "FAIL  flaky-j", failTierTestCount: 1,
+      };
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
+    J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-j");
+    fs.writeFileSync(path.join(worktreePath, J.file), "work for J\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${J.file}"`, { cwd: worktreePath });
+    seed(db, J, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
+    check("(J) the retry fires DESPITE failingTest naming no file at all — it read failTierTest, not failingTest", calls === 2);
+    check("(J) the retry call names flaky-j (from failTierTest), never anything derived from the UNCAUGHT diagnostic string", seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=flaky-j");
+    check("(J) retry passed -> merged:true", confirm.merged === true);
+    check("(J) retriedFile is flaky-j", confirm.retriedFile === "flaky-j");
+    check("(J) priorFailingTest on the durable event still records the RICH diagnostic (failingTest), even though the retry itself targeted failTierTest", (() => {
+      const evs = eventsOfKind(db, J.mgrId, "build_gate_single_file_retry");
+      return evs.length === 1 && evs[0].detail?.priorFailingTest === "💥 UNCAUGHT — Error: waitUntil timed out after 8000ms";
+    })());
+  }
+
   // ── (G) THE GUARD IS HELD THROUGH THE RETRY — see this file's own header for the summary. Two real
   //        workers sharing one repo: worker1 fails once then retries a single file; worker2 (a real,
   //        non-inert change) fires ITS OWN confirm while worker1's retry is genuinely running and must
@@ -172,7 +221,7 @@ try {
     let releaseRetry;
     const fakeGate = async () => {
       calls++;
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-g", failingTestCount: 1 };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-g", failingTestCount: 1, failTierTest: "FAIL  flaky-g", failTierTestCount: 1 };
       if (calls === 2) {
         // THE single-file retry's own runGateSeq call — held open so we can prove the per-repo guard is
         // held (a same-repo sibling stays queued) while this is still running.
@@ -297,7 +346,7 @@ try {
         await new Promise((res) => { releaseCall1 = res; });
         // The genuine, identifiable failure that would normally trigger the single-file retry — but the
         // retry's OWN admission gets cancelled below before this function is ever called a second time.
-        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1 };
+        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1, failTierTest: "FAIL  flaky-h", failTierTestCount: 1 };
       }
       // The holder's own gate — held open once admitted (mirrors worker H's own call1 above) so it keeps
       // occupying the cap-1 slot long enough for the retry's own admission to genuinely queue behind it and
@@ -396,7 +445,11 @@ try {
     const proofTracker = createFailingTestTracker();
     proofTracker.feed(Buffer.from("FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)\n"));
     check("(F proof) the REAL tracker collapses 2 distinct failing files to the LAST one only — root cause confirmed", proofTracker.result() === "FAIL  beta  (exit 1)");
-    check("(F proof, THE FIX) matchCount() correctly reports 2 for the SAME collapsed line — this is what lets identifyRetriableTestFile refuse it", proofTracker.matchCount() === 2);
+    check("(F proof, THE FIX) matchCount() correctly reports 2 for the SAME collapsed line", proofTracker.matchCount() === 2);
+    // Card 0e5b2045: identifyRetriableTestFile now reads failTierMatchCount(), not matchCount() — this run
+    // has no UNCAUGHT line, so both tracker accessors agree here (both tiers-of-interest happen to
+    // coincide), but the count that ACTUALLY drives the refusal below is failTierMatchCount() specifically.
+    check("(F proof, THE FIX) failTierMatchCount() ALSO reports 2 — this is what actually lets identifyRetriableTestFile refuse it", proofTracker.failTierMatchCount() === 2);
 
     const F = mk("f", "feature-f.txt");
     makeRepo(F);
@@ -410,7 +463,7 @@ try {
       // `beta`, but `failingTestCount:2` (the same number `proofTracker.matchCount()` just proved) tells
       // the retry gate this is NOT a complete account of the failure. `alpha`'s failure is real and
       // genuinely invisible through `failingTest` alone; `failingTestCount` is what keeps it visible.
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)", failingTest: "FAIL  beta  (exit 1)", failingTestCount: 2 };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)", failingTest: "FAIL  beta  (exit 1)", failingTestCount: 2, failTierTest: "FAIL  beta  (exit 1)", failTierTestCount: 2 };
       return { passed: true }; // beta passes in isolation — alpha was never re-run
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
@@ -438,7 +491,7 @@ try {
     let calls = 0;
     const fakeGate = async () => {
       calls++;
-      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "AssertionError: expected 1 to equal 2", failingTest: "FAIL  flaky-two", failingTestCount: 1 };
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "AssertionError: expected 1 to equal 2", failingTest: "FAIL  flaky-two", failingTestCount: 1, failTierTest: "FAIL  flaky-two", failTierTestCount: 1 };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);

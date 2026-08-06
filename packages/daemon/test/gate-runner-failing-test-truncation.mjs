@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker } = await import("../dist/orchestration/gate-runner.js");
+const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -116,11 +116,126 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         tracker.result() === undefined);
     }
   }
+
+  // ── (F)-(H) Card 0e5b2045: THE UNCAUGHT IDIOM — 9 of this daemon's own test files report a genuine
+  //     (non-AssertionError) thrown failure via `console.error("... UNCAUGHT ...")`, and matched NONE of the
+  //     original 3 tiers. The real incident (worker 7e4020e7's investigation of 04ef579e): a 907s/686-file
+  //     run's ONLY tier hit was `test-daemon.mjs`'s own content-free per-file summary line —
+  //     `FAIL  kickoff-real-spawn  (exit 1)` — while the actual stack, printed later in the same stream via
+  //     that same script's end-of-run `FAILURES:` echo (`      💥 UNCAUGHT — Error: ...`, 6-space-indented,
+  //     the exact real `test-daemon.mjs` shape), was discarded. THIS IS DoD-2's REQUIRED POSITIVE CONTROL:
+  //     the specimen is the exact idiom (a plain Error, not AssertionError, rendered through
+  //     `💥 UNCAUGHT — ${err.stack}`), and the assertion is that the tracker returns THAT line, not the bare
+  //     FAIL summary — proving the fix, not merely that the new pattern matches something in isolation. ────
+  {
+    const FAIL_LINE = "FAIL  kickoff-real-spawn  (exit 1)";
+    // The real kickoff-real-spawn.mjs idiom (`console.error(\`\n💥 UNCAUGHT — ${err?.stack || err}\`)`), as it
+    // would actually reach the live scan via test-daemon.mjs's own FAILURES: echo (6-space-indented, one
+    // line per stdout/stderr line of the failing child) — not a hand-simplified stand-in. `result()` trims
+    // each stored line (`scanLine`'s own `line.trim()`, same as every other marker in this file), so the
+    // TRIMMED form is what a caller actually observes — asserted against RAW below, not by accident.
+    const UNCAUGHT_LINE_RAW = "      💥 UNCAUGHT — Error: waitUntil timed out after 8000ms";
+    const UNCAUGHT_LINE = UNCAUGHT_LINE_RAW.trim();
+    const STACK_FRAME = "          at waitUntil (file:///dist/test/kickoff-real-spawn.mjs:120:9)";
+
+    // (F1) NEGATIVE CONTROL FIRST — prove the new pattern is not a vacuous always-match: a line that
+    // discusses "uncaught" concepts in lowercase prose (not the idiom's actual all-caps marker) must NOT
+    // match, and a tracker fed ONLY ordinary passing-shaped output finds nothing.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from("the handler gracefully handles uncaught exceptions in children\n", "utf-8"));
+      tracker.feed(Buffer.from("PASS  some-other-test\n", "utf-8"));
+      check("(F1) negative control: lowercase 'uncaught' prose + a PASS line match no tier",
+        tracker.result() === undefined);
+    }
+
+    // (F2) THE SPECIMEN, FAIL-LINE-FIRST (matches the real run's actual chronology: the per-lane completion
+    // line prints mid-run, the FAILURES: echo prints only once ALL lanes finish). Pre-fix, tier 0 (FAIL)
+    // was the only hit and won; post-fix, UNCAUGHT must win.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${FAIL_LINE}\n`, "utf-8"));
+      tracker.feed(Buffer.from(`${UNCAUGHT_LINE_RAW}\n${STACK_FRAME}\n`, "utf-8"));
+      check("(F2) DoD-2 POSITIVE CONTROL: with a real FAIL <name> line seen BEFORE the UNCAUGHT line, result() returns the UNCAUGHT line, not the bare FAIL summary",
+        tracker.result() === UNCAUGHT_LINE);
+      check("(F2) the bare FAIL summary is genuinely NOT what's returned (proves this isn't a coincidental string overlap)",
+        tracker.result() !== FAIL_LINE);
+    }
+
+    // (G) DoD-3, BOTH DIRECTIONS: the priority decision (UNCAUGHT ranks ABOVE FAIL/not-ok) must hold
+    // regardless of which line the stream happens to print first — proving this is a tier-priority choice,
+    // not an accidental "whichever line arrived last" artifact (result() already prefers the LAST match
+    // *within* a tier, so order-independence across tiers is exactly what needs proving here).
+    {
+      const orderA = createFailingTestTracker();
+      orderA.feed(Buffer.from(`${FAIL_LINE}\n${UNCAUGHT_LINE_RAW}\n`, "utf-8"));
+      const orderB = createFailingTestTracker();
+      orderB.feed(Buffer.from(`${UNCAUGHT_LINE_RAW}\n${FAIL_LINE}\n`, "utf-8"));
+      check("(G) FAIL-then-UNCAUGHT resolves to UNCAUGHT", orderA.result() === UNCAUGHT_LINE);
+      check("(G) UNCAUGHT-then-FAIL ALSO resolves to UNCAUGHT (order-independent — a genuine tier decision)", orderB.result() === UNCAUGHT_LINE);
+    }
+
+    // (H) DoD-4: matchCount() must not double-count ONE logical failure just because it prints two
+    // recognizable lines (one FAIL wrapper line + one UNCAUGHT idiom line) across two DIFFERENT tiers —
+    // matchCount() reports the WINNING tier's own count only, so a single failing file's own single
+    // UNCAUGHT line must report exactly 1, never 2.
+    {
+      const oneFailure = createFailingTestTracker();
+      oneFailure.feed(Buffer.from(`${FAIL_LINE}\n${UNCAUGHT_LINE_RAW}\n`, "utf-8"));
+      check("(H1) one logical failure (1 FAIL line + 1 UNCAUGHT line) reports matchCount()===1, not 2",
+        oneFailure.matchCount() === 1);
+
+      // Two GENUINELY DISTINCT failing files, each printing its own UNCAUGHT line, must still report 2 —
+      // proves (H1)'s ===1 isn't from an under-counting bug that would ALSO hide real multi-file ambiguity.
+      const twoFailures = createFailingTestTracker();
+      twoFailures.feed(Buffer.from("      💥 UNCAUGHT — Error: file A timed out\n", "utf-8"));
+      twoFailures.feed(Buffer.from("      💥 UNCAUGHT — Error: file B timed out\n", "utf-8"));
+      check("(H2) two distinct UNCAUGHT-tier lines report matchCount()===2 (ambiguity is still visible, not collapsed)",
+        twoFailures.matchCount() === 2);
+    }
+
+    // (I) THE DECOUPLING, ASSERTED EXPLICITLY (manager review, card 0e5b2045): `identifyRetriableTestFile`
+    // reads `failTierResult()`/`failTierMatchCount()`, NOT `result()`/`matchCount()` — a run with BOTH a
+    // real FAIL <name> line and an UNCAUGHT line must (a) still return the UNCAUGHT line from result() for
+    // diagnostics, AND (b) still produce a WORKING retry target via the tier-isolated accessors. Losing (b)
+    // as a side effect of fixing (a) would have silently turned kickoff-real-spawn's own self-healing
+    // retries into hard merge rejections (~15 extra minutes each, at its measured ~1-in-11 weaker-pass
+    // rate) — a policy change to fleet-wide retry behavior this card never asked for. Plants the real
+    // fixture files identifyRetriableTestFile's own `fs.existsSync` checks require, mirroring
+    // merge-gate-single-file-retry.mjs's fixture-planting convention.
+    {
+      const scriptsDir = path.join(dir, "packages", "daemon", "scripts");
+      const testDirFixture = path.join(dir, "packages", "daemon", "test");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      fs.mkdirSync(testDirFixture, { recursive: true });
+      fs.writeFileSync(path.join(scriptsDir, "test-daemon.mjs"), "// fixture\n");
+      fs.writeFileSync(path.join(testDirFixture, "kickoff-real-spawn.mjs"), "// fixture\n");
+
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${FAIL_LINE}\n${UNCAUGHT_LINE_RAW}\n`, "utf-8"));
+
+      check("(I-a) result() still returns the UNCAUGHT line for diagnostics, with the retry-target decoupling in place",
+        tracker.result() === UNCAUGHT_LINE);
+
+      const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
+      check("(I-b) failTierResult()/failTierMatchCount() still identify kickoff-real-spawn as a WORKING retry target — the single-file merge retry does NOT silently stop firing for UNCAUGHT-idiom files",
+        candidate !== undefined && candidate.name === "kickoff-real-spawn");
+      check("(I-b) the retry command is the real --only= single-file re-invocation",
+        candidate?.command === "node packages/daemon/scripts/test-daemon.mjs --only=kickoff-real-spawn");
+
+      // NEGATIVE CONTROL: feeding result()/matchCount() (the diagnostic-winning fields, NOT the tier-
+      // isolated ones) into identifyRetriableTestFile must decline — proves (I-b)'s pass isn't vacuous
+      // (i.e. isn't passing because identifyRetriableTestFile accepts anything it's handed).
+      const wrongFieldCandidate = identifyRetriableTestFile(tracker.result(), dir, tracker.matchCount());
+      check("(I) negative control: passing result()/matchCount() (the UNCAUGHT-winning diagnostic fields) instead of the failTier* accessors correctly declines — the two accessor pairs are not interchangeable",
+        wrongFieldCandidate === undefined);
+    }
+  }
 }
 // dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a failing-test marker buried by trailing output beyond the tail budget still survives via the live per-step scan, independent of outputTail's own truncation; a genuinely unrecognizable failure reports an honest undefined, never a guess; a heavy bare-\\r progress stream still resolves a marker correctly and stays bounded; a delimiter-free blob far exceeding the carry cap correctly evicts an early marker."
+  ? "\n✅ ALL PASS — a failing-test marker buried by trailing output beyond the tail budget still survives via the live per-step scan, independent of outputTail's own truncation; a genuinely unrecognizable failure reports an honest undefined, never a guess; a heavy bare-\\r progress stream still resolves a marker correctly and stays bounded; a delimiter-free blob far exceeding the carry cap correctly evicts an early marker; an UNCAUGHT-idiom line outranks a content-free FAIL <name> summary for diagnostics (order-independent), matchCount() doesn't double-count one logical failure across the two tiers, and the retry target is DECOUPLED from that diagnostic priority — failTierResult()/failTierMatchCount() still identify a working single-file retry even when result() reports the UNCAUGHT line instead."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

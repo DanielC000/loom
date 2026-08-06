@@ -12114,10 +12114,16 @@ export class SessionService {
       // deliberately narrow, fail-closed match — a project without this exact suite, or a failure that
       // doesn't name a real file, always returns `undefined` here and this block is a no-op, byte-identical
       // to before this card). NO CAUSE IS ASSERTED anywhere in this block or its wording. `identifyRetriableTestFile`
-      // ALSO requires `gateResult.failingTestCount === 1` — this daemon's own test runner has no fail-fast,
+      // ALSO requires `gateResult.failTierTestCount === 1` — this daemon's own test runner has no fail-fast,
       // so a run can genuinely fail on MULTIPLE files while the live tracker's own "last match per tier"
-      // shape reports only one of them. Passing `failingTestCount` through is what lets that function
+      // shape reports only one of them. Passing `failTierTestCount` through is what lets that function
       // refuse to retry a collapsed multi-failure signal (see its own doc for the full reasoning).
+      //
+      // Card 0e5b2045: reads `failTierTest`/`failTierTestCount`, NOT `failingTest`/`failingTestCount` — the
+      // FAIL/not-ok tier's OWN line, independent of whichever tier `failingTest` was drawn from for
+      // diagnostics (an `UNCAUGHT`-idiom line can outrank a bare `FAIL <name>` summary there). This retry
+      // must keep targeting the SAME file it always has, regardless of which tier wins the diagnostic
+      // display — see gate-runner.ts's `FAILING_TEST_PATTERNS` doc for the full reasoning.
       //
       // ROUTED THROUGH runExclusive (Code Review CRITICAL, card b9e07a4a): an earlier version of this
       // block called `runGateSeq` directly, bypassing the semaphore entirely — the FIRST attempt's own gate
@@ -12132,7 +12138,7 @@ export class SessionService {
       // attempt and the transient-kill retry do. It does NOT mirror that retry's `reunionAtAdmission`
       // call, deliberately — see the callback below for why.
       if (gateRan && !gateResult.passed && classifyGateFailure(gateResult) === "genuine") {
-        const candidate = identifyRetriableTestFile(gateResult.failingTest, worktreePath, gateResult.failingTestCount);
+        const candidate = identifyRetriableTestFile(gateResult.failTierTest, worktreePath, gateResult.failTierTestCount);
         if (candidate) {
           retriedFile = candidate.name;
           let singleFileRetryStartedAt = 0;
