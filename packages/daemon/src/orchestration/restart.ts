@@ -8,6 +8,7 @@ import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import { writeJsonAtomic } from "../pty/claude-config.js";
 import { DEPLOY_PACKAGES } from "../deploy-packages.js";
+import type { CapQueuedSpawn } from "./cap-queue.js";
 
 const require = createRequire(import.meta.url);
 
@@ -142,6 +143,18 @@ export interface RestartIntent {
    * the paste-recovery mint).
    */
   pendingMintedAt?: Record<string, Record<number, number>>;
+  /**
+   * Card a1b79655 — the PUBLIC projection (never the full kickoffPrompt — mirrors
+   * `CapQueueRegistry.listByManager`'s own read contract) of each captured manager's/platform's still-live
+   * cap-queued worker_spawn intents, snapshotted right before exit. `CapQueueRegistry` is DELIBERATELY
+   * in-memory-only (see its own class doc) and is never re-populated on boot — a fresh instance is
+   * constructed empty every process start, so anything queued here is gone the instant this process exits,
+   * with or without this field. This field exists purely so boot can TELL each affected manager/platform
+   * what was silently dropped (resumeFleetOnBoot appends a note naming each entry) instead of leaving it to
+   * notice a stale card on its own — it is INFORMATIONAL ONLY and never re-drives or re-queues anything.
+   * Keyed by managerSessionId/platformSessionId; absent when nothing was queued for anyone captured.
+   */
+  capQueued?: Record<string, CapQueuedSpawn[]>;
   requestedAt: string;
 }
 

@@ -3122,6 +3122,31 @@ export class SessionService {
         if (Object.keys(mintedAt).length > 0) pendingMintedAt[sessionId] = mintedAt;
       }
     }
+    // Card a1b79655: snapshot each captured manager's/platform's still-live cap-queued worker_spawn
+    // intents — the ONE restart flavor with a window to act before the process (and CapQueueRegistry's
+    // in-memory Map) dies. Public projection only (mirrors listByManager's own read contract) — this is
+    // purely so resumeFleetOnBoot can TELL each one what it lost; nothing here re-queues or re-admits
+    // anything (that's the persistence the card's DoD explicitly forbids — the loss is by design).
+    // Defensive cap on ENTRY COUNT, same reasoning as PENDING_MAX_MSGS three lines up: CapQueueRegistry is
+    // bounded per-DAEMON (CAP_QUEUE_MAX=200), not per-manager, so a pathological case (all 200 queued
+    // behind one manager) would otherwise balloon the intent JSON and that manager's resume turn. The
+    // truncation is surfaced (not silent) via a "(+N more not shown)" suffix appended to the LAST kept
+    // entry's own kickoffLabel — that field is already documented DISPLAY-ONLY (see CapQueuedSpawn's doc),
+    // so this stays within its existing contract rather than inventing a new one.
+    const CAP_QUEUED_SNAPSHOT_MAX = 20;
+    const capQueuedSnapshot: Record<string, CapQueuedSpawn[]> = {};
+    for (const { sessionId, role } of resume) {
+      if (role !== "manager" && role !== "platform") continue;
+      const all = this.capQueue.listByManager(sessionId);
+      if (all.length === 0) continue;
+      const kept = all.slice(0, CAP_QUEUED_SNAPSHOT_MAX);
+      const omitted = all.length - kept.length;
+      const last = kept[kept.length - 1];
+      if (omitted > 0 && last) {
+        kept[kept.length - 1] = { ...last, kickoffLabel: `${last.kickoffLabel} (+${omitted} more not shown)` };
+      }
+      capQueuedSnapshot[sessionId] = kept;
+    }
     // Crash/shutdown transcript backstop (same as the SIGTERM/SIGINT path): snapshot every LIVE
     // session's engine transcript before we exit. The restart kills every pty; resume re-attaches the
     // SAME engine JSONL so the happy path keeps it, but this is pure insurance for a session that fails
@@ -3136,6 +3161,7 @@ export class SessionService {
       ...(Object.keys(pending).length > 0 ? { pending } : {}),
       ...(Object.keys(pendingHolds).length > 0 ? { pendingHolds } : {}),
       ...(Object.keys(pendingMintedAt).length > 0 ? { pendingMintedAt } : {}),
+      ...(Object.keys(capQueuedSnapshot).length > 0 ? { capQueued: capQueuedSnapshot } : {}),
     });
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
@@ -3908,6 +3934,41 @@ export class SessionService {
     // "X COMPLETE + DEPLOYED" escalation for the same SHA can be de-duped (card 5907b71e part 2).
     const reasonShas = extractCommitShas(intent.reason);
 
+    // Card a1b79655: this manager's/platform's cap-queued worker_spawn intent(s), if any, were silently
+    // discarded by this restart — CapQueueRegistry is deliberately in-memory-only and is never re-loaded
+    // on boot (see its own class doc; requestDaemonRestart snapshots the PUBLIC projection into the intent
+    // right before exit, purely so this note can be written). INFORMATIONAL ONLY: this never re-queues or
+    // re-admits anything, it only tells the affected manager/platform what's gone so it can re-`worker_spawn`
+    // by hand if still needed.
+    //
+    // DEFENSIVE per-entry, mirroring `replayPending`'s own guard above (SAME reasoning, SAME blast radius):
+    // `intent` is un-versioned on-disk JSON an older/future daemon binary (or a rollback landing in the
+    // exit-75-to-relaunch gap — see RestartIntent's own doc, and CLAUDE.md's documented two-daemon setup)
+    // could write in a shape this daemon doesn't expect. `resumeFleetOnBoot` has no per-call try/catch of
+    // its own and `clearRestartIntent()` has already run by the time this fires (index.ts), so an uncaught
+    // throw here would abort resuming every LATER session in the fleet with the intent file already
+    // gone — nothing left to retry from. Skip-and-log beats fail-fast for this one caller.
+    const capQueuedNote = (id: string): string => {
+      const raw = intent.capQueued?.[id];
+      if (!Array.isArray(raw) || raw.length === 0) return "";
+      const parts: string[] = [];
+      raw.forEach((c, i) => {
+        try {
+          if (!c || typeof c !== "object" || typeof c.opId !== "string" || typeof c.kickoffLabel !== "string") {
+            console.warn(`[restart] ${id} skipped a malformed capQueued entry at index ${i} (expected {opId,kickoffLabel,...}) — a corrupted or foreign-version restart-intent file`);
+            return;
+          }
+          const taskId = typeof c.taskId === "string" ? c.taskId : "taskless";
+          const queuedAt = typeof c.queuedAt === "string" ? c.queuedAt : "unknown time";
+          parts.push(`opId ${c.opId} (task ${taskId}, queued ${queuedAt}): "${c.kickoffLabel}"`);
+        } catch (e) {
+          console.warn(`[restart] ${id} failed to read a capQueued entry at index ${i}: ${(e as Error)?.message ?? e}`);
+        }
+      });
+      if (parts.length === 0) return "";
+      return ` ⚠️ ${parts.length} cap-queued worker_spawn intent(s) you had pending were DROPPED by this restart (the cap-queue is in-memory only and never survives a restart, by design) — re-call worker_spawn yourself for any still needed: ${parts.join("; ")}`;
+    };
+
     const reqWorkers = entries.filter((e) => e.role === "worker" && e.parentSessionId === reqId).map((e) => e.sessionId);
 
     // Resume everyone EXCEPT the requesting manager first (it gets the last word + its own summary nudge).
@@ -3935,6 +3996,10 @@ export class SessionService {
         // The reason names the SHA — record it so a later completion escalation for the same SHA is a
         // recognized duplicate (part 2). Done for BOTH wake kinds: an unaffected bystander still "saw" it.
         this.recordDeployShasDelivered(e.sessionId, reasonShas);
+        // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
+        // actionable information distinct from board-impact classification, so it must never be suppressed
+        // by the no-op/idle branch below either.
+        const capNote = capQueuedNote(e.sessionId);
         if (isNoOpManagerWake(impact)) {
           // card b5664b5b (Problems A + C1), narrowed further by 61cc91c6: a non-causal bystander this
           // restart did NOT touch (no workers resumed, no queued I/O, no unconsumed answer, no STRANDED
@@ -3947,8 +4012,9 @@ export class SessionService {
           // escalation manager, or any platform/Lead — see strandedBoardWork) still forces it. A merely
           // PENDING (unanswered) owner question still never forces a turn either — only an ANSWERED,
           // not-yet-pulled one does (hasUnconsumedAnswer), since that's genuinely new for this session.
-          // EXCEPT a lost draft: that's actionable regardless of impact, so it still gets a minimal turn.
-          if (draftNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          // EXCEPT a lost draft or a dropped cap-queue entry: both are actionable regardless of impact, so
+          // either still gets a minimal turn.
+          if (draftNote || capNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
@@ -3971,14 +4037,14 @@ export class SessionService {
               e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
-              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
+              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           } else {
             this.enqueueNudge(
               e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
-              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote,
+              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           }
         }
@@ -4026,6 +4092,9 @@ export class SessionService {
         this.recordDeployShasDelivered(reqId, reasonShas);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
         const reqDraftNote = entries.find((e) => e.sessionId === reqId)?.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
+        // Card a1b79655: the requester can ALSO have had its own cap-queued intent(s) dropped by the very
+        // restart it triggered — same additive treatment as reqDraftNote.
+        const reqCapNote = capQueuedNote(reqId);
         // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
         // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
         // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
@@ -4055,11 +4124,11 @@ export class SessionService {
           ? `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
             `running daemon (reason: ${intent.reason}). The whole fleet across all projects was resumed too. ` +
             `Re-orient from your home board and your living resume doc, then end-to-end verify the live ` +
-            `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote
+            `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote
           : `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
             `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
             `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-            `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote;
+            `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
         this.enqueueNudge(reqId, reqRole, reqText);
       }
     } else {
