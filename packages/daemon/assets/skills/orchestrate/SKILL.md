@@ -27,7 +27,8 @@ there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md
 
 The `loom-orchestration` MCP surface — no human relay:
 `worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_message`, `worker_redirect`,
-`worker_flush`, `worker_stop`, `worker_recycle`, and the two-step `worker_merge` → `worker_merge_confirm`.
+`worker_flush`, `worker_stop`, `worker_recycle`, `worker_reap`, and the two-step `worker_merge` →
+`worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
 while you're mid-turn is held in your inbox and otherwise drains ONE-per-turn as a separate (often
 already-handled) turn — call **`inbox_pull`** to return AND clear your whole queued inbox in one shot.
@@ -771,6 +772,14 @@ what you checked. Found none? Treat it as live.
    one; and pass screenshot calls an
    **ABSOLUTE path under an allowed root** (the per-session scratch dir or the project's vault path) or
    no path at all — never a bare filename, which lands in the repo working tree.
+
+   **A WORKER's own stray process — an escaped/detached dev server, a stuck test runner, a zombie left
+   behind after a crash — has a dedicated on-demand path: `worker_reap`.** It's daemon-executed and
+   strictly scoped to that worker's own worktree (matched by executable path/cwd/command line, never a
+   bare image name or port), and it doesn't stop the worker itself — reach for it instead of hand-rolling
+   a `kill`/`taskkill` Bash command yourself or asking the worker to (the daemon killing its own children
+   never routes through Claude Code's own auto-mode safety classifier, which a raw kill command may get
+   blocked by).
 
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm

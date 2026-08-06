@@ -242,21 +242,35 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    treat a zero THERE as a broken check, never as green. The same trap catches a grep for a
    definition/use-form pattern you only GUESSED at — read the real declaration before relying on one, and
    keep bare-token enumeration (list, don't count, the matches) as the fail-safe. **Stop any dev server
-   (or other long-running process) you started BEFORE you
-   `worker_report done` — and stop it SAFELY.** Terminate it via the handle you started it with (the child
-   process YOU spawned); don't re-discover it by process name or port. A stray dev server holds OS file
-   locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
-   gate's install/build step — and post-merge worktree cleanup — fails with a spurious `EPERM`/lock error
-   that looks like a broken gate but is really your process. **If you must find the process to kill it,
-   scope the match to its WORKTREE PATH and nothing else — not bare image name (every `node`/`esbuild`),
-   not port, not a session id, not a project id.** Image name and port are obviously broad, so they're easy
-   to reject; an id LOOKS precise, which is exactly why it's the dangerous one — a match on a shared
-   session or project id segment can surface every worktree that id has ever touched, including a
-   different session's still-running process and long-dead worktrees that happen to share the prefix. The
-   worktree path is the only selector that is actually yours. Getting this wrong reaches the human's own
-   dev servers, unrelated projects, and even the host daemon (it has already stopped an unrelated
-   process) — and a killed peer process doesn't announce itself as a kill, it reads as an unrelated
-   failure, so the victim misdiagnoses its own work instead of catching the real cause.
+   (or other long-running process) you started, and stop it SAFELY** — but time it right: **the risk
+   window opens the moment you run an install that rewrites `node_modules` (`npm ci`, `npm install`, or a
+   typecheck/test script that calls one), not "before you report done."** Loom already reaps
+   worktree-rooted stray processes for you before the merge gate, on worker stop, and before worktree
+   removal — so the gate and the merge-time cleanup are protected, and you never need to hunt a stray for
+   THEIR sake. But a live dev server (vite/esbuild and friends) holds OS file locks on binaries inside
+   its own `node_modules` (on Windows a live binary can't be unlinked), and — depending on the project's
+   own install shape, e.g. a gate step that reinstalls a subdirectory's deps — deleting and reinstalling
+   it out from under that running server can fail `EPERM`/lock **in your own foreground shell**, many
+   turns before any report. **The collateral tell:** a failed install can leave `node_modules`
+   half-removed, so the *next* command dies with an unrelated-looking `Cannot find package …` — if you
+   see that right after an install failed, suspect a still-running server of your own before you suspect
+   your diff. **The remedy is to stop the server you started, via the handle you started it with** (the
+   child process YOU spawned) — not to hunt for it. If your session also has the `/orchestrate` skill's
+   doctrine injected (check for `.claude/skills/orchestrate/scripts/dev-server.mjs`), launch your dev
+   server through that bundled tracked-pid helper instead of a bare background command, so you always
+   hold a clean pid to stop: `node .claude/skills/orchestrate/scripts/dev-server.mjs start
+   <your-worktree-dir> -- <command...>` to start, `... stop <your-worktree-dir>` to stop — otherwise just
+   stop the child process you spawned directly. Don't re-discover a lost handle by process name or port.
+   **If you ever do need to find a stray process to stop it, scope the match to its WORKTREE PATH and
+   nothing else — not bare image name (every `node`/`esbuild`), not port, not a session id, not a project
+   id.** Image name and port are obviously broad, so they're easy to reject; an id LOOKS precise, which is
+   exactly why it's the dangerous one — a match on a shared session or project id segment can surface
+   every worktree that id has ever touched, including a different session's still-running process and
+   long-dead worktrees that happen to share the prefix. The worktree path is the only selector that is
+   actually yours. Getting this wrong reaches the human's own dev servers, unrelated projects, and even
+   the host daemon (it has already stopped an unrelated process) — and a killed peer process doesn't
+   announce itself as a kill, it reads as an unrelated failure, so the victim misdiagnoses its own work
+   instead of catching the real cause.
    And if the project has an
    end-to-end / browser test suite, a **new or changed user-facing feature** ships with (or updates)
    a test in it, run green as part of the DoD — see the project's own testing docs (its `CLAUDE.md`).
