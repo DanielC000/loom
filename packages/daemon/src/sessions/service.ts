@@ -11618,6 +11618,19 @@ export class SessionService {
         // reclassification machinery this value feeds). Scoping it inside `if (inertSkip)` was the
         // original (pre-follow-up) choice and is exactly what left the window open, since by the time
         // `inertSkip` is known, classification has already happened.
+        //
+        // FULL COST ACCOUNT FOR THIS PATH — ONE account, not two (card 776fc8c9 folded a second,
+        // contradictory account that used to live 45 lines below this one into here): when `inertSkip`
+        // ends up true, this path makes THREE `resolveGitRef` calls total — this one (`preWaitBranchHead`,
+        // unconditional the instant this block is entered), plus `postWaitHead` and `postWaitBranchHead`
+        // further below, both gated on `inertSkip` and taken only once the repo guard is granted.
+        // `acquireRepoGuardOnly` resolving instantly (the common, uncontended case) makes all three cheap
+        // — but does NOT make the two below "the only added cost", the way an earlier version of this
+        // comment claimed: `postWaitBranchHead` is a second, distinct read this same card added, never
+        // folded into that older count. The short-circuit below requires BOTH pairs to match, not just the
+        // main-head pair — `postWaitHead === gateBaseMainHead` AND `postWaitBranchHead === preWaitBranchHead`
+        // — so either mismatch, or a failed resolve on either side, routes into re-derivation; a stale skip
+        // is no longer possible through the branch side alone.
         const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
         if (inertSkip) {
@@ -11657,12 +11670,8 @@ export class SessionService {
           // needed. `ac7aad04`'s original finding here is now fully closed on both endpoints, not just
           // main's.
           //
-          // Cheap in the common (uncontended) case: `acquireRepoGuardOnly` resolved instantly, so
-          // `postWaitHead` is virtually always identical to the pre-wait `gateBaseMainHead` and the extra
-          // `resolveGitRef` below is the only added cost — the same one-read-per-run price card b798e706
-          // already accepted for the analogous real-gate re-derivation (`reunionAtAdmission`). The merge
-          // OUTCOME for an uncontended run is unchanged: `postWaitHead === gateBaseMainHead` short-circuits
-          // before any second `isInertMergeDiff` call.
+          // Cost account for this read: see the SCOPE paragraph above `preWaitBranchHead` — folded there
+          // (card 776fc8c9) so this path has ONE cost account, not a second one contradicting it here.
           const postWaitHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
           // Card db413510: the branch-side counterpart to `postWaitHead` above, read at the same point
           // — see the doc block above for why this needs its own fresh pre/post pair rather than reusing
@@ -11702,6 +11711,24 @@ export class SessionService {
               // Reap first — this WRITES tracked files in the worktree exactly like the original
               // union-merge does, so it's equally lock-sensitive (mirrors the identical reap call ahead of
               // `reunionAtAdmission`'s own `mergeMainIntoWorktree` call below).
+              //
+              // CURRENT TRIGGER SET (documented per card 776fc8c9 — was never written down as it grew):
+              // this reap is only reached via the mismatch check above plus `postWaitHead && !preLanded`
+              // here, so it fires whenever `postWaitHead` resolved AND `!preLanded` AND at least one of —
+              // (1) main moved during the guard wait (`postWaitHead !== gateBaseMainHead`, the original
+              // `ac7aad04` trigger), or (2) the branch moved during the guard wait
+              // (`postWaitBranchHead !== preWaitBranchHead`, added alongside this card's own branch-blind
+              // fix) — which INCLUDES the benign inverted window where classification already accounted
+              // for the move, since this check can't distinguish "moved after classification" from "moved
+              // before, already seen" — or (3) the branch-tip re-read itself failed (`!postWaitBranchHead`,
+              // fail-closed). Verified against `7dd30886` (same day, this exact function): that commit
+              // touches ONLY `reunionAtAdmission`'s own separate emit-compare re-derivation further below,
+              // which does no worktree write and calls no reap of its own — it adds no fourth trigger to
+              // THIS reap call. Worker's pty is still live here (this card's own founding premise), so a
+              // dev server it started inside its own worktree can be reaped under (2)/(3) in cases the
+              // original main-moved-only trigger left alone. Judged NOT a defect (Code Review + card
+              // 776fc8c9): worktree-scoped and worker-pid-excluded, identical in kind to the already-shipped
+              // main-moved reap. If this needs narrowing, that's a separate card — not decided here.
               try {
                 await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
               } catch {

@@ -642,7 +642,6 @@ try {
     mkdirp(path.join(worktreePath, "src"));
     fs.writeFileSync(path.join(worktreePath, "src", "late.ts"), "export const late = true;\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "feat: late commit during the guard wait"`, { cwd: worktreePath });
-    const branchHeadAfterLateCommit = execSync(`git rev-parse HEAD`, { cwd: worktreePath }).toString().trim();
 
     // Sanity check main BEFORE releasing our hold — this is the actual "during the wait" window. (main
     // necessarily DOES move once we release and the confirm's own real gate squashes — that's the
@@ -666,8 +665,16 @@ try {
     check("(J) the late src file actually landed on main (proves this isn't a rejection masking the bug)",
       fs.existsSync(path.join(J.repo, "src", "late.ts")));
     check("(J) the docs note landed too", fs.existsSync(path.join(J.repo, "docs", "note.md")));
-    check("(J) worker's branch tip that actually landed is the POST-late-commit tip, not a stale pre-wait one",
-      branchHeadAfterLateCommit !== mainHeadBefore);
+    // DELETED (card 776fc8c9): a check here comparing `branchHeadAfterLateCommit` against `mainHeadBefore`
+    // is unconditionally true both pre-fix and post-fix — the worker's branch already diverged from main
+    // at test setup, so its tip differs from main's OLD head BY CONSTRUCTION, regardless of which verdict
+    // the inert-skip path reached. Re-pointing it at main's POST-MERGE head doesn't fix this either:
+    // `mergeBranch` squashes the branch BY NAME (see `sessions/service.ts`'s `mergeBranch(repoPath, branch,
+    // ...)` call), so the late commit's content lands on main identically whether the fix routed this
+    // through the real gate or not — the bug this scenario proves is about GATING, not about whether the
+    // content lands, so no comparison of "what landed" can discriminate it. The `existsSync(..., "src",
+    // "late.ts")` check above already proves the post-late-commit content is what's on main; the actual
+    // discriminating proof of the fix is "(J) the late src commit forced a REAL gate" above (gateRan/calls).
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
