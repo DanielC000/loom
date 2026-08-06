@@ -15,7 +15,7 @@ import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.j
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -31,6 +31,7 @@ import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lin
 import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
+import { listSkills as listSkillStore } from "../skills/store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
 import { retrieveProjectMemoryForKickoff } from "./project-memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
@@ -395,6 +396,16 @@ type ConfirmMergeResult = {
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
+  /** Card 64a30c79: set ONLY when this merge's squash commit touched `packages/daemon/assets/skills/
+   *  <name>/**` (see {@link changedSkillNames}) — i.e. only ever on Loom's own self-hosted repo, never any
+   *  other project. Names the skill(s) and, per skill, the CORRECT next step read from the live skill
+   *  store's own `customized` flag (never guessed): a pristine skill auto-advances at the next daemon
+   *  restart; a customized one needs an explicit adopt, which a restart will NOT do for it. `undefined`
+   *  for every merge that doesn't touch that prefix — byte-identical to before this field existed. Distinct
+   *  from the generic `warning` field above so it can't be silently absorbed into (or crowded out by) an
+   *  unrelated warning; echoed separately into the `[loom:merge-done]` nudge too (see
+   *  confirmWorkerMergeTracked's `msg` construction) so both DoD-1 surfaces carry it. */
+  skillWarning?: string;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -12074,6 +12085,31 @@ export class SessionService {
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
     const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null });
+    // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
+    // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
+    // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
+    // reading the diff of the squash commit that JUST landed (`merge.sha^..merge.sha`) rather than the
+    // pre-merge branch, so this only ever fires for what actually shipped. `changedSkillNames` fails closed
+    // to `[]` for every other merge (including every other project — only Loom's own self-hosted repo ever
+    // has this path), so `skillWarning` stays `undefined` there, byte-identical to before this existed.
+    let skillWarning: string | undefined;
+    if (merge.sha) {
+      const skillNames = await changedSkillNames(repoPath, `${merge.sha}^`, merge.sha, { timeoutMs: this.gitOpMs });
+      if (skillNames.length) {
+        // Read the REAL customized flag from the live store — never inferred/guessed (this card exists
+        // partly because a prior draft inferred it from an mtime coincidence and got it wrong). A name not
+        // found in the store (e.g. a brand-new skill not yet seeded) reads as pristine: correct, since it
+        // has nothing to customize yet and will be seeded fresh at the next restart either way.
+        const store = listSkillStore();
+        const describeSkill = (name: string): string => {
+          const entry = store.find((s) => s.name === name);
+          return entry?.customized
+            ? `${name} (customized — needs an explicit adopt; a restart will NOT advance it)`
+            : `${name} (pristine — live at the next daemon restart)`;
+        };
+        skillWarning = `skill change(s) not yet live for any agent: ${skillNames.map(describeSkill).join(", ")}`;
+      }
+    }
     // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds
     // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
     // manager knows cleanup is on it.
@@ -12136,8 +12172,8 @@ export class SessionService {
       ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
     };
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}) };
   }
 
   /**
@@ -12525,6 +12561,15 @@ export class SessionService {
         const concurrencyNote = outcome.ok && outcome.value.merged && outcome.value.concurrentGates !== undefined
           ? ` cap=${outcome.value.gateCap} concurrentGates=${outcome.value.concurrentGates} concurrentGatesMax=${outcome.value.concurrentGatesMax}`
           : "";
+        // Card 64a30c79 DoD 1: the SAME skill-liveness warning the sync result carries on `skillWarning`
+        // (see confirmWorkerMerge's own computation, above the `warning`/return construction) — echoed here
+        // too so a manager who only reads this async nudge (the common case for a slow gate) still sees it,
+        // not only a manager who happened to read the original tool-call return. Absent (stays "") for
+        // every merge that never touched packages/daemon/assets/skills/**, byte-identical to before this
+        // card existed.
+        const skillNote = outcome.ok && outcome.value.merged && outcome.value.skillWarning
+          ? ` ⚠ ${outcome.value.skillWarning}`
+          : "";
         // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
         // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
         // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
@@ -12536,7 +12581,7 @@ export class SessionService {
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${skillNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during

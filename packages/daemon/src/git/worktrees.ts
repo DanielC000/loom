@@ -2076,6 +2076,45 @@ export async function isInertMergeDiff(
   return paths.every((p) => INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)));
 }
 
+/** Prefix under which a Loom-bundled skill asset lives. Only Loom's OWN self-hosted repo ever has a path
+ *  under this prefix at all — every other project's diff simply never matches it, so {@link
+ *  changedSkillNames} is a true no-op there (card 64a30c79's negative control). Deliberately unrelated to
+ *  {@link INERT_MERGE_PATH_PREFIXES} above (a gate-SKIP allowlist) — this is a liveness-WARNING detector,
+ *  never a gate-eligibility signal; an assets/skills/** diff still gates exactly as before this existed. */
+const SKILL_ASSET_PREFIX = "packages/daemon/assets/skills/";
+
+/**
+ * Skill NAMES touched by the diff between `base` and `ref` under {@link SKILL_ASSET_PREFIX} — card
+ * 64a30c79: `skills/inject.ts` delivers a session's skills from the STORE (`<LOOM_HOME>/skills/<name>/
+ * SKILL.md`), never from `assets/` directly, so a merge that lands an `assets/skills/<name>/**` change is
+ * NOT live for any agent at merge time — only at the next daemon restart (a pristine/customized:false
+ * skill) or an explicit adopt (a customized skill, which a restart never advances). This function only
+ * DETECTS which skill(s) a diff touched; it asserts nothing about customization state (the caller reads
+ * that from the live skill store) and changes no skill-loading behavior itself.
+ *
+ * Deduplicated + sorted; empty for a diff that never touches this prefix. Fails closed to `[]` on any git
+ * error/timeout, same posture as {@link isInertMergeDiff} — a missed detection costs one missing (never a
+ * wrong) warning line.
+ */
+export async function changedSkillNames(
+  repoPath: string, base: string, ref: string, deps: BoundedGitDeps = {},
+): Promise<string[]> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  let paths: string[];
+  try {
+    paths = await changedPathsBetween(git, base, ref, timeoutMs);
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const p of paths) {
+    if (!p.startsWith(SKILL_ASSET_PREFIX)) continue;
+    const name = p.slice(SKILL_ASSET_PREFIX.length).split("/")[0];
+    if (name) names.add(name);
+  }
+  return [...names].sort();
+}
+
 /** Compiled-source and non-compiled-test path scopes {@link computeEmitCompareGate} classifies changed
  *  paths into — see that function's own doc for why only these two, and why everything else fails closed. */
 const EMIT_COMPARE_SRC_PREFIX = "packages/daemon/src/";
