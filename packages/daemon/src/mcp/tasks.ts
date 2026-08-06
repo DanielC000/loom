@@ -296,10 +296,17 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
  * lookup shells out to git, but stays cheap even over an unpaginated per-project call: ONE bounded,
  * cached git-log scan backs every task's O(1) map lookup here, not one git subprocess per task.
  */
-export async function listProjectTasks(
-  db: Db, projectId: string, opts: ListTasksOptions = {},
-): Promise<TaskWithMerged[] | TaskSummary[]> {
-  const { columns, excludeDone = true, includeBody = false, minPriority, idPrefix, titleContains, offset, limit, includeMerged = true } = opts;
+/**
+ * The FILTER core shared by {@link listProjectTasks} and {@link countProjectTasks} — applies every
+ * column/priority/id/title filter but no pagination, projection, or merged-state enrichment. Split out
+ * (card 9798200c) so a counts-only read never pays for the per-task git-derived `merged` lookup just to
+ * total up rows it's about to discard.
+ */
+function filterProjectTasks(
+  db: Db, projectId: string,
+  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains">,
+): Task[] {
+  const { columns, excludeDone = true, minPriority, idPrefix, titleContains } = opts;
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
     const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
@@ -320,6 +327,14 @@ export async function listProjectTasks(
     const needle = titleContains.toLowerCase();
     tasks = tasks.filter((t) => t.title.toLowerCase().includes(needle));
   }
+  return tasks;
+}
+
+export async function listProjectTasks(
+  db: Db, projectId: string, opts: ListTasksOptions = {},
+): Promise<TaskWithMerged[] | TaskSummary[]> {
+  const { includeBody = false, offset, limit, includeMerged = true } = opts;
+  let tasks = filterProjectTasks(db, projectId, opts);
   if (offset !== undefined) tasks = tasks.slice(offset);
   if (limit !== undefined) tasks = tasks.slice(0, limit);
   // Merged-state enrichment (card 9983eed6): one cached, bounded git-log scan per repo backs every
@@ -339,6 +354,34 @@ export async function listProjectTasks(
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
+}
+
+/** Per-column and per-priority totals — {@link countProjectTasks}'s return shape. */
+export interface TaskCounts {
+  total: number;
+  byColumn: Record<string, number>;
+  byPriority: Record<string, number>;
+}
+
+/**
+ * Count a project's board tasks by column and priority WITHOUT fetching row bodies or paying for the
+ * per-task merged-state git enrichment (card 9798200c) — the common "how many cards, by column/priority"
+ * question, answered in a few hundred bytes instead of the full filtered row set. Applies the SAME
+ * column/priority/id/title filters as {@link listProjectTasks} (offset/limit/includeBody/includeMerged
+ * don't apply to a count and are simply absent from the accepted options).
+ */
+export function countProjectTasks(
+  db: Db, projectId: string,
+  opts: Pick<ListTasksOptions, "columns" | "excludeDone" | "minPriority" | "idPrefix" | "titleContains"> = {},
+): TaskCounts {
+  const tasks = filterProjectTasks(db, projectId, opts);
+  const byColumn: Record<string, number> = {};
+  const byPriority: Record<string, number> = {};
+  for (const t of tasks) {
+    byColumn[t.columnKey] = (byColumn[t.columnKey] ?? 0) + 1;
+    byPriority[t.priority] = (byPriority[t.priority] ?? 0) + 1;
+  }
+  return { total: tasks.length, byColumn, byPriority };
 }
 
 /**

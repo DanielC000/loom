@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -41,7 +41,8 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
 export const DEFAULT_EVENTS_SEARCH_CAP = 50;
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
+import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, type TaskWithMerged, type TaskCounts } from "./tasks.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
@@ -2088,7 +2089,15 @@ export class PlatformMcpRouter {
           "offset+returned while more remains, else null. Page deterministically by calling again with " +
           "offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake " +
           "a bare array at the cap for 'that's everything'. A genuine no-match returns an explicit " +
-          "{ tasks: [], total, returned: 0, offset, nextOffset: null, message } payload, never a bare empty.",
+          "{ tasks: [], total, returned: 0, offset, nextOffset: null, message } payload, never a bare empty. " +
+          "ABOVE " + SPILL_INLINE_BUDGET_CHARS + " chars, the `tasks` rows are proactively written to a scratch " +
+          "file as NEWLINE-DELIMITED JSON (mirrors tasks_list's own spill) instead of inlining one giant " +
+          "JSON-escaped line — the response becomes {rowsFile,rowsChars,rowCount,note,total,returned,offset," +
+          "nextOffset}; page rowsFile with Read (offset/limit are LINE-based) or grep it, or re-call with a " +
+          "narrower filter/limit/offset to inline fewer rows instead. Pass countsOnly:true to answer \"how many " +
+          "cards, by column/priority\" WITHOUT fetching any row bodies — returns {total, byColumn, byPriority} " +
+          "(summed across every matching project when projectId is omitted) instead of the row set; includeBody/" +
+          "limit/offset are ignored in this mode.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
           includeBody: z.boolean().optional(),
@@ -2096,9 +2105,10 @@ export class PlatformMcpRouter {
           columns: z.array(z.string()).optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
+          countsOnly: z.boolean().optional(),
         }),
       },
-      async ({ projectId, includeBody, includeDone, columns, limit, offset }) => {
+      async ({ projectId, includeBody, includeDone, columns, limit, offset, countsOnly }) => {
         // projectId resolves EXACTLY like the sibling cross-project reads (project_get/project_task_get) —
         // full id OR unambiguous 8-char prefix, error on unknown/ambiguous — so it can never silently
         // read as an empty board (the Lead misread real boards as EMPTY this way — card 0c34189c).
@@ -2109,6 +2119,19 @@ export class PlatformMcpRouter {
           projectIds = [project.id];
         } else {
           projectIds = db.listAllProjects().map((p) => p.id);
+        }
+        // countsOnly short-circuits BEFORE any row fetch — never pays for row bodies or the merged-state git
+        // enrichment listProjectTasks does below (card 9798200c). Sums per-project counts (no git call, so
+        // running it per project rather than once over a flattened set costs nothing extra).
+        if (countsOnly) {
+          const perProjectCounts = projectIds.map((pid) => countProjectTasks(db, pid, { columns, excludeDone: !includeDone }));
+          const merged: TaskCounts = { total: 0, byColumn: {}, byPriority: {} };
+          for (const c of perProjectCounts) {
+            merged.total += c.total;
+            for (const [k, n] of Object.entries(c.byColumn)) merged.byColumn[k] = (merged.byColumn[k] ?? 0) + n;
+            for (const [k, n] of Object.entries(c.byPriority)) merged.byPriority[k] = (merged.byPriority[k] ?? 0) + n;
+          }
+          return ok(merged);
         }
         // Per-project FULL filtered rows (excludeDone/columns applied by listProjectTasks), concatenated,
         // then projected + paginated at the AGGREGATE level — so the cap bounds the whole feed, not each project.
@@ -2136,6 +2159,28 @@ export class PlatformMcpRouter {
         if (returned === 0) return ok({ tasks: [], total, returned: 0, offset: off, nextOffset: null, message: "no matching tasks" });
         const tasks = includeBody ? page : page.map(toTaskSummary);
         const explicit = offset !== undefined || limit !== undefined;
+        // Proactive NDJSON spill (card 9798200c): a wide cross-project read (e.g. 100+ backlog cards) can
+        // make JSON.stringify(tasks) big enough that the HOST's own opaque overflow-spill kicks in — and
+        // since that raw JSON is ONE line with no real newlines, the spilled file is unpageable (Read's
+        // offset/limit is line-based). Render NDJSON first and spill it OURSELVES via the same
+        // spillTextIfLarge primitive tasks_list's okLinesSpillable uses, before ever reaching that cap — real
+        // line breaks, Read/grep-pageable. Keyed off the effective query args so a repeat pull under the SAME
+        // filter combo overwrites rather than accumulates scratch-dir garbage.
+        const rowsText = tasks.map((r) => JSON.stringify(r)).join("\n");
+        // No caller session to spill against (should not happen on a real request path) — fall back to the
+        // pre-spill shape rather than pass an undefined recipient into spillTextIfLarge (mirrors
+        // session_transcript's own !callerSessionId guard above).
+        if (callerSessionId) {
+          const spillKey = `list-all-tasks-${createHash("sha1").update(JSON.stringify({ projectId: projectId ?? null, includeBody: !!includeBody, includeDone: !!includeDone, columns: columns ?? null, offset: off, limit: eff })).digest("hex").slice(0, 10)}`;
+          const spill = spillTextIfLarge(callerSessionId, "list-all-tasks-spills", spillKey, rowsText, SPILL_INLINE_BUDGET_CHARS);
+          if (!spill.inline) {
+            const note =
+              `${returned} rows are ${spill.chars} chars — too large to inline safely, so they were written to ` +
+              `${spill.file} as NDJSON (one JSON object per line, real line breaks, UTF-8) — page it with Read ` +
+              "(offset/limit are LINE-based) or grep it for a field/id. Re-call with a narrower filter/limit/offset to inline fewer rows instead.";
+            return ok({ rowsFile: spill.file, rowsChars: spill.chars, rowCount: returned, total, returned, offset: off, nextOffset, note });
+          }
+        }
         // Card 57cb355d: a capped read with NO cap signal let a caller mistake "capped at N" for "N total".
         // Mirror session_transcript's own shape — bare array when the whole matching set fit in one page
         // and the caller didn't page explicitly (today's behavior, unchanged); otherwise the envelope.

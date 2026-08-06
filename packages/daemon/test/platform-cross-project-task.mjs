@@ -362,23 +362,37 @@ try {
   // Unit: listProjectTasks honors offset/limit (pure slicing).
   const sliced = await listProjectTasks(db, "pBulk", { limit: 10, offset: 5 });
   check("(5) listProjectTasks honors limit/offset", sliced.length === 10 && sliced[0].id === "bulk-5");
+  // Card 9798200c: list_all_tasks now ALSO proactively spills its `tasks` rows to an NDJSON scratch file
+  // (mirrors tasks_list's okLinesSpillable) once they'd exceed SPILL_INLINE_BUDGET_CHARS — at BULK(105)
+  // rows with includeBody:true this crosses that budget, same growth pattern that already pushed the
+  // in-project tasks_list section below to follow a `rowsFile` pointer. Follow it here too so this
+  // section's row-count assertions hold regardless of how close a given row count sits to that budget.
+  const callTasks = async (args) => {
+    const r = await call("list_all_tasks", args);
+    if (r && typeof r === "object" && !Array.isArray(r) && typeof r.rowsFile === "string") {
+      const rows = fs.readFileSync(r.rowsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      const { rowsFile, rowsChars, rowCount, note, ...rest } = r;
+      return { ...rest, tasks: rows };
+    }
+    return r;
+  };
   // Card 57cb355d: list_all_tasks default is CAPPED, and — since this board's BULK(105) rows exceed the
   // cap — the default (no offset/limit passed) now returns the {tasks,total,returned,offset,nextOffset}
   // envelope instead of a bare capped array with no cap signal, mirroring session_transcript's own shape.
-  const capped = await call("list_all_tasks", { projectId: "pBulk", includeBody: true });
+  const capped = await callTasks({ projectId: "pBulk", includeBody: true });
   check("(5) list_all_tasks default (capped) returns the pagination envelope, not a bare array",
     !Array.isArray(capped) && Array.isArray(capped.tasks));
   check(`(5) list_all_tasks default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${capped.tasks.length})`, capped.tasks.length === DEFAULT_TASK_SUMMARY_CAP);
   check("(5) list_all_tasks envelope reports the TRUE total + a non-null nextOffset",
     capped.total === BULK && capped.returned === DEFAULT_TASK_SUMMARY_CAP && capped.offset === 0 && capped.nextOffset === DEFAULT_TASK_SUMMARY_CAP);
-  const pagedPast = await call("list_all_tasks", { projectId: "pBulk", includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 });
+  const pagedPast = await callTasks({ projectId: "pBulk", includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 });
   check("(5) list_all_tasks pages past the cap with an explicit limit (envelope, nextOffset:null — nothing left)",
     pagedPast.tasks.length === BULK && pagedPast.total === BULK && pagedPast.nextOffset === null);
-  const aggOff = await call("list_all_tasks", { projectId: "pBulk", limit: 10, offset: 5 });
+  const aggOff = await callTasks({ projectId: "pBulk", limit: 10, offset: 5 });
   check("(5) list_all_tasks honors limit/offset (envelope, nextOffset:15 — more remains)",
     aggOff.tasks.length === 10 && aggOff.offset === 5 && aggOff.nextOffset === 15);
   // Paging to the true end: offset:nextOffset from `capped` walks the remaining rows, ending at nextOffset:null.
-  const lastPage = await call("list_all_tasks", { projectId: "pBulk", includeBody: true, offset: capped.nextOffset });
+  const lastPage = await callTasks({ projectId: "pBulk", includeBody: true, offset: capped.nextOffset });
   check("(5) list_all_tasks offset:nextOffset walk reaches the end (nextOffset:null, no gaps/overlaps)",
     lastPage.tasks.length === BULK - DEFAULT_TASK_SUMMARY_CAP && lastPage.nextOffset === null &&
     lastPage.tasks[0].id === `bulk-${DEFAULT_TASK_SUMMARY_CAP}`);
