@@ -5036,7 +5036,23 @@ export class PtyHost {
                 // Card d005f55b — manager-supplied LIVE evidence: same precedence posture as
                 // `confirmedDivergedPrior` above (a stronger exact match, were one to also apply, wins) —
                 // reuses `wrapperDeficit`, already computed above alongside its own diagnostic log.
-                const confirmedWrapperDeficit = (replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && wrapperDeficit) ? wrapperDeficit : null;
+                // Card 854d1632 v5 (measured, not a guess): deliberately does NOT require
+                // `replayedEntry === undefined`, unlike `confirmedFusion`/`confirmedDivergedPrior` above.
+                // A benign wrapper deficit IS, essentially by construction, a recognized replay — the stale,
+                // out-of-order confirmation of an EARLIER bare write naturally matches that earlier write's
+                // own recorded text byte-for-byte, so `replayedEntry` is non-null in exactly the case this
+                // verdict exists to explain. Gating on it here reproduced the card's live incident: the
+                // classifier fired (see the diagnostic log above) but the session-facing notice below still
+                // took the `lossClause`'s "ESTABLISHED loss" branch, because `replayedEntry !== undefined`
+                // nulled this verdict first. Safe to reorder past `confirmedFusion`/`confirmedDivergedPrior`
+                // without touching their own `replayedEntry === undefined` guards: both are ALREADY always
+                // null whenever `replayedEntry !== undefined` (it's baked into their own conditions), so
+                // `!confirmedFusion && !confirmedDivergedPrior` alone still correctly defers to either when
+                // one applies — nothing here changes their own precedence. The real-loss case (a verbatim
+                // replay with NO wrapper on this generation's own intended text) stays unaffected:
+                // `detectPossibleDuplicateWrapperDeficit` returns null immediately when `intended` carries no
+                // possible-duplicate tag to strip, regardless of `replayedEntry` — see its own doc.
+                const confirmedWrapperDeficit = (!confirmedFusion && !confirmedDivergedPrior && wrapperDeficit) ? wrapperDeficit : null;
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
                 // duplicate-check advice in `replayNote` was correct and used correctly (per the card's

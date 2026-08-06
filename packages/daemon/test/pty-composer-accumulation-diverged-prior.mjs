@@ -38,6 +38,13 @@
 //      longer). `detectPossibleDuplicateWrapperDeficit` recognizes it precisely, by reusing the EXISTING
 //      `stripPossibleDuplicateFrame` (no new matcher), and the notice re-states the duplicate-check
 //      warning the missing tag would otherwise have carried.
+//   6. Card 854d1632 v5 — THE FIXTURE THAT MATTERS: scenario 5 above never has an EARLIER bare write in
+//      `recentWrittenTurns` matching the stripped text, so `replayedEntry` is naturally undefined there —
+//      not the real-world shape. A benign wrapper-deficit IS, essentially by construction, a recognized
+//      replay of an earlier generation's own bare write (the stale confirmation matches SOME prior write
+//      byte-for-byte) — this scenario builds that earlier write first, so both `wrapperDeficit` and
+//      `replayedEntry` are true simultaneously, and asserts the notice still says "NOT A LOSS", never the
+//      recognized-replay "ESTABLISHED loss" wording.
 //
 // Mirrors pty-composer-accumulation.mjs's harness: the REAL PtyHost state machine + a FAKE pty (createPty
 // seam) — NO real claude/daemon/network.
@@ -324,6 +331,82 @@ try {
     }
     check("5: NEGATIVE CONTROL — a same-length-delta mismatch that is NOT the real tag pattern does NOT confirm (exact regex match, not a bare length heuristic)", negLines.length === 0);
     host.deliverHook(sid2, { hook_event_name: "Stop" });
+  }
+
+  // ===== 6. Card 854d1632 v5 — THE FIXTURE THAT MATTERS: BOTH `wrapperDeficit` AND a recognized
+  // `replayedEntry` true simultaneously (mgr #132's own live specimen, gen=6: written 4015/`25346df7`,
+  // reported 3975/`d75430df`, Δ=-40, wrapper `[loom:possible-duplicate root:6641123c] `). Scenario 5
+  // above never has an earlier bare write for the stripped text to match, so it can't catch a guard that
+  // suppresses the wrapper-deficit verdict whenever a replay is ALSO recognized — this is that shape. =====
+  {
+    const sid = newSession("WrapperDeficitReplay"); SIDS.push(sid);
+    const baseText = "## Where you edit (your isolated git worktree)\nMake ALL edits here (gen=6 stand-in).";
+
+    // Gen 1: an ordinary bare write, reported back byte-identical — a clean turn that establishes
+    // recentWrittenTurns[gen=1] = baseText exactly. This is the "earlier, unwrapped write" the gen=2
+    // stale confirmation below will match.
+    host.enqueueStdin(sid, baseText);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: baseText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // Gen 2: Loom re-mints the SAME content, wrapped in a real possible-duplicate tag — but the engine's
+    // report is a stale, out-of-order confirmation of gen=1's own bare write: it matches baseText exactly,
+    // i.e. the tag stripped off AND byte-identical to gen=1's own recorded write. Both `wrapperDeficit`
+    // (reported === intended-with-tag-stripped) and `replayedEntry` (reported === a recorded prior write)
+    // are true for this one mismatch.
+    const intended = framePossibleDuplicate(baseText, "6641123c-aaaa-bbbb-cccc-dddddddddddd");
+    check("6: SETUP — the wrapped gen=2 write is NOT itself equal to gen=1's own bare write (a genuine mismatch, not a no-op)",
+      intended !== baseText);
+    host.enqueueStdin(sid, intended);
+    const fake = fakesById.get(sid);
+    const writesBefore = fake.writes.length;
+    const capturedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string") capturedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: baseText }); // stale confirmation of gen=1's own bare write
+    } finally {
+      console.log = origLog;
+    }
+    const deficitLines = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-wrapper-deficit] "));
+    check("6: SETUP — [prompt-mismatch-wrapper-deficit] fires (wrapperDeficit is true)", deficitLines.length === 1);
+
+    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6: the notice enqueues", enqueued);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeText = fake.writes.slice(writesBefore).join("");
+    check("6: POSITIVE CONTROL — the wrapper-deficit verdict WINS over a recognized replay: NOT A LOSS",
+      /NOT A LOSS/.test(noticeText));
+    check("6: it does NOT say ESTABLISHED loss (the exact bug this card fixes — a recognized replay used to null the wrapper-deficit verdict)",
+      !/ESTABLISHED loss/.test(noticeText));
+    check("6: it does NOT use the generic \"possible LOSS\" framing either", !/possible LOSS/.test(noticeText));
+    check("6: it names the corrected mechanism (a stale, out-of-order confirmation)", /STALE, out-of-order confirmation/.test(noticeText));
+  }
+
+  // ===== 6b. NEGATIVE CONTROL — the real-loss shape MUST be preserved: a recognized replay with NO
+  // possible-duplicate wrapper on the current generation's own intended text (so `wrapperDeficit` is
+  // structurally null — `detectPossibleDuplicateWrapperDeficit` returns null immediately when `intended`
+  // carries no tag to strip) must still read as ESTABLISHED loss. Mirrors the Platform Lead's own live
+  // incident (gen=10: written 1402, reported 479, Δ=-923, verbatim replay, no wrapper, never re-minted). =====
+  {
+    const sid = newSession("RealLossNoWrapper"); SIDS.push(sid);
+    const genAText = "[loom:worker-report] worker AAAA — generation A's own real report (gen=6b stand-in)";
+    const genBText = "[loom:worker-report] worker BBBB — generation B's own real report, never actually delivered";
+    host.enqueueStdin(sid, genAText);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, genBText); // gen=2, no possible-duplicate wrapper on genBText
+    const fake = fakesById.get(sid);
+    const writesBefore = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText }); // verbatim replay of gen=1
+    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6b: the notice enqueues", enqueued);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeText = fake.writes.slice(writesBefore).join("");
+    check("6b: NEGATIVE CONTROL — an unwrapped verbatim replay still reads as ESTABLISHED loss (the real-loss case is NOT reassured by this fix)",
+      /ESTABLISHED/.test(noticeText) && /did not reach you/.test(noticeText));
+    check("6b: it does NOT say NOT A LOSS (that wording is reserved for a genuine wrapper deficit)", !/NOT A LOSS/.test(noticeText));
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
