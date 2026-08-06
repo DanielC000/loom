@@ -14,13 +14,20 @@
 //       Started "<command...>" in <dir> (pid <pid>)
 //       Log: <path to the child's captured stdout/stderr>
 //       Stop with: node dev-server.mjs stop <dir>
-//       Bound port: <port> (recorded to the tracking file)   [or a "not detected" note — see below]
-//     Records {pid, command, dir, startedAt, logFile, port} to a tracking file keyed off <dir>'s
-//     absolute path (see trackingFilePath) so a LATER, separate `stop` invocation — even from a
-//     different shell — can find and kill EXACTLY this process. `port` starts `null` and is filled in
-//     once the child's own startup banner (e.g. Vite's "Local: http://localhost:5173/") appears in its
-//     captured output — see PORT DETECTION below. Refuses to start a second tracked server over an
-//     already-tracked, still-alive one for the same <dir>; stop the first one before starting another.
+//       Bound: <url> (recorded to the tracking file)   [or a "not detected" note — see below]
+//     Records {pid, command, dir, startedAt, logFile, port, host, url} to a tracking file keyed off
+//     <dir>'s absolute path (see trackingFilePath) so a LATER, separate `stop` invocation — even from a
+//     different shell — can find and kill EXACTLY this process. `port`/`host`/`url` start `null` and are
+//     filled in once the child's own startup banner (e.g. Vite's "Local: http://localhost:5173/")
+//     appears in its captured output — see PORT DETECTION below. **A consumer must use `url` AS GIVEN,
+//     never rebuild it from `port` alone** — the banner's reported HOST is captured alongside the port
+//     precisely because a bare port doesn't determine a reachable URL: the same port can be reachable at
+//     `127.0.0.1` on one server and refuse that same address while answering at `[::1]` (or vice versa)
+//     on another, entirely healthy one — the binding is the server's own choice, and guessing wrong reads
+//     as "the server didn't start" against a server that's fine. `host` is the same value made directly
+//     usable (see the `0.0.0.0` note below); `url` is `host`+`port` already assembled — use it verbatim.
+//     Refuses to start a second tracked server over an already-tracked, still-alive one for the same
+//     <dir>; stop the first one before starting another.
 //
 //   node dev-server.mjs stop <dir>
 //     Reads the tracking file for <dir>, kills the tracked pid (+ its process tree) BY THAT EXACT PID,
@@ -64,10 +71,10 @@
 // already gave the supervisor, so `killTracked`'s `-pid` group-kill reaches it too — unchanged.
 //
 // Bounded (LOOM_DEV_SERVER_PORT_TIMEOUT_MS, default 15000ms) so a framework that never announces a port —
-// or is just slow to boot — doesn't hang `start` forever; on timeout the tracking file's `port` stays
-// `null` for good (nothing keeps polling the log after `start`'s own process exits) and the printed log
-// path is the fallback — grep it directly once the child catches up, or raise the timeout if this
-// framework is just slow to boot.
+// or is just slow to boot — doesn't hang `start` forever; on timeout the tracking file's `port`/`host`/
+// `url` stay `null` for good (nothing keeps polling the log after `start`'s own process exits) and the
+// printed log path is the fallback — grep it directly once the child catches up, or raise the timeout if
+// this framework is just slow to boot.
 // SAFETY (the reason this helper exists): `stop` only ever acts on the pid THIS SAME HELPER recorded
 // in `start` for that exact <dir> — never a name/port/netstat search, never a bash `$!` (which on
 // Windows is the shell's pid, not the real listener). It never touches any process it didn't itself
@@ -109,12 +116,25 @@ function logFilePath(absDir) {
   return path.join(os.tmpdir(), `loom-dev-server-${pathHash(absDir)}.log`);
 }
 
-// Matches the port a dev server's own startup banner reports it bound to — Vite ("Local:
+// Matches the host:port a dev server's own startup banner reports it bound to — Vite ("Local:
 // http://localhost:5173/"), Next.js ("- Local: http://localhost:3000"), webpack-dev-server ("Loopback:
 // http://localhost:8080/"), and similar frameworks that print a loopback (or all-interfaces) URL.
 // Deliberately generic rather than tied to one framework's exact wording, since `start` spawns an
-// ARBITRARY command and cannot know in advance which one.
-const PORT_BANNER_RE = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])\D{0,5}(\d{2,5})\b/i;
+// ARBITRARY command and cannot know in advance which one. Captures BOTH the host token (group 1, exactly
+// as the banner wrote it) and the port (group 2) — a consumer needs the host too: the same port can be
+// reachable at `127.0.0.1` on one server and refuse that address while answering at `[::1]` on another
+// (or the reverse), so recording only the port and inviting a rebuild guesses at the host either way.
+const PORT_BANNER_RE = /(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])\D{0,5}(\d{2,5})\b/i;
+
+// Maps a banner-reported host token to a host a consumer can actually connect to. Every token except
+// `0.0.0.0` is already concrete and passes through verbatim (`[::1]` keeps its own brackets, ready to
+// drop straight into a URL). `0.0.0.0` means "all interfaces" — it is the server's BIND address, not an
+// address anything can CONNECT to — so a consumer needs a concrete loopback host instead; `127.0.0.1` is
+// the one guaranteed to reach an any-interfaces bind (an any-interfaces server also accepts IPv6 loopback
+// on many platforms, but IPv4 loopback is the one guaranteed by the `0.0.0.0` bind itself).
+function urlHost(bannerHost) {
+  return bannerHost === "0.0.0.0" ? "127.0.0.1" : bannerHost;
+}
 
 // Strips ANSI/VT100 SGR escape sequences before matching — Vite (and most colorized CLIs) wraps just
 // the port digits in their own color codes (`\x1b[1m5317\x1b[22m`), and an SGR code commonly contains a
@@ -136,8 +156,8 @@ const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
 
 // Scans line by line (a banner is one URL per line in every framework observed) rather than the whole
 // blob, so DECOY_CONTEXT_RE can be scoped to the SAME line the port appears on. Returns the first
-// AFFIRMED (non-excluded + keyword-matched) candidate if one exists, else the first non-excluded
-// candidate, else null — never a decoy line, even if it's the only match in the log.
+// AFFIRMED (non-excluded + keyword-matched) candidate {host, port} if one exists, else the first
+// non-excluded candidate, else null — never a decoy line, even if it's the only match in the log.
 // KNOWN LIMIT (stated, not silently assumed): this is a heuristic, not a proof — a framework whose
 // banner happens to use none of BOUND_AFFIRMATION_RE's words falls back to "first non-excluded", which
 // is wrong if THAT line is itself an undetected decoy this list doesn't yet know to exclude, or if a
@@ -145,7 +165,7 @@ const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
 // banner. Generalizing further (e.g. verifying the candidate is actually listening) doesn't strictly
 // dominate this: the observed real case (a reverse-proxy target) is genuinely alive too — it's the
 // daemon — so a liveness check alone cannot tell it apart from the real bind.
-function extractPort(logPath) {
+function extractBinding(logPath) {
   let content;
   try {
     content = fs.readFileSync(logPath, "utf8");
@@ -158,21 +178,22 @@ function extractPort(logPath) {
     if (DECOY_CONTEXT_RE.test(line)) continue;
     const m = PORT_BANNER_RE.exec(line);
     if (!m) continue;
-    if (BOUND_AFFIRMATION_RE.test(line)) return Number(m[1]);
-    if (firstNonDecoy == null) firstNonDecoy = Number(m[1]);
+    const candidate = { host: m[1], port: Number(m[2]) };
+    if (BOUND_AFFIRMATION_RE.test(line)) return candidate;
+    if (firstNonDecoy == null) firstNonDecoy = candidate;
   }
   return firstNonDecoy;
 }
 
-// Poll the log file for the child's own bound-port banner, bounded — see PORT DETECTION above.
-async function waitForPort(logPath, timeoutMs) {
+// Poll the log file for the child's own bound-host:port banner, bounded — see PORT DETECTION above.
+async function waitForBinding(logPath, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const port = extractPort(logPath);
-    if (port != null) return port;
+    const binding = extractBinding(logPath);
+    if (binding != null) return binding;
     await new Promise((r) => setTimeout(r, 100));
   }
-  return extractPort(logPath);
+  return extractBinding(logPath);
 }
 
 // The DETACHED, TRACKED process `start` spawns is this supervisor, not the real command — see the
@@ -282,19 +303,23 @@ async function start(dir, cmdArgs) {
     process.exit(1);
   }
   child.unref();
-  writeTracked(absDir, { pid: child.pid, command: cmdArgs, dir: absDir, startedAt: new Date().toISOString(), logFile: logPath, port: null });
+  writeTracked(absDir, { pid: child.pid, command: cmdArgs, dir: absDir, startedAt: new Date().toISOString(), logFile: logPath, port: null, host: null, url: null });
   console.log(`Started "${cmdArgs.join(" ")}" in ${absDir} (pid ${child.pid})`);
   console.log(`Log: ${logPath}`);
   console.log(`Stop with: node ${SELF} stop ${dir}`);
 
   const timeoutMs = Number(process.env.LOOM_DEV_SERVER_PORT_TIMEOUT_MS || 15000);
-  const port = await waitForPort(logPath, timeoutMs);
-  if (port != null) {
+  const binding = await waitForBinding(logPath, timeoutMs);
+  if (binding != null) {
+    const host = urlHost(binding.host);
+    const url = `http://${host}:${binding.port}/`;
     const current = readTracked(absDir);
-    if (current && current.pid === child.pid) writeTracked(absDir, { ...current, port });
-    console.log(`Bound port: ${port} (recorded to the tracking file)`);
+    if (current && current.pid === child.pid) writeTracked(absDir, { ...current, port: binding.port, host, url });
+    // Print the URL, not just the port — see the top-of-file note: a consumer must use it AS GIVEN,
+    // never rebuild it from the port, since the same port can be unreachable at a guessed host.
+    console.log(`Bound: ${url} (recorded to the tracking file)`);
   } else {
-    console.log(`Bound port not detected within ${timeoutMs}ms — the tracking file's port stays unset (nothing keeps watching after this command exits); grep ${logPath} directly once the server has finished starting, or raise LOOM_DEV_SERVER_PORT_TIMEOUT_MS if this framework is just slow to boot.`);
+    console.log(`Bound host:port not detected within ${timeoutMs}ms — the tracking file's port/host/url stay unset (nothing keeps watching after this command exits); grep ${logPath} directly once the server has finished starting, or raise LOOM_DEV_SERVER_PORT_TIMEOUT_MS if this framework is just slow to boot.`);
   }
 }
 

@@ -32,11 +32,18 @@ has ever touched, not just the one you mean. Launch it through the **bundled** h
 records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search):
 `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
 the pid, then waits briefly for the command's own startup banner (e.g. Vite's `Local:
-http://localhost:5173/`) to appear in its captured log and prints the **actual bound port** — the one
-the command really bound, not necessarily the one it was asked for (a dev server commonly steps to the
-next free port under contention). That same port is recorded to the helper's tracking file, so eyeball
-via Playwright at that bound port — never assume a default, and never re-derive it from the raw command
-output yourself; the helper already did that. Then
+http://localhost:5173/`) to appear in its captured log and prints the **actual bound URL** — built from
+the host the command's own banner reported, not a guessed one, and the port it really bound, not
+necessarily the one it was asked for (a dev server commonly steps to the next free port under
+contention). That URL is recorded to the helper's tracking file (`url`, alongside the raw `host`/`port`
+it was built from) — eyeball via Playwright at that **recorded URL, used exactly as given**. 🔴 **Never
+reassemble a URL from the bare port yourself** (`http://127.0.0.1:<port>` or `http://localhost:<port>`) —
+the host a server actually answers on is that server's own choice, not something a consumer can safely
+guess: the same port can be reachable at one loopback address and refuse the other on a perfectly healthy
+server, so a guessed host can fail with a connection error that reads as "the server didn't start" against
+a server that's fine. If an older tracking file has no `url` (written before this helper recorded one),
+`stop` the tracked server and `start` it again for a fresh tracking file that includes one, or read the
+helper's own printed log directly for the server's startup banner in the meantime. Then
 `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
 merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
 `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by

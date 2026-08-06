@@ -735,10 +735,13 @@ what you checked. Found none? Treat it as live.
    *deployed* build is stale — so your post-deploy integrated pass must hit the **deployed/served**
    target, not just trust the worker's dev-server check (see *A project that runs its own deployed
    instance* below). And a worker that assumes a default dev-server port can verify another process's
-   STALE server and report a false pass — workers must assert the bound port from the tracked server
-   process itself: **read it from the tracked-pid helper's own tracking file** (`references/
-   serving-and-capture.md`, under this skill's own directory), never assume a default. Hold both when you
-   review a browser-capable worker's "verified live."
+   STALE server and report a false pass — workers must assert the bound URL from the tracked server
+   process itself: **read it from the tracked-pid helper's own tracking file, and use its recorded `url`
+   AS GIVEN** (`references/serving-and-capture.md`, under this skill's own directory), never assume a
+   default and never reassemble a URL from the bare port yourself — the same port can be reachable at one
+   loopback host and refuse another on a perfectly healthy server, so a guessed host fails exactly like
+   "the server never started" against a server that's fine. Hold both when you review a browser-capable
+   worker's "verified live."
 
    **Even the right bound URL isn't proof of the right data** — a dev server can silently fall back onto
    a different live default and serve another instance's data while everything still renders looking

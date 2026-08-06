@@ -24,8 +24,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       e.g. Vite) is FORCED to bind one higher; the recorded port must differ from the held one, must be
 //       genuinely accepting connections (not just a text match), and must survive a completely separate
 //       `stop` invocation re-reading it fresh from the tracking file (not just echoed once by `start`).
+//   (g) card 1494d3d9 — the `0.0.0.0` mapping: a server bound to ALL interfaces isn't reachable AT
+//       `0.0.0.0` itself, so the recorded url must map it to a concrete loopback host (`127.0.0.1`).
+//   (h) card 1494d3d9 — THE POSITIVE CONTROL: a REAL single-stack (IPv6-loopback-ONLY) fixture proves the
+//       recorded url connects where a naively-rebuilt `127.0.0.1` guess does not, against the SAME live,
+//       healthy server — the exact failure class measured on this box against this repo's own `pnpm web`
+//       (Vite bound `[::1]` only; `127.0.0.1` got ECONNREFUSED against a perfectly healthy server). A
+//       dual-stack fixture would prove nothing here — either guess would connect.
+//   (i) card 1494d3d9 DoD-5 — backward compatibility: `stop` tolerates a hand-authored OLD-shape tracking
+//       file (port only, no host/url) without crashing.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -79,7 +90,7 @@ try {
   const startResult = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000, env: FAST_PORT_TIMEOUT_ENV });
   check("(a) start exits 0", startResult.status === 0);
   check("(a) start prints the log path", /^Log: /m.test(startResult.stdout || ""));
-  check("(a) start reports the port as not detected (the fixture never announces one)", /Bound port not detected/.test(startResult.stdout || ""));
+  check("(a) start reports the binding as not detected (the fixture never announces one)", /Bound host:port not detected/.test(startResult.stdout || ""));
   const startMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
   check("(a) start prints a pid", !!startMatch);
   trackedPid = startMatch ? Number(startMatch[1]) : null;
@@ -195,6 +206,18 @@ function canConnect(port, timeoutMs = 2000) {
   });
 }
 
+// Like canConnect, but against an ARBITRARY host (not just 127.0.0.1) — needed for sections (g)/(h)
+// below, which must prove a connection succeeds or fails against a SPECIFIC host string (a URL's own
+// `.hostname`, already bracket-stripped by the WHATWG URL parser for an IPv6 literal).
+function canConnectHost(host, port, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port, timeout: timeoutMs });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => resolve(false));
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+  });
+}
+
 const portWorkDir = mkdtempManaged("loom-dev-server-port-");
 let portTrackedPid = null;
 let decoyServer = null;
@@ -222,9 +245,14 @@ try {
   const portStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
   portTrackedPid = portStartMatch ? Number(portStartMatch[1]) : null;
 
-  const boundMatch = /Bound port: (\d+)/.exec(startResult.stdout || "");
-  check("(f) start prints the ACTUAL bound port", !!boundMatch);
-  const recordedPort = boundMatch ? Number(boundMatch[1]) : null;
+  const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+  check("(f) start prints a Bound: url line", !!boundMatch);
+  const boundUrl = boundMatch ? boundMatch[1] : null;
+  let boundParsed = null;
+  try { boundParsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+  check("(f) start's bound url parses and carries the ACTUAL bound port", boundParsed != null);
+  check("(f) recorded host is the banner's own token (localhost), captured alongside the port", boundParsed != null && boundParsed.hostname === "localhost");
+  const recordedPort = boundParsed ? Number(boundParsed.port) : null;
 
   check(
     "(f) recorded port differs from the configured/decoy-proxy-line port — proves it's neither echoing " +
@@ -266,7 +294,172 @@ try {
   if (decoyServer) { try { decoyServer.close(); } catch { /* best effort */ } }
 }
 
+// (g) card 1494d3d9 DoD-2 — the `0.0.0.0` mapping. A server bound to ALL interfaces isn't reachable AT
+// `0.0.0.0` itself (that's a BIND address, not something anything can CONNECT to) — the helper must map
+// it to a concrete loopback host (`127.0.0.1`) rather than emitting an unusable url verbatim.
+const anyIfaceFixtureSrc = [
+  "const net = require('net');",
+  "const srv = net.createServer(() => {});",
+  "srv.listen(0, '0.0.0.0', () => {",
+  "  const actual = srv.address().port;",
+  "  console.log('  \\u001b[32m\\u2192\\u001b[39m  \\u001b[1mLocal\\u001b[22m:   \\u001b[36mhttp://0.0.0.0:\\u001b[1m' + actual + '\\u001b[22m/\\u001b[39m');",
+  "});",
+].join("\n");
+const anyIfaceScript = path.join(fixtureDir, "any-iface-server.cjs");
+fs.writeFileSync(anyIfaceScript, anyIfaceFixtureSrc);
+const anyIfaceWorkDir = mkdtempManaged("loom-dev-server-anyiface-");
+let anyIfaceTrackedPid = null;
+
+try {
+  const startResult = spawnSync(
+    process.execPath,
+    [HELPER, "start", anyIfaceWorkDir, "--", process.execPath, anyIfaceScript],
+    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+  );
+  check("(g) start (0.0.0.0 bind) exits 0", startResult.status === 0);
+  const anyIfaceStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+  anyIfaceTrackedPid = anyIfaceStartMatch ? Number(anyIfaceStartMatch[1]) : null;
+
+  const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+  check("(g) start prints a Bound: url line", !!boundMatch);
+  const boundUrl = boundMatch ? boundMatch[1] : null;
+  let parsed = null;
+  try { parsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+  check(
+    "(g) 0.0.0.0 is mapped to a concrete loopback host (127.0.0.1), never emitted verbatim as an " +
+      "unreachable bind address",
+    parsed != null && parsed.hostname === "127.0.0.1",
+  );
+
+  const reallyBound = parsed != null && await canConnectHost(parsed.hostname, Number(parsed.port));
+  check("(g) the mapped 127.0.0.1 url genuinely connects to the 0.0.0.0-bound server", reallyBound);
+
+  // Tear down via the helper's OWN `stop` (taskkill /T on win32) — the tracked pid is the SUPERVISOR
+  // (see dev-server.mjs's own SUPERVISOR note); a bare SIGKILL on just that pid leaves its real child
+  // (the actual net server holding this section's cwd) alive as an orphan, which then blocks this temp
+  // dir's own cleanup at process exit (EBUSY) — `stop` is what correctly kills the whole subtree.
+  spawnSync(process.execPath, [HELPER, "stop", anyIfaceWorkDir], { encoding: "utf8", timeout: 10_000 });
+} catch (e) {
+  console.log(`FAIL  unexpected error (0.0.0.0 mapping control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (anyIfaceTrackedPid != null && isAlive(anyIfaceTrackedPid)) { try { process.kill(anyIfaceTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
+// (h) card 1494d3d9 DoD-4 — THE POSITIVE CONTROL. Measured on this box against this repo's own real
+// `pnpm web` (Vite): the dev server bound `[::1]` ONLY — `http://localhost:5317/` (equivalently
+// `http://[::1]:5317/`) connected, `http://127.0.0.1:5317/` got ECONNREFUSED against a perfectly healthy
+// server. A DUAL-STACK fixture would prove nothing here — either guess would connect, which is exactly
+// why this fixture binds IPv6 LOOPBACK ONLY: a genuine single-stack specimen, not a synthetic stand-in
+// that happens to pass either way.
+const ipv6OnlyFixtureSrc = [
+  "const net = require('net');",
+  "const srv = net.createServer(() => {});",
+  "srv.listen(0, '::1', () => {",
+  "  const actual = srv.address().port;",
+  "  console.log('  \\u001b[32m\\u2192\\u001b[39m  \\u001b[1mLocal\\u001b[22m:   \\u001b[36mhttp://[::1]:\\u001b[1m' + actual + '\\u001b[22m/\\u001b[39m');",
+  "});",
+].join("\n");
+const ipv6OnlyScript = path.join(fixtureDir, "ipv6-only-server.cjs");
+fs.writeFileSync(ipv6OnlyScript, ipv6OnlyFixtureSrc);
+const ipv6WorkDir = mkdtempManaged("loom-dev-server-ipv6only-");
+let ipv6TrackedPid = null;
+
+try {
+  // Confirm THIS host can actually bind IPv6 loopback before trusting the rest of this section — if it
+  // can't, `start` would fail for an environment reason unrelated to the code under test, and every
+  // downstream check here would be meaningless. Logged explicitly (never a silent skip) so a genuine
+  // gap in coverage on some future host is visible, not mistaken for a pass.
+  const probeSrv = net.createServer(() => {});
+  const canBindV6 = await new Promise((resolve) => {
+    probeSrv.once("error", () => resolve(false));
+    probeSrv.listen(0, "::1", () => resolve(true));
+  });
+  if (canBindV6) await new Promise((r) => probeSrv.close(r));
+
+  if (!canBindV6) {
+    console.log("SKIP  (h) IPv6-loopback positive control — this host cannot bind ::1, so the single-stack specimen this card requires can't be reproduced here");
+  } else {
+    const startResult = spawnSync(
+      process.execPath,
+      [HELPER, "start", ipv6WorkDir, "--", process.execPath, ipv6OnlyScript],
+      { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+    );
+    check("(h) start (IPv6-loopback-only bind) exits 0", startResult.status === 0);
+    const ipv6StartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+    ipv6TrackedPid = ipv6StartMatch ? Number(ipv6StartMatch[1]) : null;
+
+    const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+    check("(h) start prints a Bound: url line", !!boundMatch);
+    const boundUrl = boundMatch ? boundMatch[1] : null;
+    let parsed = null;
+    try { parsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+    // Node's URL parser keeps an IPv6 hostname bracketed (`u.hostname === "[::1]"`, not `"::1"`) — verify
+    // against that real behavior rather than the unbracketed form.
+    check("(h) recorded host is the banner's own [::1] token, not a guessed default", parsed != null && parsed.hostname === "[::1]");
+
+    // THE CONTROL, part 1: the RECORDED url connects to the real IPv6-only server.
+    const recordedConnects = parsed != null && await canConnectHost(parsed.hostname, Number(parsed.port));
+    check("(h) the recorded url connects to the real IPv6-only server", recordedConnects);
+
+    // THE CONTROL, part 2: a NAIVELY-REBUILT url — the exact guess a port-only tracking file would force
+    // a consumer to make — does NOT connect, against the SAME live, healthy server on the SAME port; only
+    // the host differs. This is the proof the card's DoD demands: the recorded url succeeds precisely
+    // where a port-only guess fails, on a genuine single-stack specimen (not a dual-stack server that
+    // would let either guess through).
+    const naiveConnects = parsed != null && await canConnectHost("127.0.0.1", Number(parsed.port));
+    check(
+      "(h) THE POSITIVE CONTROL: a naively-rebuilt 127.0.0.1 url refuses against this SAME healthy " +
+        "server — proving the recorded url connects precisely where a port-only guess fails",
+      naiveConnects === false,
+    );
+
+    // Tear down via the helper's OWN `stop` — see the matching note in section (g): a bare SIGKILL on
+    // just the tracked (supervisor) pid leaves its real child (the net server holding this section's
+    // cwd) alive as an orphan.
+    spawnSync(process.execPath, [HELPER, "stop", ipv6WorkDir], { encoding: "utf8", timeout: 10_000 });
+  }
+} catch (e) {
+  console.log(`FAIL  unexpected error (IPv6-only positive control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (ipv6TrackedPid != null && isAlive(ipv6TrackedPid)) { try { process.kill(ipv6TrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
+// (i) card 1494d3d9 DoD-5 — backward compatibility. A tracking file written by the OLDER helper (before
+// this card) has no `url`/`host`, only `port`. CONSUMER CHECKED: this file's own `stop()` — it reads
+// `tracked.port` defensively (`typeof tracked.port === "number"`) and never assumes `host`/`url` exist,
+// so it must tolerate the old shape rather than crash. Exercised against a HAND-AUTHORED old-shape
+// tracking file (not the current writer's own output), so this genuinely tests tolerance of a shape the
+// current code no longer produces, rather than restating what `start` already writes.
+const oldShapeWorkDir = mkdtempManaged("loom-dev-server-oldshape-");
+try {
+  const oldShapeAbsDir = path.resolve(oldShapeWorkDir);
+  const oldShapeHash = crypto.createHash("sha256").update(oldShapeAbsDir).digest("hex").slice(0, 16);
+  const oldShapeTrackFile = path.join(os.tmpdir(), `loom-dev-server-${oldShapeHash}.json`);
+  // A pid that is definitely NOT alive, so killTracked's best-effort kill is a genuine no-op — this
+  // section is about SHAPE tolerance, not process lifecycle (already covered by sections a/b/e).
+  const deadPid = 999999;
+  check("(i) chosen dead pid is genuinely not alive (test precondition)", !isAlive(deadPid));
+  fs.writeFileSync(oldShapeTrackFile, JSON.stringify({
+    pid: deadPid, command: ["old-helper-fixture"], dir: oldShapeAbsDir,
+    startedAt: new Date().toISOString(), logFile: "/nonexistent", port: 4321,
+    // deliberately NO host/url fields — this IS the pre-fix shape under test.
+  }), "utf8");
+
+  const stopResult = spawnSync(process.execPath, [HELPER, "stop", oldShapeWorkDir], { encoding: "utf8", timeout: 10_000 });
+  check("(i) stop on an OLD-shape (no url/host) tracking file exits 0, doesn't crash", stopResult.status === 0);
+  check("(i) stop still reports the old record's port", /\(port 4321\)/.test(stopResult.stdout || ""));
+  check(
+    "(i) stop's output carries no literal 'undefined' from an unguarded host/url read",
+    !/undefined/.test(stopResult.stdout || ""),
+  );
+} catch (e) {
+  console.log(`FAIL  unexpected error (old-shape tracking file tolerance): ${(e && e.stack) || e}`);
+  failures++;
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, and records the ACTUAL bound port (not the configured one) even under port contention."
+  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), and that recorded url connects on a real single-stack server where a naively-rebuilt one refuses."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
