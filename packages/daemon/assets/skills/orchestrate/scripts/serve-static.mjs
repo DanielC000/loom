@@ -209,17 +209,30 @@ async function start(dirArg, portArg) {
 
   // The child knows the ACTUAL bound port (0 means OS-assigned); wait for it to write that back to
   // trackFile rather than guessing. Bounded so a broken child fails fast instead of hanging forever.
-  const deadline = Date.now() + 5000;
+  // Ceiling stays 5000ms (card cb1101a0: do not widen — the previous remedy for a sibling site was a
+  // widen that only held 12 days). The one real intermediate signal available here is the CHILD'S OWN
+  // LIVENESS: this launcher holds child.pid directly, so a crash before trackFile is written is an
+  // immediate, genuine terminal signal — distinct from "still starting, just slow under host load" —
+  // and there's no reason to burn the rest of the ceiling waiting on a process that's already gone.
+  const waitStartedAt = Date.now();
+  const deadline = waitStartedAt + 5000;
   let record = null;
+  let childDied = false;
   while (Date.now() < deadline) {
     try {
       const parsed = JSON.parse(fs.readFileSync(trackFile, "utf8"));
       if (parsed && typeof parsed.pid === "number" && typeof parsed.port === "number") { record = parsed; break; }
     } catch { /* not written yet */ }
+    if (!isAlive(child.pid)) { childDied = true; break; }
     await new Promise((r) => setTimeout(r, 50));
   }
   if (!record) {
-    console.error(`start: server did not come up within 5s for ${absDir}`);
+    const waitedMs = Date.now() - waitStartedAt;
+    if (childDied) {
+      console.error(`start: child pid ${child.pid} exited before writing ${trackFile} (waited ${waitedMs}ms) for ${absDir}`);
+    } else {
+      console.error(`start: server did not come up within ${waitedMs}ms — still waiting on ${trackFile} from pid ${child.pid} for ${absDir}`);
+    }
     try { killTracked(child.pid); } catch { /* best effort */ }
     process.exit(1);
   }

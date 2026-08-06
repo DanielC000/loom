@@ -55,6 +55,17 @@ const waitUntil = async (fn, { tries = 50, delayMs = 20 } = {}) => {
   for (let i = 0; i < tries; i++) { if (await fn()) return true; await sleep(delayMs); }
   return false;
 };
+// waitUntilDiagnosed wraps waitUntil with a timer + a named description of what's being waited on, so a
+// timeout names its own diagnosis (what it waited on, how long) instead of leaving that to be
+// reconstructed later (card cb1101a0). Poll budget/shape is UNCHANGED — this only enriches the message.
+const waitUntilDiagnosed = async (label, fn, opts) => {
+  const startedAt = Date.now();
+  const ok = await waitUntil(fn, opts);
+  const elapsedMs = Date.now() - startedAt;
+  const budgetMs = (opts?.tries ?? 50) * (opts?.delayMs ?? 20);
+  if (!ok) console.error(`TIMEOUT  waited ${elapsedMs}ms (budget ${budgetMs}ms) for: ${label}`);
+  return { ok, elapsedMs };
+};
 
 // --- Hermetic LOOM_HOME + a sandboxed HOME (set BEFORE importing dist — paths.ts reads LOOM_HOME at import). ---
 const tmpHome = path.join(os.tmpdir(), `loom-rlcqd-${Date.now()}-${process.pid}`);
@@ -187,8 +198,12 @@ try {
   // default and cost card f11f3aae's unrelated merge a gate rejection on 2026-07-25. Worktree provisioning
   // is real git work, and cap=2 contention stacks multiple full suites' worth of it — widened to 5000ms.
   // Still a bounded poll, not a blind sleep.
-  const fired = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskB && w.processState === "live"), { tries: 250, delayMs: 20 });
-  check("(2) taskB auto-fires on the limit-clear alone — NO unrelated worker exit happened after the park", fired);
+  const { ok: fired, elapsedMs: firedElapsedMs } = await waitUntilDiagnosed(
+    `taskB reaching worker_list processState:"live" (real worktree provisioning driven by the cap-queue drain)`,
+    async () => (await call("worker_list")).some((w) => w.taskId === taskB && w.processState === "live"),
+    { tries: 250, delayMs: 20 },
+  );
+  check(`(2) taskB auto-fires on the limit-clear alone — NO unrelated worker exit happened after the park (${firedElapsedMs}ms)`, fired);
   check("(3) exactly ONE cap-queue drain call happened after the park — caused by the watcher's resume hook",
     drainSpyCalls === 1);
 
@@ -283,8 +298,12 @@ try {
 
     // Same real-worktree-spawn-live flake surface as taskB's poll above (see that comment for the
     // measurement) — widened identically.
-    const firedD = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskD && w.processState === "live"), { tries: 250, delayMs: 20 });
-    check("(6) taskD auto-fires from the REST clear alone — no unrelated worker exit involved", firedD);
+    const { ok: firedD, elapsedMs: firedDElapsedMs } = await waitUntilDiagnosed(
+      `taskD reaching worker_list processState:"live" (real worktree provisioning driven by the REST clear route's drain)`,
+      async () => (await call("worker_list")).some((w) => w.taskId === taskD && w.processState === "live"),
+      { tries: 250, delayMs: 20 },
+    );
+    check(`(6) taskD auto-fires from the REST clear alone — no unrelated worker exit involved (${firedDElapsedMs}ms)`, firedD);
     check("(6) causation: exactly ONE cap-queue drain call happened, from the REST route's own hook", restDrainCalls === 1);
 
     let listPostRest = await call("worker_list");
