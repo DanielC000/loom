@@ -1,0 +1,153 @@
+[
+  {
+    "file": "C--Users-danie--loom-worktrees-046fda54-b722-4d77-b126-aa657e30863d-059d44574cac\\4a64477b-be2c-40f7-bbc3-3ecf69cd191b.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "er.** \\n  \\n ## 📌 RE-ANSWERING \\n Engine JSONLs: `C:\\Users\\danie\\.claude\\projects\\C--Users-danie-Documents-GitHub-loom\\<id>.jsonl`. Count calls with `\"name\":\"mcp__codescape__…\"` — ⛔ **NOT a bare `grep -c mcp__codescape__`**, which counts the turn-0 tool manifest and reported a **0-call control arm as 18**. \\n "
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-046fda54-b722-4d77-b126-aa657e30863d-427f9c7d2542\\3f80e654-4256-44be-9521-00160f0aa4e8.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "d by KIND, because the kinds are NOT equivalent** \\n - **(i) a TRUE \"use the graph\" instruction — the only one they found:** `b2de9a5b` — *\"you'll have `mcp__codescape__*` code-map tools — use them naturally to navigate.\"* \\n - **(ii) codescape is the SUBJECT of the task** (wiring epic / design spike / re"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-046fda54-b722-4d77-b126-aa657e30863d-427f9c7d2542\\a8e6475f-25c0-4124-ba39-7d07dea017fd.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "proves nothing except that the block was delivered.** \\n  \\n ## ⚠️ THE INSTRUMENT HAZARD — POSITIVE-CONTROL BEFORE YOU TRUST ANY COUNT \\n 🔴 **A bare `grep -c mcp__codescape__` over an engine JSONL COUNTS THE TURN-0 TOOL MANIFEST and scored a KNOWN-ZERO-CALL control arm as 18.** ✅ **`tasks_get 75f4a754` for "
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-046fda54-b722-4d77-b126-aa657e30863d-63871b012bcc\\d9a15263-84a4-4cf6-86ad-b6938a08c9f0.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks",
+      "playwright"
+    ],
+    "snippet": " unique to THAT text, and must be run on the window where it MUST read zero. \\n  \\n ## THE CALL-COUNTING PATTERN — validated to an EXACT VALUE \\n Use `\"name\":\"mcp__codescape__` over the engine JSONL. \\n - Positive control: reads 4 / 3 / 2 on `6baea621` / `5d834aa2` / `4e18ab91` = exactly the 4 / 3 / 2 usage-log"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-046fda54-b722-4d77-b126-aa657e30863d-a74907d69605\\25911d16-6c6e-4505-9497-372b84b0b2d5.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "uments-GitHub-loom\\<id>.jsonl`. Card `75f4a754` did exactly that for 64 of 72 rows — that is the method to reuse. \\n ⛔ **Count with the pattern `\"name\":\"mcp__codescape__…\"` — NOT a bare `grep -c mcp__codescape__`**, which counts the turn-0 tool manifest and once reported a **0-call control arm as 18**."
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-032ca3130b68\\12212e08-4c49-4e33-8fc1-a0aa93b5ab42.jsonl",
+    "server": "deja",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "` if present); if unset/unresolvable, CLEAN-SKIP (like the capture relay / Playwright missing-cli) — never break the spawn. \\n 3. `--allowedTools`: add `mcp__deja__find_mockups`, `mcp__deja__submit_mockup`, `mcp__deja__mark_reused` when the flag is on (parity with how Playwright's tools are allowlisted"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-465ada8bc373\\010e48b0-be09-4637-b9d1-b96e425f26ed.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "wer → the turn WEDGES until the busy-stuck watchdog (the exact failure `host.ts` ~L2230 documents). \\n - **Fix:** add the 5 codescape write tool names (`mcp__codescape__focus_flow`, `…__highlight`, `…__open_view`, `…__annotate`, `…__show_diff`) to `--disallowedTools` at the `buildSpawnArgs` chokepoint,"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-5f18e096ec4d\\0da37071-6dfe-4c88-a177-caf3b28e6b12.jsonl",
+    "server": "deja",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "`git diff main...loom/032ca3130b68`. It adds a builtin `dejaCorpus` per-profile capability that INJECTS a per-session stdio `deja mcp` server (tools `mcp__deja__find_mockups`/`submit_mockup`/`mark_reused`) — a TRUST-BOUNDARY / exfil-class grant (an MCP-server injection). It mirrors the existing `bro"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-6125b0f48e1f\\c9be3575-78db-49d1-b798-c6cfb9ee4fdd.jsonl",
+    "server": "playwright",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "OOLS` precedent EXACTLY (packages/daemon/src/pty/host.ts): \\n 1. Add a const near CODESCAPE_WRITE_TOOLS (~host.ts:941): `PLAYWRIGHT_DISALLOWED_TOOLS = [\"mcp__playwright__browser_run_code_unsafe\"]` (Object.freeze, with a doc comment matching CODESCAPE_WRITE_TOOLS' style). \\n 2. Thread a `playwrightMounted`"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-77ff30cb9fe5\\c59113e5-58de-44d8-9777-a05bd8c8c319.jsonl",
+    "server": "github",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "ERSONAL_ACCESS_TOKEN` → seed row secretEnvVar (seed.ts:54) + credential tie (registry.ts:374-377) need ZERO change. \\n - Allowlist: both servers expose `mcp__github__*`; seed grants whole-server prefix `[\"mcp__github\"]` → individual tool-name churn needs NO seed/allowlist edit (allowlist-neutral). (If "
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-822716571e39\\ee260947-f175-40f8-b605-e5bdf4f86ecb.jsonl",
+    "server": "playwright",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "st FILE PATHS / read host files into the page. The CR cited `browser_file_upload` (README:893) and `browser_drop`. Confirm the exact MCP tool names (`mcp__playwright__browser_file_upload`, `mcp__playwright__browser_drop`, and any OTHER path-taking host-file-read tool you find) — disallow exactly tha"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-8760b520530a\\6707a612-9cec-41ae-8ace-fa584817dc36.jsonl",
+    "server": "github",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "it's still `GITHUB_PERSONAL_ACCESS_TOKEN` or note the difference), and any **tool-surface/name differences** vs the archived server (the allowlisted `mcp__github__*` tool names may change — if so, flag exactly which seed/allowlist entries must update). \\n 5. **Migration/back-compat** — full replacement"
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-8f9b4b109736\\db38a9ab-4379-4bc5-a7a2-92d716727a95.jsonl",
+    "server": "playwright",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "run_code_unsafe` — @playwright/mcp's own README calls it \"RCE-equivalent\" (arbitrary JS in the Playwright SERVER process = host RCE). The fix unions `mcp__playwright__browser_run_code_unsafe` into `--disallowedTools` whenever the Playwright MCP mounts, mirroring the existing `CODESCAPE_WRITE_TOOLS` "
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-fcfb879f477e\\9ff9c1b0-5eb9-4cfd-b895-d746fd583601.jsonl",
+    "server": "codescape",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "ng. When done, report the gate result + confirm the C flow uses the daemon-delivered pattern (companion never receives the token). Note: you'll have `mcp__codescape__*` code-map tools — use them naturally to navigate; flag me if they error."
+  },
+  {
+    "file": "C--Users-danie--loom-worktrees-c36e8691-44d8-44ae-91ed-1bae3c632b33-fed4b419b042\\584a7a84-88f8-4880-9bfd-f6e5757ec414.jsonl",
+    "server": "loom-audit",
+    "provisioned": [
+      "claude-in-chrome",
+      "loom-orchestration",
+      "loom-tasks"
+    ],
+    "snippet": "ace. \\n  \\n THE BUG (source-confirmed): code comments surfaced via a worker's Grep/Read tool results, when read back through the audit transcript surface (`mcp__loom-audit__transcript_read`), render with their leading comment token corrupted: \\n - `// Guard each FK-column rename` → `\\ Guard each FK-column re"
+  }
+]
