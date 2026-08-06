@@ -254,8 +254,11 @@ export interface DanglingWorkerEntry {
  *  defensive fallback for `confirmWorkerMerge` being called directly again in the future, not a live path
  *  today) — carried on every return so a manager juggling several concurrent merges can match this outcome
  *  back to the specific `worker_merge_confirm` call that produced it.
- *  `gateSteps` (card a2873f7e): per-step `{step, durationMs, status}` from the gate that just ran, forwarded
- *  from {@link GateSequentialResult.steps} on the GREEN path — `undefined` when the gate was reused (never
+ *  `gateSteps` (card a2873f7e; widened to the REJECTION return by card 720bb7ad — before that card this
+ *  was GREEN-path only, forwarded from {@link GateSequentialResult.steps} but silently dropped on the plain
+ *  gate-fail rejection return even though `gateStepsResult` was already computed and in scope there,
+ *  nested only inside that return's own `gateDetail.steps` instead): per-step `{step, durationMs, status}`
+ *  from the gate that just ran, set on BOTH outcomes now — `undefined` when the gate was reused (never
  *  actually spawned, see the reuse-a-green-self-check path) or when there's no gate configured at all.
  *  PURELY DIAGNOSTIC — see {@link formatGateStepsDiagnostic}'s doc; never branch on it. */
 /** Diagnostic detail for a `reason:"gate"` rejection (card 4b8f2b6e) — populated ONLY when a configured
@@ -540,6 +543,15 @@ function deriveMergeGateVerdict(
       // MERGE-kind row's verdict never carried ANY output at all, on either outcome — this is the fix for
       // the card's own measured gap (a passing MERGE gate's output was persisted NOWHERE).
       ...(v.outputTail !== undefined ? { outputTail: v.outputTail } : {}),
+      // Card 720bb7ad DoD-1/2: the TOP-LEVEL `steps` field — the SAME one a "gate" (worker self-check) row
+      // already populates on both outcomes — widened to "merge" rows too, mirroring `outputTail`'s own
+      // a1a8c5c4 precedent exactly. BEFORE this card a PASSING merge carried NO step breakdown anywhere
+      // (this field was "gate"-kind only by construction — see PendingGateOpVerdict's own doc); a REJECTED
+      // merge had one, but only nested inside `gateDetail.steps` below (fail-only). This is now the ONE
+      // location a reader should prefer for either outcome — `gateDetail.steps` stays, unremoved, as a
+      // pre-existing fail-only duplicate (same bytes) for back-compat, mirroring the deliberate
+      // `outputTail`/`gateDetail.stderrTail` duplication already documented just below.
+      ...(v.gateSteps !== undefined ? { steps: v.gateSteps } : {}),
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -784,6 +796,18 @@ const GATE_OP_RETAIN_MS = 5_000;
  *  injected into every project's gate child regardless of whether anything there was meant to read it.
  *  `LOOM_GATE_TEST_CONCURRENCY` is unambiguously Loom's own gate-runner convention. */
 const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY: "3" };
+
+/** Card 720bb7ad DoD-3: stamp this op's `opId` onto the gate child's environment as `LOOM_GATE_OP_ID` —
+ *  `scripts/test-daemon.mjs` reads it and, when present, includes it on its own `kind:"run-summary"`
+ *  NDJSON row, so that row can finally be joined back to the `gate_status`-visible op that produced it
+ *  (previously: no producer of that row carried any correlating id at all, and two runs admitted close
+ *  together at `maxConcurrentGates>=2` were indistinguishable by timestamp alone — see the card's own
+ *  §ATTRIBUTION). Merges ADDITIVELY on top of any base override a call site already needs (e.g. the
+ *  worker self-gate's own `WORKER_GATE_ENV_OVERRIDE`) — `LOOM_GATE_OP_ID` always wins if `base` somehow
+ *  already set it, since object spread order below places it last. */
+function gateOpIdEnvOverride(opId: string, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...base, LOOM_GATE_OP_ID: opId };
+}
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
@@ -3202,7 +3226,7 @@ export class SessionService {
    */
   async deployOwnProject(
     managerSessionId: string, reason: string,
-  ): Promise<{ deployed: boolean; reason?: string; exitCode?: number | null; outputTail?: string }> {
+  ): Promise<{ deployed: boolean; reason?: string; exitCode?: number | null; outputTail?: string; opId?: string }> {
     this.requireManager(managerSessionId, "deploy");
     const session = this.db.getSession(managerSessionId);
     const project = session ? this.db.getProject(session.projectId) : undefined;
@@ -3226,12 +3250,18 @@ export class SessionService {
     }
 
     const runGateSeq = this.runGate ?? runGateSequential;
+    // Card 720bb7ad DoD-3: deploy had NO correlating id at all before this card (unlike a worker
+    // self-check or a merge, both threaded through PendingOpRegistry) — `deployDescriptor.opId` makes a
+    // live deploy findable via `gate_status`/`gate_queue` like the other two gate types, and the SAME id
+    // is stamped onto the audit event below and the gate child's env (`gateOpIdEnvOverride`) so its own
+    // NDJSON run-summary row is attributable too.
+    const opId = randomUUID();
     // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
     // rather than running alongside it unbounded. See GateSemaphore's class doc. "high" priority (card
     // 24642c3d) — a deploy is a deliberate human-triggered action, not a worker self-check retry. The
     // descriptor (card a1c86452) makes it visible on the Gates page's active lane while it holds/queues for
     // a slot; `startedAt` (admission time) drives the audit event's real run-time `durationMs` (excl. queue wait).
-    const deployDescriptor: GateDescriptor = { gateType: "deploy", projectId: project.id, sessionId: managerSessionId };
+    const deployDescriptor: GateDescriptor = { gateType: "deploy", projectId: project.id, sessionId: managerSessionId, opId };
     let deployStartedAt = 0;
     // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the full
     // rationale — the semaphore's own active count at admission, carried onto the audit event below.
@@ -3245,7 +3275,7 @@ export class SessionService {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
         getDeployConcurrentGatesMax = getMaxConcurrentGates;
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, undefined, undefined, undefined, hooks);
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId), undefined, undefined, hooks);
       },
       "high",
     );
@@ -3253,7 +3283,7 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
-        reason, ok: result.passed, durationMs: Date.now() - deployStartedAt,
+        opId, reason, ok: result.passed, durationMs: Date.now() - deployStartedAt,
         gateCap: orchestration.maxConcurrentGates, concurrentGates: deployConcurrentAtStart, concurrentGatesMax: deployConcurrentGatesMax,
         ...(result.passed ? {} : {
           exitCode: result.failedStatus ?? null,
@@ -3264,8 +3294,8 @@ export class SessionService {
       },
     });
     return result.passed
-      ? { deployed: true }
-      : { deployed: false, reason: "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail };
+      ? { deployed: true, opId }
+      : { deployed: false, reason: "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail, opId };
   }
 
   /**
@@ -3398,9 +3428,14 @@ export class SessionService {
      *  `state` is `queued`/`running` — omitted for every settled/tombstone state, where there is no
      *  current step left to have extended. */
     extended?: boolean;
-    /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present ONLY for a settled "gate"
-     *  row with a recorded verdict; every field below is independently optional and omitted (never a
-     *  fabricated `null`/`false`) when there's nothing to report. */
+    /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present for a settled row (either
+     *  KIND) with a recorded verdict; every field below is independently optional and omitted (never a
+     *  fabricated `null`/`false`) when there's nothing to report. SCOPE VARIES PER FIELD, not uniformly
+     *  "gate-only": `durationMs`/`validatedHead`/`headWarning` stay "gate"-kind only (a "merge" row's
+     *  analogous timing lives in `totalDurationMs`/`settledAt` below instead); `passed`/`cancelled`/
+     *  `reason`/`outputTail`/`steps` (the last widened to "merge" rows by card 720bb7ad — see
+     *  `PendingGateOpVerdict`'s own doc) and `gateDetail` (fail-only either way) are populated for BOTH
+     *  "gate" and "merge" rows. */
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     gateDetail?: PendingGateOpVerdict["gateDetail"];
@@ -3415,7 +3450,23 @@ export class SessionService {
      *  window), not gated on a recorded verdict, since it's the row's own `started_at` column, always
      *  known once a row exists at all. Absent only for the two "no row at all" outcomes
      *  (`never_existed`/`unknown`) and the live `queued`/`running`/`ambiguous` returns above, which report
-     *  `since`/`elapsedMs` instead. */
+     *  `since`/`elapsedMs` instead.
+     *
+     *  ⚠️⚠️ Card 720bb7ad DoD-4 — THE TRAP THE NAME INVITES: `admittedAt` READS as "the instant this op was
+     *  admitted past the gate concurrency cap" but is NOT that — it is MINT time (when the op was first
+     *  created/queued, before it ever competed for a slot). A queued op can sit for minutes before it's
+     *  actually admitted (routine at `maxConcurrentGates>=2` under fleet load), so `totalDurationMs`
+     *  (`settledAt - admittedAt`, see the sibling field below) SILENTLY INCLUDES that queue wait — it is
+     *  the REAL total op wall time (worktree prep + queue wait + gate + squash), never a
+     *  queue-wait-excluded "how long did the actual work take" figure. Measured: one op's `admittedAt` sat
+     *  ~7m16s before {@link GateQueueEntry.since} (the LIVE field that re-bases to the moment this SAME op
+     *  was actually admitted) read the op as `"running"` — a real, not hypothetical, gap. The field that
+     *  DOES re-base to true admission is `gate_queue`'s (or this same op's own live, pre-settle
+     *  `gate_status` read's) `since`/`elapsedMs` — but ONLY while the op is still live (`queued`/
+     *  `running`); once settled, that live view is gone and `admittedAt` (mint time) is the only admission-
+     *  adjacent timestamp left on the durable record. There is no settled-and-queue-wait-excluded field —
+     *  if you need queue wait specifically, read it from `gate_queue`/`gate_status` WHILE the op is still
+     *  live, before it settles. */
     admittedAt?: string;
     /** Card 9f6598dd — closes Finding 1 (a settled "merge" op used to report NEITHER of these three
      *  fields at all: `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}`, nothing else).
@@ -11401,7 +11452,7 @@ export class SessionService {
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
           // event, not a second independently-computed signal.
           const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
+          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), undefined, undefined, mirroredHooks);
           // CARD c24dd48a: a passing gate is about to hand off to this method's own squash phase
           // (`mergeBranch`, below, outside this call) — keep the per-repo admission guard held so a queued
           // same-repo sibling isn't admitted into the gap between this gate settling and that squash
@@ -11470,7 +11521,7 @@ export class SessionService {
         const candidate = identifyRetriableTestFile(gateResult.failingTest, worktreePath, gateResult.failingTestCount);
         if (candidate) {
           retriedFile = candidate.name;
-          const retryResult = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, undefined, false);
+          const retryResult = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false);
           retryPassed = retryResult.passed;
           evt("build_gate_single_file_retry", { retriedFile, retryPassed, priorFailingTest: gateResult.failingTest });
           // THE NON-NEGOTIABLE PART (card 344ce950 §3): a pass-after-retry is WEAKER evidence than a clean
@@ -11573,7 +11624,7 @@ export class SessionService {
               // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
               // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
               await reunionAtAdmission();
-              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
+              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false, undefined, hooks);
               // CARD c24dd48a: same "about to hand off to squash" hold as the first attempt above — see
               // that call site's identical comment.
               if (r.passed) holdRepoGuardOnExit();
@@ -11757,6 +11808,9 @@ export class SessionService {
           gateExtended,
           gateProximity,
           outputTail: gateOutputTailForRecord,
+          // Card 720bb7ad: mirrors the plain-GREEN return's own `gateSteps` — see this field's own doc for
+          // why the rejection path used to leave it unset here (nested only in `gateDetail.steps` above).
+          ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}),
           // Card 344ce950: a retry that ALSO failed still recorded that one was attempted — this rejection's
           // own `reason`/`detailText`/`gateDetail` above are UNCHANGED by that retry (DoD-1: "fails again ⇒
           // reject exactly as today"); this is purely additive observability alongside the unchanged verdict.
@@ -12830,7 +12884,7 @@ export class SessionService {
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE, undefined, cancelSignal, hooks);
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks);
               },
               "low",
             );

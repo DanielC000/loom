@@ -21,6 +21,7 @@ import {
   topSlowestFiles,
   formatGateTimingSummaryLines,
   neverCompletedFiles,
+  gateTimingOpId,
 } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
@@ -78,6 +79,36 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
   // Honest-null, not a guessed value — this repo has a standing rule against adding a subprocess here (see
   // createRssTracker's own scope caveat in scripts/test-daemon.mjs).
   check("nodeLikeProcessCount/nodeLikeWorkingSetMB are honestly null (no subprocess added)", snap.nodeLikeProcessCount === null && snap.nodeLikeWorkingSetMB === null);
+}
+
+// ── gateTimingOpId (card 720bb7ad DoD-3) ────────────────────────────────────────────────────────────────
+{
+  const savedEnv = process.env.LOOM_GATE_OP_ID;
+  try {
+    // [negative control] the common case — a human's own local `pnpm --filter @loom/daemon test:daemon`,
+    // or CI, never sets this env var at all.
+    delete process.env.LOOM_GATE_OP_ID;
+    check("[negative control] undefined (never a fabricated empty string) when the env var is unset", gateTimingOpId() === undefined);
+    process.env.LOOM_GATE_OP_ID = "";
+    check("[negative control] an EMPTY string env var ALSO reads as undefined, never a fabricated ''", gateTimingOpId() === undefined);
+
+    // [positive control] the daemon sets it (gateOpIdEnvOverride in sessions/service.ts) — a real opId
+    // round-trips verbatim.
+    process.env.LOOM_GATE_OP_ID = "ec0f9383-bcd0-498e-9f51-7f5fdd66dd14";
+    check("[positive control] a real opId round-trips verbatim", gateTimingOpId() === "ec0f9383-bcd0-498e-9f51-7f5fdd66dd14");
+  } finally {
+    if (savedEnv === undefined) delete process.env.LOOM_GATE_OP_ID; else process.env.LOOM_GATE_OP_ID = savedEnv;
+  }
+
+  // The run-summary row itself: opId flows through appendGateTimingRow's plain JSON.stringify unmodified
+  // when present, and OMITTED ENTIRELY (not a fabricated null) when undefined — JSON.stringify's own
+  // standard undefined-key-drop behavior, exercised here against the REAL row shape rather than assumed.
+  const target = path.join(scratchRoot, "opid-rows.ndjson");
+  appendGateTimingRow(target, { kind: "run-summary", runUid: "r1", opId: "real-op-id-here" });
+  appendGateTimingRow(target, { kind: "run-summary", runUid: "r2", opId: undefined });
+  const rows = fs.readFileSync(target, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  check("a row WITH an opId carries it verbatim", rows[0].opId === "real-op-id-here");
+  check("a row with opId:undefined OMITS the key entirely (not JSON `null`) — proof a reader can tell 'no id available' apart from a fabricated value", !("opId" in rows[1]));
 }
 
 // ── computeTestSourceBytes (card 90678ee9 DoD-5) ────────────────────────────────────────────────────────

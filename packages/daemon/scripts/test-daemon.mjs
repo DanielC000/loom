@@ -227,6 +227,19 @@ export function computeTestSourceBytes(testDir, selected) {
   return total;
 }
 
+/** Card 720bb7ad DoD-3: the caller's `opId`, threaded in via the `LOOM_GATE_OP_ID` env var — the daemon
+ *  sets it (see `gateOpIdEnvOverride` in sessions/service.ts) on the child running `pnpm --filter
+ *  @loom/daemon test:daemon` for a merge/deploy/worker-self-check gate (including a RETRY, which gets the
+ *  SAME opId as the attempt it's retrying), so this run's own `kind:"run-summary"` NDJSON row can be
+ *  joined back to the exact `gate_status`-visible op that produced it — closing the gap where two runs
+ *  admitted close together (routine at `maxConcurrentGates>=2`) were indistinguishable by timestamp
+ *  alone. `undefined` (never a fabricated empty string) when absent — a human's own local `pnpm --filter
+ *  @loom/daemon test:daemon`, CI, or any other caller that never set the env var. Exported as its own pure
+ *  function so a test can assert the read directly without spawning a real gate. */
+export function gateTimingOpId() {
+  return process.env.LOOM_GATE_OP_ID || undefined;
+}
+
 /** Pure: the slowest `n` TIMED results (skipped/never-run entries have no `durationMs` and are excluded),
  *  descending. Exported so a test can drive it against synthetic result arrays directly. */
 export function topSlowestFiles(results, n = 20) {
@@ -1203,6 +1216,9 @@ if (isMain) {
       kind: "run-summary",
       runIndex: gateTimingRunIndex,
       runUid: gateTimingRunUid,
+      // Card 720bb7ad DoD-3: see gateTimingOpId's own doc — omitted (not a fabricated empty string) for
+      // any caller that never set LOOM_GATE_OP_ID.
+      opId: gateTimingOpId(),
       runStartTs: gateTimingRunStartTs,
       runEndTs: gateTimingRunEndTs,
       durationMs: gateTimingWallClockMs,

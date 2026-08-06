@@ -75,11 +75,12 @@ try {
   const pty = { enqueueStdin: () => ({ delivered: false }) };
 
   // The runGate seam: records every invocation and returns whatever `nextResult` currently holds
-  // (a hermetic stand-in for runGateSequential — no real process is ever spawned).
+  // (a hermetic stand-in for runGateSequential — no real process is ever spawned). Also captures
+  // envOverride (card 720bb7ad DoD-3) — deploy previously had NO correlating id at all.
   const calls = [];
   let nextResult = { passed: true };
-  const fakeRunGate = async (gate, cwd, timeoutMs) => {
-    calls.push({ gate, cwd, timeoutMs });
+  const fakeRunGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
+    calls.push({ gate, cwd, timeoutMs, envOverride });
     return nextResult;
   };
   const svc = new SessionService(db, pty, new OrchestrationControl(), { runGate: fakeRunGate });
@@ -121,6 +122,16 @@ try {
   const deployEvents1 = eventsOfKind(db, "mDeploy", "deploy");
   check("(c) exactly one 'deploy' audit event was recorded", deployEvents1.length === 1);
   check("(c) the audit event carries ok:true + the caller's reason", deployEvents1[0].detail?.ok === true && deployEvents1[0].detail?.reason === "ship it");
+  // Card 720bb7ad DoD-3 — THE FIX: deploy had NO correlating id at all before this card. `opId` is now
+  // returned to the caller, stamped on the audit event, AND threaded onto the gate child's env so its own
+  // NDJSON run-summary row (if the deployCommand shells out to the daemon's own test:daemon) is
+  // attributable too — all THREE must agree on the SAME value.
+  check("(c — 720bb7ad) deployOwnProject returns a real opId on a successful run", typeof ok1.opId === "string" && ok1.opId.length > 0);
+  // NOTE: each of the next two checks is deliberately anchored on `typeof ok1.opId === "string"` FIRST —
+  // an equality check alone (`x.opId === ok1.opId`) would pass VACUOUSLY (undefined === undefined) if the
+  // fix regressed and ok1.opId went back to undefined, silently defeating the whole point of this control.
+  check("(c — 720bb7ad) the audit event carries the SAME opId the caller was returned", typeof ok1.opId === "string" && deployEvents1[0].detail?.opId === ok1.opId);
+  check("(c — 720bb7ad) the gate child's env carries LOOM_GATE_OP_ID matching that SAME opId", typeof ok1.opId === "string" && calls[0].envOverride?.LOOM_GATE_OP_ID === ok1.opId);
 
   // ── (c cont'd) configured deploy: FAILURE surfaces exitCode/outputTail both to the caller and the audit event ──
   nextResult = { passed: false, failedStatus: 2, outputTail: "remote: rejected\nerror: failed to push" };
@@ -132,6 +143,10 @@ try {
   const deployEvents2 = eventsOfKind(db, "mDeploy", "deploy");
   check("(c) the failed attempt ALSO emits a 'deploy' audit event (ok:false)", deployEvents2.length === 2 && deployEvents2[1].detail?.ok === false);
   check("(c) the failed audit event carries the exit code", deployEvents2[1].detail?.exitCode === 2);
+  // Card 720bb7ad DoD-3: opId is ALSO present on the failure path (parity with success above).
+  check("(c — 720bb7ad) a failed run ALSO returns a real opId", typeof fail1.opId === "string" && fail1.opId.length > 0);
+  check("(c — 720bb7ad) the failed audit event carries the SAME opId the caller was returned", typeof fail1.opId === "string" && deployEvents2[1].detail?.opId === fail1.opId);
+  check("(c — 720bb7ad) the failed run's opId is DIFFERENT from the earlier successful run's — a fresh id per attempt", typeof fail1.opId === "string" && typeof ok1.opId === "string" && fail1.opId !== ok1.opId);
 
   // ── (d) rate limit: this manager session has now deployed twice; drive it to the cap ──
   nextResult = { passed: true };

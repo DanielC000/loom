@@ -171,7 +171,12 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, admittedAt?, passed?, cancelled?, reason?, " +
       "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?, proximity?}. `admittedAt` (ISO, when " +
       "the op was minted) is present whenever a row exists at all — live or settled — not gated on a " +
-      "recorded verdict. `queued`/`running` mean it's still " +
+      "recorded verdict. ⚠️ IT READS as \"when this op was admitted past the gate concurrency cap\" but is " +
+      "NOT that — a queued op can sit for minutes before it's actually admitted, so don't difference it " +
+      "against a settle time expecting queue-wait-excluded duration; the field that DOES re-base to true " +
+      "admission is `gate_queue`'s (or this SAME tool's own pre-settle) `since`/`elapsedMs`, but only while " +
+      "the op is still LIVE (`queued`/`running`) — once settled there is no queue-wait-excluded field left. " +
+      "`queued`/`running` mean it's still " +
       "LIVE. `settled` means the op reached a normal terminal result (pass, fail, error, or cancelled). " +
       "The `[loom:gate-done]`/`[loom:gate-failed]` nudge is still the PRIMARY, unprompted way you learn the " +
       "outcome — but once `state` reads `settled`, this tool NOW ALSO reports it directly: `passed:true` " +
@@ -243,18 +248,29 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?}. `queued`/`running` " +
+      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
+      "outputTail?, gateDetail?}. `queued`/`running` " +
       "mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
-      "`[loom:merge-failed]` nudge for the ACTUAL rejection/failure diagnosis (phase, failing test, " +
-      "stderr — this tool never reports that level of detail itself), but a settled op now retains a " +
-      "durable, queryable RECORD too: `admittedAt` (ISO, when the op was minted — present whenever a row " +
-      "exists at all, live or settled) and, once settled, `outcome` (`\"pass\"`|`\"fail\"`|`\"error\"`|" +
-      "`\"cancelled\"` — `\"pass\"` means merged, `\"fail\"` means a resolved rejection, `\"error\"` means a " +
-      "thrown exception mid-confirm), `settledAt` (ISO) and `totalDurationMs` (`settledAt - admittedAt`, " +
-      "the FULL op wall time — worktree prep + union-merge + gate + squash, not just the gate step itself; " +
-      "strictly ≥ the `steps` line the completion nudge carries, which is only ever a FLOOR on the real " +
-      "total). `extended` here means something different from the LIVE `extended` below: once settled, it " +
+      "`[loom:merge-failed]` nudge as your PRIMARY, unprompted way to learn the outcome, but a settled op " +
+      "now ALSO retains a durable, queryable RECORD you can pull on demand: `outcome` " +
+      "(`\"pass\"`|`\"fail\"`|`\"error\"`|`\"cancelled\"` — `\"pass\"` means merged, `\"fail\"` means a " +
+      "resolved rejection, `\"error\"` means a thrown exception mid-confirm), `steps` (card 720bb7ad — " +
+      "per-step `{step,durationMs,status}` at sub-ms precision, present on BOTH a pass and a fail, the same " +
+      "shape the completion nudge's own steps line renders from) and a bounded `outputTail`, and — on a " +
+      "`\"fail\"` only — `gateDetail` (phase/failedStep/failingTest/exitCode/signal/timedOut, the SAME " +
+      "diagnosis the `[loom:merge-rejected]` nudge embeds). `admittedAt` (ISO, when the op was MINTED — " +
+      "present whenever a row exists at all, live or settled) READS as \"when this op was admitted past " +
+      "the gate concurrency cap\" but is NOT that: a queued op can sit for minutes before it's actually " +
+      "admitted (routine at `maxConcurrentGates>=2`), so `totalDurationMs` (`settledAt - admittedAt`, " +
+      "below) silently INCLUDES that queue wait — it's the real total op wall time (worktree prep + queue " +
+      "wait + union-merge + gate + squash), never a queue-wait-excluded figure. The field that DOES " +
+      "re-base to true admission is `gate_queue`'s (or THIS SAME tool's own pre-settle) `since`/`elapsedMs` " +
+      "— but only while the op is still LIVE (`queued`/`running`); read it there before it settles if you " +
+      "need queue wait specifically — there is no settled-and-queue-wait-excluded field. `settledAt` (ISO) " +
+      "pairs with `totalDurationMs` (`settledAt - admittedAt`, the FULL op wall time — worktree prep + " +
+      "union-merge + gate + squash, not just the gate step itself; strictly ≥ `Σ(steps)`, which is only " +
+      "ever a FLOOR on the real total). `extended` here means something different from the LIVE `extended` below: once settled, it " +
       "reports whether ANY step of the gate this op actually ran ever consumed its one-time auto-extend — " +
       "`undefined` (not `false`) when no gate spawned for this op at all (gateless project, or a REUSED " +
       "self-check), so `extended:true` paired with `outcome:\"fail\"` is the specific \"this run was over " +
@@ -3327,8 +3343,11 @@ export class OrchestrationMcpRouter {
             "OWN, derived server-side from this session; you can never deploy anything else. Refuses with " +
             "{deployed:false,reason} if you've hit the per-manager deploy rate " +
             "limit. `reason` is a short note for the audit trail only — it is never part of the command run. " +
-            "On success returns {deployed:true}; on a failed run returns {deployed:false,reason,exitCode," +
-            "outputTail} with a bounded stdout+stderr tail to diagnose from.",
+            "On success returns {deployed:true,opId}; on a failed run returns {deployed:false,reason,exitCode," +
+            "outputTail,opId} with a bounded stdout+stderr tail to diagnose from. `opId` (card 720bb7ad) " +
+            "correlates this run to the daemon's own `deploy` audit event and, if the project's gate command " +
+            "shells out to `pnpm --filter @loom/daemon test:daemon`, to that run's own gate-timing NDJSON " +
+            "row — absent only when refused before any host exec was attempted (unconfigured/rate-limited).",
           inputSchema: strictShape({ reason: z.string() }),
         },
         async ({ reason }) => {

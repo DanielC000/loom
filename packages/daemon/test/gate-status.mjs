@@ -572,7 +572,11 @@ try {
     // runGateStep calls on a real auto-extend, exercising confirmWorkerMerge's mirroring wrapper without
     // a real slow timeout (gate-timeout-extend.mjs already proves the underlying extend MECHANISM; this
     // proves the WIRING from that hook to the persisted record).
-    const richPassGateExtended = async (_gate, _cwd, _timeoutMs, _runStep, _env, _allowExtend, _cancelSignal, hooks) => {
+    // Card 720bb7ad DoD-3: also CAPTURES the envOverride argument confirmWorkerMerge passed — asserted
+    // below to prove LOOM_GATE_OP_ID was actually threaded onto the gate child's env.
+    let capturedEnvOverride;
+    const richPassGateExtended = async (_gate, _cwd, _timeoutMs, _runStep, envOverride, _allowExtend, _cancelSignal, hooks) => {
+      capturedEnvOverride = envOverride;
       hooks?.onExtend?.();
       return { passed: true, steps: [{ step: "pnpm gate", durationMs: 4200, status: 0 }], outputTail: "ok" };
     };
@@ -610,6 +614,14 @@ try {
     // the exact value that used to be silently discarded the moment `confirmWorkerMerge` saw `passed:true`.
     check("(e2e merge verdict pass — a1a8c5c4 FIX) outputTail round-trips through the tombstone — a passing MERGE gate used to retain NO output of its own before this card", status.outputTail === "ok");
     check("(e2e merge verdict pass — 3407caad) gate_status ALSO round-trips proximity for a settled merge PASS", status.proximity?.nearBudget === false && status.proximity?.step === "pnpm gate");
+    // Card 720bb7ad DoD-1/2 — THE FIX: a PASSING merge used to carry NO step breakdown anywhere durable
+    // (the top-level `steps` field was "gate"-kind only by construction — see PendingGateOpVerdict's own
+    // doc). This is the ONE location a reader should now prefer for either outcome.
+    check("(e2e merge verdict pass — 720bb7ad THE FIX) steps round-trips through the tombstone as a TOP-LEVEL field on a PASSING merge — previously absent entirely", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].step === "pnpm gate" && status.steps[0].durationMs === 4200);
+    // Card 720bb7ad DoD-3 — THE FIX: the gate child's env carried LOOM_GATE_OP_ID, matching the SAME opId
+    // this op settled under — proving the NDJSON run-summary row a real `pnpm --filter @loom/daemon
+    // test:daemon` child would write is now attributable back to this exact op.
+    check("(e2e merge verdict pass — 720bb7ad DoD-3) the gate child's envOverride carries LOOM_GATE_OP_ID matching this op's own opId", capturedEnvOverride?.LOOM_GATE_OP_ID === opId);
   }
 
   // ── (e2e merge, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) the merge-gate analogue of the worker
@@ -674,11 +686,17 @@ try {
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    const richFailGate = async () => ({
-      passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false,
-      outputTail: "FAIL  some_test.mjs", failingTest: "some_test.mjs",
-      steps: [{ step: "pnpm gate", durationMs: 900, status: 1 }],
-    });
+    // Card 720bb7ad DoD-3: also CAPTURES the envOverride argument — asserted below alongside the fail
+    // path's step-breakdown fix.
+    let capturedEnvOverride;
+    const richFailGate = async (_gate, _cwd, _timeoutMs, _runStep, envOverride) => {
+      capturedEnvOverride = envOverride;
+      return {
+        passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+        outputTail: "FAIL  some_test.mjs", failingTest: "some_test.mjs",
+        steps: [{ step: "pnpm gate", durationMs: 900, status: 1 }],
+      };
+    };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: richFailGate });
 
     const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
@@ -698,6 +716,11 @@ try {
     // verdict payload gate_status/gate_history read) — the exact "carries no tail" gap the card measured.
     check("(e2e merge verdict fail — HALF THREE) gate_status ALSO carries the stderr tail — previously dropped here", status.gateDetail?.stderrTail === "FAIL  some_test.mjs");
     check("(e2e merge verdict fail — HALF THREE) gate_status ALSO carries per-step durations — previously dropped here", Array.isArray(status.gateDetail?.steps) && status.gateDetail.steps.length === 1 && status.gateDetail.steps[0].step === "pnpm gate" && status.gateDetail.steps[0].durationMs === 900);
+    // Card 720bb7ad DoD-1/2: the SAME step breakdown ALSO now round-trips as the TOP-LEVEL `steps` field
+    // (the ONE location a reader should prefer for either outcome — see PendingGateOpVerdict's own doc),
+    // not just nested inside gateDetail — parity with the pass path's own top-level `steps` fix above.
+    check("(e2e merge verdict fail — 720bb7ad) steps ALSO round-trips as a TOP-LEVEL field (parity with the fail-only gateDetail.steps copy above)", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].step === "pnpm gate" && status.steps[0].durationMs === 900);
+    check("(e2e merge verdict fail — 720bb7ad DoD-3) the gate child's envOverride ALSO carries LOOM_GATE_OP_ID matching this op's own opId on the fail path", capturedEnvOverride?.LOOM_GATE_OP_ID === opId);
     check("(e2e merge verdict fail) extended is false (spawned, never extended) — NOT undefined (a distinct claim from \"never spawned\", see the negative control below)", status.extended === false);
     check("(e2e merge verdict fail) admittedAt/settledAt/totalDurationMs are ALL present on the fail path too (parity with pass)", typeof status.admittedAt === "string" && typeof status.settledAt === "string" && typeof status.totalDurationMs === "number");
     // Card a1a8c5c4: outputTail is now a TOP-LEVEL field on both outcomes (mirroring the sibling "gate"
@@ -757,6 +780,11 @@ try {
     // empty string, same "nothing to report" discipline `extended` already follows above.
     check("(e2e merge negative control — a1a8c5c4) outputTail is undefined — no gate ran, nothing to report", status.outputTail === undefined);
     check("(e2e merge negative control — 3407caad DoD-4) gate_status's proximity is ALSO undefined here, never a fabricated {nearBudget:false}", status.proximity === undefined);
+    // Card 720bb7ad DoD-1/2 NEGATIVE CONTROL: the top-level `steps` field must ALSO stay undefined here —
+    // no gate spawned, so there's genuinely nothing to report, same discipline as extended/outputTail/
+    // proximity above. Without this, `steps === undefined` on a pass could be misread as "the fix didn't
+    // work" instead of "correctly nothing to report".
+    check("(e2e merge negative control — 720bb7ad) gate_status's steps is ALSO undefined here — no gate ran, nothing to report", status.steps === undefined);
   }
 
   // ── (e2e, tombstone terminal states) gate_status maps EVERY pending_gate_ops.state value through —

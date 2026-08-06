@@ -1801,28 +1801,37 @@ export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | 
 export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
 
 /**
- * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd
- * and a1a8c5c4) — everything about a settled "gate"/"merge" op's outcome that doesn't need its own
- * queryable column (see the `pending_gate_ops` schema doc for why this is one JSON blob, not one column
- * per field). Every field is optional because which ones are meaningful depends on BOTH `verdict` and
- * which KIND of row this is: a "gate" row's `"pass"`/`"fail"` carries `durationMs`/`validatedHead`/
- * `steps`/`outputTail` (mirrors {@link WorkerGateResult}'s own `ran:true` fields); a "merge" row's
- * `"pass"`/`"fail"` instead carries `settledAt`/`totalDurationMs`/`extended`/`outputTail` (see those
- * fields' own docs) — `durationMs`/`validatedHead`/`steps` stay "gate"-kind only, never populated for a
- * "merge" row. `outputTail` (a1a8c5c4) is the one field BOTH kinds populate, on BOTH `"pass"` and
- * `"fail"` — the bounded (~4KB, `OUTPUT_TAIL_BYTES`) last-step tail. For a "gate" row this is
- * unconditional whenever a gate ran. For a "merge" row it is populated ONLY on the two dominant return
- * paths — a plain gate-fail rejection and a plain successful merge — and stays `undefined` on every
- * OTHER path too, not just "no gate spawned": a gateless project, a REUSED self-check, a pre-gate
- * rejection, AND a rarer post-gate-PASS rejection (`gate_base_invalidated`, a merge conflict, an
- * orphaned/stage-empty no-op) all read back `undefined` here even though a gate may have genuinely run
- * and produced output in that last case. ⚠️ A missing `outputTail` on a "merge" row is therefore NOT
- * proof that no gate spawned — `extended` (`undefined` ONLY when no gate spawned) is the field that
- * proves that; never infer it from `outputTail`'s absence. `"fail"` additionally carries `gateDetail`
- * (the SAME rich diagnostic — phase/failedStep/failingTest/exitCode/signal/timedOut — the
- * `[loom:gate-failed]`/`[loom:merge-rejected]` nudge already embeds); `"cancelled"`/`"error"` carry
- * `reason` only. A row written before 4c5bf820 (or a "merge" row written before 9f6598dd) has NO payload
- * at all — `verdictPayload` reads back `null`, never a fabricated shape.
+ * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd,
+ * a1a8c5c4, and 720bb7ad) — everything about a settled "gate"/"merge" op's outcome that doesn't need its
+ * own queryable column (see the `pending_gate_ops` schema doc for why this is one JSON blob, not one
+ * column per field). Every field is optional because which ones are meaningful depends on BOTH `verdict`
+ * and which KIND of row this is: a "gate" row's `"pass"`/`"fail"` carries `durationMs`/`validatedHead`
+ * too, which stay "gate"-kind only, never populated for a "merge" row; a "merge" row's `"pass"`/`"fail"`
+ * instead carries `settledAt`/`totalDurationMs`/`extended` (see those fields' own docs). `outputTail`
+ * (a1a8c5c4) and `steps` (card 720bb7ad — BEFORE this card `steps` was "gate"-kind only, exactly the
+ * `outputTail` gap a1a8c5c4 had already closed; see that card's DoD for why a PASSING merge is the one
+ * outcome this closes the last hole for) are the two fields BOTH kinds populate, on BOTH `"pass"` and
+ * `"fail"` — `outputTail` is the bounded (~4KB, `OUTPUT_TAIL_BYTES`) last-step tail, `steps` is the
+ * sub-ms-precision per-step `{step, durationMs, status}` breakdown. For a "gate" row `steps` is
+ * unconditional whenever a gate ran; for a "merge" row it's populated whenever `ConfirmMergeResult.
+ * gateSteps` was — the SAME "nothing to report" scope `outputTail`/`extended` already follow (gateless
+ * project, REUSED self-check, or a pre-gate rejection all read back `undefined`). `gateDetail.steps`
+ * (below) is a SEPARATE, fail-only, pre-existing copy of the identical bytes for a "merge" row — kept
+ * for back-compat with `card 361520a0`'s own consumers rather than removed, but this top-level `steps`
+ * field is the ONE location a reader should prefer, since it's the only one populated on a PASS too.
+ * `outputTail` is populated ONLY on the two dominant return paths — a plain gate-fail rejection and a
+ * plain successful merge — and stays `undefined` on every OTHER path too, not just "no gate spawned": a
+ * gateless project, a REUSED self-check, a pre-gate rejection, AND a rarer post-gate-PASS rejection
+ * (`gate_base_invalidated`, a merge conflict, an orphaned/stage-empty no-op) all read back `undefined`
+ * here even though a gate may have genuinely run and produced output in that last case (the SAME rarer
+ * gap `steps` inherits, since both derive from the same `ConfirmMergeResult` fields). ⚠️ A missing
+ * `outputTail`/`steps` on a "merge" row is therefore NOT proof that no gate spawned — `extended`
+ * (`undefined` ONLY when no gate spawned) is the field that proves that; never infer it from
+ * `outputTail`/`steps`' absence. `"fail"` additionally carries `gateDetail` (the SAME rich diagnostic —
+ * phase/failedStep/failingTest/exitCode/signal/timedOut — the `[loom:gate-failed]`/`[loom:merge-rejected]`
+ * nudge already embeds); `"cancelled"`/`"error"` carry `reason` only. A row written before 4c5bf820 (or a
+ * "merge" row written before 9f6598dd) has NO payload at all — `verdictPayload` reads back `null`, never
+ * a fabricated shape.
  */
 export interface PendingGateOpVerdict {
   reason?: string;
@@ -1853,10 +1862,14 @@ export interface PendingGateOpVerdict {
      *  independent signals to cross-check or reconcile — a future "fix" that makes one follow the other
      *  would silently couple two fields that were never meant to be coupled. */
     stderrTail?: string;
-    /** Card 361520a0, Half Three: per-step `{step, durationMs, status}` — the SAME shape the top-level
-     *  `steps` field carries for a "gate" row, but for "merge" a rejection's step timings live nested in
-     *  `GateRejectionDetail.steps` instead (see that type's own doc for why), so this mirrors it here rather
-     *  than forcing a rejection to populate the top-level field it was never scoped to. */
+    /** Card 361520a0, Half Three: per-step `{step, durationMs, status}` — originally the ONLY place a
+     *  "merge" rejection's step timings lived, since the top-level `steps` field above was "gate"-kind
+     *  only at the time. Card 720bb7ad widened the top-level `steps` field to "merge" rows too, on BOTH
+     *  pass and fail — see that field's own doc — so this nested copy is now a DELIBERATE, fail-only
+     *  DUPLICATE of the identical bytes (same reasoning as `stderrTail` vs. the top-level `outputTail`
+     *  just above: independently motivated, never two signals to reconcile), kept here for back-compat
+     *  rather than removed. A reader wanting a merge's step breakdown should prefer the top-level `steps`
+     *  field — it's the one location populated on BOTH outcomes; this one is fail-only. */
     steps?: { step: string; durationMs: number | null; status: number | null }[];
   };
   /** Card 9f6598dd: the op's own settle instant (ISO), captured at the SAME `settlePendingGateOp` call
@@ -7202,11 +7215,15 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   }
   const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
   const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
-  // Card 3aec1df6 — the reachability key: `worker_gate`/`deploy` detail_json never carried an opId (nothing
-  // needed one — their own failure detail is already inline, see `failingTest` above), but `build_gate`/
-  // `build_gate_retry` now stamp `opId` explicitly (service.ts's two `evt("build_gate"...)` call sites) so
-  // a null-`failingTest` merge row can still be resolved to its full diagnostic via `gate_status(opId)`.
-  // `null` for any row recorded before this field shipped, or for a kind that never stamps it.
+  // Card 3aec1df6 — the reachability key: `worker_gate` detail_json still never carries an opId (nothing
+  // needed one — its own failure detail is already inline, see `failingTest` above; adding it there is
+  // card 78214063's separate scope, not this one's). `deploy` detail_json USED to be in the same
+  // never-carries-one bucket, but card 720bb7ad changed that: `deployOwnProject` now mints an opId and
+  // stamps it on its own `deploy` audit event (previously deploy had no correlating id anywhere at all),
+  // so a `deploy`-kind row is resolvable here too now. `build_gate`/`build_gate_retry` stamp `opId`
+  // explicitly (service.ts's two `evt("build_gate"...)` call sites) so a null-`failingTest` merge row can
+  // still be resolved to its full diagnostic via `gate_status(opId)`. `null` for any row recorded before
+  // its own kind's field shipped, or for a kind that never stamps it (currently: `worker_gate` only).
   const opId = typeof detail.opId === "string" ? detail.opId : null;
   const outcome = gateOutcomeFromDetail(detail);
   const gateCap = typeof detail.gateCap === "number" ? detail.gateCap : null;
