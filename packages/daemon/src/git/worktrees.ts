@@ -2150,11 +2150,6 @@ export interface EmitCompareGateResult {
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
-  /** Count of changed `test/*.mjs` paths classified as living inside an EXCLUDED_DIR_NAMES subtree
-   *  (`fixtures/`, `census/`) — recognized, but never pushed into {@link changedTestFiles} since the full
-   *  suite's own discovery walk never descends into that subtree either (card 815b4b30). Diagnostic only,
-   *  same "a skip is never silent" discipline as `identicalFileCount`. */
-  excludedTestFileCount: number;
   reason?: string;
 }
 
@@ -2222,11 +2217,39 @@ export interface EmitCompareGateResult {
  * prefixes, any non-`M` status (added/deleted/renamed) on a compiled file, or a failed soundness
  * precondition all return `eligible:false`. A false `false` costs one ordinary gate run; a false `true`
  * would land unverified behavior on main — the same asymmetry that decided every judgement call here.
+ *
+ * ANY EXCLUDED-DIR (`fixtures/`, `census/`) TOUCH FAILS THIS DIFF CLOSED — card 44968963, the decision
+ * between two candidates. `815b4b30` (above) stopped a `fixtures/`/`census/` path from being pushed into
+ * {@link EmitCompareGateResult.changedTestFiles} and run AS a test — correct, since the full suite's own
+ * discovery walk never descends there either. But that fix left a gap: a diff changing a shared fixture
+ * PLUS one of its consumer test files still reached `eligible:true` (the consumer alone proves eligibility),
+ * running only that one consumer while the fixture's OTHER consumers — outside the diff, unrun by either
+ * gate — could equally have broken. Measured on this repo (card 44968963 DoD-1): `fake-codescape-cli.mjs`
+ * has 6 consumers, `echo-env.mjs` has 3 — this is a real, reachable exposure, not a hypothetical one.
+ *
+ * The candidate that would have PRESERVED speed here — resolve a changed fixture's consumers and fold them
+ * into `changedTestFiles` — was rejected. Every real consumer in this repo names its fixture the same way:
+ * `path.join(__dirname, "fixtures", "<literal-basename>.mjs")` — a computed path, not an `import`, so a
+ * resolver can only ever be a TEXTUAL heuristic (grep the fixture's basename across `test/**`), never a
+ * structural one. That heuristic happens to find all of today's consumers, but "happened to find them all"
+ * is exactly the standard this card's own DoD-3 rules out (a guessed resolver that misses a consumer is
+ * WORSE than always running the full gate, because a clean `eligible:true` LOOKS precise while silently
+ * proving nothing for the consumer it missed) — and nothing stops a future test file from referencing a
+ * fixture through a shared constant, a computed/interpolated name, or an indirection this repo doesn't use
+ * today, none of which a basename grep would ever see. There is no way to PROVE such a resolver cannot miss
+ * a consumer, only ways to observe that it hasn't yet — so it fails the same asymmetry as everything else in
+ * this file: a wrong skip is a bad merge, a wrong full-run is minutes. Unconditionally failing closed the
+ * moment ANY excluded-dir path changes needs no resolver to trust, so it cannot have this failure mode.
+ *
+ * COST, NAMED: this also forces the full gate for the previously-reduced case where a fixture change ships
+ * alongside a real test file change that has nothing to do with the fixture (`test/emit-compare-gate.mjs`
+ * case (J) — see that test's own updated expectation). That diff shape is not provably safe to reduce
+ * without exactly the resolver this decision rejects, so the regression is accepted, not overlooked.
  */
 export async function computeEmitCompareGate(
   repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
-  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, excludedTestFileCount: 0, reason });
+  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, reason });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2243,7 +2266,6 @@ export async function computeEmitCompareGate(
 
   const changedTsFiles: string[] = [];
   const changedTestFiles: string[] = [];
-  let excludedTestFileCount = 0;
   // Lazily loaded (only if a test/*.mjs path with a subdirectory actually shows up below) and cached for
   // the rest of this call. `undefined` = not attempted yet; `null` = attempted and failed (fail closed);
   // a `Set` = the real names, loaded straight from THIS diff's own worktree copy of test-daemon.mjs.
@@ -2275,14 +2297,20 @@ export async function computeEmitCompareGate(
       // here: both only ever change how `findExcludedDirTestShapedFiles` ANNOTATES a file already inside
       // an excluded dir for the full-suite banner — neither marker makes the full suite actually RUN that
       // file, so there is nothing for a marker to change about whether this reduced gate runs it either.
+      //
+      // Card 44968963: a fixture/census file's OTHER consumers can sit anywhere else in `test/**`, entirely
+      // outside this diff, and this function has no sound way to enumerate them (see this function's own
+      // doc for why a consumer-resolver was rejected) — so ANY changed path landing here fails the WHOLE
+      // diff closed to the full gate immediately, rather than being silently dropped from consideration
+      // the way it was before this card. This is strictly narrower than before: it can only ever turn a
+      // past `eligible:true` into `eligible:false`, never the reverse.
       const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
         if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
         if (excludedDirNames === null) return notEligible(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`);
         if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
-          excludedTestFileCount++;
-          continue;
+          return notEligible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
         }
       }
       // Mirrors scripts/test-daemon.mjs's own discovery rule: an underscore-prefixed segment anywhere in
@@ -2307,14 +2335,11 @@ export async function computeEmitCompareGate(
   }
 
   if (changedTsFiles.length === 0 && changedTestFiles.length === 0) {
-    // Every changed path was either a DELETED test/*.mjs file or (card 815b4b30) an excluded-dir
-    // (fixtures/, census/) test/*.mjs file — nothing left needing behavioral proof, but nothing PROVEN
-    // inert either. Fail closed rather than report a green run that proved nothing: this is what stops a
-    // diff touching ONLY a fixtures/census file from reading as a vacuous eligible:true with an empty
-    // changedTestFiles.
-    return notEligible(excludedTestFileCount > 0
-      ? "every changed path was inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — nothing left to prove inert"
-      : "no eligible changed path left to prove inert");
+    // Every changed path was a DELETED test/*.mjs file — an excluded-dir (fixtures/, census/) path already
+    // returned notEligible above (card 44968963), so it can never reach here. Nothing left needing
+    // behavioral proof, but nothing PROVEN inert either — fail closed rather than report a green run that
+    // proved nothing.
+    return notEligible("no eligible changed path left to prove inert");
   }
 
   if (changedTsFiles.length > 0) {
@@ -2347,7 +2372,7 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length, excludedTestFileCount };
+  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length };
 }
 
 /**

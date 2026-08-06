@@ -327,10 +327,13 @@ try {
     check("(I) no reduced-gate warning present", !(typeof confirm.warning === "string" && /reduced/.test(confirm.warning)));
   }
 
-  // ── (J) card 815b4b30 POSITIVE CONTROL — the ae476ab1-shaped diff: a REAL changed test file PLUS a
-  //        changed test/fixtures/*.mjs file in the SAME diff. The reduced gate must still fire (the real
-  //        test file proves eligibility) but must select ONLY the real test file — never the fixture —
-  //        proving the fix actually changes SELECTION, not just the all-excluded case in (I) ────────────
+  // ── (J) card 44968963 — SUPERSEDES the pre-44968963 behavior: the ae476ab1-shaped diff (a REAL changed
+  //        test file PLUS a changed test/fixtures/*.mjs file in the SAME diff) used to reduce (the real
+  //        test file alone proved eligibility, and the fixture was merely excluded from selection). That
+  //        left the fixture's OTHER consumers — outside this diff — unrun by either gate. Card 44968963
+  //        chose to fail the WHOLE diff closed to the full gate the moment ANY fixtures/census path
+  //        changes, rather than build a consumer-resolver that could silently miss one; this is the
+  //        regression that decision accepts, named explicitly (not a silent behavior change) ─────────────
   {
     const J = mk("j");
     const BASE_TEST = ["// a hermetic test file backed by a fixture", "console.log(\"PASS  placeholder\");", "process.exit(0);", ""].join("\n");
@@ -356,9 +359,46 @@ try {
 
     const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
     check("(J) gateRan:true", confirm.gateRan === true);
-    check("(J) captured command is the REDUCED gate — the real test file still proves eligibility", capturedGate !== FULL_GATE && !capturedGate.includes("test:daemon"));
-    check("(J) reduced command runs the REAL changed test file directly", capturedGate.includes("packages/daemon/test/kickoff-real.mjs"));
-    check("(J) reduced command does NOT run the changed fixtures/ file as a test", !capturedGate.includes("fixtures/fake-cli.mjs"));
+    check("(J) captured command IS the full gate — a fixtures/ file changing alongside a real test file no longer reduces (card 44968963)", capturedGate === FULL_GATE);
+  }
+
+  // ── (K) card 44968963 DoD-4 — the motivating real-world shape: a changed fixture PLUS ONE of its several
+  //        consumers, while ANOTHER real consumer of that SAME fixture sits entirely outside the diff (the
+  //        `fake-codescape-cli.mjs` specimen — 6 consumers on this repo, only ever proven eligible via ONE
+  //        of them before this card). Must fail closed to the full gate: nothing here can prove the
+  //        untouched consumer is unaffected ──────────────────────────────────────────────────────────────
+  {
+    const K = mk("k");
+    const CONSUMER = (name) => [
+      `// consumer of fixtures/fake-cli.mjs, standing in for e.g. codescape-health-probe.mjs`,
+      `console.log("PASS  ${name}");`, "process.exit(0);", "",
+    ].join("\n");
+    fs.mkdirSync(K.repo, { recursive: true });
+    fs.writeFileSync(path.join(K.repo, "README.md"), "# ecg\n");
+    mkdirp(path.join(K.repo, "packages", "daemon", "test", "fixtures"));
+    mkdirp(path.join(K.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(K.repo, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
+    fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "consumer-a.mjs"), CONSUMER("consumer-a"));
+    fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "consumer-b.mjs"), CONSUMER("consumer-b"));
+    fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: K.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
+    K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
+    // Only consumer-a + the fixture change; consumer-b (an equally real consumer of the SAME fixture) is
+    // untouched — exactly the shape that used to slip through with partial coverage.
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "consumer-a.mjs"), CONSUMER("consumer-a (updated)"));
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update one consumer + the shared fixture"`, { cwd: worktreePath });
+    seed(db, K);
+
+    const confirm = await sessions.confirmWorkerMerge(K.mgrId, K.workerId);
+    check("(K) gateRan:true", confirm.gateRan === true);
+    check("(K) captured command IS the full gate — consumer-b (unchanged, same fixture) can't be proven unaffected", capturedGate === FULL_GATE);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
@@ -367,6 +407,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and a diff touching a real test file plus its backing fixtures/ file together still reduces, selecting the real test file and never the fixture."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
