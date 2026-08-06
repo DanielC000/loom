@@ -303,6 +303,11 @@ async function main(): Promise<void> {
     // recipient AND the sender. See PtyHostEvents.onPasteLengthLoss's own doc / SessionService.
     // handlePasteLengthLoss's own doc.
     onPasteLengthLoss: (sessionId, candidate) => sessions.handlePasteLengthLoss(sessionId, candidate),
+    // Card 47c11741: the tripwire's own one-shot RECOVERY re-injection ALSO collapsed — `sessions` (forward
+    // reference, same pattern as onPasteLengthLoss above) decides how to fail loud to the recipient AND the
+    // sender, reusing handlePasteLengthLoss's shape. See PtyHostEvents.onPasteTripwireGiveUp's own doc /
+    // SessionService.handlePasteTripwireGiveUp's own doc.
+    onPasteTripwireGiveUp: (sessionId, info) => sessions.handlePasteTripwireGiveUp(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

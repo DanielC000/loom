@@ -242,12 +242,19 @@ class TestPtyHost extends createSeamHost(PtyHost) {
   }
 }
 
+// Card 47c11741: the give-up escalation's new real channel — captured here so tests can assert it fires
+// ONLY on an actual give-up (isRecoveryAttempt collapsing a second time), never on an ordinary detection,
+// a clean recovery resolution, or a normal turn. `events` stays optional-callback-shaped (matches
+// PtyHostEvents' own `?.` contract) so this addition is purely additive to every OTHER existing caller of
+// this fixture pattern elsewhere in the suite.
+const giveUpLog = [];
 const events = {
   onEngineSessionId() {},
   onBusy() {},
   onContextStats() {},
   onRateLimited() {},
   onExit() {},
+  onPasteTripwireGiveUp(sessionId, info) { giveUpLog.push({ sessionId, ...info }); },
 };
 
 const host = new TestPtyHost(events);
@@ -447,6 +454,11 @@ try {
       warnLog.length - beforeWarn2 === 0);
     check("RECOVERY (i): a cleanly-resolved recovery schedules no further corrective turn (no new pty writes)",
       fake.writes.length === writesBefore2);
+    // NEGATIVE CONTROL (card 47c11741): this is the SAME give-up code path minus the second collapse — the
+    // strongest negative to run this against, since it proves the new channel only fires on the actual
+    // give-up branch (isRecoveryAttempt collapsing AGAIN), not merely on "a recovery turn happened at all."
+    check("RECOVERY (i) NEGATIVE CONTROL (card 47c11741): a cleanly-resolved recovery emits NOTHING on the new give-up channel — byte-identical to pre-card behavior",
+      giveUpLog.length === 0);
   }
 
   // (k) RECOVERY-ESCALATE, the loop-safety proof: the RECOVERY re-injection ITSELF collapses. Must NOT
@@ -479,6 +491,17 @@ try {
       newWarnings[0]?.includes("ALSO collapsed"));
     check("RECOVERY (k): NO third corrective turn is written — the one-shot bound holds (no infinite loop)",
       fake.writes.length === writesBeforeEscalate);
+    // POSITIVE CONTROL (card 47c11741): the give-up escalation now routes through a real, queryable channel
+    // on top of the console.warn above (which stays byte-identical — asserted above). This is the exact
+    // "recovery ALSO collapsed" case the card is about: prove the new signal actually fires here, not just
+    // that it stays silent elsewhere.
+    check("RECOVERY (k) POSITIVE CONTROL (card 47c11741): the give-up fires the new onPasteTripwireGiveUp channel exactly once",
+      giveUpLog.length === 1);
+    check("RECOVERY (k): the give-up event names the correct session",
+      giveUpLog[0]?.sessionId === SID);
+    check("RECOVERY (k): the give-up event carries the placeholder token from THIS collapse",
+      giveUpLog[0]?.token === "[Pasted text #23 +9 lines]");
+    giveUpLog.length = 0; // consumed — reset for the next block's own delta assertion
   }
   // (l) card 78e4b3f2 REGRESSION GUARD, RED-FIRST: the recovery re-injection ITSELF can be a genuine
   // physical RE-DELIVERY — an in-session give-up requeue that redrained marks its text
@@ -513,6 +536,13 @@ try {
       newWarnings[0]?.includes("ALSO collapsed"));
     check("(l) THE FIX: NO further corrective turn is written for a marked recovery's own collapse (one-shot bound holds through the tag)",
       fake.writes.length === writesBeforeStop);
+    // Card 47c11741: a MARKED recovery's give-up is still recognized as a give-up (mirrors (k)'s new-channel
+    // assertion) — the possible-duplicate frame in front of PASTE_RECOVERY_TAG must not defeat this either.
+    check("(l) card 47c11741: a marked recovery's give-up ALSO fires the new onPasteTripwireGiveUp channel exactly once",
+      giveUpLog.length === 1);
+    check("(l) card 47c11741: the give-up event carries this collapse's own placeholder token",
+      giveUpLog[0]?.token === "[Pasted text #77 +2 lines]");
+    giveUpLog.length = 0;
   }
 
   // (m) STALENESS ANNOTATION (card 4af5aefa): the actual live specimen was minted CORRECTLY (its content
@@ -662,6 +692,12 @@ try {
     ]);
     host.deliverHook(SID, { hook_event_name: "Stop" });
   }
+
+  // FINAL NEGATIVE CONTROL (card 47c11741): (m)/(n) exercise ordinary detections and clean/annotated
+  // recoveries — none of them a give-up — after (k)/(l) already reset giveUpLog to empty. Nothing since
+  // should have added to it.
+  check("FINAL NEGATIVE CONTROL (card 47c11741): no further onPasteTripwireGiveUp firings from the non-give-up (m)/(n) scenarios",
+    giveUpLog.length === 0);
 } finally {
   console.warn = realWarn;
   try { host.stop(SID, "hard"); } catch { /* ignore */ }

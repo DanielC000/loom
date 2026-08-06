@@ -7087,6 +7087,35 @@ export class SessionService {
   }
 
   /**
+   * Card 47c11741 — consumes `PtyHostEvents.onPasteTripwireGiveUp`: the bare-placeholder tripwire's own
+   * one-shot RECOVERY re-injection ALSO collapsed, and Loom will not retry a second time (one-shot by
+   * design — see the call site's own doc). Until this card, the give-up terminated in a bare
+   * `console.warn` and nothing else — no queryable record, no notice to anyone who could actually act.
+   * Deliberately reuses `handlePasteLengthLoss`'s established shape (same two recipients, same durable
+   * `db.appendEvent` audit trail) rather than inventing a second channel for what is, from the affected
+   * session's point of view, the same kind of gap: pasted content that never reached the engine. The one
+   * real difference from that sibling is WHO can act: there, Loom never wrote the lost text at all (a
+   * human/raw-terminal paste) so the notice can only ask "did you send something? — resend it." Here Loom
+   * DID write the text (twice, including the one-shot recovery itself) and DID detect both collapses, so
+   * the SENDER'S action is unambiguous — manually resend, because Loom's own automatic budget is spent.
+   */
+  handlePasteTripwireGiveUp(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "paste_tripwire_give_up", detail: { token: info.token, engineSessionId: info.engineSessionId },
+    });
+    const tokenNote = info.token ? ` (placeholder ${info.token})` : "";
+    const recipientMsg = `[loom:paste-tripwire-giveup] this session's own bare-pasted-text placeholder tripwire fired TWICE in a row${tokenNote}: the original submission collapsed, Loom's one-shot automatic recovery re-injection ALSO collapsed, and Loom will not retry a third time (see card eef4883c / 0f9268cc). If you were expecting pasted content around this point in the conversation, it likely did not arrive — ask whoever sent it to resend it directly rather than assuming it's safe to proceed.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:paste-tripwire-giveup] your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""}'s bare-pasted-text placeholder tripwire fired TWICE in a row${tokenNote}: the original submission collapsed, Loom's own one-shot automatic recovery re-injection ALSO collapsed, and Loom's automatic-recovery budget for this is now exhausted. Please resend the original content to that session directly — Loom will not attempt this again on its own.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card 417cea0a — the post-hoc retraction half of the give-up notice: `purgeConfirmedGiveUpRequeue`
    * (pty/host.ts) already learns, by content match, that a given-up message's turn actually ran — this
    * consumes that signal (wired via `PtyHostEvents.onGiveUpConfirmed`). `sessionId` is the RECIPIENT whose

@@ -1243,7 +1243,17 @@ export type OrchestrationEventKind =
   // session's id if one exists, else its own id — mirrors `session_message_gave_up`'s "notify whoever can
   // act" convention), workerSessionId = the affected session itself; `detail` carries { token, statedLines,
   // estimatedBytesLost }. The durable audit trail for a loss Loom could only detect, never recover.
-  | "paste_length_loss";
+  | "paste_length_loss"
+  // Card 47c11741 — `PtyHostEvents.onPasteTripwireGiveUp` fired: the bare-placeholder tripwire's own
+  // one-shot RECOVERY re-injection (see `PASTE_RECOVERY_TAG`, paste-tripwire.ts) ALSO collapsed, and Loom
+  // will not retry a second time (one-shot by design). Distinct from `paste_length_loss` above — THAT one
+  // fires when Loom never wrote the lost text at all (the human/raw-paste gap); this one fires when Loom
+  // DID write it (twice) and DID detect both collapses, but the automatic-recovery budget is exhausted.
+  // Filed under the AFFECTED session (managerSessionId = its parent session's id if one exists, else its
+  // own id — same "notify whoever can act" convention as `paste_length_loss`), workerSessionId = the
+  // affected session itself; `detail` carries { token, engineSessionId }. The durable audit trail for a
+  // give-up that used to terminate in a bare console.warn with no queryable record at all.
+  | "paste_tripwire_give_up";
 
 export interface OrchestrationEvent {
   id: string;

@@ -2790,6 +2790,22 @@ export interface PtyHostEvents {
    */
   onPasteLengthLoss?(sessionId: string, candidate: PasteLengthLossCandidate): void;
   /**
+   * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
+   * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
+   * console.warn (this file's Stop-hook call site) already fires. Distinct from `onPasteLengthLoss` above:
+   * that one fires when Loom never wrote the lost text at all (the human/raw-paste gap); THIS one fires
+   * when Loom DID write it (twice) and DID detect both collapses, but the automatic-recovery budget is
+   * exhausted (one-shot by design — see the call site's own doc for why a second automatic attempt isn't
+   * warranted). PtyHost itself cannot notify beyond the session (no DB, no manager lookup — same layering
+   * boundary as `onPasteLengthLoss`/`onKickoffGiveUpExhausted` above); the implementer (sessions/
+   * service.ts) decides how to fail loud to both the recipient and — where one exists — the sender,
+   * reusing `handlePasteLengthLoss`'s established shape rather than inventing a second one. `token` is
+   * whatever `matchEmbeddedPlaceholderToken` found in this turn's recorded text (may be `null` — the
+   * give-up itself never depends on a token match). OPTIONAL, same rationale as its siblings above: every
+   * existing `PtyHostEvents` test double is unaffected until it opts in.
+   */
+  onPasteTripwireGiveUp?(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void;
+  /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
    * death (the process died without a stop() — a crash / clean self-exit). It is the load-bearing
@@ -5259,6 +5275,13 @@ export class PtyHost {
               : "auto-recovering: re-injecting the lost content as a corrective turn (one-shot — a second collapse on the recovery itself will not retry again).";
             // eslint-disable-next-line no-console
             console.warn(`[paste-tripwire] ${sessionId} submitted turn resolved to a bare pasted-text placeholder (engineSessionId=${live.engineSessionId ?? "?"}, claudeVersion=${getCachedClaudeVersion() ?? "?"}) — content may have been lost to an upstream CLI paste-collapse race (see card eef4883c / 8a39f544). ${actionNote}`);
+            if (isRecoveryAttempt) {
+              // Card 47c11741: the give-up itself — until now this fired ONLY the console.warn above and
+              // nothing else (no db.appendEvent, no nudge, zero consumers outside this log line). Purely
+              // additive: the warn above is untouched, this just gives the give-up a real, queryable
+              // channel on top of it.
+              this.events.onPasteTripwireGiveUp?.(sessionId, { token: matchEmbeddedPlaceholderToken(stats?.lastUserText), engineSessionId: live.engineSessionId ?? null });
+            }
             if (!isRecoveryAttempt) {
               // Defer OUTSIDE the M2 synchronous window (see the box above deliverHook's Stop/StopFailure
               // case) — enqueueStdin's idle-submit path would trip the finalizingTurn guard if called
