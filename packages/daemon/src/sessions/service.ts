@@ -936,6 +936,24 @@ function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }):
       "Move/push that content out of the worktree yourself, then remove it, or re-run worker_merge_confirm with forceRemoveWorktree:true to force removal.";
 }
 
+/** The manager-facing `warning` text for a `worker_merge_confirm` whose post-merge worktree removal
+ *  (gcWorktreeDir, called from {@link SessionService.finalizeMerge}) came back anything other than
+ *  `"removed"` or `"nested-repo-blocked"` (the latter has its own {@link nestedRepoBlockWarning}) — task
+ *  035fb673: this used to be a `console.warn`-only signal (git/worktrees.ts + gcWorktreeDir) nobody
+ *  polling `worker_merge_confirm` would ever see. Shared by the Green path and the ALREADY_MERGED path
+ *  ({@link SessionService.finishAlreadyMerged}) so the two can't drift. In every case the MERGE itself
+ *  already landed successfully — this is purely additive cleanup reporting, never a failure. */
+function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-skip", worktreePath: string): string {
+  switch (outcome) {
+    case "wedged":
+      return `worktree ${worktreePath} could not be removed — a held OS file handle survived a force-kill retry (genuinely WEDGED). Non-blocking: the merge itself landed successfully. Loom retries this automatically (a low-frequency background sweep, plus every daemon boot) until it either clears on its own or crosses a give-up bound, at which point it flips to needsHuman and stops retrying — no action needed for now.`;
+    case "left-on-disk":
+      return `worktree ${worktreePath} could not be removed — a transient handle-lag outlasted a few short in-call retries (not tracked as wedged). Non-blocking: the merge itself landed successfully. It is NOT retried by the background sweep, but the NEXT daemon restart's boot-reconcile pass will retry it. To clear it sooner: try worker_reap first (harmless if there's nothing to kill), then delete ${worktreePath} yourself — safe, the merge already landed.`;
+    case "needs-human-skip":
+      return `worktree ${worktreePath} has been wedged across many attempts and Loom has GIVEN UP automatic retry. Non-blocking: the merge itself landed successfully. This one needs a HUMAN: reboot (or otherwise force-release the stuck handle), then delete ${worktreePath} manually.`;
+  }
+}
+
 /**
  * Card 00bd3b4a: the shared hedge every give-up-EXHAUSTED-derived notice states — Loom's own redelivery/
  * give-up budget exhausting is NOT proof the underlying write was never received, and a later
@@ -12583,6 +12601,10 @@ export class SessionService {
     // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
     // manager knows cleanup is on it.
     const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
+    // WORKTREE-GC WARNING (task 035fb673): the worktree removal itself came back wedged/left-on-disk/
+    // needs-human — distinct from the nested-repo BLOCK above (which retains the worktree deliberately).
+    // Purely additive: `undefined` on a clean removal, so this never fires on the common path.
+    const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, worktreePath) : undefined;
     // NO-GATE WARNING (finding 8363e602; made repo-aware by CARRIED item 2, multi-repo epic 49136451
     // phase 2): with no gateCommand configured FOR THE TARGET REPO, the branch above merges
     // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
@@ -12623,7 +12645,7 @@ export class SessionService {
     const emitCompareWarning = emitCompareSkip
       ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite`
       : undefined;
-    const warning = [nestedWarning, gateWarning, inertSkipWarning, emitCompareWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, emitCompareWarning].filter((w): w is string => !!w).join(" ") || undefined;
     // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map
     // (card e50600d2) doesn't hold an entry for a session that can never merge again.
     this.lastWorkerGateCheck.delete(workerSessionId);
@@ -12701,7 +12723,11 @@ export class SessionService {
       await new Promise((r) => setTimeout(r, 100));
     }
     const finalizeResult = await this.finalizeMerge(args);
-    const warning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
+    const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
+    // Task 035fb673: same additive worktree-GC warning as the Green path (confirmWorkerMerge) — see its
+    // own comment for why this is purely additive and never a failure signal.
+    const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, args.worktreePath) : undefined;
+    const warning = [nestedWarning, worktreeWarning].filter((w): w is string => !!w).join(" ") || undefined;
     return warning
       ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true, warning }
       : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };
@@ -14279,7 +14305,13 @@ export class SessionService {
      * fills it in from a real `getTaskMergedInfo` read.
      */
     mergedVerification?: "content" | null;
-  }): Promise<{ nestedRepoBlock?: { paths: string[]; truncated: boolean } }> {
+  }): Promise<{
+    nestedRepoBlock?: { paths: string[]; truncated: boolean };
+    /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
+     *  occurred — surfaced by the caller via {@link worktreeGcWarning}. `undefined` on a clean removal,
+     *  byte-identical to before this field existed. */
+    worktreeGcOutcome?: "wedged" | "left-on-disk" | "needs-human-skip";
+  }> {
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
     // worker being merged (already hard-stopped by the caller). Covers BOTH confirmWorkerMerge paths
@@ -14287,6 +14319,7 @@ export class SessionService {
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
     let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
+    let worktreeGcOutcome: "wedged" | "left-on-disk" | "needs-human-skip" | undefined;
     try {
       // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
       // chokepoint every caller (this, boot-reconcile Pass B's two GC sites, the wedge sweep) shares —
@@ -14303,6 +14336,10 @@ export class SessionService {
         console.warn(`[finalizeMerge] worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
           `merge already landed, only the worktree cleanup is deferred.`);
       } else if (result.outcome !== "removed") {
+        // Task 035fb673: this used to be console.warn-only (the daemon log), invisible to the merging
+        // manager. `worktreeGcOutcome` carries it out to the caller so it can be folded into the
+        // `worker_merge_confirm` return's `warning` field — a surface the manager already reads.
+        worktreeGcOutcome = result.outcome;
         // eslint-disable-next-line no-console
         console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${result.outcome}); ` +
           `merge already landed — finishing bookkeeping regardless.`);
@@ -14412,7 +14449,7 @@ export class SessionService {
     // redundant second drain from that later onExit is harmless (idempotent — the queue is either already
     // empty or still genuinely has room). Safe on the idempotent ALREADY_MERGED replay path too.
     void this.maybeDrainCapQueue(args.managerSessionId);
-    return nestedRepoBlock ? { nestedRepoBlock } : {};
+    return { ...(nestedRepoBlock ? { nestedRepoBlock } : {}), ...(worktreeGcOutcome ? { worktreeGcOutcome } : {}) };
   }
 
   /**
