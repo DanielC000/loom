@@ -37,6 +37,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // non-hermetic state — the opposite of what a committed test may depend on), but the mechanism that
 // produced it is captured as synthetic minimal-pair regressions instead.
 //
+// CARD b6eab182 (2026-08-06) — SUPERSEDES the weak-only matching described above. 5 REAL spurious
+// create-BLOCKS were measured in LIVE usage (not sampled draws) — the 5th matched on nothing but a bare
+// camelCase-shaped field name (`workerlabel`) plus a `file:line` landmark, i.e. exactly the two-weak-
+// category bar this detector used to consider sufficient. Per the stated asymmetry (a spurious dedup
+// CONFLICT is loud and self-correcting; a spurious create-BLOCK silently kills a finding), weak evidence —
+// of ANY category, in ANY combination — is no longer sufficient BY ITSELF: a match now REQUIRES at least
+// one STRONG identifier (a session id / task id — both full UUIDs — or a Loom branch name). Weak evidence
+// still corroborates a strong match's ranking/report but can never trigger one alone. ACCEPTED COST: this
+// module's own founding abcf0eba/bc91e86c pair (caught purely via weak evidence — see below) is no longer
+// auto-flagged — tests below document that explicitly as an intended trade rather than silently dropping
+// the assertion.
+//
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE.
 // Run: 1) build (turbo builds shared first), 2) node test/task-dedupe.mjs
 import fs from "node:fs";
@@ -116,9 +128,12 @@ const SPEC = {
 };
 const text = (s) => `${s.title}\n${s.body}`;
 
-// Card abdaecda's legibility fixtures — a WEAK-ONLY match (shared file:line + camelCase symbol, no
-// strong session-id/branch) mirroring the real 166e3536/f3917f96 absurd-specimen shape, and a STRONG
-// match (shared UUID) as the negative control for the weak-only caveat.
+// Card abdaecda originally used these as a WEAK-ONLY match fixture (shared file:line + camelCase symbol,
+// no strong session-id/branch) mirroring the real 166e3536/f3917f96 absurd-specimen shape. Card b6eab182
+// repurposes them as the DoD-3 POSITIVE CONTROL instead: two genuinely-distinct cards citing the same
+// file:line + symbol must now create CLEANLY (no refusal at all), since weak-only evidence can no longer
+// qualify a match. STRONG_A/STRONG_B (below) remain the DoD-4 NEGATIVE CONTROL: a genuine duplicate
+// sharing a real STRONG identifier (a session id) must still be blocked.
 const WEAKONLY_A = {
   title: "chore(examples): illustrate liveFleetResumeSet usage patterns",
   body: "Worked example only — queries liveFleetResumeSet via service.ts:490 as a sample call site, " +
@@ -146,17 +161,23 @@ try {
   const m1r = findSuspectedDuplicate([{ id: "47340c82", ...SPEC.p1a }], text(SPEC.p1b));
   check("(pos) symmetric: dde0ce24-shaped text is flagged as a duplicate of 47340c82", m1r?.taskId === "47340c82");
 
+  // Card b6eab182 ACCEPTED COST: abcf0eba/bc91e86c share ONLY weak evidence (ERROR_FILENAME_EXCED_RANGE +
+  // CreateProcess + startupPrompt — screaming_snake/pascal_case/camel_case, zero strong identifiers). Weak
+  // evidence alone no longer qualifies a match (see duplicateDetection.ts's module doc, "CARD b6eab182"),
+  // so this founding pair is now a documented, INTENTIONAL false negative rather than a positive control.
   const m2 = findSuspectedDuplicate([{ id: "bc91e86c", ...SPEC.p2b }], text(SPEC.p2a));
-  check("(pos) abcf0eba-shaped text is flagged as a duplicate of bc91e86c (shared ERROR_FILENAME_EXCED_RANGE + CreateProcess)",
-    m2?.taskId === "bc91e86c");
+  check("(b6eab182, accepted cost) abcf0eba-shaped text is NO LONGER flagged as a duplicate of bc91e86c (weak-only evidence)",
+    m2 === null);
   const m2r = findSuspectedDuplicate([{ id: "abcf0eba", ...SPEC.p2a }], text(SPEC.p2b));
-  check("(pos) symmetric: bc91e86c-shaped text is flagged as a duplicate of abcf0eba", m2r?.taskId === "abcf0eba");
+  check("(b6eab182, accepted cost) symmetric: bc91e86c-shaped text is NO LONGER flagged as a duplicate of abcf0eba",
+    m2r === null);
 
   // Full-corpus version (all 6 real specimens present at once) — proves the pairing isn't an artifact of
   // an isolated 2-card test: each candidate must land on its OWN true counterpart, not a neighbor.
   const corpus = (excludeKey) => Object.entries(SPEC).filter(([k]) => k !== excludeKey).map(([k, v]) => ({ id: k, ...v }));
   check("(pos, full corpus) p1a's best match is p1b", findSuspectedDuplicate(corpus("p1a"), text(SPEC.p1a))?.taskId === "p1b");
-  check("(pos, full corpus) p2a's best match is p2b", findSuspectedDuplicate(corpus("p2a"), text(SPEC.p2a))?.taskId === "p2b");
+  check("(b6eab182, accepted cost, full corpus) p2a no longer matches anything (weak-only evidence, no strong id)",
+    findSuspectedDuplicate(corpus("p2a"), text(SPEC.p2a)) === null);
 
   // ===================== GATE 2 — NEGATIVE CONTROL: distinct findings, similar wording =====================
   const n1 = findSuspectedDuplicate([{ id: "66d91a11", ...SPEC.neg2 }], text(SPEC.neg1));
@@ -205,11 +226,14 @@ try {
   check("(neg) many shared file:line refs alone (zero other categories) do not flag",
     findSuspectedDuplicate([{ id: "sweepB", title: "sweep B", body: manyFileLineRefs }],
       `sweep A\n${manyFileLineRefs}`) === null);
-  check("(pos) the SAME shared file:line refs DO corroborate once paired with a second category",
+  // Card b6eab182: a second weak category no longer corroborates into a match on its own either — this
+  // is exactly DoD-1's "error constants ... do not trigger a block on their own" (this shape, two weak
+  // categories, is the SAME shape as the real workerlabel+file:line spurious block that motivated the fix).
+  check("(b6eab182) many shared file:line refs PLUS a second weak category still do NOT flag without a strong id",
     findSuspectedDuplicate(
       [{ id: "sweepB2", title: "sweep B2", body: `${manyFileLineRefs} ERROR_SOME_DISTINCT_CONSTANT` }],
       `sweep A2\n${manyFileLineRefs} ERROR_SOME_DISTINCT_CONSTANT`,
-    )?.taskId === "sweepB2");
+    ) === null);
 
   // m5 — the rarityThreshold boundary: an identifier shared by EXACTLY `rarityThreshold` tasks (the
   // matched task included) still counts; shared by one more than that, it doesn't. Flipping the `>` to
@@ -226,40 +250,52 @@ try {
   check("(m5) one carrier OVER the rarity threshold (4 existing carriers) no longer counts",
     findSuspectedDuplicate(overThreshold, `candidate\n${rareBranch}`) === null);
 
-  // M2 — ranking: a task with a STRONG hit must outrank one with ONLY weak evidence, even richer weak
-  // evidence — both must genuinely QUALIFY (share evidence with the candidate) for this to test the
-  // tie-break rather than trivially picking the only qualifying candidate.
+  // M2 — card b6eab182: a strong-less weak match, however rich, no longer qualifies AT ALL (superseding
+  // the old "strong outranks richer weak-only" tie-break test) — confirm that directly first.
   const rankSharedWeak = "ERROR_UNRELATED_CONSTANT CreateUnrelatedThing extraSymbolHere";
-  const rankStrongOnly = { id: "strongOnly", title: "strongOnly", body: "e3641737-6a51-4165-801f-7757e925ea7b" };
-  const rankWeakRicher = {
-    id: "weakRicher", title: "weakRicher",
-    body: `e3641737-6a51-4165-801f-7757e925ea7c ${rankSharedWeak}`,
-  }; // a DIFFERENT UUID (no strong match) + 3 weak categories shared with the candidate below
-  const rankCandidate = `e3641737-6a51-4165-801f-7757e925ea7b ${rankSharedWeak}`; // shares UUID w/ strongOnly, weak w/ weakRicher
-  check("(M2) both candidates genuinely qualify (sanity: weakRicher alone also matches)",
-    findSuspectedDuplicate([rankWeakRicher], rankCandidate)?.taskId === "weakRicher");
-  check("(M2) a single STRONG match outranks a richer but strong-less weak match",
-    findSuspectedDuplicate([rankWeakRicher, rankStrongOnly], rankCandidate)?.taskId === "strongOnly");
+  const rankSharedUuid = "e3641737-6a51-4165-801f-7757e925ea7b";
+  const rankWeakOnlyCandidate = {
+    id: "weakOnly", title: "weakOnly", body: rankSharedWeak,
+  };
+  check("(b6eab182) a strong-less weak match, however many categories, does not qualify at all",
+    findSuspectedDuplicate([rankWeakOnlyCandidate], rankSharedWeak) === null);
 
-  // n8 — the reported sharedIdentifiers list is bounded even when many identifiers are shared. Spans
-  // TWO categories (camelCase + snake_case) so it actually clears MIN_WEAK_CATEGORIES and qualifies.
+  // M2 (redesigned for b6eab182) — ranking among candidates that ALL genuinely qualify (each carries the
+  // strong id) still respects weak-category richness as the tie-break.
+  const rankStrongOnly = { id: "strongOnly", title: "strongOnly", body: rankSharedUuid };
+  const rankStrongPlusWeak = { id: "strongPlusWeak", title: "strongPlusWeak", body: `${rankSharedUuid} ${rankSharedWeak}` };
+  const rankCandidate = `${rankSharedUuid} ${rankSharedWeak}`;
+  check("(M2) both candidates genuinely qualify via the shared STRONG id (sanity)",
+    findSuspectedDuplicate([rankStrongOnly], rankCandidate)?.taskId === "strongOnly"
+    && findSuspectedDuplicate([rankStrongPlusWeak], rankCandidate)?.taskId === "strongPlusWeak");
+  check("(M2) among two equally-STRONG matches, richer corroborating weak evidence wins the tie-break",
+    findSuspectedDuplicate([rankStrongOnly, rankStrongPlusWeak], rankCandidate)?.taskId === "strongPlusWeak");
+
+  // n8 — the reported sharedIdentifiers list is bounded even when many identifiers are shared. A shared
+  // STRONG id is required to qualify at all (card b6eab182); the many weak tokens (camelCase + snake_case)
+  // are corroboration, testing that the bound applies across strong+weak tokens combined.
   const manySharedCamel = Array.from({ length: 6 }, (_, i) => `sharedSymbolNumber${i}`).join(" ");
   const manySharedSnake = Array.from({ length: 6 }, (_, i) => `shared_symbol_number_${i}`).join(" ");
   const manySharedWeak = `${manySharedCamel} ${manySharedSnake}`;
-  const manyMatch = findSuspectedDuplicate([{ id: "many", title: "many", body: manySharedWeak }], `candidate\n${manySharedWeak}`);
+  const manySharedUuid = "12345678-1234-1234-1234-123456789012";
+  const manyMatch = findSuspectedDuplicate(
+    [{ id: "many", title: "many", body: `${manySharedUuid} ${manySharedWeak}` }],
+    `candidate\n${manySharedUuid} ${manySharedWeak}`,
+  );
   check("(n8) sharedIdentifiers is bounded, not a raw dump of every shared token",
     manyMatch !== null && manyMatch.sharedIdentifiers.length <= 9 && manyMatch.sharedIdentifiers.some((s) => s.startsWith("and ")));
 
-  // ===================== card abdaecda — strongMatch/weakCategories legibility fields =====================
+  // ===================== card b6eab182 — DoD-3 positive control / DoD-4 negative control =====================
+  // DoD-3: two genuinely-distinct cards sharing only a code landmark + naming convention (the exact shape
+  // card abdaecda used to flag as a weak-only match) must now create CLEANLY — no match at all.
   const weakOnlyMatch = findSuspectedDuplicate([{ id: "weakOnlyExisting", ...WEAKONLY_A }], text(WEAKONLY_B));
-  check("(abdaecda, pos) a weak-only match (shared file:line + camelCase symbol, no strong id) reports strongMatch:false",
-    weakOnlyMatch !== null && weakOnlyMatch.strongMatch === false);
-  check("(abdaecda, pos) ...and names the contributing weak categories",
-    weakOnlyMatch !== null && weakOnlyMatch.weakCategories.includes("camel_case") && weakOnlyMatch.weakCategories.includes("file_line"));
+  check("(b6eab182, DoD-3 positive control) a shared file:line + camelCase symbol alone (no strong id) no longer matches",
+    weakOnlyMatch === null);
 
+  // DoD-4: a genuine duplicate sharing a real STRONG identifier (a session id) must still be blocked.
   const strongFieldMatch = findSuspectedDuplicate([{ id: "strongExisting", ...STRONG_A }], text(STRONG_B));
-  check("(abdaecda, neg control) a strong (shared UUID) match reports strongMatch:true",
-    strongFieldMatch !== null && strongFieldMatch.strongMatch === true);
+  check("(b6eab182, DoD-4 negative control) a shared session id (strong identifier) still matches",
+    strongFieldMatch !== null && strongFieldMatch.taskId === "strongExisting");
 } catch (e) {
   check(`pure-function section threw: ${e.stack}`, false);
 }
@@ -342,24 +378,26 @@ try {
   check("(tool, neg) two genuinely distinct cards with similar wording BOTH create with no refusal",
     !negFirst.error && !negSecond.error && negFirst.id !== negSecond.id);
 
-  // ===================== card abdaecda — refusal message names both titles + the weak-only caveat =====================
+  // ===================== card b6eab182 — DoD-3 positive control / DoD-4 negative control (real tool surface) =====================
+  // DoD-3: two genuinely-distinct cards citing the same file:line + naming convention (this exact fixture
+  // was card abdaecda's weak-only-match specimen) now BOTH create cleanly — no refusal at all.
   const weakOnlyFirst = await call("tasks_create", { title: WEAKONLY_A.title, body: WEAKONLY_A.body });
-  check("(abdaecda) weak-only fixture's first card creates normally", !weakOnlyFirst.error && !!weakOnlyFirst.id);
-  const weakOnlyRefused = await call("tasks_create", { title: WEAKONLY_B.title, body: WEAKONLY_B.body });
-  check("(abdaecda) weak-only match is refused naming BOTH card titles",
-    typeof weakOnlyRefused.error === "string"
-      && weakOnlyRefused.error.includes(WEAKONLY_B.title) && weakOnlyRefused.error.includes(WEAKONLY_A.title));
-  check("(abdaecda) weak-only refusal carries the coincidental-collision caveat",
-    typeof weakOnlyRefused.error === "string" && weakOnlyRefused.error.includes("coincidentally collide"));
+  check("(b6eab182, DoD-3) weak-only fixture's first card creates normally", !weakOnlyFirst.error && !!weakOnlyFirst.id);
+  const weakOnlySecond = await call("tasks_create", { title: WEAKONLY_B.title, body: WEAKONLY_B.body });
+  check("(b6eab182, DoD-3) the second, genuinely-distinct card sharing only a code landmark + naming " +
+    "convention now creates CLEANLY too (no refusal)", !weakOnlySecond.error && !!weakOnlySecond.id);
 
+  // DoD-4: a genuine duplicate — same session id (a STRONG identifier) — is still blocked, and the
+  // refusal still names the counterpart plus the allowDuplicate/supersedes/relatedTo escape hatches (DoD-2).
   const strongFirst = await call("tasks_create", { title: STRONG_A.title, body: STRONG_A.body });
-  check("(abdaecda) strong fixture's first card creates normally", !strongFirst.error && !!strongFirst.id);
+  check("(b6eab182, DoD-4) strong fixture's first card creates normally", !strongFirst.error && !!strongFirst.id);
   const strongRefused = await call("tasks_create", { title: STRONG_B.title, body: STRONG_B.body });
-  check("(abdaecda) strong match is refused naming both card titles",
+  check("(b6eab182, DoD-4) a genuine duplicate (shared session id) is still refused, naming both card titles",
     typeof strongRefused.error === "string"
       && strongRefused.error.includes(STRONG_B.title) && strongRefused.error.includes(STRONG_A.title));
-  check("(abdaecda, neg control) a strong match's refusal does NOT carry the weak-only caveat",
-    typeof strongRefused.error === "string" && !strongRefused.error.includes("coincidentally collide"));
+  check("(b6eab182, DoD-2) the refusal states the allowDuplicate/supersedes/relatedTo escape hatches",
+    typeof strongRefused.error === "string"
+      && strongRefused.error.includes("allowDuplicate") && strongRefused.error.includes("supersedes/relatedTo"));
 
   await client.close();
   db.close();
@@ -438,6 +476,6 @@ try {
 for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — findSuspectedDuplicate flags both real duplicate pairs (47340c82/dde0ce24 via session id + branch, abcf0eba/bc91e86c via ERROR_FILENAME_EXCED_RANGE + CreateProcess) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) are each regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2), the rarity-threshold boundary (m5), and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
+  ? "\n✅ ALL PASS — findSuspectedDuplicate flags the real 47340c82/dde0ce24 duplicate pair (shared session id + branch, a STRONG match) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); card b6eab182's redesign is verified directly — weak evidence (code symbols/file:line/naming conventions), however many distinct categories it spans, NEVER qualifies a match alone (regression-tested against the file:line+error-constant shape and against a strong-less weak match directly), which as an ACCEPTED, explicitly-documented cost also means the module's own founding abcf0eba/bc91e86c pair (caught purely via weak evidence) is no longer auto-flagged; a genuine duplicate sharing a real STRONG identifier (session id) is still blocked, naming the counterpart plus the allowDuplicate/supersedes/relatedTo escape hatches (DoD-2/DoD-4); two genuinely-distinct cards sharing only a code landmark + naming convention now create CLEANLY with no refusal (DoD-1/DoD-3); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) remain regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2) is re-tested among strong-qualifying candidates, the rarity-threshold boundary (m5) and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
