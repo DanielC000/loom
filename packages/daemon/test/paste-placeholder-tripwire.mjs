@@ -107,6 +107,57 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
       detectBarePastePlaceholderTripwire(discussingTheBug, "Here: [Pasted text #99 +2 lines] — different token, not typed") === true);
   }
 
+  // --- gen discriminator (card 2c58bdd3): a stale CLI-side re-render of an OLDER, already-delivered
+  // generation's own placeholder TOKEN must not trip a FRESH, correctly-delivered turn — investigation
+  // `773b3914` traced 3-of-4 (structurally the 4th too) "RECOVERY re-injection ALSO collapsed" escalations
+  // to exactly this shape. Modelled on `detectPastePlaceholderLengthLoss`'s own `abeac33a` guard (a
+  // bounded, gen-ordered history a later turn's placeholder can be "explained" against), but keyed on the
+  // EXACT token (id + count) rather than the stated line count alone — see the exported function's own doc
+  // for why: a magnitude-only match risks suppressing a genuine, unrelated collapse that happens to share a
+  // line count (proven by this very test file — see the note on PART 2 test (b)/(c) below), while the
+  // CLI's own placeholder id is assigned once per collapse and never reused within a session. Also ONE
+  // deliberate asymmetry vs the sibling: a match at the CURRENT gen must NOT suppress (that sibling defers
+  // current-gen collapses to THIS detector; this detector can't defer to itself) — see the third case below.
+  {
+    const olderTokenHistory = [{ gen: 5, token: "[Pasted text #11 +3 lines]" }];
+    const staleGhostSubmit = "second scenario line\nthird scenario line\nfourth scenario line\nfinal line two";
+    // RED CASE: the exact false-positive shape from the corpus — a garbled-prefix stale placeholder token
+    // (the SAME token gen 5 already produced) glued onto an otherwise fully-intact, unrelated later turn.
+    const staleGhostRecorded = `[Pasted text #11 +3 lines]${staleGhostSubmit}`;
+    check("gen discriminator: WITHOUT gen info (the pre-2c58bdd3 2-arg shape) the stale-render ghost still fires — the exact corpus false positive this card exists to close",
+      detectBarePastePlaceholderTripwire(staleGhostSubmit, staleGhostRecorded) === true);
+    check("gen discriminator: WITH gen info, a placeholder token already observed at an OLDER gen does NOT trip",
+      detectBarePastePlaceholderTripwire(staleGhostSubmit, staleGhostRecorded, 9, olderTokenHistory) === false);
+
+    // Unrelated history present, but neither its id NOR its count matches this placeholder — must not
+    // over-suppress (the "do not narrow into blindness" arm, DoD-3).
+    const freshCollapseSubmit = "a genuinely new pasted block\nwith two lines";
+    check("gen discriminator: unrelated older-gen history (different token) does not suppress a genuine, differently-numbered collapse",
+      detectBarePastePlaceholderTripwire(freshCollapseSubmit, "[Pasted text #20 +2 lines]", 9, olderTokenHistory) === true);
+
+    // Same STATED COUNT as the older history entry (+3 lines), but a DIFFERENT placeholder id (#12, not
+    // #11) — a genuinely independent collapse that happens to be the same size must still trip. This is
+    // the exact magnitude-collision a line-count-only discriminator would have missed (see PART 2 (b)/(c)
+    // below, where reusing the SAME fixture content at two gens caught this for real).
+    const sameCountDifferentIdSubmit = "an independent new paste\nwith three total lines\nhere is the third";
+    check("gen discriminator: a DIFFERENT placeholder id with the SAME stated count as older history still trips (no magnitude collision)",
+      detectBarePastePlaceholderTripwire(sameCountDifferentIdSubmit, "[Pasted text #12 +3 lines]", 9, olderTokenHistory) === true);
+
+    // A match at the CURRENT gen (not an older one) must NOT suppress — the deliberate asymmetry vs the
+    // sibling's `findExplainingWrittenGen`. This is what a genuine fresh collapse of THIS turn looks like
+    // once this turn's own token has already been recorded into the history (host.ts records it
+    // unconditionally, win or lose, at the SAME Stop-hook the tripwire itself runs from).
+    const sameGenSubmit = "third line one\nthird line two\nthird line three";
+    check("gen discriminator: a token match at the CURRENT gen (not strictly older) does NOT suppress — genuine same-turn collapse still trips",
+      detectBarePastePlaceholderTripwire(sameGenSubmit, "[Pasted text #30 +3 lines]", 9, [{ gen: 9, token: "[Pasted text #30 +3 lines]" }]) === true);
+
+    // A bare placeholder with no stated count is still gen-matchable by exact token identity alone.
+    check("gen discriminator: a bare placeholder (no stated count) is ALSO suppressed by an exact older-gen token match",
+      detectBarePastePlaceholderTripwire(staleGhostSubmit, "[Pasted text #40]", 9, [{ gen: 5, token: "[Pasted text #40]" }]) === false);
+    check("gen discriminator: a bare placeholder with no history match still trips",
+      detectBarePastePlaceholderTripwire(staleGhostSubmit, "[Pasted text #40]", 9, olderTokenHistory) === true);
+  }
+
   // --- recovery helpers (card 0f9268cc): pure, host-free ---
   check("recovery: buildPasteRecoveryText carries the recovery tag",
     buildPasteRecoveryText("the lost content").startsWith(PASTE_RECOVERY_TAG));
@@ -330,6 +381,36 @@ try {
     "in the transcript, with nothing recoverable.\nSee card eef4883c for background.";
   check("NEGATIVE (h) message literally quoting the placeholder phrase, fully resolved: no tripwire warning",
     await runTurn(discussingTheBug, discussingTheBug) === 0);
+
+  // (h2) POSITIVE/NEGATIVE PAIR (card 2c58bdd3) — the gen discriminator through the REAL host.ts wiring
+  // (live.submitGeneration + live.recentPlaceholderTokens), not just the pure function. An earlier turn's
+  // OWN genuine collapse seeds the token history with its exact placeholder token, at an OLDER gen; a
+  // LATER, unrelated turn whose recorded transcript text picks up a stale re-render of that SAME EXACT
+  // token (the concurrent-traffic shape investigation `773b3914` found in 3-of-4, structurally the 4th,
+  // real "ALSO collapsed" escalations — findings.md specimen `a7f22ddb`'s garbled-prefix shape) must NOT
+  // trip a second time — while an otherwise-identical case carrying a token NEVER SEEN before still trips
+  // (the DoD-3 "do not narrow into blindness" arm).
+  {
+    // An earlier turn's OWN genuine collapse: nothing in history yet, so this trips normally (and
+    // auto-drains its one-shot recovery via the `runTurn` helper) — its exact token is recorded into
+    // live.recentPlaceholderTokens regardless.
+    const seedSubmit = "seed line one\nseed line two\nseed line three";
+    check("(h2) setup: the seed turn's own genuine collapse trips (nothing explains it yet)",
+      await runTurn(seedSubmit, "[Pasted text #51 +3 lines]") === 1);
+
+    // A later, unrelated long/multi-line turn whose OWN content is fully intact, but whose recorded
+    // transcript text carries the SAME exact stale token as a garbled prefix.
+    const laterSubmit = "later line one\nlater line two\nlater line three\nlater line four";
+    const staleRecorded = `[Pasted text #51 +3 lines]${laterSubmit}`;
+    check("(h2) THE FIX: a later turn whose recorded text carries the SAME EXACT token an older gen already produced does NOT trip",
+      await runTurn(laterSubmit, staleRecorded) === 0);
+
+    // Same shape, but a token never seen before (different id AND count) — must still trip.
+    const laterSubmit2 = "second later line one\nsecond later line two\nsecond later line three\nsecond later line four";
+    const unexplainedRecorded = `[Pasted text #52 +99 lines]${laterSubmit2}`;
+    check("(h2) REGRESSION GUARD: a NEVER-SEEN token still trips — the fix does not narrow into blindness",
+      await runTurn(laterSubmit2, unexplainedRecorded) === 1);
+  }
 
   // ===================== PART 3 — one-shot RECOVERY (card 0f9268cc) =====================
   // A detected loss is no longer WARN-only: host.ts re-injects the original submitted text as a

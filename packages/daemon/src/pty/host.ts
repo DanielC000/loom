@@ -16,7 +16,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, type PasteLengthLossCandidate, type WrittenLineCountEntry } from "../orchestration/paste-tripwire.js";
+import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -2462,6 +2462,15 @@ interface Live {
   // materially growing `Live`'s footprint. See paste-tripwire.ts's own doc on `PASTE_LOSS_EXPLAIN_WINDOW`
   // and on `detectPastePlaceholderLengthLoss`'s bound for the full reasoning and the stated residual.
   recentWrittenLineCounts: WrittenLineCountEntry[];
+  // Card 2c58bdd3 — `detectBarePastePlaceholderTripwire`'s own `gen` discriminator history: the EXACT
+  // placeholder token strings (not line counts — see paste-tripwire.ts's doc on why this key differs from
+  // `recentWrittenLineCounts` above) observed embedded in a turn's recorded transcript text, oldest-first,
+  // bounded at `PASTE_TRIPWIRE_TOKEN_WINDOW`. Pushed at the Stop-hook chokepoint (not at `submit()` time —
+  // unlike the two rings above, this one records what the TRANSCRIPT reported, not what Loom wrote),
+  // whenever `matchEmbeddedPlaceholderToken` finds a token in that turn's recorded text, regardless of
+  // whether the tripwire itself fired for it — a later turn's stale re-render of this SAME token is what
+  // this history exists to recognize.
+  recentPlaceholderTokens: SeenPlaceholderTokenEntry[];
   // Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
   // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route only — null for a
   // DM route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own
@@ -3945,6 +3954,7 @@ export class PtyHost {
       recentWrittenTurns: [],
       recentReportedTurns: [],
       recentWrittenLineCounts: [],
+      recentPlaceholderTokens: [],
       activeTurnSenderId: null,
       lastPromptSenderId: null,
       activeTurnProactive: false,
@@ -4114,7 +4124,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null,
@@ -4194,7 +4204,7 @@ export class PtyHost {
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [],
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null,
@@ -5220,8 +5230,12 @@ export class PtyHost {
           const submittedText = rawSubmittedText !== null ? stripPossibleDuplicateFrame(rawSubmittedText) : null;
           live.lastRawSubmit = null;
           // A future recurrence of a submitted paste silently collapsing to a bare placeholder is now
-          // LOGGED instead of silent — over EITHER delivery channel.
-          if (detectBarePastePlaceholderTripwire(submittedText, stats?.lastUserText)) {
+          // LOGGED instead of silent — over EITHER delivery channel. Card 2c58bdd3: pass the CURRENT gen +
+          // `live.recentPlaceholderTokens` so the tripwire can tell a genuine fresh collapse of THIS turn
+          // apart from a stale CLI-side re-render of an OLDER, already-delivered turn's own placeholder
+          // token — see that function's own doc for the false-positive shape this closes (investigation
+          // `773b3914`) and for why this history is keyed on the exact token, not `live.recentWrittenLineCounts`.
+          if (detectBarePastePlaceholderTripwire(submittedText, stats?.lastUserText, live.submitGeneration, live.recentPlaceholderTokens)) {
             // Card 0f9268cc: one-shot auto-RECOVERY on top of detection. `submittedText` is provably
             // non-null here (detectBarePastePlaceholderTripwire's own first guard requires it truthy).
             // ONE combined console.warn (not two) — a caller/test counting "did the tripwire fire" via
@@ -5269,6 +5283,17 @@ export class PtyHost {
               // collapsed has no durable msgId of its own to inherit.
               setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { logicalId: randomUUID(), mintedAtGen, mintedAtWallClock }); }, 0);
             }
+          }
+          // Card 2c58bdd3: record whatever placeholder token THIS turn's recorded text carried — win or
+          // lose above — into `live.recentPlaceholderTokens`, so a LATER turn's stale re-render of this
+          // SAME exact token can be recognized (the `gen` discriminator on the check above). Deliberately
+          // unconditional on whether the tripwire fired: even a token that guard (1)/(3) already ruled
+          // benign this turn is still evidence the literal string existed in the transcript at this gen,
+          // which is exactly what a future re-render would repeat.
+          const observedToken = matchEmbeddedPlaceholderToken(stats?.lastUserText);
+          if (observedToken) {
+            live.recentPlaceholderTokens.push({ gen: live.submitGeneration, token: observedToken });
+            if (live.recentPlaceholderTokens.length > PASTE_TRIPWIRE_TOKEN_WINDOW) live.recentPlaceholderTokens.shift();
           }
           // Card b68d1f5b DoD-1 — the gen-aware, calibrated length check: catches an UNEXPLAINED
           // `[Pasted text #N +M lines]` placeholder even when `detectBarePastePlaceholderTripwire` above

@@ -47,11 +47,42 @@ export function isBarePastedTextPlaceholder(recordedText: string): boolean {
   return PLACEHOLDER_RE.test(recordedText.trim());
 }
 
+/** The embedded placeholder token substring in `recordedText` (e.g. "[Pasted text #12 +48 lines]"), or
+ *  `null` if none is present. Exported so host.ts can extract the SAME token detectBarePastePlaceholderTripwire
+ *  matched on, to record it into `Live.recentPlaceholderTokens` (card 2c58bdd3's `gen` discriminator, below)
+ *  without duplicating `PLACEHOLDER_RE` at the call site. */
+export function matchEmbeddedPlaceholderToken(recordedText: string | null | undefined): string | null {
+  if (!recordedText) return null;
+  const match = recordedText.trim().match(PLACEHOLDER_RE);
+  return match ? match[0] : null;
+}
+
+/** One entry of `Live.recentPlaceholderTokens` (card 2c58bdd3) — the EXACT placeholder token string
+ *  observed embedded in a turn's recorded transcript text, plus the `gen` of that turn. See
+ *  `detectBarePastePlaceholderTripwire`'s own doc for what this history is used for. */
+export interface SeenPlaceholderTokenEntry {
+  gen: number;
+  token: string;
+}
+
+/**
+ * Card 2c58bdd3 — how many of the most-recent OBSERVED placeholder tokens `Live.recentPlaceholderTokens`
+ * retains, per session, for `detectBarePastePlaceholderTripwire`'s `gen` discriminator above. Its own
+ * constant, deliberately smaller than the sibling's `PASTE_LOSS_EXPLAIN_WINDOW` (64): that ring holds one
+ * entry per `submit()` call (every turn), so a long horizon in TURN COUNT is needed to span a real gap
+ * measured in wall-clock time. This ring holds one entry only when a placeholder was actually SEEN in a
+ * turn's recorded text — a genuinely rare event (89 firings against a much larger corpus of ordinary
+ * turns in the investigation this card is built from) — so the same wall-clock horizon needs far fewer
+ * entries. Cheap regardless (a `gen` plus one short string per entry).
+ */
+export const PASTE_TRIPWIRE_TOKEN_WINDOW = 16;
+
 /**
  * Trips iff ALL hold: (1) the submitted turn was long/multi-line enough that the CLI's collapse could
  * plausibly apply, (2) the transcript's recorded turn text for that same turn contains a placeholder —
- * anywhere in the text, not only when it's the text's entirety, and (3) that EXACT placeholder substring
- * is ABSENT from the submitted text.
+ * anywhere in the text, not only when it's the text's entirety, (3) that EXACT placeholder substring is
+ * ABSENT from the submitted text, and (4) that EXACT placeholder token wasn't already observed, verbatim,
+ * in an OLDER generation's own recorded turn.
  *
  * (3) is a false-positive guard, added after the embedded-match widening ((2), card 0f9268cc) was
  * validated against the real transcript corpus (18140 user turns) and found 18 embedded-match hits — ALL
@@ -75,18 +106,61 @@ export function isBarePastedTextPlaceholder(recordedText: string): boolean {
  * rather than engineer around (any fix would need to distinguish WHY the substring is present, which
  * isn't derivable from these two strings alone).
  *
+ * (4) is card 2c58bdd3's `gen` discriminator, added after investigation `773b3914` traced 3 of 4
+ * "RECOVERY re-injection ALSO collapsed" escalations (and, structurally, the 4th) to a specific false-
+ * positive shape guard (3) cannot see: concurrent traffic on the session (a peer/manager message, or
+ * Loom's own `[loom:prompt-mismatch]` diagnostic, landing near the same moment) leaves a placeholder-
+ * shaped token — from an EARLIER, already-delivered generation's own collapse — sitting in the recorded
+ * text of a LATER, unrelated, correctly-delivered turn. That token is CLI-side re-render noise, not a loss
+ * of THIS turn's content; guard (3) alone can't tell it apart from a genuine fresh collapse because it only
+ * compares against `submittedText` (this SAME turn's own write), never against what a PRIOR turn's own
+ * recorded text already contained.
+ *
+ * This is the exact shape `detectPastePlaceholderLengthLoss` below was already hardened against via its own
+ * `gen` discriminator (card `abeac33a`) — same STRUCTURE (a bounded, `gen`-ordered history a later turn's
+ * placeholder can be "explained" against), but a DELIBERATELY DIFFERENT KEY. `abeac33a`'s sibling matches on
+ * the placeholder's STATED LINE COUNT against Loom's own WRITE history — reasonable there, because it's
+ * comparing a placeholder's claimed magnitude against what Loom is independently certain it wrote. Reusing
+ * that same magnitude match here over-suppresses: two UNRELATED genuine collapses (or an unrelated full
+ * resolve and a real collapse — see the regression this card's own test suite caught, PART 2 test (b)/(c),
+ * both submitting `longPaste`) routinely share the same line count by pure coincidence, especially at the
+ * SMALL end (`+3 lines` is common) — exactly the magnitude band `abeac33a` itself flagged as "where a real
+ * defect would live." A magnitude collision would silently swallow a genuine, independent loss, which is the
+ * narrowing-into-blindness DoD-3 forbids. The CLI's own placeholder id (`#N`) has no such collision risk: it
+ * is assigned once per collapse event and never reused within a session (a real transcript specimen ran
+ * `#1`...`#91` monotonically) — two DIFFERENT collapses can never share BOTH the same `#N` and `+M`, so an
+ * EXACT token match can only mean "this literal artifact was already seen," never "two different losses
+ * happened to be the same size." Matching on the whole token (id + count together) rather than the count
+ * alone is what makes this guard collision-safe where the sibling's magnitude match is not.
+ *
+ * Same asymmetry as the sibling regardless of key choice: a match at the CURRENT gen must NOT suppress —
+ * `detectPastePlaceholderLengthLoss` explicitly defers current-gen collapses to THIS function; this function
+ * IS the current-gen detector and must not defer to itself. Only a token seen at a generation STRICTLY OLDER
+ * than `currentGen` counts as "already observed."
+ *
+ * `currentGen`/`recentPlaceholderTokens` are OPTIONAL — omitted, this guard simply doesn't run, leaving
+ * (1)-(3) as the whole check (the pre-2c58bdd3 shape, still exercised directly by callers that don't carry
+ * per-session generation history).
+ *
  * Either text arg missing (no submitted text captured, or no recorded user turn read back) → false —
  * there's nothing to compare.
  */
 export function detectBarePastePlaceholderTripwire(
   submittedText: string | null | undefined,
   recordedText: string | null | undefined,
+  currentGen?: number,
+  recentPlaceholderTokens?: ReadonlyArray<SeenPlaceholderTokenEntry>,
 ): boolean {
   if (!submittedText || !recordedText) return false;
   if (!couldCliCollapseToPlaceholder(submittedText)) return false;
-  const match = recordedText.trim().match(PLACEHOLDER_RE);
-  if (!match) return false;
-  return !submittedText.includes(match[0]);
+  const token = matchEmbeddedPlaceholderToken(recordedText);
+  if (!token) return false;
+  if (submittedText.includes(token)) return false;
+  if (currentGen !== undefined && recentPlaceholderTokens !== undefined) {
+    const seenOlder = recentPlaceholderTokens.some((entry) => entry.gen < currentGen && entry.token === token);
+    if (seenOlder) return false;
+  }
+  return true;
 }
 
 /**
