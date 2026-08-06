@@ -2128,6 +2128,36 @@ const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
  *  `"pnpm build && pnpm --filter @loom/daemon test:daemon"`) always runs from repo root, so a reduced
  *  command built from these paths must match that convention to `&&`-chain into {@link splitGateSteps}
  *  the identical way.
+ *
+ *  MEMBERSHIP CRITERION (card a1734000) — why these five and not every `test/*guard*.mjs`: a guard
+ *  belongs here only if something OTHER than a behavioural `.ts` edit can invalidate what it asserts. A
+ *  behavioural `.ts` edit already fails {@link computeEmitCompareGate} closed to the FULL gate, where
+ *  every guard under `packages/daemon/test/` runs anyway via the corpus walk — so a guard whose ONLY
+ *  invalidator is that kind of edit needs no seat on the reduced path; it is never reachable-but-unrun.
+ *  `emit-compare-soundness-guard.mjs` is deliberately excluded on exactly this ground: it is the
+ *  regression test FOR `emitCompareSoundnessOk` (below) — the SOUNDNESS PRECONDITION this function's own
+ *  doc comment above describes — and that precondition is re-checked LIVE, fail-closed, on every reduced-
+ *  path call regardless of this guard. Its own correctness can therefore only be broken by editing
+ *  `worktrees.ts`, which is itself a behavioural `.ts` edit. Investigated + confirmed at card a1734000; do
+ *  not re-add it here without re-deriving the argument against the criterion above, and do not read its
+ *  absence as an oversight.
+ *
+ *  ⛔ NOT A GLOB, DELIBERATELY: `grep -l readdirSync packages/daemon/test/*guard*.mjs` finds every
+ *  corpus-wide-scanning guard — a DISCOVERABLE family sitting right next to this HARDCODED list, which
+ *  is an intentional divergence, not an oversight. Membership here is a JUDGEMENT call against the
+ *  criterion above; a glob would silently re-admit `emit-compare-soundness-guard.mjs` on the next guard
+ *  file that happens to match the name pattern and reverse this decision without anyone deciding it.
+ *  Adding a guard here means deciding against the criterion above, never "the filename matches so it
+ *  belongs."
+ *
+ *  ⚠️ A SECOND LIST MUST STAY IN SYNC, AND THE CHECK IS ASYMMETRIC: `packages/daemon/test/emit-compare-
+ *  gate.mjs` keeps its own `GUARD_BASENAMES` array mirroring this list, to assert each guard actually
+ *  appears in the reduced gate command {@link buildReducedGateCommand} builds. REMOVING an entry from
+ *  this list while `GUARD_BASENAMES` still names it fails that integration test loudly (the captured
+ *  command stops containing a basename the test still expects). But ADDING an entry here without also
+ *  adding its basename to `GUARD_BASENAMES` fails SILENTLY — the new guard genuinely runs (this list
+ *  drives the real command), but nothing asserts it does, so a mis-registered addition ships green.
+ *  Whoever adds a guard to this list must add the same basename to `GUARD_BASENAMES` in the same change.
  */
 const STATIC_GUARD_REPO_PATHS = [
   "packages/daemon/test/clock-path-regression-guard.mjs",
