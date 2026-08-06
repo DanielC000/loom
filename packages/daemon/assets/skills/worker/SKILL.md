@@ -312,12 +312,21 @@ owner answers it instead of relying on a reader remembering to check by hand; as
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every
 git/build/file command. **Never `cd ..`** to climb above your worktree root — if you must change
-directory, `cd` to an absolute path you own. **Never run a bare `git stash`** (or any other repo-wide
-git mutation) from a directory you haven't verified — a bare stash is repo-wide and can sweep up
-unrelated uncommitted work in a parent repo; if you must stash, scope it to explicit paths (`git stash
-push -- <paths>`). If you ever cause an unresolved out-of-scope side effect anyway — a stash you
-couldn't restore, a process you killed, a file touched outside your worktree — **report it explicitly**
-in your `worker_report`; never claim a cleanup you didn't actually do.
+directory, `cd` to an absolute path you own. If you ever cause an unresolved out-of-scope side effect —
+a process you killed, a file touched outside your worktree — **report it explicitly** in your
+`worker_report`; never claim a cleanup you didn't actually do.
+
+**Never use `git stash`** (push/pop/apply/drop), scoped or not. `refs/stash` lives in the repo's
+COMMON `.git` dir, not per-worktree — every worktree of the same repo shares ONE stash stack, so a
+bare `pop` can return a sibling session's WIP into your tree, or a sibling's `pop` can silently
+swallow yours — regardless of which worktree pushed which entry.
+To temporarily revert a file to prove a check goes RED, then restore it: `git diff -- <file> >
+<SCRATCHPAD>/<name>.patch` (capture **outside the repo** — a stray `.patch` left inside it can land in
+a commit), `git checkout HEAD -- <file>`, run the check, then `git apply <SCRATCHPAD>/<name>.patch` to
+restore. These act only on your worktree's own index and files, never a shared ref, so they're safe
+under concurrent sibling workers. If foreign content ever appears in your tree anyway, don't discard
+it — it's another session's real work: copy it aside, `git checkout HEAD -- <file>` to clear your own
+tree, and report the incident up.
 
 **Windows worktree hazard — never junction a live tree before removing it.** On Windows, **never**
 create a directory junction or symlink (`mklink /J`, `New-Item -ItemType SymbolicLink`) from a live
