@@ -530,8 +530,32 @@ export class GateSemaphore {
    *  the mechanism that makes the per-worktree AND per-repo guards compose with the existing priority
    *  queue rather than deadlocking behind it. A worktree-less/repo-less waiter is never skipped by either
    *  check (see `worktreeFree`/`mergeRepoFree`). Grants at most one waiter per call, matching `release()`'s
-   *  own one-slot-freed contract — unchanged from before this card. */
+   *  own one-slot-freed contract — unchanged from before this card.
+   *
+   *  CAP CHECK (card d9d5057f): gated on `this.lastKnownCap` before scanning any tier — chosen over
+   *  threading a fresh `cap` through every call site because `releaseMergeRepoGuard`/`endSquash` (the
+   *  OTHER caller, invoked standalone from `confirmWorkerMerge`, outside `runExclusive` entirely) has no
+   *  `cap` in scope at all and is a PUBLIC method other code already calls by this exact signature; adding
+   *  a `cap` param there would be a breaking API change for a value this class already tracks. Both
+   *  callers were previously assumed "release-shaped" (called only when a slot had JUST freed, so
+   *  `active` was already `< cap` by construction) — true for `release()` (its own `this.active--` runs
+   *  immediately before this call, in the same synchronous turn) but NOT for `releaseMergeRepoGuard()`:
+   *  it frees a REPO guard, not a cap slot — the cap slot for that same op was already freed earlier, at
+   *  its own `release()` call, and an unrelated op can have consumed that freed slot in the gap between
+   *  the two. A cap-blind grant here would then over-admit past `cap`. `lastKnownCap` is the same
+   *  RESOLVE-LIVE value `runExclusive` already refreshes on every call (see its own doc + the
+   *  `[gate] maxConcurrentGates …` transition log) — reading it here extends that existing liveness
+   *  instead of freezing a cap captured at construction time. `undefined` (no `runExclusive` call has
+   *  ever happened yet) never blocks — unreachable in practice, since `grantNext()` is only ever reached
+   *  from `release()`/`releaseMergeRepoGuard()`, both of which presuppose at least one prior admission
+   *  that already set this.
+   *
+   *  ⚠️ Fixing this gap INVALIDATES a premise card `96d5f76b`'s investigation relied on: reasoning about
+   *  whether a decline at `release()`/`endSquash()` was cap-caused or repo-caused held ONLY because
+   *  `grantNext()` had no cap check. Any conclusion from that investigation resting on that premise needs
+   *  re-deriving now, not assumed to still hold. */
   private grantNext(): void {
+    if (this.lastKnownCap !== undefined && this.active >= this.lastKnownCap) return;
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       for (let i = 0; i < tier.length; i++) {
         const w = tier[i]!;

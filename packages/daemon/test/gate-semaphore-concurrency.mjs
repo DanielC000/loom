@@ -333,6 +333,84 @@ const worktrees = [];
   }
 }
 
+// ── CAP CHECK ON A NON-RELEASE-SHAPED grantNext() CALLER (card d9d5057f) ───────────────────────────
+// grantNext() used to grant to the next eligible waiter by checking ONLY worktreeFree/mergeRepoFree,
+// never `this.active < cap` — safe only under the assumption that both its callers are "release-shaped"
+// (invoked exactly when a cap slot has JUST freed, so admitting one more waiter can't exceed cap).
+// release() genuinely is: its own `this.active--` runs synchronously, immediately before it calls
+// grantNext(). releaseMergeRepoGuard() (called via endSquash(), STANDALONE from `confirmWorkerMerge`,
+// well after that same op's own release() already ran and already decremented `active`) is NOT: it frees
+// a REPO guard, not a cap slot, and an entirely unrelated op can consume the already-freed cap slot in
+// the gap between an op's release() and its later endSquash() call. THIS test constructs exactly that gap
+// using only the public API (runExclusive + holdRepoGuardOnExit + endSquash — the real confirmWorkerMerge
+// shape) and proves a cap-saturated grantNext() call, reached via endSquash(), can no longer over-admit.
+{
+  const sem = new GateSemaphore();
+  const cap = 1;
+
+  // A: a merge holding repoPath R, admits into the only cap-1 slot. Declares holdRepoGuardOnExit so its
+  // repo hold survives PAST its own release() — the real confirmWorkerMerge shape (gateRan -> beginSquash
+  // held via holdRepoGuardOnExit -> mergeBranch -> endSquash), see runExclusive's own doc.
+  let releaseA;
+  const pA = sem.runExclusive(cap, { gateType: "merge", projectId: "p", sessionId: "A", repoPath: "/repo/R" },
+    async (_startedAt, _cancelSignal, _hooks, _getMax, holdRepoGuardOnExit) => {
+      holdRepoGuardOnExit();
+      await new Promise((res) => { releaseA = res; });
+      return "a-done";
+    });
+  await sleep(20); // let A genuinely admit
+  check("(cap-on-grantNext) A admits into the only cap-1 slot", sem.snapshot().active === 1);
+
+  // B: queued behind A, SAME repoPath — blocked by the repo guard (not by cap, which will free next).
+  let bStarted = false;
+  const pB = sem.runExclusive(cap, { gateType: "merge", projectId: "p", sessionId: "B", repoPath: "/repo/R" },
+    async () => { bStarted = true; return "b-done"; });
+  await sleep(20);
+  check("(cap-on-grantNext) precondition: B is queued behind A's repo hold", sem.snapshot().queued === 1);
+
+  // A resolves — release() fires: active-- (1 -> 0); the repo hold SURVIVES (holdRepoGuard was declared),
+  // so grantNext()'s scan there finds B still repo-blocked and grants nothing. The cap slot is genuinely
+  // free now, but B is still queued.
+  releaseA("go");
+  await pA;
+  check("(cap-on-grantNext) after A settles: cap slot is free, but B is STILL queued (repo-blocked, not cap-blocked)",
+    sem.snapshot().active === 0 && sem.snapshot().queued === 1);
+
+  // C: a totally UNRELATED op (no repoPath) consumes the now-free cap slot via the ordinary acquire() path.
+  let releaseC;
+  const pC = sem.runExclusive(cap, { gateType: "worker", projectId: "p", sessionId: "C" },
+    async () => { await new Promise((res) => { releaseC = res; }); return "c-done"; });
+  await sleep(20);
+  check("(cap-on-grantNext) C admits into the freed cap slot — cap is genuinely saturated again", sem.snapshot().active === 1);
+
+  // A's squash phase finally settles (well after A's own release()) and calls endSquash — THE call this
+  // card is about: it frees the repo guard and calls grantNext() while `active` is ALREADY back at cap
+  // (C is running). A cap-blind grantNext() would see B is now repo-free and admit it anyway, over-admitting to 2.
+  sem.endSquash("/repo/R", "opA");
+
+  const CAP_WINDOW_MS = 150;
+  const neverOverAdmitted = await assertNeverWithControl({
+    label: "(cap-on-grantNext) B never starts while C still holds the only cap-1 slot — endSquash's grantNext() must not over-admit past cap",
+    check: () => bStarted,
+    windowMs: CAP_WINDOW_MS,
+    positiveControl: async () => {
+      const controlSem = new GateSemaphore();
+      let controlStarted = false;
+      const pControl = controlSem.runExclusive(1, { gateType: "worker", projectId: "ctrl", sessionId: "ctrl" }, async () => { controlStarted = true; return "control"; });
+      const observed = await observeOnce({ check: () => controlStarted, windowMs: CAP_WINDOW_MS });
+      await pControl;
+      return observed;
+    },
+  });
+  check("(cap-on-grantNext) B PROVABLY did not start while C held the only slot — no over-admission past cap 1", neverOverAdmitted);
+  check("(cap-on-grantNext) active never exceeded cap at the observed point", sem.snapshot().active <= cap);
+
+  releaseC("go");
+  const [rB, rC] = await Promise.all([pB, pC]);
+  check("(cap-on-grantNext) once C releases, B is finally admitted and settles", rB === "b-done" && rC === "c-done");
+  check("(cap-on-grantNext) registry empty after all three settle (no leak)", sem.snapshot().entries.length === 0);
+}
+
 // ── MAX-CONCURRENT-OVER-RUN (card c6750500): `concurrentGates` (at-admission only) can never see a gate
 // that starts ALONE and is joined mid-run — it reads 1 forever, even though the run spent most of its
 // wall-clock contended. `concurrentGatesMax`, exposed via `runExclusive`'s 4th `fn` param
