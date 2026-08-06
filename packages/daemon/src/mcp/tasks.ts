@@ -849,17 +849,31 @@ export async function updateProjectTask(
     if ("error" in blocker) return { error: `deferredUntilTaskId ${blocker.error}` };
     patch = { ...patch, deferredUntilTaskId: blocker.id };
   }
-  // Manual-deferral self-explaining guard (card c90e9525) — whole-patch-reject, same convention as the
-  // guards above: `deferred` is a stored verdict with no reason/date attached is exactly the defect this
-  // card fixes, so a write that would LEAVE the card manually deferred (deferred:true, no
-  // deferredUntilTaskId — route (a) has its own release condition, the named blocker task, and is
-  // untouched here) with no reason recorded either before or after this patch is refused outright. A date
-  // alone would not satisfy this (the card's own DoD-1 is explicit) — hence a REASON is the thing gated,
-  // never just a timestamp. `deferredAt` is never a caller-suppliable field (not in this function's patch
-  // type) — it is stamped SERVER-SIDE only, below, so it can never be forged to a false start time.
+  // Manual-deferral self-explaining guard (card c90e9525, delta-scoped by card 57f346e6) —
+  // whole-patch-reject, same convention as the guards above: `deferred` is a stored verdict with no
+  // reason/date attached is exactly the defect this card fixes, so a write that would LEAVE the card
+  // manually deferred (deferred:true, no deferredUntilTaskId — route (a) has its own release condition,
+  // the named blocker task, and is untouched here) with no reason recorded either before or after this
+  // patch is refused outright. A date alone would not satisfy this (the card's own DoD-1 is explicit) —
+  // hence a REASON is the thing gated, never just a timestamp. `deferredAt` is never a caller-suppliable
+  // field (not in this function's patch type) — it is stamped SERVER-SIDE only, below, so it can never be
+  // forged to a false start time.
+  //
+  // 57f346e6: this guard must fire on the PATCH'S DELTA, not on the RESULTING state alone — the original
+  // form evaluated `isManualDeferral` from the resulting state unconditionally, so it re-validated (and
+  // rejected) a patch that never touched deferred/deferredUntilTaskId/deferredReason at all, the moment
+  // it landed on a card that happened to ALREADY be a manual deferral with no reason. That made every
+  // legacy pre-c90e9525 no-reason-deferred row reject EVERY future patch — including a bare columnKey
+  // move — forever, since nothing about such a patch could ever supply the missing reason. `touchesDeferralFields`
+  // scopes both the reason guard AND the deferredAt backfill below to patches that actually touch one of
+  // the three deferral fields, so an unrelated field-only patch passes through a legacy row UNCHANGED
+  // (deferred/deferredReason/deferredAt all untouched) — while a patch that DOES touch deferred/
+  // deferredUntilTaskId/deferredReason and would still leave the card manually-deferred-with-no-reason is
+  // refused exactly as before (the real case c90e9525 exists to catch).
   const resultingDeferred = patch.deferred !== undefined ? patch.deferred === true : owned.deferred === true;
   const resultingDeferredUntilTaskId = patch.deferredUntilTaskId !== undefined ? patch.deferredUntilTaskId : (owned.deferredUntilTaskId ?? null);
   const isManualDeferral = resultingDeferred && resultingDeferredUntilTaskId == null;
+  const touchesDeferralFields = patch.deferred !== undefined || patch.deferredUntilTaskId !== undefined || patch.deferredReason !== undefined;
   let deferredReasonPatch: string | null | undefined;
   if (patch.deferredReason !== undefined) {
     const trimmed = patch.deferredReason == null ? null : patch.deferredReason.trim();
@@ -867,8 +881,11 @@ export async function updateProjectTask(
   }
   if (patch.deferred === false) {
     // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
+    // Un-deferring never needs a reason of its own — only a write that would LEAVE the card manually
+    // deferred does (the guard above never reaches this branch, since `patch.deferred === false` short
+    // circuits before it).
     deferredReasonPatch = null;
-  } else if (isManualDeferral) {
+  } else if (touchesDeferralFields && isManualDeferral) {
     const resultingReason = deferredReasonPatch !== undefined ? deferredReasonPatch : (owned.deferredReason ?? null);
     if (!resultingReason) {
       return { error: "a manual deferral (deferred:true with no deferredUntilTaskId) needs a reason — pass deferredReason explaining why it's parked and what would release it, so a future reader can tell it apart from a forgotten card" };
@@ -879,10 +896,14 @@ export async function updateProjectTask(
   // is still null). Never touched on a later edit that only updates the reason text on an already-dated
   // row — updatedAt already tracks "last touched"; this field means "since when has it actually been
   // deferred" (see Task.deferredAt's own doc for why updatedAt can't serve that role), so it stays put.
+  // Gated by `touchesDeferralFields` for the same reason as the reason-guard above: an unrelated
+  // field-only patch (e.g. a columnKey move) must leave a legacy no-reason row's deferredAt untouched
+  // too, not silently backfill it to "now" as a side effect of a write that was never about deferral at
+  // all — that would fabricate false provenance for the exact rows this guard exists to protect.
   let deferredAtPatch: string | null | undefined;
   if (patch.deferred === false) {
     deferredAtPatch = null;
-  } else if (isManualDeferral && (owned.deferred !== true || !owned.deferredAt)) {
+  } else if (touchesDeferralFields && isManualDeferral && (owned.deferred !== true || !owned.deferredAt)) {
     deferredAtPatch = new Date().toISOString();
   }
   if (deferredReasonPatch !== undefined) patch = { ...patch, deferredReason: deferredReasonPatch };

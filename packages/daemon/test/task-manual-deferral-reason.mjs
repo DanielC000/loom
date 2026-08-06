@@ -11,6 +11,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // dist/mcp/tasks.js) — no daemon, no real claude, no git needed (this card never touches merged-state
 // resolution).
 //
+// Card 57f346e6 — the guard above evaluated the RESULTING state (isManualDeferral) unconditionally, so
+// it re-rejected a patch that never touched deferred/deferredUntilTaskId/deferredReason at all, the
+// moment it landed on a card that already WAS a manual deferral with no reason (any pre-c90e9525 legacy
+// row). That made every such row reject EVERY future patch forever — including a bare columnKey move —
+// since no patch that omits deferredReason could ever supply the missing reason. Fix: the guard (and its
+// deferredAt-backfill sibling) now fires only when the patch actually TOUCHES one of the three deferral
+// fields. Scenarios (10)-(11) below are this card's own regression coverage, additive to (1)-(9) above
+// (which prove the real c90e9525 case survives untouched).
+//
 // Proves:
 //   (1) a FRESH manual deferral (deferred:true, no deferredUntilTaskId, no deferredReason) is REFUSED —
 //       whole patch rejected, nothing written (deferred stays false).
@@ -142,6 +151,37 @@ try {
   check("(9) deferredAt/deferredReason UNTOUCHED by an unrelated field-only patch",
     r9.deferredAt === beforePatch9.deferredAt && r9.deferredReason === beforePatch9.deferredReason);
 
+  // ===== (10) DELTA vs RESULTING STATE (card 57f346e6) — a legacy no-reason deferred row must pass an
+  // unrelated field-only patch UNCHANGED, not reject it forever =====
+  const c10Id = "legacy-manual-defer-2";
+  db.insertTask({ id: c10Id, projectId: "pRepo", title: "legacy deferred, no reason, positive control", body: "", columnKey: "backlog",
+    position: 0, deferred: true, deferredUntilTaskId: null, deferredAt: null, deferredReason: null, createdAt: now, updatedAt: now });
+  // Positive control: confirm this EXACT shape (deferred:true, no reason, no deferredUntilTaskId) still
+  // trips the guard when the patch DOES touch a deferral field — proves the check can fire at all before
+  // trusting a later "unchanged" result as meaningful, not just a check that never engages.
+  const r10control = await updateProjectTask(db, "pRepo", c10Id, { deferred: true });
+  check("(10) positive control: touching `deferred` on this exact legacy row still trips the guard", "error" in r10control);
+  // The real regression: a patch touching ONLY columnKey (never deferred/deferredUntilTaskId/deferredReason)
+  // must succeed, and must leave every deferral field byte-identical — not just avoid an error, but avoid
+  // silently fabricating a deferredAt as a side effect of an unrelated write.
+  const r10 = await updateProjectTask(db, "pRepo", c10Id, { columnKey: "in_progress" });
+  check("(10) a columnKey-only patch on a legacy no-reason deferred row SUCCEEDS (was: refused forever)", !("error" in r10));
+  check("(10) columnKey actually applied", r10.columnKey === "in_progress");
+  check("(10) deferred/deferredReason/deferredAt pass through UNCHANGED (true/null/null)",
+    r10.deferred === true && r10.deferredReason === null && r10.deferredAt === null);
+  const raw10 = db.getTask(c10Id);
+  check("(10) raw DB row confirms: no deferredAt fabricated as a side effect of the columnKey move",
+    raw10.deferred === true && raw10.deferredReason === null && raw10.deferredAt === null && raw10.columnKey === "in_progress");
+
+  // ===== (11) NEGATIVE CONTROL — the same legacy row still refuses a write that DOES touch a deferral
+  // field and would still leave it manually-deferred-with-no-reason (the real c90e9525 case, unaffected
+  // by the delta fix) =====
+  const r11 = await updateProjectTask(db, "pRepo", c10Id, { deferredUntilTaskId: null });
+  check("(11) explicitly touching deferredUntilTaskId (still resulting in manual, no reason) is REFUSED", "error" in r11);
+  const raw11 = db.getTask(c10Id);
+  check("(11) nothing written by the refused call — columnKey from (10) still stands",
+    raw11.columnKey === "in_progress" && raw11.deferredReason === null);
+
   db.close();
 } finally {
   fs.rmSync(file, { force: true });
@@ -150,6 +190,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a manual deferral (no deferredUntilTaskId) is refused with no reason recorded either before or after the write, deferredAt stamps once at the start of the episode (or the first time a reason lands on a legacy row) and never re-stamps on a later edit, both fields reset on an explicit clear, a whitespace-only reason is treated as none, a route-(a) deferral needs neither field (its own release condition is the named blocker task), and an unrelated field-only patch never touches either field."
+  ? "\n✅ ALL PASS — a manual deferral (no deferredUntilTaskId) is refused with no reason recorded either before or after the write, deferredAt stamps once at the start of the episode (or the first time a reason lands on a legacy row) and never re-stamps on a later edit, both fields reset on an explicit clear, a whitespace-only reason is treated as none, a route-(a) deferral needs neither field (its own release condition is the named blocker task), an unrelated field-only patch never touches either field, and (card 57f346e6) a legacy no-reason-deferred row now accepts a patch that never touches a deferral field — unchanged — while a patch that DOES touch one and would still leave it manually-deferred-with-no-reason still refuses."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
