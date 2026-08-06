@@ -1802,7 +1802,7 @@ export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
 
 /**
  * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd,
- * a1a8c5c4, and 720bb7ad) — everything about a settled "gate"/"merge" op's outcome that doesn't need its
+ * a1a8c5c4, 720bb7ad, and e2b6f900) — everything about a settled "gate"/"merge" op's outcome that doesn't need its
  * own queryable column (see the `pending_gate_ops` schema doc for why this is one JSON blob, not one
  * column per field). Every field is optional because which ones are meaningful depends on BOTH `verdict`
  * and which KIND of row this is: a "gate" row's `"pass"`/`"fail"` carries `durationMs`/`validatedHead`
@@ -1831,7 +1831,9 @@ export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
  * phase/failedStep/failingTest/exitCode/signal/timedOut — the `[loom:gate-failed]`/`[loom:merge-rejected]`
  * nudge already embeds); `"cancelled"`/`"error"` carry `reason` only. A row written before 4c5bf820 (or a
  * "merge" row written before 9f6598dd) has NO payload at all — `verdictPayload` reads back `null`, never
- * a fabricated shape.
+ * a fabricated shape. `gateCap`/`concurrentGates`/`concurrentGatesMax` (card e2b6f900) are a THIRD field
+ * trio "merge" rows populate on both `"pass"` and `"fail"`, same two-dominant-paths scope as `outputTail`/
+ * `steps` — see those three fields' own doc, just below, for the span caveat each one carries.
  */
 export interface PendingGateOpVerdict {
   reason?: string;
@@ -1896,6 +1898,38 @@ export interface PendingGateOpVerdict {
    *  discipline as `extended`; otherwise always populated, `nearBudget:false` included, on BOTH "pass"
    *  and "fail" — this is not a failure-only signal. Populated for both "gate" and "merge" rows. */
   proximity?: { nearBudget: boolean; step: string; fraction: number };
+  /** Card e2b6f900: the gate concurrency triple this op's gate ran under — the CONDITION channel, distinct
+   *  from `steps`/`outputTail` above (the OUTPUT channel a1a8c5c4/720bb7ad already closed for "merge"
+   *  rows). Before this card a FAILING "merge" row's rejection baked this triple as TEXT ONLY into its
+   *  `[loom:merge-rejected]` nudge (`detailBits`, in `confirmWorkerMerge`) — never reaching THIS durable
+   *  store, so `gate_status(opId)` could not recover it after the fact; a PASSING "merge" row carried it
+   *  in NEITHER the nudge nor this store. (`gate_history` — a SEPARATE, audit-event-backed series, fed by
+   *  the pre-existing `build_gate` event, which stamps this triple unconditionally on both outcomes and
+   *  predates this card — already served the multi-row dataset question; this closes the opId-keyed
+   *  per-op read that event was never wired to, not a total absence.) Populated for "merge" rows only, on the same two dominant outcomes
+   *  `outputTail`/`steps` already cover (a plain gate-fail rejection, a plain successful merge) — `undefined`
+   *  on the rarer post-gate-PASS rejections those two fields also leave unwired, and on a "gate" (worker
+   *  self-check) row (that kind's own `deriveWorkerGateVerdict` doesn't set it yet — a narrower, deliberate
+   *  gap, not an oversight; the card this closes is specifically about the MERGE-gate asymmetry).
+   *  `gateCap` is the resolved `orchestration.maxConcurrentGates` in force at admission — a plain cap
+   *  number, no span ambiguity. `concurrentGates` is INSTANT-AT-ADMISSION — "how many gates were admitted
+   *  together the moment THIS one started" — and UNDERSTATES true contention: a second gate joining
+   *  seconds (or minutes) later never moves this number, so a run that spent most of its wall time
+   *  contended can still read back as if it ran alone. `concurrentGatesMax` is the TRUE max-over-run figure
+   *  (derived from `GateSemaphore`'s own admit/release bookkeeping, never a polling sample) and OVERSTATES
+   *  a brief overlap as full contention — it cannot distinguish "contended for the entire run" from "joined
+   *  for the last 3 minutes of an 18-minute run". Both fields are real and both mislead if read alone as
+   *  "the condition this run ran under" rather than as two different, imperfect lenses on it — this is the
+   *  SAME caveat `gate_history`'s own tool description already states for these two field names on that
+   *  (separate, audit-event-backed) read path; repeated here because a `gate_status(opId)` reader may never
+   *  see that other tool's description. Never combine these into a single derived "contention score" — that
+   *  would hide exactly the span ambiguity this doc exists to name. ⚠️ FOURTH CAVEAT: on a "merge" row that
+   *  carries `retriedFile` with a resulting pass (card 344ce950's single-file retry — which does NOT
+   *  re-admit through the gate semaphore), this triple describes only the FIRST, failed admission, never
+   *  the one the eventual pass is about — see `ConfirmMergeResult.gateCap`'s own doc for the full detail. */
+  gateCap?: number;
+  concurrentGates?: number;
+  concurrentGatesMax?: number;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

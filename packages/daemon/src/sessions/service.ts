@@ -363,6 +363,38 @@ type ConfirmMergeResult = {
    *  shape an order-dependent/cross-test-pollution bug can produce (real in the suite, absent alone). Never
    *  silently upgraded to an ordinary pass anywhere this flows — see the card's own honesty requirement. */
   retryPassed?: boolean;
+  /** Card e2b6f900: the gate concurrency triple this merge's gate ran under, captured once — after the
+   *  TRANSIENT-KILL AUTO-RETRY if one fired (that retry re-admits through `runExclusive`, a fresh
+   *  concurrency snapshot) — and set on the SAME two dominant return paths as `outputTail` above (a plain gate-fail
+   *  rejection and a plain successful merge) — mirroring that field's own scope exactly, for the identical
+   *  reason: `undefined` on the rarer post-gate-PASS rejections (merge conflict, `gateBaseInvalidated`, an
+   *  orphaned/stage-empty no-op) NOT because no gate ran there, but because this card left those paths
+   *  unwired, same as `outputTail`. Before this card, NEITHER outcome carried this triple on the
+   *  STRUCTURED result or in the durable `verdict_payload_json` store `gate_status(opId)` reads — a FAILING
+   *  merge's rejection only baked it as TEXT into `detailBits`/the `[loom:merge-rejected]` nudge, and a
+   *  PASSING merge carried it on neither of those two channels at all. ⚠️ This was NOT the only place the
+   *  triple existed, though: `gate_history` (backed by the pre-existing `build_gate` audit event, which
+   *  stamps `gateCap`/`concurrentGates`/`concurrentGatesMax` unconditionally on BOTH outcomes, predating
+   *  this card) already served the multi-row dataset question — this field closes the OPID-KEYED,
+   *  per-op-result channel, not a total absence. `gateCap` is the resolved `orchestration.maxConcurrentGates` in force at admission.
+   *  `concurrentGates` is INSTANT-AT-ADMISSION — "how many gates were admitted together the moment THIS
+   *  one started" — and UNDERSTATES contention: a second gate joining seconds later never moves it.
+   *  `concurrentGatesMax` is the TRUE max-over-run figure (GateSemaphore's own admit/release bookkeeping)
+   *  and OVERSTATES a brief overlap as full contention — it cannot tell "contended throughout" from "joined
+   *  for the last 3 minutes of an 18-minute run". Both are real, both mislead if read as THE condition
+   *  rather than two different, imperfect lenses on it (mirrors `gate_history`'s own tool-description
+   *  caveat on these same two fields — restated here rather than assumed, since this is a different read
+   *  path). `undefined` for a gateless project or a REUSED gate (`gateRan:false` — nothing was ever
+   *  admitted, so there's nothing to report), same discipline as `gateExtended`/`gateProximity`.
+   *  ⚠️ THIRD SPAN CAVEAT (Code Review, card e2b6f900): the SINGLE-FILE RETRY (card 344ce950) does NOT
+   *  re-admit through `runExclusive` — it calls the gate runner directly, no slot, no fresh snapshot — so
+   *  on a merge that ends `retriedFile` + `retryPassed:true` (5 of 14 merge gates, per 344ce950's own
+   *  measured n=14), this triple describes ONLY the FIRST, FAILED admission, never the admission the
+   *  eventual PASS verdict is actually about. Cross-check `retriedFile` before trusting this triple as
+   *  "the condition the pass ran under" on such a row. */
+  gateCap?: number;
+  concurrentGates?: number;
+  concurrentGatesMax?: number;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -552,6 +584,14 @@ function deriveMergeGateVerdict(
       // pre-existing fail-only duplicate (same bytes) for back-compat, mirroring the deliberate
       // `outputTail`/`gateDetail.stderrTail` duplication already documented just below.
       ...(v.gateSteps !== undefined ? { steps: v.gateSteps } : {}),
+      // Card e2b6f900: the gate concurrency triple — the CONDITION channel, distinct from `outputTail`/
+      // `steps` above (the OUTPUT channel a1a8c5c4/720bb7ad already closed). Same "undefined means nothing
+      // to report" discipline, same two-dominant-paths scope — see `ConfirmMergeResult.gateCap`'s own doc
+      // for the full field-by-field span caveat (repeated there, not here, so there is exactly one place a
+      // future editor needs to update it).
+      ...(v.gateCap !== undefined ? { gateCap: v.gateCap } : {}),
+      ...(v.concurrentGates !== undefined ? { concurrentGates: v.concurrentGates } : {}),
+      ...(v.concurrentGatesMax !== undefined ? { concurrentGatesMax: v.concurrentGatesMax } : {}),
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -3479,6 +3519,15 @@ export class SessionService {
      *  `deriveMergeGateVerdict`) — omitted (not fabricated) for a "gate" row, a legacy row, or a
      *  not-yet-settled row, exactly like every other verdict-payload field above. */
     settledAt?: string; totalDurationMs?: number;
+    /** Card e2b6f900: the gate concurrency triple this op's gate ran under — see
+     *  {@link ConfirmMergeResult.gateCap}'s own doc for the full field-by-field span caveat (`gateCap` a
+     *  plain config echo, `concurrentGates` UNDERSTATES as an admission-instant snapshot, `concurrentGatesMax`
+     *  OVERSTATES as a max-over-run figure). Populated for "merge" rows only, on the same two dominant
+     *  outcomes `steps`/`outputTail` above already cover — `undefined` (never fabricated) for a gateless
+     *  project, a REUSED self-check, a rarer post-gate-PASS rejection those two fields also leave unwired,
+     *  or a "gate" (worker self-check) row (a narrower, deliberate gap — see {@link PendingGateOpVerdict
+     *  .gateCap}'s own doc). */
+    gateCap?: number; concurrentGates?: number; concurrentGatesMax?: number;
     /** Card 9f6598dd: the SAME `pass`/`fail`/`error`/`cancelled` classification `passed`/`cancelled`
      *  above already encode as two separate booleans — surfaced ALSO as one literal string so a caller
      *  doesn't have to reconstruct it (`extended:true` paired with `outcome:"fail"` is the specific
@@ -3537,6 +3586,13 @@ export class SessionService {
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
+          // Card e2b6f900: without this, the triple is written to verdict_payload_json and NEVER read back
+          // out — a manager calling gate_status(opId) after missing the nudge (precisely the post-hoc
+          // recovery path this card exists to serve) would see undefined and reasonably conclude "no gate
+          // ran here", not "the reader drops it". Code Review finding, card e2b6f900.
+          ...(payload?.gateCap !== undefined ? { gateCap: payload.gateCap } : {}),
+          ...(payload?.concurrentGates !== undefined ? { concurrentGates: payload.concurrentGates } : {}),
+          ...(payload?.concurrentGatesMax !== undefined ? { concurrentGatesMax: payload.concurrentGatesMax } : {}),
           ...settleTimingFields,
         }
         : t.record.verdict === "cancelled"
@@ -10894,6 +10950,24 @@ export class SessionService {
     // sits OUTSIDE the `if (gate)` block below, where the value is actually computed. `undefined` for a
     // gateless project, a REUSED gate, or a pre-gate rejection (nothing spawned).
     let gateOutputTailForRecord: string | undefined;
+    // Card e2b6f900: the gate concurrency triple this merge's gate ran under — declared at THIS outer
+    // scope for the SAME reason `gateOutputTailForRecord`/`gateExtended` are: the plain GREEN return at
+    // the bottom of this method sits OUTSIDE the `if (gate)` block below, where `gateCap`/`concurrentAtStart`/
+    // `concurrentGatesMax` are actually computed (see the CONCURRENCY NEIGHBOURHOOD doc inside that block).
+    // Before this card a FAILING merge's rejection embedded this triple as TEXT ONLY, baked into the
+    // `[loom:merge-rejected]` nudge's `detailBits` string — never structured on the return value, so it
+    // never reached the durable `verdict_payload_json` store either; a PASSING merge carried it on NEITHER
+    // of those two channels. (`gate_history`, backed by the pre-existing `build_gate` audit event, DID
+    // already carry the triple for both outcomes — this closes the opId-keyed, per-op-result channel that
+    // event never fed, not a total absence.) This is the fix: both outcomes now carry the SAME three
+    // fields structurally on THIS channel, so a reader comparing a pass and a fail (the whole point of
+    // this card) reads identical shapes instead of parsing one out of prose and finding nothing for the
+    // other. `undefined` for a gateless project or a
+    // REUSED gate (`gateRan:false` — nothing was ever admitted, so there is nothing to report), same
+    // "nothing to report" discipline `gateExtended`/`gateStepsResult` already follow.
+    let gateCapForRecord: number | undefined;
+    let concurrentGatesForRecord: number | undefined;
+    let concurrentGatesMaxForRecord: number | undefined;
     // Card 344ce950: the single-file retry's own outcome (see the `if (gate)` block below for where these
     // are actually set) — declared at THIS outer scope for the SAME reason as the fields just above: the
     // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined` for
@@ -11677,6 +11751,23 @@ export class SessionService {
       // at all. `undefined` for a REUSED result (`gateRan:false` — nothing actually spawned), mirroring
       // `gateStepsResult`'s own "nothing to report" discipline just above.
       gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+      // Card e2b6f900: capture the SAME concurrency triple the CONCURRENCY NEIGHBOURHOOD comment above
+      // (and every `evt()` call in this block) already computes, onto the outer-scope fields BOTH the
+      // rejection branch below AND the plain-green return further down can read — mirrors
+      // `gateStepsResult`/`gateExtended`/`gateProximity`/`gateOutputTailForRecord`'s own "set once here,
+      // read from either branch" pattern, one line above. `concurrentAtStart`/`concurrentGatesMax` already
+      // hold their FINAL values here — but "final" needs a caveat, Code Review finding (card e2b6f900): the
+      // TRANSIENT-KILL AUTO-RETRY below DOES re-run through `runExclusive` and re-assigns both (a fresh
+      // admission, its own concurrency snapshot). The SINGLE-FILE RETRY above (card 344ce950) does NOT —
+      // it calls `runGateSeq` directly, no `runExclusive`, no slot admission — so on a merge that ends
+      // `retriedFile` + `retryPassed:true` (5 of 14 merge gates, per 344ce950's own measured n=14), the
+      // triple captured here describes ONLY the FIRST, FAILED admission, not the admission the eventual
+      // PASS verdict is really about. Not fabricated, not a regression — an unnamed span caveat in exactly
+      // the dataset this card exists to make trustworthy; see `ConfirmMergeResult.gateCap`'s own doc for
+      // where this is now named for a reader of the persisted value, not just this comment.
+      gateCapForRecord = gateRan ? gateCap : undefined;
+      concurrentGatesForRecord = gateRan ? concurrentAtStart : undefined;
+      concurrentGatesMaxForRecord = gateRan ? concurrentGatesMax : undefined;
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
         // failing phase/step, the first failing test/assertion, and the child's own output — a manager
@@ -11748,8 +11839,12 @@ export class SessionService {
           // exceed the at-start figure if another gate joined mid-run) — the exact context a byte-
           // identical-tree pass/fail pair (a real incident: op f954fb86 failed where op 8c7f078e had just
           // passed) needs to be attributable to its concurrency neighbourhood instead of an unexplained
-          // code-defect hunt.
-          `cap=${gateCap} concurrentAtStart=${concurrentAtStart} concurrentGatesMax=${concurrentGatesMax}`,
+          // code-defect hunt. Rendered as `concurrentGates=` (Code Review, card e2b6f900) — renamed from
+          // the local variable's own `concurrentAtStart`, which this label used to echo verbatim — so ONE
+          // name (`concurrentGates`, matching `ConfirmMergeResult`/`PendingGateOpVerdict`/`gate_history`'s
+          // column/`gate_status`'s field) is greppable across the nudge text and every structured surface;
+          // no test asserted the old label's exact text (checked before renaming).
+          `cap=${gateCap} concurrentGates=${concurrentAtStart} concurrentGatesMax=${concurrentGatesMax}`,
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
@@ -11808,6 +11903,12 @@ export class SessionService {
           gateExtended,
           gateProximity,
           outputTail: gateOutputTailForRecord,
+          // Card e2b6f900: mirrors the plain-GREEN return's own `gateCap`/`concurrentGates`/
+          // `concurrentGatesMax` — see `ConfirmMergeResult`'s own doc for why this rejection used to carry
+          // the triple as TEXT ONLY (baked into `detailBits` above), never structured.
+          ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
+          ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
+          ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
           // Card 720bb7ad: mirrors the plain-GREEN return's own `gateSteps` — see this field's own doc for
           // why the rejection path used to leave it unset here (nested only in `gateDetail.steps` above).
           ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}),
@@ -12024,9 +12125,19 @@ export class SessionService {
     // Echo the exact subject this commit landed with (card b88704bb) — a transcript reader can see what
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
+    // Card e2b6f900: the SAME concurrency triple the rejection branch above now carries structurally —
+    // before this card a PASSING merge carried NOTHING here at all (not even the TEXT-only form the
+    // rejection's `[loom:merge-rejected]` nudge baked into `detailBits`). `undefined` (spread out entirely,
+    // never a fabricated 0) for a gateless project, a REUSED gate, or the inert-diff skip — same "nothing
+    // to report" discipline as `gateStepsResult`/`gateExtended` just below.
+    const concurrencyFields = {
+      ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
+      ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
+      ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
+    };
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(retriedFile ? { retriedFile, retryPassed } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(retriedFile ? { retriedFile, retryPassed } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}) };
   }
 
   /**
@@ -12403,6 +12514,17 @@ export class SessionService {
         const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
           ? ` ⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${outcome.value.retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`
           : "";
+        // Card e2b6f900: the SAME concurrency triple the `[loom:merge-rejected]` rejection text already
+        // bakes into its `detailBits` (see confirmWorkerMerge's identical `cap=… concurrentGates=…
+        // concurrentGatesMax=…` wording — both use `concurrentGates=`, matching the field name everywhere
+        // else, Code Review finding) — added here too so a manager comparing a green run against a red one
+        // doesn't have to pivot to `gate_status(opId)` for the live-read case. Cheap, additive: absent
+        // whenever `concurrentGatesForRecord`'s own "nothing to report" discipline applies (gateless
+        // project, REUSED gate) — an ordinary green merge with no gate at all stays exactly as quiet as
+        // before this card.
+        const concurrencyNote = outcome.ok && outcome.value.merged && outcome.value.concurrentGates !== undefined
+          ? ` cap=${outcome.value.gateCap} concurrentGates=${outcome.value.concurrentGates} concurrentGatesMax=${outcome.value.concurrentGatesMax}`
+          : "";
         // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
         // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
         // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
@@ -12414,7 +12536,7 @@ export class SessionService {
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during
