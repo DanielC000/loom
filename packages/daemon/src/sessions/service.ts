@@ -6850,8 +6850,16 @@ export class SessionService {
       const id = isDirective(e) ? idOf(e) : undefined;
       return id !== undefined && effectiveRootOf(id) === rootMsgId;
     });
-    if (thisDirectiveEvent && events.some((e) => {
-      if (!isDirective(e) || e === thisDirectiveEvent || e.managerSessionId !== sender || e.ts <= thisDirectiveEvent.ts) return false;
+    // "Newer" is decided by ARRAY POSITION, never by re-comparing `e.ts` directly: `events` is already
+    // `ORDER BY ts, rowid` (db.ts), so two events sharing the SAME wall-clock millisecond (ISO timestamps
+    // are ms-resolution, and two `messageWorker`/`redirect_worker` calls dispatched back-to-back with no
+    // intervening I/O can easily land in the same ms) are still correctly ordered by insertion via the
+    // rowid tie-break. A raw `e.ts <= thisDirectiveEvent.ts` check throws that tie-break away and reads a
+    // same-millisecond pair as "not newer", silently failing to suppress the stale directive's notice
+    // (found via a deterministic frozen-clock repro of card e2b6c434 — not a scheduling/pool-size artifact).
+    const thisIdx = thisDirectiveEvent ? events.indexOf(thisDirectiveEvent) : -1;
+    if (thisDirectiveEvent && events.some((e, i) => {
+      if (!isDirective(e) || e === thisDirectiveEvent || e.managerSessionId !== sender || i <= thisIdx) return false;
       const otherId = idOf(e);
       return otherId !== undefined && effectiveRootOf(otherId) !== rootMsgId;
     })) {
