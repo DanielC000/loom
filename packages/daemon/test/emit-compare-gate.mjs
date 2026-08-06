@@ -20,12 +20,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) SCOPE BOUNDARY — an ADDED .ts file (status A, not M) -> FULL gate (fails closed on non-modify).
 //   (F) SCOPE BOUNDARY — a changed path outside both scoped prefixes (packages/daemon/scripts/**) -> FULL
 //       gate, even though every OTHER changed path in the same diff is a comment-only .ts edit.
+//   (L) card 7183540f — BRANCH-BLIND AT CAP-QUEUE ADMISSION: `effectiveGate`/`emitCompareSkip` are
+//       computed BEFORE `gateSemaphore.runExclusive`'s admission wait and were never re-derived once
+//       admitted. TWO SEPARATE projects sharing ONE SessionService (default cap 1, no platform override)
+//       so the second worker's confirm genuinely QUEUES on the semaphore's CAP — not a per-repo guard,
+//       the wait this card names (routinely minutes at a real `maxConcurrentGates`, unlike the sub-second
+//       repo-guard-only wait `db413510` closes for the sibling inert-skip path). While queued, its OWN
+//       branch gains a further BEHAVIORAL edit layered on the comment-only edit that made it eligible
+//       pre-wait — MUST re-derive at admission and fall back to the full gate, never ride through on the
+//       stale pre-wait REDUCED verdict.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -400,6 +412,116 @@ try {
     check("(K) gateRan:true", confirm.gateRan === true);
     check("(K) captured command IS the full gate — consumer-b (unchanged, same fixture) can't be proven unaffected", capturedGate === FULL_GATE);
   }
+
+  // ── (L) card 7183540f — BRANCH-BLIND AT CAP-QUEUE ADMISSION — see this file's own header for the
+  //        summary. L1 occupies the daemon's ONLY cap slot (default `maxConcurrentGates` 1, no platform
+  //        override) with a real, held-open gate on its OWN repo. L2 (a SEPARATE repo/project — isolates
+  //        the CAP wait from any per-repo/main-movement concern the sibling card already covers) starts
+  //        with a comment-only .ts edit — proven emit-compare-eligible BEFORE L2 's confirm ever reaches
+  //        the semaphore. Once L2 is GENUINELY queued behind L1's held-open slot, a further BEHAVIORAL
+  //        edit lands on L2's own branch — the reachable sequence the card names verbatim: "the confirming
+  //        worker's pty is not stopped until after the merge method returns... a worker committing once
+  //        more while its own merge waits [is] an ordinary sequence, not a contrived one." ──────────────
+  {
+    const L1 = mk("l1"), L2 = mk("l2");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+
+    // L1: a plain cap-slot occupant, deliberately unrelated to emit-compare mechanics — any path outside
+    // both scoped prefixes forces a real (never-reduced) gate, which is all this arm needs from it.
+    fs.mkdirSync(L1.repo, { recursive: true });
+    fs.writeFileSync(path.join(L1.repo, "README.md"), "# ecg\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: L1.repo });
+
+    // L2: needs the tsconfig fixtures `emitCompareSoundnessOk` reads.
+    makeRepoWithBaseSrcFile(L2, BASE_SRC);
+
+    let gate1Calls = 0, gate2Calls = 0;
+    let capturedGate2;
+    let gate1AdmittedResolve;
+    const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+    let releaseGate1;
+    const fakeGate = async (gateCmd, cwd) => {
+      if (cwd === L1.worktreePath) {
+        gate1Calls++;
+        gate1AdmittedResolve();
+        await new Promise((res) => { releaseGate1 = res; });
+        return { passed: true };
+      }
+      gate2Calls++;
+      capturedGate2 = gateCmd;
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const wt1 = await createWorktree(L1.repo, L1.projId, L1.taskId);
+    L1.worktreePath = wt1.worktreePath; L1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
+    mkdirp(path.join(L1.worktreePath, "packages", "other"));
+    fs.writeFileSync(path.join(L1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: unrelated cap-slot occupant"`, { cwd: L1.worktreePath });
+    seed(db, L1);
+
+    const wt2 = await createWorktree(L2.repo, L2.projId, L2.taskId);
+    L2.worktreePath = wt2.worktreePath; L2.branch = wt2.branch; worktrees.push(wt2.worktreePath);
+    // Pre-wait: a COMMENT-ONLY edit — eligible for the reduced gate, classified BEFORE admission (case A).
+    fs.writeFileSync(path.join(L2.worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo"`, { cwd: L2.worktreePath });
+    seed(db, L2);
+
+    // Fire L1's confirm first — a REAL gate, held open until manually released, occupying the daemon's
+    // ONLY cap slot.
+    const p1 = sessions.confirmWorkerMerge(L1.mgrId, L1.workerId);
+    await gate1Admitted;
+    check("(L) L1 genuinely admitted and holds the cap's only slot", sessions.gateSemaphore.snapshot().active === 1);
+
+    // Fire L2's confirm — its pre-wait classification (comment-only -> eligible) runs BEFORE admission,
+    // then it must genuinely QUEUE behind L1 on the semaphore's CAP (L1/L2 are different repos, so this is
+    // never a per-repo guard wait).
+    let confirm2Settled = false;
+    const p2 = sessions.confirmWorkerMerge(L2.mgrId, L2.workerId).then((r) => { confirm2Settled = true; return r; });
+
+    const queued = await pollUntil(
+      () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === L2.projId),
+      { timeoutMs: 10000 },
+    );
+    check("(L) L2 genuinely reached the semaphore's CAP-queue wait before L1 released", queued);
+
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(L) L2's confirm does NOT settle while L1's held-open gate still occupies the cap's only slot",
+      check: () => confirm2Settled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(L) L2's confirm PROVABLY waited on the cap, not a fluke of scheduling", neverSettled);
+
+    // NOW, while L2 is genuinely queued behind the cap, a further BEHAVIORAL edit lands on L2's OWN
+    // branch — layered on top of the comment-only edit that made it eligible pre-wait. The COMBINED diff
+    // (comment fix + token flip) is no longer transpile-identical.
+    fs.writeFileSync(path.join(L2.worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)").replace("x === 0", "x === 1"));
+    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold during the cap-queue wait"`, { cwd: L2.worktreePath });
+
+    releaseGate1("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(L) L1 merged successfully, ran its own gate exactly once", confirm1.merged === true && gate1Calls === 1);
+    check("(L) L2 merged successfully", confirm2.merged === true);
+    check("(L) L2's gate command was called exactly once", gate2Calls === 1);
+    check("(L) ⭐ L2's captured command IS the FULL gate — the late behavioral commit forced a re-derivation at admission, the stale pre-wait REDUCED verdict was NOT trusted",
+      capturedGate2 === FULL_GATE);
+    check("(L) no reduced-gate warning present on L2's result", !(typeof confirm2.warning === "string" && /reduced/.test(confirm2.warning)));
+    check("(L) L2's late behavioral edit actually landed on main",
+      fs.readFileSync(path.join(L2.repo, "packages", "daemon", "src", "example.ts"), "utf8").includes("x === 1"));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -407,6 +529,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

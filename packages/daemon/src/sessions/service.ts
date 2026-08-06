@@ -11148,6 +11148,15 @@ export class SessionService {
     let emitCompareSkip = false;
     let emitCompareTestFiles: string[] = [];
     let emitCompareIdenticalCount = 0;
+    // Card 7183540f: the branch/main tips THIS classification actually ran against — captured strictly
+    // BEFORE the `computeEmitCompareGate` call below (see that call site's own doc for the ordering-trap
+    // reasoning, mirroring db413510's identical discipline for the inert-skip path). Read again at
+    // admission (inside `reunionAtAdmission`, once this op is finally through the CAP-queue wait) to
+    // detect a branch or main move that happened WHILE queued — `undefined` here means "never classified
+    // eligible", so the admission-time check below is a no-op for the (overwhelmingly common) non-skip
+    // case.
+    let emitComparePreWaitBranchHead: string | undefined;
+    let emitComparePreWaitMainHead: string | undefined;
     // Card a2873f7e: per-step durations from whichever gate run actually settles below (the first attempt,
     // or the transient-kill retry if one fires) — declared at THIS outer scope for the same reason `gateRan`
     // is: the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined`
@@ -11759,6 +11768,19 @@ export class SessionService {
       // admission guard on a pass), just with `buildReducedGateCommand`'s smaller command substituted for
       // the project's real `gateCommand`. See `computeEmitCompareGate`'s own doc for the full safety case.
       if (!inertSkip && !reuseResult && gateBaseMainHead) {
+        // PRE-CLASSIFICATION BRANCH-TIP CAPTURE (card 7183540f — the emit-compare two-path sibling of
+        // db413510, which closed the identical shape for the inert-skip path; read that card's own
+        // in-code doc before touching this). Captured HERE, strictly BEFORE `computeEmitCompareGate` runs,
+        // NOT after: that function resolves `ref` (branch) BY NAME internally (a `git diff --name-status
+        // base..branch` call), so a capture placed after it would leave a commit landing between
+        // classification and the capture invisible to classification yet folded into "the tip
+        // classification already saw" — db413510's own ordering-trap mistake, one call site over.
+        // `emitComparePreWaitMainHead` is a plain assignment, not a git read: `gateBaseMainHead` is
+        // already resolved above, so this just snapshots what THIS classification actually ran against —
+        // a later admission-time reunion that advances `gateBaseMainHead` (main moved during the wait) is
+        // then detectable by simple inequality, no second HEAD read needed.
+        emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+        emitComparePreWaitMainHead = gateBaseMainHead;
         const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
         if (emitCompare.eligible) {
           emitCompareSkip = true;
@@ -11766,7 +11788,10 @@ export class SessionService {
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
         }
       }
-      const effectiveGate = emitCompareSkip ? buildReducedGateCommand(emitCompareTestFiles) : gate;
+      // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
+      // `reunionAtAdmission` below when a branch/main move during the CAP-queue wait invalidates this
+      // pre-wait classification — see that function's own doc for the full mechanism.
+      let effectiveGate = emitCompareSkip ? buildReducedGateCommand(emitCompareTestFiles) : gate;
 
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
@@ -11904,29 +11929,82 @@ export class SessionService {
       // manager reading `gate_queue`'s `idleMs` to judge "working hard" vs. "hung" on a merge entry should
       // read a small, early, non-growing-past-a-couple-seconds `idleMs` as this window, not a stall.
       const reunionAtAdmission = async (): Promise<void> => {
-        if (preLanded || !gateBaseMainHead) return;
-        const admissionHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs });
-        if (!admissionHead || admissionHead === gateBaseMainHead) return;
-        // REAP BEFORE THIS SECOND UNION TOO (Code Review finding, card b798e706 — mirroring the pre-gate
-        // reap's own c0aeb5b2 doc above verbatim): this re-union WRITES tracked files in the worktree
-        // exactly like the FIRST union-merge does, so it is equally lock-sensitive — an escaped watcher/
-        // build child that (re-)attached during the queue wait would otherwise make THIS write fail with a
-        // spurious EPERM, misreported below as a real git failure rather than the lock issue it actually
-        // is. `reap`/`workerPid` are the SAME closures the pre-gate sweep above already captured — reused
-        // here, not re-derived.
-        try {
-          await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
-        } catch {
-          // Best-effort, same guard as the pre-gate sweep above.
+        if (!preLanded && gateBaseMainHead) {
+          const admissionHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs });
+          if (admissionHead && admissionHead !== gateBaseMainHead) {
+            // REAP BEFORE THIS SECOND UNION TOO (Code Review finding, card b798e706 — mirroring the
+            // pre-gate reap's own c0aeb5b2 doc above verbatim): this re-union WRITES tracked files in the
+            // worktree exactly like the FIRST union-merge does, so it is equally lock-sensitive — an
+            // escaped watcher/build child that (re-)attached during the queue wait would otherwise make
+            // THIS write fail with a spurious EPERM, misreported below as a real git failure rather than
+            // the lock issue it actually is. `reap`/`workerPid` are the SAME closures the pre-gate sweep
+            // above already captured — reused here, not re-derived.
+            try {
+              await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+            } catch {
+              // Best-effort, same guard as the pre-gate sweep above.
+            }
+            const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+            if (!reunion.ok) {
+              const why = reunion.conflict
+                ? "branch conflicts with current main — rebase/resolve before merge"
+                : (reunion.reason ?? "union merge failed");
+              throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
+            }
+            gateBaseMainHead = reunion.mainSha;
+          }
         }
-        const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
-        if (!reunion.ok) {
-          const why = reunion.conflict
-            ? "branch conflicts with current main — rebase/resolve before merge"
-            : (reunion.reason ?? "union merge failed");
-          throw new AdmissionReunionFailedError(reunion.conflict ? "union_conflict_at_admission" : "union_merge_failed_at_admission", why);
+        // EMIT-COMPARE RE-DERIVATION AT ADMISSION (card 7183540f — the two-path sibling of db413510,
+        // closed above for the inert-skip path): `effectiveGate`/`emitCompareSkip` were computed BEFORE
+        // this op ever entered the semaphore's CAP-queue wait (see the pre-wait classification's own doc,
+        // above this function) and were never re-derived once admitted — a branch commit landing during
+        // that wait (routinely MINUTES at `maxConcurrentGates` > 1, unlike the sub-second repo-guard-only
+        // wait db413510 closes) rides through on a REDUCED gate built from a stale eligibility proof and a
+        // stale `changedTestFiles` list. Re-checked HERE, unconditionally (deliberately NOT nested inside
+        // the `!preLanded` guard above — that scoping exists only to protect ALREADY_MERGED classification
+        // for the union-re-merge, an unrelated concern; `computeEmitCompareGate` does no worktree write and
+        // has no such hazard, and the card's own reachable sequence — "the confirming worker's pty is not
+        // stopped until after the merge method returns" — applies to a preLanded re-confirm exactly as it
+        // does to an ordinary union-producer merge).
+        //
+        // A no-op whenever `emitCompareSkip` is false (the overwhelmingly common case: nothing was ever
+        // classified eligible, so there is nothing here to invalidate) — costs nothing beyond the boolean
+        // check on that path.
+        if (emitCompareSkip) {
+          const postWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
+          // FAIL CLOSED ON ANY DOUBT (card 7183540f DoD-3): a failed resolve (`!postWaitBranchHead`)
+          // counts as "moved" — never as "unchanged" — mirroring `postWaitHead`'s own `!postWaitHead ||`
+          // fail-closed leg for the inert-skip path above. `gateBaseMainHead` is compared against the
+          // PRE-WAIT snapshot taken at classification time (`emitComparePreWaitMainHead`), not re-read via
+          // a second HEAD resolve — the `!preLanded` branch above already advanced `gateBaseMainHead` in
+          // place the instant main moved, so a plain inequality here is sufficient and free.
+          const moved = !postWaitBranchHead || postWaitBranchHead !== emitComparePreWaitBranchHead || gateBaseMainHead !== emitComparePreWaitMainHead;
+          if (moved) {
+            // RE-RUN THE WHOLE CALL, NOT JUST THE ELIGIBILITY CHECK (card 7183540f DoD-4): re-checking
+            // eligibility alone while keeping the stale `emitCompareTestFiles` would close only the
+            // smaller half — the file LIST is what `buildReducedGateCommand` actually spawns, so a stale
+            // list would still run the wrong (or an incomplete) reduced command even if the boolean
+            // verdict itself were freshly re-proven. `computeEmitCompareGate` is one bounded git-diff read
+            // (the same cost class as the pre-wait call it mirrors), so re-running it whole is negligible
+            // next to what's downstream either way.
+            const reclassified = (postWaitBranchHead && gateBaseMainHead)
+              ? await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs })
+              : undefined;
+            if (reclassified?.eligible) {
+              emitCompareTestFiles = reclassified.changedTestFiles;
+              emitCompareIdenticalCount = reclassified.identicalFileCount;
+              effectiveGate = buildReducedGateCommand(emitCompareTestFiles);
+            } else {
+              // No longer provably reducible (or the re-derivation itself was ambiguous — an unresolvable
+              // branch ref, or `gateBaseMainHead` itself unset) — this MUST take the full gate, never a
+              // stale reduced one: the `1055f5e3` asymmetry governs (a wrong reduction is a bad merge; a
+              // wrong full run is minutes). `emitCompareSkip:false` here also keeps the eventual
+              // `emitCompareWarning`/`build_gate` event from claiming a reduction that no longer happened.
+              emitCompareSkip = false;
+              effectiveGate = gate;
+            }
+          }
         }
-        gateBaseMainHead = reunion.mainSha;
       };
       // REJECT-ON-ADMISSION-REUNION-FAILURE (card b798e706 DoD-3): shared by both the first attempt's catch
       // and the retry's own catch below — a real git failure hit while trying to close the queue-wait
