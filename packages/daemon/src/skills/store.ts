@@ -354,6 +354,40 @@ export function listSkills(): SkillSummary[] {
 }
 
 /**
+ * Card e8697dd3 — `served_status`'s `deployStaleness.stale`/`commitsBehind` are DELIBERATELY scoped to
+ * `packages/daemon/src`/`packages/shared/src` only (a daemon-PROCESS restart signal); an `assets/skills/**`
+ * merge correctly contributes NOTHING to that signal, since the running process never reads `assets/`
+ * directly. But a bundled skill is delivered to sessions from the STORE (`skills/inject.ts`), which only
+ * re-syncs from `assets/skills/**` on daemon boot/restart (`seedGlobalSkills()`) — so an assets-only merge
+ * that changed a skill leaves every agent on the OLD skill with `deployStaleness` reading fully clean. This
+ * is that MISSING standing signal: derived fresh from `listSkills()` (never cached — same discipline as
+ * `computeDeployStaleness`), split by the SAME customized/pristine distinction the one-shot merge-time
+ * nudge already uses (`sessions/service.ts`'s `describeSkill`) — a pristine skill with `updateAvailable`
+ * will auto-advance at the next restart; a customized one will NOT (it needs an explicit adopt) and
+ * reporting it as "a restart will fix this" would just be a new false claim in place of the old one.
+ */
+export interface SkillStoreStaleness {
+  /** True when ANY bundled skill's store copy is behind its shipped asset — pending restart or adopt. */
+  stale: boolean;
+  /** Pristine bundled skills with a shipped update: `daemon_restart` (or a human relaunch) advances these. */
+  pendingRestart: string[];
+  /** Customized bundled skills with a shipped update: a restart will NOT advance these — they need an
+   *  explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`), by design, to protect the user's edit. */
+  pendingAdopt: string[];
+}
+
+/** Fresh, uncached read of skill-store staleness — see the doc above `SkillStoreStaleness`. */
+export function skillStoreStaleness(): SkillStoreStaleness {
+  const pendingRestart: string[] = [];
+  const pendingAdopt: string[] = [];
+  for (const s of listSkills()) {
+    if (!s.bundled || !s.updateAvailable) continue;
+    (s.customized ? pendingAdopt : pendingRestart).push(s.name);
+  }
+  return { stale: pendingRestart.length > 0 || pendingAdopt.length > 0, pendingRestart, pendingAdopt };
+}
+
+/**
  * Backfill the `base` snapshot for every bundled skill that has none — one-time, seed-if-absent (called
  * from seedGlobalSkills() at boot). base := the CURRENT shipped asset. Consequences (the SAFE direction):
  *  - pristine (mine == shipped): base == mine == shipped → neither customized nor update.

@@ -16,11 +16,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * (see served_status's doc comment) — so either would report a false CLEAN for exactly this case.
  *
  * DoD #2 (`637558ca` cry-wolf precedent): `stale`/`commitsBehind` are scoped to ONLY the paths whose
- * changes actually require a rebuild+RESTART to take effect — `packages/daemon/src` and
- * `packages/shared/src` (see `DEPLOY_PACKAGES`, `./deploy-packages.js`). `assets/**` (skills, hook-relay)
- * is read live per-spawn with NO restart needed (see CLAUDE.md's asset-merge caveat), and a vault/docs-only
- * merge needs no restart either — a signal that cries stale on those gets ignored within a day, which is
- * worse than no signal.
+ * changes actually require a rebuild+RESTART of THIS PROCESS to take effect — `packages/daemon/src` and
+ * `packages/shared/src` (see `DEPLOY_PACKAGES`, `./deploy-packages.js`). `assets/hook-relay.mjs` and
+ * `assets/vault-lint/**` are read live per-use straight from the package dir with NO restart needed, and a
+ * vault/docs-only merge needs no restart either — a signal that cries stale on those gets ignored within a
+ * day, which is worse than no signal. ⚠️ Card e8697dd3: `assets/skills/**` is DIFFERENT and deliberately
+ * excluded from THAT reasoning — a bundled skill is delivered to sessions from a separate STORE
+ * (`<LOOM_HOME>/skills/<name>/SKILL.md`, see `skills/inject.ts`), and the store only re-syncs from
+ * `assets/skills/**` on daemon boot/restart (`seedGlobalSkills()`). This module's own `stale`/
+ * `commitsBehind` correctly never counts an assets-only merge either way (it answers "does the daemon
+ * PROCESS need a restart", not "does anything need a restart") — but do not generalize its silence on
+ * `assets/skills/**` into "that subtree needs no restart too". See `skills/store.ts`'s
+ * `skillStoreStaleness()` for that separate signal, surfaced on `served_status` as its own field.
  *
  * Card c3ce92ea — `packages/web` is DELIBERATELY excluded from `stale`/`commitsBehind` (a web-only merge
  * must never advise a `daemon_restart`, which drops every live session across ALL projects), but it is NOT
