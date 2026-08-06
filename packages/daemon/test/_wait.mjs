@@ -37,11 +37,14 @@
 //      every file touching that chain and found one with zero slack that had simply never failed yet.
 //
 // USAGE:
-//   import { waitUntil, deferred } from "./_wait.mjs";
+//   import { waitUntil, deferred, sleepPast } from "./_wait.mjs";
 //   await waitUntil(() => registry.peek(key) === undefined, { label: "k5 evicted after failure" });
 //   const { promise, resolve } = deferred();
 //   const pending = await reg.attach(key, kind, mgr, waitMs, () => promise);
 //   resolve({ ok: true });   // settle it exactly when the test wants to, never "after enough sleep"
+//   await sleepPast(70, 50, "past retainMs");   // was: await sleep(70); // past retainMs — now an
+//                                                // executable assertion instead of a trusted comment
+//                                                // (card 5e51e778 — see fixed-wait-witness-guard.mjs)
 //
 // Most `sleep()` calls in this suite are NOT this anti-pattern (letting a microtask drain, pacing a poll
 // loop) — do not mass-convert every sleep you find; convert one only when it's genuinely racing another
@@ -112,4 +115,24 @@ export function deferred() {
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+
+/**
+ * The "exceeds-a-threshold" half of card 5e51e778's diff-scoped presence guard (see
+ * fixed-wait-witness-guard.mjs): turns a trusted comment ("`await sleep(70); // past retainMs:50`") into
+ * an executable assertion. `setTimeout`/`sleep` is a FLOOR, never a ceiling — extra host load can only
+ * push the actual elapsed time further past `ms`, never closer to violating `ms > thresholdMs`, which is
+ * why this direction (unlike a probe wait racing another real duration) is safe to prove mechanically
+ * instead of by convention. Throws SYNCHRONOUSLY (before ever awaiting the real wait) if the claim is
+ * false at call time, so a copy-pasted site with the wrong numbers fails loudly instead of quietly
+ * asserting nothing.
+ * @param {number} ms the wait duration, asserted to exceed `thresholdMs`.
+ * @param {number} thresholdMs the real quantity `ms` must outlast (a retainMs, a debounce, etc.).
+ * @param {string} [label] identifies the claim in the thrown message.
+ */
+export async function sleepPast(ms, thresholdMs, label = "sleepPast") {
+  if (!(ms > thresholdMs)) {
+    throw new Error(`sleepPast(${label}): ms (${ms}) does not exceed thresholdMs (${thresholdMs}) — this call proves a floor, not a guess, and the numbers given don't clear it`);
+  }
+  await sleep(ms);
 }

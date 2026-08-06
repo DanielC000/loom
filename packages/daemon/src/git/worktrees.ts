@@ -2134,6 +2134,15 @@ const STATIC_GUARD_REPO_PATHS = [
   "packages/daemon/test/fixed-wait-negative-guard.mjs",
   "packages/daemon/test/onexit-discard-guard.mjs",
   "packages/daemon/test/codescape-privacy-guard.mjs",
+  // Card 5e51e778 (Code Review finding): a reduced gate for a test-only diff runs ONLY this list plus the
+  // changed test file(s) themselves — never the full ~668-test suite. Without this entry, a diff that
+  // ADDS an unwitnessed raw-sleep site to test/*.mjs (exactly the diff class this guard exists to police)
+  // took the reduced path and never ran it at all: it wasn't a static guard, and it wasn't "the changed
+  // test file" unless the diff happened to touch this exact file. Diff-scoped (not a corpus-wide scan
+  // like its three siblings above), but that's orthogonal to WHERE it must run — it still greps live
+  // source-TEXT (a real `git diff`, not compiled behavior), so it belongs in this list on the same
+  // grounds `fixed-wait-negative-guard.mjs` already does.
+  "packages/daemon/test/fixed-wait-witness-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */

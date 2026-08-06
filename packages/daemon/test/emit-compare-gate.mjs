@@ -52,7 +52,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const GIT_ID = "-c user.email=ecg@loom -c user.name=ecg";
 const now = new Date().toISOString();
 const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
-const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs"];
+const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs", "fixed-wait-witness-guard.mjs"];
 // Card 815b4b30: (I)/(J) below need each fixture repo to carry a REAL, importable
 // packages/daemon/scripts/test-daemon.mjs so `loadExcludedTestDirNames` (git/worktrees.ts) can actually
 // resolve `EXCLUDED_DIR_NAMES` from it — using the REAL file's content (not a hand-typed stub) means these
