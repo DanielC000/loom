@@ -38,6 +38,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       wait-then-reclassify path, but the sibling's own landed change makes THIS branch's diff no longer
 //       provably inert against the new main — this MUST run the real gate, never a stale skip (DoD-2's
 //       fail-closed requirement, exercised for real rather than merely asserted).
+//   (J) BRANCH-ONLY MOVE DURING THE GUARD WAIT (card db413510): (H)/(I) both moved MAIN during the wait
+//       (a sibling's real gate squashing). This isolates the other endpoint — main never moves, only the
+//       BRANCH gains a new commit during the wait (a still-active worker committing further) — the gap
+//       ac7aad04's own re-derivation left open (it was keyed on main movement alone). MUST re-derive and
+//       take the real gate, never ride through on the stale pre-wait docs-only verdict.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-inert-diff.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -566,6 +571,104 @@ try {
     check("(I) a THIRD, unrelated inert worker on the same repo did NOT hang behind a leaked guard", confirm3 !== "TIMEOUT");
     check("(I) and it merged successfully — the repo guard was genuinely free", confirm3 !== "TIMEOUT" && confirm3.merged === true && confirm3.gateRan !== true);
   }
+
+  // ── (J) BRANCH-ONLY MOVE DURING THE GUARD WAIT (card db413510) — the short-circuit at the
+  //        reclassification site (`!postWaitHead || postWaitHead !== gateBaseMainHead`) was BRANCH-BLIND:
+  //        it only ever re-derived when MAIN moved during the guard wait, never when the BRANCH did. This
+  //        scenario isolates that half of the bug: MAIN NEVER MOVES (no sibling squash, ever) — the wait is
+  //        instead induced by directly holding the repo guard from the TEST itself, via the exact same
+  //        `GateSemaphore.acquireRepoGuardOnly` primitive `confirmWorkerMerge` uses — while worker's OWN
+  //        branch gains a genuinely new, non-docs commit. The reachable sequence named on the card: "the
+  //        confirming worker's pty is not stopped until after the merge method returns... so a worker
+  //        committing once more while its own merge waits on the repo guard is an ordinary sequence, not a
+  //        contrived one." PRE-FIX: the new src commit rides through on the STALE docs-only inert verdict —
+  //        gateRan stays false and the fake gate is NEVER called, even though a real src file just squashed
+  //        onto main ungated. POST-FIX: the branch-tip mismatch is caught, `isInertMergeDiff` re-derives
+  //        against the branch's NEW tip (by name, not by stale sha), finds it no longer inert, and routes to
+  //        the real gate. ─────────────────────────────────────────────────────────────────────────────────
+  {
+    const J = mk("j");
+    makeRepo(J);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
+    J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
+    // Start docs-only — provably inert against main BEFORE the wait, exactly like (A).
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: worktreePath });
+    seed(db, J, "pnpm gate");
+
+    const mainHeadBefore = execSync(`git rev-parse HEAD`, { cwd: J.repo }).toString().trim();
+
+    // Hold the repo-guard-only slot for J.repo directly from the test — the SAME primitive
+    // `confirmWorkerMerge`'s inert-skip path itself calls (`acquireRepoGuardOnly`). This induces a real
+    // wait WITHOUT any sibling gate ever running and WITHOUT main ever moving — isolating the branch-only
+    // move this scenario exists to prove, uncontaminated by (H)/(I)'s main-movement case.
+    const releaseTestHold = await sessions.gateSemaphore.acquireRepoGuardOnly({
+      repoPath: J.repo, projectId: J.projId, sessionId: "test-holder", taskId: null, branch: null, opId: "test-holder-op",
+    });
+
+    let confirmSettled = false;
+    const pConfirm = sessions.confirmWorkerMerge(J.mgrId, J.workerId).then((r) => { confirmSettled = true; return r; });
+
+    // Deterministic sync point (same helper (H)/(I) use): don't commit to the branch, and don't release
+    // the test's own hold, until worker's confirm has GENUINELY reached its own repo-guard-only wait —
+    // i.e. it has already captured `inertSkip`/`gateBaseMainHead`/`preWaitBranchHead` and is now blocked.
+    const queued = await waitUntilRepoGuardQueued(sessions, J.projId, J.repo, 10000);
+    check("(J) worker's confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
+
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(J) the confirm does NOT settle while the test hold is still held",
+      check: () => confirmSettled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(J) confirm PROVABLY waited on the guard, not a fluke of scheduling", neverSettled);
+
+    // NOW, while the worker's confirm is genuinely blocked on the guard, commit a NEW, non-docs file
+    // directly to the worker's OWN branch — the reachable race the card names: a still-active worker
+    // committing further while its own merge waits on the repo guard, which can be minutes.
+    mkdirp(path.join(worktreePath, "src"));
+    fs.writeFileSync(path.join(worktreePath, "src", "late.ts"), "export const late = true;\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: late commit during the guard wait"`, { cwd: worktreePath });
+    const branchHeadAfterLateCommit = execSync(`git rev-parse HEAD`, { cwd: worktreePath }).toString().trim();
+
+    // Sanity check main BEFORE releasing our hold — this is the actual "during the wait" window. (main
+    // necessarily DOES move once we release and the confirm's own real gate squashes — that's the
+    // EXPECTED outcome this scenario proves, not a violation of "main never moved during the wait".)
+    const mainHeadStillDuringWait = execSync(`git rev-parse HEAD`, { cwd: J.repo }).toString().trim();
+    check("(J) sanity: main genuinely never moved during the wait itself — isolates the branch-only case",
+      mainHeadStillDuringWait === mainHeadBefore);
+
+    // Release the test's own hold — main never moved WHILE HELD (just proven above); ONLY the branch did.
+    releaseTestHold();
+    const confirm = await pConfirm;
+
+    // ⭐ THE CENTRAL ASSERTION — the whole point of card db413510: a branch that gained a genuinely new,
+    // non-docs commit DURING the guard wait must NOT ride through on the stale pre-wait inert verdict. Pre-
+    // fix this is FALSE (gateRan stays false, calls stays 0) because the short-circuit only checks
+    // `postWaitHead !== gateBaseMainHead` — main never moved, so it never re-derives, and the stale
+    // `inertSkip:true` computed against the OLD (docs-only) branch tip rides straight through.
+    check("(J) the late src commit forced a REAL gate — the stale docs-only inert verdict was NOT trusted",
+      confirm.gateRan === true && calls === 1);
+    check("(J) merged successfully once the real gate passed", confirm.merged === true);
+    check("(J) the late src file actually landed on main (proves this isn't a rejection masking the bug)",
+      fs.existsSync(path.join(J.repo, "src", "late.ts")));
+    check("(J) the docs note landed too", fs.existsSync(path.join(J.repo, "docs", "note.md")));
+    check("(J) worker's branch tip that actually landed is the POST-late-commit tip, not a stale pre-wait one",
+      branchHeadAfterLateCommit !== mainHeadBefore);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -573,6 +676,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), and falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I)."
+  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), and a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
