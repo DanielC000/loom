@@ -585,11 +585,16 @@ export class GateSemaphore {
    *  ⚠️ PRIORITY INVERSION, DOCUMENTED (Code Review, card b9e07a4a): {@link freeRepoPath} checks THIS map
    *  before ever considering `highWaiters` — a repo-guard-only waiter for `repoPath` ALWAYS wins the next
    *  hand-off over a same-repo `highWaiters` entry, REGARDLESS of arrival order, even one that has been
-   *  queued far longer. This is a deliberate, accepted cost (a repo-guard-only wait is bounded by, at
-   *  worst, another op's own squash — near-instant — never a full gate run), not a redesign of the
-   *  existing FIFO/priority tiering; `highWaiters`/`lowWaiters`' OWN relative ordering (card 24642c3d) is
-   *  completely unaffected — this inversion exists ONLY between this map and those two tiers, for the
-   *  SAME contested `repoPath`. */
+   *  queued far longer. This is a deliberate, accepted cost — a repo-guard-only wait is bounded by, at
+   *  worst, another op's own squash, never a full gate run — not a redesign of the existing FIFO/priority
+   *  tiering; `highWaiters`/`lowWaiters`' OWN relative ordering (card 24642c3d) is completely unaffected —
+   *  this inversion exists ONLY between this map and those two tiers, for the SAME contested `repoPath`.
+   *  ⚠️ NO LONGER "near-instant" (Code Review correction, card ac7aad04): that squash used to be a bare
+   *  `mergeBranch` call. Since card ac7aad04's post-guard reclassification, a HOLDER can also perform a
+   *  reap + a real `git merge` + a `git diff` (`isInertMergeDiff`) while holding this same guard, before
+   *  it ever reaches squash — measured ~1.5s typical, bounded worst-case by the caller's `gitOpMs` (15s
+   *  default, `GIT_OP_TIMEOUT_MS` in `git/worktrees.ts`) per git call. Still bounded and safe, just no
+   *  longer sub-second. */
   private readonly repoGuardOnlyWaiters = new Map<string, Array<{ id: string; descriptor: RepoGuardOnlyDescriptor; enqueuedAt: number; resolve: () => void; reject: (err: Error) => void }>>();
 
   /** Card b9e07a4a Code Review: metadata for a repoPath CURRENTLY held via {@link acquireRepoGuardOnly}

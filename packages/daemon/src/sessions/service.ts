@@ -11554,6 +11554,113 @@ export class SessionService {
             }
             throw err;
           }
+          // RE-DERIVE AFTER THE GUARD, NOT BEFORE (card ac7aad04 — Code Review finding on b9e07a4a):
+          // `inertSkip`/`gateBaseMainHead` above were captured BEFORE this wait, so a same-repo sibling
+          // that lands DURING it leaves this op holding a stale `gateBaseMainHead` the moment the guard
+          // is finally granted — `mergeBranch`'s own `requireCanonicalHead` re-check below would then
+          // deterministically refuse with `gate_base_invalidated`, forcing a manager re-confirm for a
+          // merge that could otherwise have just landed. Re-checking HERE, now that we exclusively hold
+          // this repo (no other same-repo op can be admitted — real gate or another inert-skip — until we
+          // release below), turns that guaranteed rejection into either a landed merge or a real gate,
+          // never a stale skip — WITH RESPECT TO MAIN MOVEMENT (Code Review, card ac7aad04): the
+          // short-circuit below (`!postWaitHead || postWaitHead !== gateBaseMainHead`) re-derives against
+          // main's CURRENT tip, but is branch-endpoint-BLIND — it never re-reads `branch`'s own tip. If
+          // main hasn't moved but `branch` gained a NEW commit during the wait (a still-active worker
+          // committing further), that new commit is NOT re-classified here and a stale `inertSkip:true`
+          // can still ride through. This is PRE-EXISTING, unchanged by this card (the original db9b0130
+          // check was equally blind to a branch that moved between its own read and the guard being
+          // granted) — not a regression introduced here, and out of this card's scope to close.
+          //
+          // Cheap in the common (uncontended) case: `acquireRepoGuardOnly` resolved instantly, so
+          // `postWaitHead` is virtually always identical to the pre-wait `gateBaseMainHead` and the extra
+          // `resolveGitRef` below is the only added cost — the same one-read-per-run price card b798e706
+          // already accepted for the analogous real-gate re-derivation (`reunionAtAdmission`). The merge
+          // OUTCOME for an uncontended run is unchanged: `postWaitHead === gateBaseMainHead` short-circuits
+          // before any second `isInertMergeDiff` call.
+          const postWaitHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+          if (!postWaitHead || postWaitHead !== gateBaseMainHead) {
+            // MAIN MOVED DURING THE WAIT — re-union first (union producer only), then re-check.
+            // `isInertMergeDiff` is a two-dot diff between a main sha and `branch`'s CURRENT tip: for the
+            // union producer, `branch` was already unioned with main ONCE, at the OLD (pre-wait)
+            // `gateBaseMainHead` (the union-merge earlier in this same call). Diffing that stale, unioned
+            // branch against the NEW main tip directly (skipping this re-union) would show every path the
+            // sibling itself changed as "removed" on this branch's side — a false non-inert verdict for a
+            // branch whose OWN content never touched those paths at all. Re-unioning first (mirroring
+            // `reunionAtAdmission`'s identical reasoning below, just performed here instead of at
+            // admission) brings the sibling's content into `branch`'s own tree first, so the diff against
+            // the new main again reflects ONLY this branch's own net changes — the same property the
+            // ORIGINAL union-merge earlier in this call exists to establish.
+            //
+            // The preLanded producer is DELIBERATELY EXCLUDED from re-union here — same reason
+            // `reunionAtAdmission` excludes it (see that function's own "SCOPED TO THE UNION PRODUCER
+            // ONLY" doc): re-unioning a preLanded branch would defeat the entire point of skipping the
+            // union there in the first place (protecting `ALREADY_MERGED` classification). Its own
+            // two-dot diff against a moved main can therefore over-report (main's own independent
+            // divergence reads as a "changed" path on this branch's side) — safe, since over-reporting
+            // only ever pushes toward the real-gate branch below, never the reverse; see
+            // `isInertMergeDiff`'s own fail-closed doc.
+            let reclassifyBase = postWaitHead;
+            let reunionFailed = false;
+            if (postWaitHead && !preLanded) {
+              // Reap first — this WRITES tracked files in the worktree exactly like the original
+              // union-merge does, so it's equally lock-sensitive (mirrors the identical reap call ahead of
+              // `reunionAtAdmission`'s own `mergeMainIntoWorktree` call below).
+              try {
+                await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
+              } catch {
+                // Best-effort, same guard as every other reap call in this method.
+              }
+              const reunion = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+              if (reunion.ok) {
+                // Keep `gateBaseMainHead` current regardless of the inert verdict below: if this ends up
+                // NOT provably inert, the real-gate path's own `reunionAtAdmission` reads this value and
+                // — seeing it already matches a fresh HEAD read — no-ops instead of re-doing this same
+                // union a second time.
+                reclassifyBase = reunion.mainSha;
+                gateBaseMainHead = reunion.mainSha;
+              } else {
+                // Conflict or a real git failure — do NOT try to resolve it here. Fall through to "not
+                // provably inert" below and let the ordinary real-gate path's own `reunionAtAdmission`
+                // (and its already-hardened `AdmissionReunionFailedError` handling) retry and report it
+                // properly, exactly as it would for any other admission-time reunion failure.
+                reunionFailed = true;
+              }
+            }
+            // FAIL CLOSED: a failed HEAD re-read (`postWaitHead` undefined — git error/timeout), a failed
+            // re-union (`reunionFailed`), or `isInertMergeDiff`'s own internal error paths (it fails closed
+            // to `false` on its own) all converge on `stillInert === false` here — "ambiguous for any
+            // reason" always routes to the real gate below, never to a stale skip.
+            const stillInert = (!reunionFailed && reclassifyBase)
+              ? await isInertMergeDiff(repoPath, reclassifyBase, branch, { timeoutMs: this.gitOpMs })
+              : false;
+            if (stillInert && reclassifyBase) {
+              // Diff is still fully inert against the tree main actually looks like NOW — advance
+              // `gateBaseMainHead` to what we just proved, so `mergeBranch`'s own `requireCanonicalHead`
+              // re-check (further below, inside its own lock) validates against a base that is still
+              // current at the moment we're about to squash, not the one captured before the wait.
+              gateBaseMainHead = reclassifyBase;
+            } else {
+              // No longer provably inert (or the re-derivation itself was ambiguous) — this MUST take the
+              // real gate, never a stale skip: converting `inertSkip` back to `false` here is what routes
+              // this op into the ordinary `runExclusive` gate path below instead of the `{ passed: true,
+              // steps: [] }` shortcut. Release the just-acquired repo-guard-only hold FIRST: holding it
+              // while also entering `runExclusive` would make that call's own `mergeRepoFree` admission
+              // check see this SAME repoPath as held (by our own `rgo-` id) and queue behind itself
+              // forever, since nothing releases that hold until this whole span's outer `finally` — a
+              // self-deadlock. `releaseInertRepoGuard` is idempotent (see its own doc), so the outer
+              // `finally`'s unconditional call after this is a safe no-op once we've released here.
+              // `gateRan` goes back to `true` (mirroring its `gateRan = !reuseResult` assignment above,
+              // before the inert-skip branch first flipped it): the invariant this method's own doc relies
+              // on (`gateRan === true` iff `!reuseResult && !inertSkip`) must keep holding now that
+              // `inertSkip` is false again, so `beginSquash`/`endSquash` below correctly treat this op as
+              // one that reaches `runExclusive` — exactly like an ordinary real-gate merge that was never
+              // inert to begin with.
+              inertSkip = false;
+              gateRan = true;
+              releaseInertRepoGuard?.();
+              releaseInertRepoGuard = undefined;
+            }
+          }
         }
       }
 
@@ -12288,19 +12395,24 @@ export class SessionService {
     // since `withCanonicalIndexLock`/`requireCanonicalHead` remain untouched and still fail-closed inside
     // `mergeBranch`'s own lock either way).
     //
-    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned TWICE in this whole method (Code
-    // Review correction, card db9b0130 — a prior version of this comment claimed exactly once, which the
-    // inert-diff skip below falsified) — `gateRan = !reuseResult` first, then `if (inertSkip) gateRan =
-    // false;` immediately after (both inside `if (gate)`), other than its `let gateRan = false`
-    // declaration. The SECOND assignment only ever NARROWS `gateRan` toward `false`, never the reverse, so
-    // the proof still holds in the direction that matters: `gateRan === true` here if and only if BOTH
-    // `reuseResult` was falsy AND `inertSkip` was falsy at that point, which is EXACTLY the condition under
-    // which `gateResult = reuseResult ?? (inertSkip ? { passed: true, steps: [] } : await this
-    // .gateSemaphore.runExclusive(...))` actually evaluates the `runExclusive(...)` branch. `gateRan` is
-    // therefore still a precise, structural proxy for "this call reached `runExclusive` at least once" —
-    // never true for the REUSE path (skipped by the `??`), never true for the INERT-DIFF SKIP path (the
-    // `inertSkip` ternary skips it exactly like reuse does), and never true for a GATELESS project/repo
-    // (never reaches `if (gate)` at all, so neither assignment ever runs).
+    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned THREE TIMES in this whole method (Code
+    // Review correction, card ac7aad04 — a prior version of this comment said TWICE, which its own
+    // reclassification branch below falsified; card db9b0130 before it made the identical correction from
+    // an earlier claim of exactly once — a proven rot site, restate carefully) — `gateRan = !reuseResult`
+    // first; then `if (inertSkip) gateRan = false;` (both inside `if (gate)`); then, ONLY inside that same
+    // inert-diff-skip branch, `ac7aad04`'s own post-guard reclassification can set `gateRan = true` again
+    // — but ONLY in the same code path that also resets `inertSkip = false` right alongside it (see that
+    // branch's own doc for why: falling through to a real gate requires both flips together). The proof
+    // still holds, because the THIRD assignment re-widens `gateRan` in LOCKSTEP with `inertSkip` being
+    // reset, never independently: `gateRan === true` here if and only if BOTH `reuseResult` was falsy AND
+    // `inertSkip` was falsy AT THIS POINT (regardless of which of the three assignments last set
+    // `gateRan`), which is EXACTLY the condition under which `gateResult = reuseResult ?? (inertSkip ?
+    // { passed: true, steps: [] } : await this.gateSemaphore.runExclusive(...))` actually evaluates the
+    // `runExclusive(...)` branch. `gateRan` is therefore still a precise, structural proxy for "this call
+    // reached `runExclusive` at least once" — never true for the REUSE path (skipped by the `??`), never
+    // true for an INERT-DIFF SKIP that stayed inert (the `inertSkip` ternary skips it exactly like reuse
+    // does), and never true for a GATELESS project/repo (never reaches `if (gate)` at all, so none of the
+    // three assignments ever run).
     //
     // SAFE BECAUSE (Code Review CORRECTION, card b9e07a4a — an earlier version of this paragraph claimed
     // `92e960d1`'s admission-exclusivity guard ALONE was what kept `beginSquash`/`endSquash` from ever
