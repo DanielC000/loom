@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Added
+- **A declared Windows floor.** Loom now documents (README) and enforces at install time (`install.ps1`) a minimum of Windows 10 build 18309+ (version 1903, May 2019, or later) or Windows 11 — the floor node-pty itself requires to use ConPTY instead of falling back to winpty. This isn't a claim that older builds are broken today; Loom has simply never tested or claimed support for that winpty fallback, and a future node-pty upgrade removes winpty entirely, so an unaddressed older host would eventually lose the ability to spawn `claude` at all rather than hit a documentation gap.
+
 ## [0.27.0] — 2026-08-06
 
 **A message-delivery and merge-gate reliability release.** A further hardening pass on the pty

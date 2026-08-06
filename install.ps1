@@ -15,12 +15,15 @@
       pwsh -ExecutionPolicy Bypass -File .\install.ps1 -NoStart   # install only
 
   What it does (IDEMPOTENT - safe to re-run; `npm i -g` upgrades in place):
-    1. Ensure Node 22+ is on PATH. It DETECTS Node and, if missing/too old, prints a guide and exits
+    1. On Windows, check the build is 18309+ (version 1903, May 2019, or later, or Windows 11) - the
+       floor node-pty needs to use ConPTY instead of falling back to winpty. Below that, exits with a
+       guide instead of installing; skipped entirely on non-Windows hosts.
+    2. Ensure Node 22+ is on PATH. It DETECTS Node and, if missing/too old, prints a guide and exits
        (it does NOT download or bundle a pinned Node - that is a deferred future enhancement).
-    2. `npm i -g loomctl` - installs/upgrades the `loom` command.
-    3. Optionally `loom service install` - register a per-user Task Scheduler logon task (prompted, or
+    3. `npm i -g loomctl` - installs/upgrades the `loom` command.
+    4. Optionally `loom service install` - register a per-user Task Scheduler logon task (prompted, or
        via -Service / env).
-    4. Start Loom in the background and open the cockpit (unless -NoStart).
+    5. Start Loom in the background and open the cockpit (unless -NoStart).
 
 .NOTES
   When piped through `irm | iex` you cannot pass -Switches. Drive those runs with environment variables
@@ -45,12 +48,34 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $NodeMinMajor = 22
+$WindowsBuildFloor = 18309   # node-pty's own ConPTY floor: Windows 10 version 1903 (May 2019) or later, or Windows 11 - see README Quick start
 
 # --- helpers ---------------------------------------------------------------------------------------
 function Write-Step([string] $msg) { Write-Host "[loom] $msg"        -ForegroundColor Cyan }
 function Write-Ok  ([string] $msg) { Write-Host "[loom] $msg"        -ForegroundColor Green }
 function Write-Warn([string] $msg) { Write-Host "[loom] $msg"        -ForegroundColor Yellow }
 function Write-Fatal([string] $msg) { Write-Host "[loom] error: $msg" -ForegroundColor Red; exit 1 }
+
+function Get-WindowsBuild {
+  return [System.Environment]::OSVersion.Version.Build
+}
+
+function Show-WindowsBuildGuide([int] $build) {
+  Write-Warn "Loom needs Windows 10 version 1903 (May 2019) or later, Windows 11, or Windows Server 2022+ (build $WindowsBuildFloor+) - this host reports build $build."
+  Write-Host @"
+
+Loom drives 'claude' through node-pty, which only uses ConPTY (Windows' modern pty API) starting at
+build $WindowsBuildFloor - that threshold is node-pty's own, not where Windows itself introduced ConPTY.
+Below it, node-pty falls back to its winpty backend - a path Loom has never tested or claimed to support.
+A future node-pty upgrade removes winpty entirely, so on this build every session spawn (not just a rare
+crash) would fail outright once that lands.
+
+Loom does not install on this Windows build. Update to Windows 10 version 1903 (May 2019) or later,
+Windows 11, or Windows Server 2022+ (Settings > Windows Update on client SKUs; Windows Update / sconfig
+on Server Core), then re-run this installer.
+"@
+  exit 1
+}
 
 function Get-NodeMajor {
   $node = Get-Command node -ErrorAction SilentlyContinue
@@ -93,7 +118,19 @@ if ($Port -lt 1 -or $Port -gt 65535) { Write-Fatal "invalid port '$Port' (expect
 $env:LOOM_PORT = "$Port"   # loom + `loom service install` read this for the bound port
 $Url = "http://127.0.0.1:$Port"
 
-# --- 1. ensure Node 22+ ----------------------------------------------------------------------------
+# --- 1. ensure a supported Windows build (ConPTY floor; this script targets Windows only) -----------
+if ([System.Environment]::OSVersion.Platform -eq 'Win32NT') {
+  Write-Step "Checking Windows build ..."
+  $winBuild = Get-WindowsBuild
+  if ($winBuild -lt $WindowsBuildFloor) {
+    Show-WindowsBuildGuide $winBuild
+  }
+  Write-Ok "Windows build $winBuild - supported."
+} else {
+  Write-Step "Non-Windows platform detected - skipping the Windows build check (this script is for Windows; see install.sh for macOS/Linux/WSL)."
+}
+
+# --- 2. ensure Node 22+ ----------------------------------------------------------------------------
 Write-Step "Checking for Node $NodeMinMajor+ ..."
 $major = Get-NodeMajor
 if ($null -eq $major) {
@@ -106,7 +143,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 }
 Write-Ok "Node $(& node --version) with npm $(& npm --version) - good."
 
-# --- 2. install / upgrade loomctl ------------------------------------------------------------------
+# --- 3. install / upgrade loomctl ------------------------------------------------------------------
 Write-Step "Installing the Loom CLI (npm i -g $Source) ..."
 & npm i -g $Source
 if ($LASTEXITCODE -ne 0) {
@@ -131,7 +168,7 @@ function Invoke-Loom { param([Parameter(ValueFromRemainingArguments = $true)] [s
 $installedVer = (Invoke-Loom --version) 2>$null
 Write-Ok "Installed: $installedVer ($Source)"
 
-# --- 3. optional autostart -------------------------------------------------------------------------
+# --- 4. optional autostart -------------------------------------------------------------------------
 if ($null -eq $WantService) {
   if ([Environment]::UserInteractive) {
     $answer = Read-Host '[loom] Register Loom to autostart on login? [y/N]'
@@ -148,7 +185,7 @@ if ($WantService) {
   else { Write-Warn "Autostart registration failed (exit $LASTEXITCODE) - retry with 'loom service install'." }
 }
 
-# --- 4. start ---------------------------------------------------------------------------------------
+# --- 5. start ---------------------------------------------------------------------------------------
 $started = $false
 if ($WantStart) {
   Write-Step 'Starting Loom in the background ...'
