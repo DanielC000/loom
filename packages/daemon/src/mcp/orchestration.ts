@@ -512,6 +512,53 @@ const REPORT_RESOLVED_EVENT_KINDS: ReadonlySet<OrchestrationEvent["kind"]> = new
 ]);
 
 /**
+ * Card 3c39be30 — `resolveDirectiveOutcome` (below) has an UNDOCUMENTED, UNENFORCED precondition: the
+ * `events` array it walks must actually be CAPABLE of containing the `session_message_delivered`/
+ * `session_message_gave_up` rows for the msgId chain it's asked to resolve — i.e. it must come from a
+ * query scoped to a session id that genuinely appears on that chain's events, via the SAME column the
+ * query filters on. Get that wrong (e.g. filter `manager_session_id` on a worker's own id, which — bar
+ * coincidence — never appears there) and the array is silently, permanently missing the one row that
+ * would flip the answer: `resolveDirectiveOutcome` returns a CONFIDENT `"pending"` forever, never an
+ * error. This tripped `peerMessageStatusByMsgId`'s first implementation (card 0f693dea) — fed
+ * `db.listEvents(managerSessionId)` before `resolveQueuedMessage` (sessions/service.ts) threaded the real
+ * sender through, so the one row that would have resolved a drained HELD send to "delivered" was filed
+ * under nobody's session and a passing test suite never caught it (it asserted "pending" on a message it
+ * never actually drained).
+ *
+ * FIX: fold stream selection OUT of every call site and into these three named constructors — the ONLY
+ * way to produce a `DirectiveEventStream`. A caller can no longer freehand a query and hope it's scoped
+ * right; it picks one of "this worker", "this worker's own recycle lineage", or "this manager's own
+ * recycle lineage" and the constructor runs the correspondingly-correct `Db` query itself.
+ * `resolveDirectiveOutcome` then REFUSES (throws) an array that didn't come from one of these — a real
+ * runtime tag, not just a TS-erased phantom type, so the guard survives even a JS-level or manually-cast
+ * call, not only a `tsc` pass. Chosen over a bare top-of-function assertion (the smallest diff, and the
+ * one this card explicitly warns against defaulting to) because an assertion alone still leaves every call
+ * site free to hand-assemble its own array the WRONG way and merely get caught after the fact; folding
+ * selection into named constructors removes the freehand assembly step entirely — there is no longer a
+ * "build the array yourself" path to get wrong. See `directiveByMsgId`/`peerMessageStatusByMsgId` below
+ * for the shared resolver these streams feed (DoD-2's twins fold), and
+ * `resolve-directive-outcome-stream-guard.mjs` for the regression proof this guard actually fires.
+ */
+const DIRECTIVE_STREAM_TAG: unique symbol = Symbol("directiveEventStream");
+type DirectiveEventStream = OrchestrationEvent[] & { readonly [DIRECTIVE_STREAM_TAG]: true };
+function tagDirectiveEventStream(events: OrchestrationEvent[]): DirectiveEventStream {
+  Object.defineProperty(events, DIRECTIVE_STREAM_TAG, { value: true, enumerable: false });
+  return events as DirectiveEventStream;
+}
+/** Worker-keyed, single session — mirrors `db.listEventsForWorker`'s own scope exactly. */
+function workerDirectiveStream(db: Db, workerSessionId: string): DirectiveEventStream {
+  return tagDirectiveEventStream(db.listEventsForWorker(workerSessionId));
+}
+/** Worker-keyed, widened across `workerSessionId`'s OWN recycle lineage (self + predecessors). */
+function workerLineageDirectiveStream(db: Db, workerSessionId: string): DirectiveEventStream {
+  return tagDirectiveEventStream(ownLineageIds(db, workerSessionId).flatMap((id) => db.listEventsForWorker(id)));
+}
+/** Manager(sender)-keyed, widened across `managerSessionId`'s OWN recycle lineage (self + predecessors). */
+function managerLineageDirectiveStream(db: Db, managerSessionId: string): DirectiveEventStream {
+  return tagDirectiveEventStream(ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id)));
+}
+
+/**
  * Resolve ONE directive's (a `message_worker`/`redirect_worker` send's) current fate from durable event
  * history alone, walking its give-up/re-mint chain from `rootMsgId` forward. Card 35c96aa6: hoisted out of
  * `buildServer`'s `staleDirectiveProjection` closure to MODULE scope (unchanged logic — it never closed
@@ -524,14 +571,28 @@ const REPORT_RESOLVED_EVENT_KINDS: ReadonlySet<OrchestrationEvent["kind"]> = new
  * Each msgId gives up AT MOST ONCE (a give-up either re-mints to a brand-new msgId or parks terminally —
  * see handleGiveUpExhausted's doc) — so walking msgId -> its one give-up event -> the next msgId cannot
  * loop; `seen` is a cheap defensive bound, not a real cycle guard.
+ *
+ * Card 3c39be30: `events` is now the branded `DirectiveEventStream`, not a raw `OrchestrationEvent[]` —
+ * see that type's own doc, immediately above, for the precondition this enforces and why.
  */
 export function resolveDirectiveOutcome(
-  events: OrchestrationEvent[], rootDirective: OrchestrationEvent, rootMsgId: string,
+  events: DirectiveEventStream, rootDirective: OrchestrationEvent, rootMsgId: string,
 ):
   | { state: "parked"; msgId: string; parkedAt: string }
   | { state: "confirmed-after-park"; msgId: string; parkedAt: string; confirmedAt: string }
   | { state: "delivered"; msgId: string; deliveredAt: string; turnSeqAtDelivery: number }
   | { state: "pending"; msgId: string } {
+  if (!(DIRECTIVE_STREAM_TAG in events)) {
+    // Card 3c39be30: refuse outright rather than walk an array that cannot be trusted to contain the
+    // evidence this chain depends on — the pre-fix failure mode was a CONFIDENT wrong "pending", never an
+    // error, and that silence is the whole defect. Build `events` via workerDirectiveStream /
+    // workerLineageDirectiveStream / managerLineageDirectiveStream instead of assembling it by hand.
+    throw new Error(
+      "resolveDirectiveOutcome: events must be built via workerDirectiveStream/workerLineageDirectiveStream/" +
+      "managerLineageDirectiveStream (card 3c39be30) — a hand-assembled array cannot be trusted to contain " +
+      "the session_message_delivered/session_message_gave_up rows this chain walk depends on.",
+    );
+  }
   let msgId = rootMsgId;
   const seen = new Set<string>();
   while (!seen.has(msgId)) {
@@ -583,6 +644,38 @@ export function resolveDirectiveOutcome(
 }
 
 /**
+ * Card 3c39be30 DoD-2 — the SHARED engine behind `directiveByMsgId` and `peerMessageStatusByMsgId` below.
+ * Both need exactly the same three steps: find an "origin" event matching some caller-specific predicate
+ * (which differs — `message_worker`/`redirect_worker`'s own `msgId`/`queuedMsgId` field, vs a
+ * `cross_project_message`'s own `msgId` field), resolve that origin's msgId chain via
+ * `resolveDirectiveOutcome`, and project the outcome into the `{msgId, found, state, at}` shape both tools
+ * actually return. Before this card those three steps were duplicated verbatim in each twin — "same
+ * signature, same 4-way `at` ternary, same return shape" per this card's own body — and had ALREADY
+ * drifted (see `peerMessageStatusByMsgId`'s own history below: prefix matching + lineage-widening landed
+ * there but never here). Folding to one resolver means the outcome-projection logic, and the STREAM
+ * PRECONDITION `resolveDirectiveOutcome` now enforces (see that function's own doc), are each stated once.
+ *
+ * `findOrigin` receives the ALREADY-SCOPED `DirectiveEventStream` (never a raw array) and returns the
+ * origin event + the msgId to walk from it, or `undefined` on no match — callers never touch
+ * `resolveDirectiveOutcome` directly, so they cannot feed it anything but the stream this function already
+ * built via the correct constructor.
+ */
+function resolveMsgIdOutcome(
+  events: DirectiveEventStream, ref: string,
+  findOrigin: (events: DirectiveEventStream, ref: string) => { event: OrchestrationEvent; msgId: string } | undefined,
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+  const origin = findOrigin(events, ref);
+  if (!origin) return { msgId: ref, found: false, state: null, at: null };
+  const outcome = resolveDirectiveOutcome(events, origin.event, origin.msgId);
+  const at =
+    outcome.state === "parked" ? outcome.parkedAt
+    : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
+    : outcome.state === "delivered" ? outcome.deliveredAt
+    : null;
+  return { msgId: origin.msgId, found: true, state: outcome.state, at };
+}
+
+/**
  * Card 867e64f1 DoD-3 — the manager-facing per-message consumed/not-consumed read, keyed to a SPECIFIC
  * `msgId` rather than "whichever directive is most recent" (`staleDirectiveProjection`'s own `directive`
  * field). Both `staleDirectiveProjection` and the worker-facing `directive_status` tool already resolve a
@@ -601,23 +694,23 @@ export function resolveDirectiveOutcome(
  * worker has no `message_worker`/`redirect_worker` event carrying that exact root msgId at all — a
  * distinct signal from `state:null` on a msgId that WAS sent but has no further resolution (there is no
  * such case: every found root either resolves via `resolveDirectiveOutcome` or is defensively `pending`).
+ *
+ * Card 3c39be30: now takes `db` + `workerSessionId` rather than a pre-fetched `events` array — the caller
+ * at `worker_status` used to build that array itself (`db.listEventsForWorker(w.id)`); it now can't, which
+ * is the point (see `workerDirectiveStream`'s own doc for why a freehand-built array is the exact defect
+ * class this closes).
  */
 function directiveByMsgId(
-  events: OrchestrationEvent[], msgId: string,
+  db: Db, workerSessionId: string, msgId: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
-  const directiveEvent = events.find((e) => {
-    if (e.kind === "message_worker") return e.detail?.msgId === msgId;
-    if (e.kind === "redirect_worker") return e.detail?.queuedMsgId === msgId;
-    return false;
+  return resolveMsgIdOutcome(workerDirectiveStream(db, workerSessionId), msgId, (events, ref) => {
+    const directiveEvent = events.find((e) => {
+      if (e.kind === "message_worker") return e.detail?.msgId === ref;
+      if (e.kind === "redirect_worker") return e.detail?.queuedMsgId === ref;
+      return false;
+    });
+    return directiveEvent ? { event: directiveEvent, msgId: ref } : undefined;
   });
-  if (!directiveEvent) return { msgId, found: false, state: null, at: null };
-  const outcome = resolveDirectiveOutcome(events, directiveEvent, msgId);
-  const at =
-    outcome.state === "parked" ? outcome.parkedAt
-    : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
-    : outcome.state === "delivered" ? outcome.deliveredAt
-    : null;
-  return { msgId, found: true, state: outcome.state, at };
 }
 
 /**
@@ -626,11 +719,11 @@ function directiveByMsgId(
  * `handleGiveUpExhausted`'s `canCheckRecipient` doc, sessions/service.ts — the honest "no read exists"
  * clause a peer sender gets in a `[loom:redelivery-parked]` notice) — the actual gap this card exists to
  * close. Ownership is enforced BY CONSTRUCTION, with no exception: every event this function ever consults
- * is drawn from `db.listEvents(id)` for `id` in the caller's OWN recycle lineage (`ownLineageIds` below) —
- * NEVER a read into any other session's stream, peer or otherwise. This function genuinely never reads the
- * peer manager's own event stream; earlier drafts of this doc and of this function's own body disagreed on
- * that point (a real "the sentence asserting a policy is where it breaches" instance, caught in Code
- * Review) — fixed at the SOURCE instead, see below.
+ * comes from `managerLineageDirectiveStream` — `db.listEvents(id)` for `id` in the caller's OWN recycle
+ * lineage (`ownLineageIds`) — NEVER a read into any other session's stream, peer or otherwise. This
+ * function genuinely never reads the peer manager's own event stream; earlier drafts of this doc and of
+ * this function's own body disagreed on that point (a real "the sentence asserting a policy is where it
+ * breaches" instance, caught in Code Review) — fixed at the SOURCE instead, see below.
  *
  * THREE fixes landed here after Code Review on this card's first pass, all measured against the running
  * daemon rather than assumed from the shape of the code:
@@ -668,23 +761,14 @@ function directiveByMsgId(
 function peerMessageStatusByMsgId(
   db: Db, managerSessionId: string, ref: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
-  const events = ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id));
-  const originCandidates = events
-    .filter((e): e is OrchestrationEvent & { detail: { msgId: string } } =>
-      e.kind === "cross_project_message" && typeof e.detail?.msgId === "string")
-    .map((e) => ({ id: e.detail.msgId, event: e }));
-  const resolved = resolveIdPrefix(originCandidates, ref);
-  if (resolved.kind !== "found") return { msgId: ref, found: false, state: null, at: null };
-  const originEvent = resolved.record.event;
-  const msgId = resolved.record.id;
-
-  const outcome = resolveDirectiveOutcome(events, originEvent, msgId);
-  const at =
-    outcome.state === "parked" ? outcome.parkedAt
-    : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
-    : outcome.state === "delivered" ? outcome.deliveredAt
-    : null;
-  return { msgId, found: true, state: outcome.state, at };
+  return resolveMsgIdOutcome(managerLineageDirectiveStream(db, managerSessionId), ref, (events, r) => {
+    const originCandidates = events
+      .filter((e): e is OrchestrationEvent & { detail: { msgId: string } } =>
+        e.kind === "cross_project_message" && typeof e.detail?.msgId === "string")
+      .map((e) => ({ id: e.detail.msgId, event: e }));
+    const resolved = resolveIdPrefix(originCandidates, r);
+    return resolved.kind === "found" ? { event: resolved.record.event, msgId: resolved.record.id } : undefined;
+  });
 }
 
 /**
@@ -770,8 +854,9 @@ function directiveDeliveriesForCaller(
   currentTurnSeq: number;
   truncated: boolean;
 } {
-  const lineage = ownLineageIds(db, callerSessionId);
-  const events = lineage.flatMap((id) => db.listEventsForWorker(id));
+  // Card 3c39be30: built via the same worker-lineage stream constructor `resolveDirectiveOutcome` (called
+  // below) now requires — see that function's own doc for the precondition this satisfies.
+  const events = workerLineageDirectiveStream(db, callerSessionId);
   events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
   // msgId -> the TRUE internal rootMsgId this msgId's own chain was minted under (see this function's own
   // doc for why message_worker/redirect_worker's own msgId field is NOT reliable for this).
@@ -798,7 +883,8 @@ function directiveDeliveriesForCaller(
     // `messageWorker`/`deliverRedirect`, sessions/service.ts, which both stamp this event with BOTH fields
     // at once). An earlier draft read `workerSessionId` into a field literally named `fromSession`, which
     // is structurally guaranteed wrong: `db.listEventsForWorker` selects `WHERE worker_session_id = ?`, so
-    // that value can only ever be one of `lineage`'s own ids — it could never have named a sender.
+    // that value can only ever be one of `workerLineageDirectiveStream`'s own lineage ids — it could never
+    // have named a sender.
     if (outcome.state === "delivered") {
       deliveries.push({ root: label, at: outcome.deliveredAt, turnSeq: outcome.turnSeqAtDelivery, msgId: outcome.msgId, fromSession: d.managerSessionId, receivedBy: d.workerSessionId ?? callerSessionId });
     } else if (outcome.state === "confirmed-after-park") {
@@ -1826,7 +1912,9 @@ export class OrchestrationMcpRouter {
       staleDirective: { msgId: string; deliveredAt: string; turnsSinceDelivery: number } | null;
       parkedDirective: { msgId: string; parkedAt: string } | null;
     } => {
-      const events = db.listEventsForWorker(workerSessionId);
+      // Card 3c39be30: built via workerDirectiveStream — the constructor resolveDirectiveOutcome (called
+      // below) now requires, see that function's own doc for the precondition this satisfies.
+      const events = workerDirectiveStream(db, workerSessionId);
       // Card 0fbb0507: widens the "latest directive" scan from `message_worker` ONLY to `message_worker`
       // OR `redirect_worker` — `worker_redirect` routes through the SAME enqueueDurableMessage/enqueueStdin
       // path and can park exactly the same way, but a parked redirect used to surface NOTHING here (this
@@ -2262,7 +2350,7 @@ export class OrchestrationMcpRouter {
           ...reportedProjection(w.id),
           ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
           ...archivedWithoutReport(w.id),
-          ...(msgId ? { queriedDirective: directiveByMsgId(db.listEventsForWorker(w.id), msgId) } : {}),
+          ...(msgId ? { queriedDirective: directiveByMsgId(db, w.id, msgId) } : {}),
         });
       },
     );
