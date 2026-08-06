@@ -3830,10 +3830,15 @@ export class OrchestrationMcpRouter {
           "origin project + this manager session, the title, the detail/evidence, and a severity. The target " +
           "is the Platform board, fixed server-side (you cannot pick a project) — for a LINKED peer " +
           "project's manager instead, use peer_message. Returns the created Platform task id plus a " +
-          "`deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` means no Lead session " +
-          "was live but the board task is durably filed (the normal, safe case) — a live Lead is nudged " +
-          "immediately (even one that's currently parked waiting on exactly this); only `dropped` warrants " +
-          "concern. DEDUPED: re-escalating the SAME title with an unchanged-or-lower severity while your " +
+          "`deliveryStatus` (delivered-live | queued | boarded | suppressed-duplicate | dropped): `boarded` " +
+          "means no Lead session was live but the board task is durably filed (the normal, safe case) — a " +
+          "live Lead is nudged immediately (even one that's currently parked waiting on exactly this). " +
+          "`suppressed-duplicate` is DIFFERENT from `boarded`: a Lead IS live, but its live nudge was " +
+          "deliberately withheld because it already saw this same content (today: a completion report " +
+          "naming a deploy SHA the Lead was already told about) — the board task is still filed either way, " +
+          "so nothing is lost, but don't read `suppressed-duplicate` as \"nobody is watching\" the way you " +
+          "would `boarded`; it means someone IS watching and chose not to take a live turn on this one. " +
+          "Only `dropped` warrants concern. DEDUPED: re-escalating the SAME title with an unchanged-or-lower severity while your " +
           "prior escalation is still UNRESOLVED (pending, unclaimed on the board — OR already being worked, " +
           "moved off the landing lane but not yet resolved) reuses that task instead of filing a duplicate " +
           "— the response carries `deduped: true` and no fresh Lead nudge is sent; check escalation_status " +

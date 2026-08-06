@@ -296,27 +296,59 @@ try {
   check("(1) a BUSY-at-capture standing reviewer still gets the 'continue your work' continuation nudge",
     q(id.busyReviewer).length === 1 && q(id.busyReviewer)[0].includes("[loom:daemon-restarted]") && /continue your/i.test(q(id.busyReviewer)[0]));
 
-  // ============================ (2) COMPLETION-ESCALATION DE-DUP ============================
-  // The deploy wake already delivered SHA to the Lead. A "COMPLETE + DEPLOYED" escalation for that SAME
-  // SHA suppresses its live nudge (one completion = one turn) but STILL files the durable board task.
-  const leadTurnsBefore = q(id.lead).length; // 1 (the no-op FYI)
-  const dup = sessions.platformEscalate(id.deployer, { title: `Bugfix COMPLETE + DEPLOYED (${SHA})`, detail: `Shipped at ${SHA}.`, severity: "info" });
-  check("(2) the duplicate-SHA completion escalation enqueues NO new live turn to the Lead (suppressed)",
-    q(id.lead).length === leadTurnsBefore && !q(id.lead).some((m) => m.includes("[loom:escalation]")));
-  check("(2) but the durable board task IS still filed on the Platform home",
+  // ============================ (2) COMPLETION-ESCALATION DE-DUP (card 066d317c) ============================
+  // recordDeployShasDelivered now fires ONLY for a wake whose ENQUEUED text actually names `intent.reason`
+  // (the affected/full-re-orient branch) — never for a silent bystander (never enqueued at all) and never
+  // for the minimal no-op nudge (draft/cap-note only text, no reason/SHA in it either).
+
+  // (2a) REGRESSION GUARD for the fix itself: id.lead is the FIRST live "platform" session platformEscalate
+  // finds, and it resumed SILENTLY above (part 1: q(id.lead).length === 0, an unaffected bystander) — it
+  // never actually saw the SHA. A completion escalation naming that SAME SHA must therefore NOT be
+  // suppressed: the OLD code recorded the SHA against id.lead unconditionally regardless of branch, so a
+  // Lead that was never told anything still silently swallowed the live nudge for a genuinely new report —
+  // exactly the incident the card describes (a live Lead deliberately, and wrongly, skipped).
+  const leadTurnsBefore = q(id.lead).length; // 0 — silent bystander, never told the SHA
+  const notReallyDup = sessions.platformEscalate(id.deployer, { title: `Bugfix COMPLETE + DEPLOYED (${SHA})`, detail: `Shipped at ${SHA}.`, severity: "info" });
+  check("(2a) a silent-bystander Lead that never saw the SHA does NOT suppress a completion escalation naming it (the fix)",
+    q(id.lead).length === leadTurnsBefore + 1 && q(id.lead).some((m) => m.includes("[loom:escalation]") && m.includes(notReallyDup.taskId)));
+  // PtyStub always reports `{delivered:false, position:N}` (a resumed pty is never immediately ready), so
+  // a genuinely-delivered turn here reads as 'queued', never 'delivered-live' — the point is it's NEITHER
+  // 'boarded' NOR 'suppressed-duplicate': a live, un-suppressed nudge really was enqueued.
+  check("(2a) its deliveryStatus is 'queued' (a genuine, un-suppressed live-session turn) — never 'boarded' or 'suppressed-duplicate'",
+    notReallyDup.deliveryStatus === "queued");
+
+  // (2b) POSITIVE CONTROL: id.affLead genuinely DID get the full re-orient nudge naming `intent.reason`
+  // (hence the SHA) in part 1 above (its role="platform" branch text includes `reason: ${intent.reason}`).
+  // Take id.lead and id.silentLead (both silent bystanders, never told anything) off the "live platform"
+  // roster so platformEscalate's `.find` resolves to id.affLead — proving the dedup genuinely suppresses
+  // when the Lead really was told, not merely because SOME platform session exists.
+  db.setProcessState(id.lead, "exited");
+  db.setProcessState(id.silentLead, "exited");
+  const affLeadTurnsBefore = q(id.affLead).length; // 1 — the full re-orient nudge (names the SHA)
+  // DELIBERATELY a DIFFERENT title from (2a)'s — platformEscalate's own same-title/same-origin dedupe
+  // (server-side, ahead of the liveLead/SHA check) would otherwise reuse (2a)'s still-open task and
+  // return early with `boarded`, never reaching the SHA-suppression path this checks at all.
+  const dup = sessions.platformEscalate(id.deployer, { title: `Second COMPLETE + DEPLOYED report (${SHA})`, detail: `Shipped at ${SHA}.`, severity: "info" });
+  check("(2b) a completion escalation naming a SHA the (genuinely notified) Lead already saw enqueues NO new live turn (suppressed)",
+    q(id.affLead).length === affLeadTurnsBefore && !q(id.affLead).some((m) => m.includes("[loom:escalation]")));
+  check("(2b) but the durable board task IS still filed on the Platform home",
     db.listTasks(home).some((t) => t.id === dup.taskId && /COMPLETE \+ DEPLOYED/.test(t.title)));
-  check("(2) its deliveryStatus is 'boarded' (durably routed, no live turn burned)", dup.deliveryStatus === "boarded");
+  check("(2b) its deliveryStatus is the DISTINCT 'suppressed-duplicate' — NOT 'boarded' (DoD-2: a live-but-skipped Lead must read differently from a genuinely offline one)",
+    dup.deliveryStatus === "suppressed-duplicate");
+  check("(2b) the response names the matched token so a wrong suppression is recoverable after the fact (DoD-3)",
+    Array.isArray(dup.suppressedShas) && dup.suppressedShas.includes(SHA));
 
   // Control: an escalation for a SHA the Lead has NOT seen is delivered LIVE (no regression).
   const fresh = sessions.platformEscalate(id.deployer, { title: "New unrelated regression ff00ee11", detail: "Different issue at ff00ee11.", severity: "high" });
   check("(2) a NEW-SHA escalation IS delivered live to the Lead (legitimate, un-suppressed)",
-    q(id.lead).some((m) => m.includes("[loom:escalation]") && m.includes(fresh.taskId)) && fresh.deliveryStatus !== "boarded");
+    q(id.affLead).some((m) => m.includes("[loom:escalation]") && m.includes(fresh.taskId)) &&
+    fresh.deliveryStatus !== "boarded" && fresh.deliveryStatus !== "suppressed-duplicate");
 } finally {
   db.close();
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a non-causal routine deploy resumes unaffected bystanders SILENTLY (no wasted turn; affected/requester still get the full re-check, an idle standing reviewer is silent while a busy one is nudged), and a completion escalation for a SHA the deploy wake already delivered is suppressed live yet still durably boarded — one completion = one turn."
+  ? "\n✅ ALL PASS — a non-causal routine deploy resumes unaffected bystanders SILENTLY (no wasted turn; affected/requester still get the full re-check, an idle standing reviewer is silent while a busy one is nudged); a completion escalation naming a SHA a silent bystander Lead never actually saw delivers live, un-suppressed (card 066d317c fix); and one naming a SHA a genuinely-notified Lead DID see is suppressed live with a distinct 'suppressed-duplicate' status + the matched token — yet still durably boarded."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

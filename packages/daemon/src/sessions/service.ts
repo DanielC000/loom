@@ -3950,9 +3950,13 @@ export class SessionService {
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
-   * Each reason-bearing wake (requester + manager/platform) also records the deploy SHA(s) named in the
-   * reason against its session (recordDeployShasDelivered), so a later "X COMPLETE + DEPLOYED" completion
-   * escalation for the same SHA is recognized as a duplicate turn and its live nudge suppressed (part 2).
+   * Every wake whose ENQUEUED text actually names the reason (the requester's nudge always does; a
+   * manager/platform's does ONLY in the affected/full-re-orient branch, never the silent or minimal
+   * no-op branch — card 066d317c) also records the deploy SHA(s) named in the reason against its session
+   * (recordDeployShasDelivered), so a later "X COMPLETE + DEPLOYED" completion escalation for the same SHA
+   * is recognized as a duplicate turn and its live nudge suppressed (part 2). Recording it for a session
+   * that never actually saw the reason text would let that suppression fire against a session that, in
+   * truth, was never told — this is exactly the bug card 066d317c fixed.
    * EVERY continuation nudge carries the shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it NOTEs the
    * engine's file-read tracking was reset by the restart (not preservable from the daemon — re-Read before
    * Edit). It is the daemon's ONE coherent resume turn per session (card 5d8dea5f removed the old bare-
@@ -4047,9 +4051,11 @@ export class SessionService {
       queuedIoReplayed: (intent.pending?.[id] ?? []).length,
     });
 
-    // Deploy SHAs named in the restart reason — a manager typically stamps the deployed SHA into it. Every
-    // reason-bearing wake (requester + manager/platform) records these against its session so a later
-    // "X COMPLETE + DEPLOYED" escalation for the same SHA can be de-duped (card 5907b71e part 2).
+    // Deploy SHAs named in the restart reason — a manager typically stamps the deployed SHA into it. Only
+    // a wake whose ENQUEUED text actually names the reason records these against its session (see the
+    // per-branch calls below), so a later "X COMPLETE + DEPLOYED" escalation for the same SHA can be
+    // de-duped (card 5907b71e part 2) — WITHOUT recording it for a session that was never actually told
+    // (card 066d317c).
     const reasonShas = extractCommitShas(intent.reason);
 
     // Card a1b79655: this manager's/platform's cap-queued worker_spawn intent(s), if any, were silently
@@ -4111,9 +4117,6 @@ export class SessionService {
         );
       } else if (e.role === "manager" || e.role === "platform") {
         const impact = wakeImpact(e.sessionId, e.role);
-        // The reason names the SHA — record it so a later completion escalation for the same SHA is a
-        // recognized duplicate (part 2). Done for BOTH wake kinds: an unaffected bystander still "saw" it.
-        this.recordDeployShasDelivered(e.sessionId, reasonShas);
         // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
         // actionable information distinct from board-impact classification, so it must never be suppressed
         // by the no-op/idle branch below either.
@@ -4132,11 +4135,25 @@ export class SessionService {
           // not-yet-pulled one does (hasUnconsumedAnswer), since that's genuinely new for this session.
           // EXCEPT a lost draft or a dropped cap-queue entry: both are actionable regardless of impact, so
           // either still gets a minimal turn.
+          //
+          // NOTE (card 066d317c): whatever gets enqueued in THIS branch (nothing, or the minimal
+          // draft/cap-note-only text) never names `intent.reason`, so this session never actually saw the
+          // SHA — recordDeployShasDelivered must NOT fire here. It used to fire unconditionally for every
+          // manager/platform wake regardless of branch (the comment here used to claim "an unaffected
+          // bystander still 'saw' it" — false: a silent bystander sees literally nothing, and even the
+          // draft/cap-note text carries no SHA). That let a later completion escalation for the same SHA
+          // suppress its live nudge to a Lead that never actually saw it — the sender read `boarded` and
+          // stood down believing the report was durably filed, with no way to tell that apart from a
+          // genuinely offline Lead. See the `else` branch below for the one place this record IS correct.
           if (draftNote || capNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
-          // manager re-checks precisely.
+          // manager re-checks precisely. This is the ONLY branch whose enqueued text actually names
+          // `intent.reason` (and therefore the SHA) — so it's the only place a later completion escalation
+          // naming the same SHA is legitimately a duplicate turn, and the only place the SHA-delivered
+          // record may be written (card 066d317c; see the no-op branch's note above for what this replaced).
+          this.recordDeployShasDelivered(e.sessionId, reasonShas);
           const affected = [
             impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
             impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
@@ -7519,6 +7536,7 @@ export class SessionService {
   ): {
     taskId: string; projectId: string; deliveryStatus: DeliveryStatus; deduped?: boolean;
     appended?: boolean; created?: boolean; linkedTaskId?: string; possiblyRelatedTaskIds?: string[];
+    suppressedShas?: string[];
   } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
@@ -7679,17 +7697,31 @@ export class SessionService {
     // (durably persisted, no live taker); a live Lead upgrades it to `delivered-live` (idle, took the turn)
     // or `queued` (busy, held FIFO).
     let deliveryStatus: DeliveryStatus = "boarded";
+    let suppressedShas: string[] | undefined;
     const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
     if (liveLead) {
-      // Completion-escalation de-dup (card 5907b71e part 2): a "X COMPLETE + DEPLOYED" escalation naming a
-      // SHA the Lead already saw via a recent `[loom:daemon-restarted]` deploy wake is a duplicate turn —
-      // suppress the LIVE nudge (one completion = one turn). The durable board task above is ALWAYS filed,
-      // so nothing is lost; deliveryStatus stays `boarded` (the Lead reads it as a board task). A SHA the
-      // Lead has NOT seen is a legitimate, un-suppressed escalation (no regression).
+      // Completion-escalation de-dup (card 5907b71e part 2, corrected by 066d317c): a "X COMPLETE +
+      // DEPLOYED" escalation naming a SHA the Lead already saw via a recent `[loom:daemon-restarted]`
+      // deploy wake is a duplicate turn — suppress the LIVE nudge (one completion = one turn). The durable
+      // board task above is ALWAYS filed either way, so nothing is ever LOST. But this IS a live Lead
+      // being deliberately skipped, not a genuinely offline one — `deliveryStatus` must say so distinctly
+      // (`suppressed-duplicate`, never `boarded`): a sender reading `boarded` here can't tell "nobody is
+      // watching" from "someone IS watching, we just chose not to interrupt them" (card 066d317c — this
+      // conflation, combined with the record-unconditionally bug in resumeFleetOnBoot, let a sender stand
+      // down believing a report was merely durably filed when a live Lead had in fact been skipped). A SHA
+      // the Lead has NOT seen is a legitimate, un-suppressed escalation (no regression).
       const escShas = extractCommitShas(`${input.title} ${input.detail}`);
-      if (this.deployShaAlreadyDelivered(liveLead.id, escShas)) {
+      const matchedShas = this.deployShasAlreadyDelivered(liveLead.id, escShas);
+      if (matchedShas.length > 0) {
+        deliveryStatus = "suppressed-duplicate";
+        suppressedShas = matchedShas;
+        // Card 066d317c DoD-3: log the MATCHED TOKEN(S), not just that a suppression happened — both the
+        // dedup window and `extractCommitShas` free-match 7-40 hex chars, so a genuine commit SHA can
+        // collide with an unrelated hex-looking token (e.g. a Loom card id) named in either the deploy
+        // reason or this escalation's own title/detail. Without the token logged, a wrongly-suppressed
+        // escalation is unrecoverable after the fact — there'd be no way to tell which token collided.
         // eslint-disable-next-line no-console
-        console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — SHA already delivered by a deploy restart (task ${taskId} still filed)`);
+        console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — token(s) already delivered by a deploy restart: ${matchedShas.join(", ")} (task ${taskId} still filed)`);
       } else {
         const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId}: ${input.title} (severity: ${severity})`;
         try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
@@ -7699,6 +7731,7 @@ export class SessionService {
       taskId, projectId: home.id, deliveryStatus,
       ...(created ? { created: true } : {}),
       ...(appended ? { appended: true } : {}),
+      ...(suppressedShas ? { suppressedShas } : {}),
       ...(linkedTaskId ? { linkedTaskId } : {}),
       ...(possiblyRelatedTaskIds ? { possiblyRelatedTaskIds } : {}),
     };
@@ -8404,17 +8437,21 @@ export class SessionService {
   }
 
   /**
-   * True iff a still-fresh `[loom:daemon-restarted]` wake already delivered ANY of these SHAs to the
-   * session — i.e. a completion escalation for one of them would be a duplicate turn. Prunes (and reports
-   * false for) a window past the TTL, so an old deploy can never suppress a genuinely new escalation.
-   * `nowMs` is injectable for the hermetic test.
+   * The SUBSET of `shas` a still-fresh `[loom:daemon-restarted]` wake already delivered to the session —
+   * i.e. a completion escalation naming any of these would be a duplicate turn. Empty means no match
+   * (nothing to suppress). Returns the actual matched tokens, not just a boolean, so a caller can log
+   * WHICH token collided (card 066d317c DoD-3) — both this window and `extractCommitShas`'s free 7-40 hex
+   * match mean a genuine commit SHA can collide with an unrelated hex-looking token (e.g. a card id), and
+   * a suppression that doesn't name its token is unrecoverable after the fact. Prunes (and reports empty
+   * for) a window past the TTL, so an old deploy can never suppress a genuinely new escalation. `nowMs` is
+   * injectable for the hermetic test.
    */
-  private deployShaAlreadyDelivered(sessionId: string, shas: string[], nowMs: number = Date.now()): boolean {
-    if (shas.length === 0) return false;
+  private deployShasAlreadyDelivered(sessionId: string, shas: string[], nowMs: number = Date.now()): string[] {
+    if (shas.length === 0) return [];
     const entry = this.deployShaWindow.get(sessionId);
-    if (!entry) return false;
-    if (nowMs - entry.atMs >= SessionService.SHA_DEDUP_TTL_MS) { this.deployShaWindow.delete(sessionId); return false; }
-    return shas.some((s) => entry.shas.has(s));
+    if (!entry) return [];
+    if (nowMs - entry.atMs >= SessionService.SHA_DEDUP_TTL_MS) { this.deployShaWindow.delete(sessionId); return []; }
+    return shas.filter((s) => entry.shas.has(s));
   }
 
   /**

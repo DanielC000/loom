@@ -819,8 +819,16 @@ export interface Session {
  *                        crash-recovery watcher auto-resumes the parent). Surfaces later, never lost.
  *   • `dropped`        — a genuine failure to route: there was no target to reach AND nothing durable will
  *                        surface it (e.g. a parentless worker report). The ONLY value that warrants alarm.
+ *   • `suppressed-duplicate` — a LIVE recipient exists but the live nudge was deliberately withheld because
+ *                        the recipient already saw this same content (today: a platform_escalate completion
+ *                        report naming a deploy SHA the Lead was already nudged about — card 066d317c). The
+ *                        board task is still filed (same durability floor as `boarded`), but this is
+ *                        DISTINCT from `boarded`: a `boarded` reader can't tell "nobody is watching this"
+ *                        from "someone IS watching but chose to skip your live turn" — collapsing the two
+ *                        let a sender stand down believing a report was merely durably filed when in fact a
+ *                        live Lead had deliberately been skipped.
  */
-export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped";
+export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped" | "suppressed-duplicate";
 
 /** Append-only orchestration audit record (the manager↔worker timeline). */
 export type OrchestrationEventKind =
