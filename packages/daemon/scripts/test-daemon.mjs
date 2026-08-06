@@ -80,6 +80,13 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // exported `neverCompletedFiles` helper. Existing consumers (e.g.
 // docs/investigations/a591a654-gate-timing-attribution/scripts/compute-sum-wall-slack.mjs) already filter
 // by `kind`, so this additive row kind is silently ignored by anything that doesn't know about it yet.
+//
+// Card a496166a DoD-0 (REMAINING WORK): a FOURTH row kind, kind:"host-sample", is emitted PERIODICALLY
+// throughout the run (not just before/after, like `hostBefore`/`hostAfter` on the run-start/run-summary
+// rows above) — the missing piece that lets a fast run and a slow run be compared distribution-to-
+// distribution instead of by one point-in-time snapshot. Same `runUid` join key; same "unknown kind is
+// silently ignored" additivity. See `onHostSample` in the isMain run below for the emission site and
+// `cpuBusyPctDelta`'s own doc for why its `cpuBusyPct` field is a SAMPLED DELTA, never a cumulative total.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 
@@ -137,6 +144,65 @@ export function cheapHostSnapshot() {
     nodeLikeProcessCount: null,
     nodeLikeWorkingSetMB: null,
   };
+}
+
+/** Card a496166a DoD-0: the delta-based CPU busy % between two `os.cpus()`-shaped readings — TRUE current
+ *  host load, never the CUMULATIVE lifetime total this card's kickoff RETRACTED (`Get-Process | Sort CPU
+ *  -Desc` ranks by cumulative CPU-seconds, which conflates "has run a long time" with "is busy right now" —
+ *  the retracted claim ranked Spotify #1 at 35,567 CPU-seconds while a sampled-delta read showed it absent
+ *  from the live top 12 entirely). Host-wide % busy = 1 - (summed idle-time delta / summed total-time
+ *  delta) across every core, between the two snapshots. Pure and injectable-input so a test can drive it
+ *  with synthetic `times` objects instead of asserting against the real, non-deterministic host.
+ *  Returns null (never NaN/Infinity) when there's nothing meaningful to divide by — a zero-or-negative
+ *  elapsed delta (two reads in the same tick, or a clock oddity) or a shape mismatch (different core count
+ *  between the two readings, e.g. a CPU hot-plug) — rather than reporting a fabricated number. */
+export function cpuBusyPctDelta(prevCpus, currCpus) {
+  if (!Array.isArray(prevCpus) || !Array.isArray(currCpus) || prevCpus.length === 0 || prevCpus.length !== currCpus.length) {
+    return null;
+  }
+  let idleDelta = 0;
+  let totalDelta = 0;
+  for (let i = 0; i < currCpus.length; i++) {
+    const p = prevCpus[i].times;
+    const c = currCpus[i].times;
+    idleDelta += c.idle - p.idle;
+    totalDelta += (c.user + c.nice + c.sys + c.idle + c.irq) - (p.user + p.nice + p.sys + p.idle + p.irq);
+  }
+  if (totalDelta <= 0) return null;
+  return Math.max(0, Math.min(100, ((totalDelta - idleDelta) / totalDelta) * 100));
+}
+
+/** Stateful wrapper around `cpuBusyPctDelta` + a real `os.cpus()` read, so the periodic sampler (the
+ *  isMain run below) doesn't have to manage "what was the previous reading" itself. `readCpus` is
+ *  injectable (defaults to the real `os.cpus`) so a test can drive deterministic synthetic readings
+ *  instead of the real, non-deterministic host. The FIRST `sample()` call always returns `null` — there is
+ *  no prior reading to delta against yet — never a fabricated 0% or 100%; every call after that returns
+ *  the delta since the PREVIOUS `sample()` call, not since the sampler was created. */
+export function createHostLoadSampler(readCpus = () => os.cpus()) {
+  let prev = null;
+  return {
+    sample() {
+      const curr = readCpus();
+      const busyPct = prev ? cpuBusyPctDelta(prev, curr) : null;
+      prev = curr;
+      return busyPct;
+    },
+  };
+}
+
+/** Human-readable whole-run host-CPU-busy summary line (Card a496166a DoD-0) — same placement/posture as
+ *  `formatRssFloorLine`/`formatMaxGapLine` below: printed unconditionally, pass or fail. The "SAMPLED
+ *  DELTA, not cumulative" framing is baked INTO the line itself, not left to a caveat a reader can skip —
+ *  this project was burned once already by a cumulative-CPU number read as load (see the card).
+ *  `busyPctSamples` should already exclude the sampler's own null first reading (see createHostLoadSampler). */
+export function formatHostLoadSummaryLine(busyPctSamples, intervalMs) {
+  if (busyPctSamples.length === 0) {
+    return `# host CPU busy — SAMPLED DELTA (not cumulative): 0 sample(s) with a valid delta @ ${intervalMs}ms (run too short for a second tick)`;
+  }
+  const min = Math.min(...busyPctSamples);
+  const max = Math.max(...busyPctSamples);
+  const mean = busyPctSamples.reduce((sum, v) => sum + v, 0) / busyPctSamples.length;
+  return `# host CPU busy — SAMPLED DELTA (not cumulative), ${busyPctSamples.length} sample(s) @ ${intervalMs}ms: min ${min.toFixed(1)}% / mean ${mean.toFixed(1)}% / max ${max.toFixed(1)}%`;
 }
 
 /** Card 90678ee9 DoD-5: the one population field this NDJSON was missing. `testCount` only says HOW MANY
@@ -628,12 +694,17 @@ export function formatMaxGapLine(gapMs, { partial = false } = {}) {
 // code (the caller/Node's own default uncaught-exception handling is what decides that, exactly as it did
 // before this wrapper existed — this function only ever observes and rethrows, never catches-and-exits).
 // `runFn` does the actual test-running work; `log` is injectable so a hermetic test can capture output
-// instead of asserting against real console.log side effects.
-export async function runInstrumentedSuite(runFn, { sampleIntervalMs = 5000, log = console.log } = {}) {
+// instead of asserting against real console.log side effects. `onSample` (card a496166a DoD-0) is an
+// OPTIONAL, ADDITIVE hook fired on the SAME timer tick as the RSS sample — lets a caller ride this
+// existing periodic-sampling machinery for its own observability (e.g. host-load sampling) instead of
+// standing up a second interval. Defaults to a no-op, so every existing call site (and the RSS-gap test,
+// which doesn't pass it) is byte-identical in behavior to before this parameter existed.
+export async function runInstrumentedSuite(runFn, { sampleIntervalMs = 5000, log = console.log, onSample = () => {} } = {}) {
   const rssTracker = createRssTracker();
   const completionTimestamps = [performance.now()];
   rssTracker.sample();
-  const timer = setInterval(() => rssTracker.sample(), sampleIntervalMs);
+  onSample();
+  const timer = setInterval(() => { rssTracker.sample(); onSample(); }, sampleIntervalMs);
   timer.unref?.();
   try {
     await runFn(completionTimestamps);
@@ -1033,6 +1104,44 @@ if (isMain) {
     // (trivial, should-never-throw) row construction, same posture as the post-run block below.
     console.warn(`⚠ gate-timing write-ahead record failed (non-fatal): ${err.message}`);
   }
+  // Card a496166a DoD-0 (REMAINING WORK): periodic host-load sampling for the WHOLE duration of a gate
+  // run, not just a before/after bracket — the piece §DoD-0b names as missing: a single point-in-time
+  // sample can't tell a fast run and a slow run apart. Rides the SAME timer `runInstrumentedSuite` already
+  // runs for RSS sampling below (no second interval, no new harness) via its `onSample` hook. Each tick
+  // writes an ADDITIVE "host-sample" NDJSON row (own `kind`, joined by the SAME `runUid` every other row
+  // in this run already carries) — existing consumers filter by `kind` and silently ignore one they don't
+  // recognize (see the header comment above GATE_TIMING_NDJSON), so this cannot break
+  // compute-sum-wall-slack.mjs or any other reader of this file.
+  const gateTimingHostSampler = createHostLoadSampler();
+  const gateTimingHostBusySamples = [];
+  let gateTimingHostSampleIndex = 0;
+  const onHostSample = () => {
+    try {
+      const busyPct = gateTimingHostSampler.sample();
+      if (busyPct !== null) gateTimingHostBusySamples.push(busyPct);
+      appendGateTimingRow(GATE_TIMING_NDJSON, {
+        kind: "host-sample",
+        runIndex: gateTimingRunIndex,
+        runUid: gateTimingRunUid,
+        sampleIndex: gateTimingHostSampleIndex++,
+        ts: new Date().toISOString(),
+        // Date.now()-derived, not performance.now() — matches this NDJSON schema's existing startTs/endTs
+        // convention (see the runOne comment above): these rows are joined and read as wall-clock epoch
+        // timestamps against the run-start/run-summary rows, never used for an in-process pass/fail
+        // assertion a monotonic clock would matter for.
+        elapsedMs: Date.now() - gateTimingRunStartEpoch,
+        // SAMPLED DELTA, never cumulative — see cpuBusyPctDelta's own doc for why that distinction is
+        // load-bearing here. null on the sampler's first tick (no prior reading to delta against yet).
+        cpuBusyPct: busyPct,
+        freeMemMB: Math.round(os.freemem() / 1e6),
+        totalMemMB: Math.round(os.totalmem() / 1e6),
+      });
+    } catch {
+      // Best-effort, same posture as appendGateTimingRow itself (which never throws on its own) — this
+      // guards the (should-never-throw) os.cpus()/os.freemem() reads feeding it. A sampling failure must
+      // never affect this gate's own pass/fail or exit code.
+    }
+  };
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
     const nextIndex = makeCursor(SELECTED.length);
     const gateTimingCtx = { runIndex: gateTimingRunIndex, runUid: gateTimingRunUid };
@@ -1056,7 +1165,7 @@ if (isMain) {
       console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
       process.exit(1);
     }
-  }, { sampleIntervalMs: RSS_SAMPLE_INTERVAL_MS });
+  }, { sampleIntervalMs: RSS_SAMPLE_INTERVAL_MS, onSample: onHostSample });
   const gateTimingRunEndTs = new Date().toISOString();
   const gateTimingWallClockMs = Date.now() - gateTimingRunStartEpoch;
 
@@ -1074,6 +1183,7 @@ if (isMain) {
   // run's, arguably more, since rejections are disproportionately the interesting ones.
   console.log(formatRssFloorLine(rssTracker.sampleCount(), RSS_SAMPLE_INTERVAL_MS, rssTracker.floorBytes()));
   console.log(formatMaxGapLine(maxGapMs(completionTimestamps)));
+  console.log(formatHostLoadSummaryLine(gateTimingHostBusySamples, RSS_SAMPLE_INTERVAL_MS));
 
   // Card 17069e7e (DoD-2): per-file timing — human summary (unconditional, pass or fail, same placement as
   // the RSS/gap lines above) + a best-effort NDJSON artifact. Wrapped whole: this is observation only, and
