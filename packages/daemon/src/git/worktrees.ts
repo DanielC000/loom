@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
@@ -2149,6 +2150,11 @@ export interface EmitCompareGateResult {
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
+  /** Count of changed `test/*.mjs` paths classified as living inside an EXCLUDED_DIR_NAMES subtree
+   *  (`fixtures/`, `census/`) — recognized, but never pushed into {@link changedTestFiles} since the full
+   *  suite's own discovery walk never descends into that subtree either (card 815b4b30). Diagnostic only,
+   *  same "a skip is never silent" discipline as `identicalFileCount`. */
+  excludedTestFileCount: number;
   reason?: string;
 }
 
@@ -2220,7 +2226,7 @@ export interface EmitCompareGateResult {
 export async function computeEmitCompareGate(
   repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
-  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, reason });
+  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, excludedTestFileCount: 0, reason });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2237,6 +2243,11 @@ export async function computeEmitCompareGate(
 
   const changedTsFiles: string[] = [];
   const changedTestFiles: string[] = [];
+  let excludedTestFileCount = 0;
+  // Lazily loaded (only if a test/*.mjs path with a subdirectory actually shows up below) and cached for
+  // the rest of this call. `undefined` = not attempted yet; `null` = attempted and failed (fail closed);
+  // a `Set` = the real names, loaded straight from THIS diff's own worktree copy of test-daemon.mjs.
+  let excludedDirNames: Set<string> | null | undefined;
   for (const line of entries) {
     const tab = line.indexOf("\t");
     if (tab < 0) return notEligible(`unparseable diff line: ${line}`);
@@ -2248,6 +2259,32 @@ export async function computeEmitCompareGate(
       continue;
     }
     if (p.startsWith(EMIT_COMPARE_TEST_PREFIX) && p.endsWith(".mjs")) {
+      // Card 815b4b30: a path sitting inside an EXCLUDED_DIR_NAMES subtree (`fixtures/`, `census/`) is,
+      // by construction, not a test at all — scripts/test-daemon.mjs's own discovery walk never descends
+      // into either directory, so the full suite never runs it either. Checked FIRST, before the
+      // underscore/shell-safety checks below: those two checks exist only to protect what
+      // `buildReducedGateCommand` is about to interpolate into a shell-executed `&&` chain, and an
+      // excluded-dir path is never going to reach that chain at all, so subjecting it to those checks
+      // could only ever produce a spurious notEligible for a file this function is about to skip anyway.
+      // REUSE, not reimplementation (Code Review, card 815b4b30): two independent notions of "is this a
+      // test" is exactly the shared-unit divergence that produced this bug (a fixture/census path was
+      // treated as a real test here while test-daemon.mjs's own walk already excluded it) — so this loads
+      // the REAL `EXCLUDED_DIR_NAMES` Set by dynamically importing THIS DIFF'S OWN worktree copy of
+      // scripts/test-daemon.mjs (see `loadExcludedTestDirNames`), never a hand-copied second list that
+      // could silently drift from it. `loom:not-a-test:`/`loom:gate-exempt:` markers are NOT re-checked
+      // here: both only ever change how `findExcludedDirTestShapedFiles` ANNOTATES a file already inside
+      // an excluded dir for the full-suite banner — neither marker makes the full suite actually RUN that
+      // file, so there is nothing for a marker to change about whether this reduced gate runs it either.
+      const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
+      const dirSegments = relToTestDir.split("/").slice(0, -1);
+      if (dirSegments.length > 0) {
+        if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
+        if (excludedDirNames === null) return notEligible(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
+          excludedTestFileCount++;
+          continue;
+        }
+      }
       // Mirrors scripts/test-daemon.mjs's own discovery rule: an underscore-prefixed segment anywhere in
       // the path (the file's own name, or a containing directory like `_scratch/`) marks a non-test helper
       // whose standalone-run behavior isn't guaranteed — fail closed rather than assume it's safe to run
@@ -2270,9 +2307,14 @@ export async function computeEmitCompareGate(
   }
 
   if (changedTsFiles.length === 0 && changedTestFiles.length === 0) {
-    // Every changed path was a DELETED test/*.mjs file — nothing left needing behavioral proof, but
-    // nothing PROVEN inert either; fail closed rather than special-case a deletion-only diff.
-    return notEligible("no eligible changed path left to prove inert");
+    // Every changed path was either a DELETED test/*.mjs file or (card 815b4b30) an excluded-dir
+    // (fixtures/, census/) test/*.mjs file — nothing left needing behavioral proof, but nothing PROVEN
+    // inert either. Fail closed rather than report a green run that proved nothing: this is what stops a
+    // diff touching ONLY a fixtures/census file from reading as a vacuous eligible:true with an empty
+    // changedTestFiles.
+    return notEligible(excludedTestFileCount > 0
+      ? "every changed path was inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — nothing left to prove inert"
+      : "no eligible changed path left to prove inert");
   }
 
   if (changedTsFiles.length > 0) {
@@ -2305,7 +2347,37 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length };
+  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length, excludedTestFileCount };
+}
+
+/**
+ * Loads the REAL `EXCLUDED_DIR_NAMES` Set from `scripts/test-daemon.mjs` — dynamically imported from
+ * `worktreePath` itself (the diff's OWN checked-out copy of that script), not from this daemon process's
+ * own installed copy: `emitCompareSoundnessOk` above already reads its two tsconfig files live from
+ * `worktreePath` for the identical reason (a future edit to the script must be seen immediately, not
+ * after a daemon restart), and `test/census/lib.mjs` already imports this same module the same way (for
+ * its `NOT_HERMETIC` export) — `test-daemon.mjs` is deliberately import-safe (see its own `isMain` guard
+ * doc: "an out-of-band harness ... needs to import this file's ... export without ALSO triggering a full
+ * ... run as a side effect of that import"), so this is genuine reuse, not a new coupling.
+ *
+ * FAILS CLOSED to `null` on any error — an unreadable/unparseable script, a missing `scripts/` directory
+ * (never shipped in the packaged `loomctl` npm install; see `scripts/build-npm-package.mjs`'s `files`
+ * list — this whole emit-compare mechanism is Loom-repo-specific already and simply never engages on a
+ * shipped install's own project, same posture as the `typescript`-unresolvable case below), or an export
+ * that isn't actually a `Set`. Never resolve ambiguity to an empty-but-truthy Set — a caller that got
+ * `null` here MUST fail the whole diff closed, exactly like the `typescript`-unresolvable case just
+ * below in {@link computeEmitCompareGate}.
+ */
+async function loadExcludedTestDirNames(worktreePath: string): Promise<Set<string> | null> {
+  try {
+    const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
+    // Windows: dynamic import() needs a file:// URL, never a bare drive-letter path
+    // (ERR_UNSUPPORTED_ESM_URL_SCHEME) — same caveat test/census/lib.mjs's own import already documents.
+    const mod = (await import(pathToFileURL(scriptPath).href)) as { EXCLUDED_DIR_NAMES?: unknown };
+    return mod.EXCLUDED_DIR_NAMES instanceof Set ? (mod.EXCLUDED_DIR_NAMES as Set<string>) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Narrow structural type for the `typescript` package's default export — only the surface this file

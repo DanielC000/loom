@@ -316,7 +316,10 @@ export const NOT_HERMETIC = new Set([
 // still didn't account for `looksLikeTest` violations). The ONLY authoritative number is `HERMETIC.length`
 // (computed below) — read it from a real run's own "N/M hermetic daemon tests passed" line, or run this
 // script with `--count` for the same number without running the suite.
-const EXCLUDED_DIR_NAMES = new Set(["fixtures", "census"]);
+// Exported (card 815b4b30) so `git/worktrees.ts`'s emit-compare reduced-gate classifier can dynamically
+// import THIS exact Set — the diff's own worktree copy of this file — rather than hand-copying the two
+// names into a second, driftable list. See `loadExcludedTestDirNames` in worktrees.ts for the reuse.
+export const EXCLUDED_DIR_NAMES = new Set(["fixtures", "census"]);
 
 // A discovered file not underscore-prefixed must carry at least one of these to count as a real test.
 // Card b122c7d4's census verified the marker set against test/'s top-level .mjs files at that commit:

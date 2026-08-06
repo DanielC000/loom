@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -40,6 +41,14 @@ const GIT_ID = "-c user.email=ecg@loom -c user.name=ecg";
 const now = new Date().toISOString();
 const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
 const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs"];
+// Card 815b4b30: (I)/(J) below need each fixture repo to carry a REAL, importable
+// packages/daemon/scripts/test-daemon.mjs so `loadExcludedTestDirNames` (git/worktrees.ts) can actually
+// resolve `EXCLUDED_DIR_NAMES` from it — using the REAL file's content (not a hand-typed stub) means these
+// tests exercise the genuine reuse path end to end, with zero risk of a second, drifting copy of the
+// fixtures/census name list.
+const REAL_TEST_DAEMON_SCRIPT = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "test-daemon.mjs"), "utf8",
+);
 
 function seed(db, p) {
   db.insertProject({ id: p.projId, name: "ECG", repoPath: p.repo, vaultPath: p.repo, config: { orchestration: { gateCommand: FULL_GATE } }, createdAt: now, archivedAt: null });
@@ -289,6 +298,68 @@ try {
     check("(H) gateRan:true", confirm.gateRan === true);
     check("(H) captured command IS the full gate — a semicolon in the test file path fails closed rather than reaching the shell string", capturedGate === FULL_GATE);
   }
+
+  // ── (I) card 815b4b30 — a diff touching ONLY a test/fixtures/*.mjs file must FAIL CLOSED to the full
+  //        gate, never report a vacuous eligible:true with nothing left to run ─────────────────────────
+  {
+    const I = mk("i");
+    fs.mkdirSync(I.repo, { recursive: true });
+    fs.writeFileSync(path.join(I.repo, "README.md"), "# ecg\n");
+    mkdirp(path.join(I.repo, "packages", "daemon", "test", "fixtures"));
+    mkdirp(path.join(I.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(I.repo, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
+    fs.writeFileSync(path.join(I.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
+    I.worktreePath = worktreePath; I.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: tweak fixture output"`, { cwd: worktreePath });
+    seed(db, I);
+
+    const confirm = await sessions.confirmWorkerMerge(I.mgrId, I.workerId);
+    check("(I) gateRan:true", confirm.gateRan === true);
+    check("(I) captured command IS the full gate — a fixtures/-only diff fails closed rather than reporting a vacuous green", capturedGate === FULL_GATE);
+    check("(I) no reduced-gate warning present", !(typeof confirm.warning === "string" && /reduced/.test(confirm.warning)));
+  }
+
+  // ── (J) card 815b4b30 POSITIVE CONTROL — the ae476ab1-shaped diff: a REAL changed test file PLUS a
+  //        changed test/fixtures/*.mjs file in the SAME diff. The reduced gate must still fire (the real
+  //        test file proves eligibility) but must select ONLY the real test file — never the fixture —
+  //        proving the fix actually changes SELECTION, not just the all-excluded case in (I) ────────────
+  {
+    const J = mk("j");
+    const BASE_TEST = ["// a hermetic test file backed by a fixture", "console.log(\"PASS  placeholder\");", "process.exit(0);", ""].join("\n");
+    fs.mkdirSync(J.repo, { recursive: true });
+    fs.writeFileSync(path.join(J.repo, "README.md"), "# ecg\n");
+    mkdirp(path.join(J.repo, "packages", "daemon", "test", "fixtures"));
+    mkdirp(path.join(J.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(J.repo, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
+    fs.writeFileSync(path.join(J.repo, "packages", "daemon", "test", "kickoff-real.mjs"), BASE_TEST);
+    fs.writeFileSync(path.join(J.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: J.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
+    J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "kickoff-real.mjs"), BASE_TEST.replace("backed by a fixture", "backed by a fixture (updated)"));
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update kickoff test + its backing fixture"`, { cwd: worktreePath });
+    seed(db, J);
+
+    const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
+    check("(J) gateRan:true", confirm.gateRan === true);
+    check("(J) captured command is the REDUCED gate — the real test file still proves eligibility", capturedGate !== FULL_GATE && !capturedGate.includes("test:daemon"));
+    check("(J) reduced command runs the REAL changed test file directly", capturedGate.includes("packages/daemon/test/kickoff-real.mjs"));
+    check("(J) reduced command does NOT run the changed fixtures/ file as a test", !capturedGate.includes("fixtures/fake-cli.mjs"));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -296,6 +367,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and a diff touching a real test file plus its backing fixtures/ file together still reduces, selecting the real test file and never the fixture."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
