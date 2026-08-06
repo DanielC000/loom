@@ -30,6 +30,12 @@
 //    FILE for the actual content, and MAY cross-check the summary line's len/sha256 against it.
 //  - Never exits on its own (mirrors a real claude staying up after a turn) — the harness kills it via
 //    `host.stop(sessionId, "hard")`.
+//  - Emits a `FIXTURE_ALIVE` heartbeat every FIXTURE_HEARTBEAT_MS (env, default 500) from boot onward —
+//    card ae476ab1: the harness's delivery wait used to be a flat deadline that couldn't tell "still
+//    working, just slow" apart from "hung/dead", and a measured, reproducible real-OS scheduling jitter
+//    (2.6-4.4x this fixture's own typical delivery time, observed on an otherwise-idle solo host with
+//    nothing else in the suite running) tripped that flat deadline. The heartbeat gives the harness a
+//    liveness signal to poll instead of guessing a bigger fixed number (see doc in kickoff-real-spawn.mjs).
 import fs from "node:fs";
 import crypto from "node:crypto";
 
@@ -59,10 +65,18 @@ if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
 const readyDelayMs = Number(process.env.FIXTURE_READY_DELAY_MS) || 0;
 const debounceMs = Number(process.env.FIXTURE_DEBOUNCE_MS) || 300;
+const heartbeatMs = Number(process.env.FIXTURE_HEARTBEAT_MS) || 500;
 
 setTimeout(() => {
   process.stdout.write("FIXTURE_READY\n");
 }, readyDelayMs);
+
+// Independent of the ready delay / debounce timers above — ticks for as long as this real process's own
+// event loop is genuinely alive, which is exactly the property the harness needs to distinguish "real but
+// slow" from "hung/crashed" (see the header doc).
+setInterval(() => {
+  process.stdout.write("FIXTURE_ALIVE\n");
+}, heartbeatMs);
 
 let chunks = [];
 let debounceTimer = null;

@@ -102,6 +102,54 @@ const KICKOFF_PRE_DELIVERY_FLOOR_MS = MODE_LOG_MAX_ATTEMPTS * MODE_LOG_POLL_MS;
 // arbitrary pick.
 const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 
+// ============ Stall-aware delivery wait (card ae476ab1) ============
+// A flat waitUntil(..., {timeoutMs}) can't tell "the real child hasn't finished yet" apart from "the real
+// child is dead/wedged" — both just run out the same clock. Measured directly (this card, solo run 6 of 6
+// on an otherwise-idle host with NOTHING else in the suite running): a single real spawn's own
+// SessionStart->FIXTURE_RECEIVED round trip legitimately spiked 2.6-4.4x its typical ~5s cost (12546ms,
+// 13747ms observed elsewhere in that SAME run, vs ~4750-5200ms steady-state in 5 other clean runs) purely
+// from ordinary OS scheduling jitter — not a hang, not a suite-mate polluting shared state (checked and
+// refuted: the file that alphabetically runs immediately before this one on the same lane, in 92.5% of
+// PASSING runs too — not a discriminator). The old flat ceiling was tripped by exactly this jitter (the
+// `auditor` role overshot its 19000ms budget by only 1.1x, at 20879ms). Widening that fixed number would
+// be the "longer sleep" anti-pattern this project has already been burned by twice (see _wait.mjs's own
+// header) — it only buys a slower flake, since jitter has no natural ceiling.
+// Instead: the fixture (fake-claude-cli.mjs) now emits a FIXTURE_ALIVE heartbeat every
+// FIXTURE_HEARTBEAT_MS while it's genuinely alive. This harness treats a STALL (no new pty output AT ALL,
+// heartbeats included, for HEARTBEAT_STALL_MS) as the real failure signal, and tolerates any amount of
+// elapsed wall-clock time as long as the child keeps proving it's alive. `waitForDeliveryStallAware`'s own
+// `absoluteCeilingMs` argument (computed per call site below, from the OLD fixed-ceiling formula x2) is a
+// backstop only — sized generously so it never fires on genuine jitter, existing purely to fail a
+// truly-wedged child instead of hanging the whole gate.
+const HEARTBEAT_STALL_MS = 15000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Poll for `/FIXTURE_RECEIVED/` in the harness's accumulated pty text. Fails only on a genuine STALL (no
+ * new output of any kind — heartbeat included — for `HEARTBEAT_STALL_MS`) rather than on total elapsed
+ * time, or if `absoluteCeilingMs` is exceeded despite continued liveness (a backstop against a child that
+ * heartbeats forever without ever actually delivering — a real bug, not jitter).
+ */
+async function waitForDeliveryStallAware(label, sessionId, absoluteCeilingMs) {
+  const t0 = Date.now();
+  let lastText = harness.text(sessionId);
+  let lastActivityAt = t0;
+  for (;;) {
+    const text = harness.text(sessionId);
+    if (/FIXTURE_RECEIVED/.test(text)) return;
+    if (text.length !== lastText.length) { lastText = text; lastActivityAt = Date.now(); }
+    const now = Date.now();
+    const idleMs = now - lastActivityAt;
+    if (idleMs > HEARTBEAT_STALL_MS) {
+      throw new Error(`${label} real fixture reports FIXTURE_RECEIVED — STALLED: no new output (heartbeat included) for ${idleMs}ms (budget ${HEARTBEAT_STALL_MS}ms), ${now - t0}ms total elapsed`);
+    }
+    if (now - t0 > absoluteCeilingMs) {
+      throw new Error(`${label} real fixture reports FIXTURE_RECEIVED — exceeded absolute backstop ${absoluteCeilingMs}ms despite continued liveness (heartbeats kept arriving but delivery never completed)`);
+    }
+    await sleep(10);
+  }
+}
+
 const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
 const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
 console.log(`[measured] real CLAUDE.md=${claudeMd.length} chars, real worker SKILL.md=${workerSkill.length} chars`);
@@ -201,12 +249,15 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   // scaling the timeout with payload size since writeChunked paces large payloads over more real ticks,
   // PLUS the documented pre-delivery floor (see KICKOFF_PRE_DELIVERY_FLOOR_MS above) that 0050a17e added
   // between SessionStart and the kickoff's actual pty write.
-  const deliveryTimeoutMs = KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2);
+  // Absolute backstop only (see the stall-aware doc above) — kept proportional to the OLD fixed-ceiling
+  // formula (2x) purely so the large-payload sections (10KB/40KB) still get commensurately more room
+  // before the backstop can ever fire; the STALL check above is what actually gates ordinary jitter.
+  const deliveryAbsoluteCeilingMs = 2 * (KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2));
   const deliveryWaitStartedAt = performance.now();
   try {
-    await waitUntil(() => /FIXTURE_RECEIVED/.test(harness.text(sessionId)), { label: `${label} real fixture reports FIXTURE_RECEIVED`, timeoutMs: deliveryTimeoutMs });
+    await waitForDeliveryStallAware(label, sessionId, deliveryAbsoluteCeilingMs);
   } finally {
-    console.log(`   [measured ${label}] SessionStart→FIXTURE_RECEIVED: ${Math.round(performance.now() - deliveryWaitStartedAt)}ms (budget ${deliveryTimeoutMs}ms = ${KICKOFF_PRE_DELIVERY_FLOOR_MS}ms floor + ${Math.max(15000, kickoff.length * 2)}ms pacing, kickoff ${kickoff.length} chars)`);
+    console.log(`   [measured ${label}] SessionStart→FIXTURE_RECEIVED: ${Math.round(performance.now() - deliveryWaitStartedAt)}ms (stall budget ${HEARTBEAT_STALL_MS}ms, absolute backstop ${deliveryAbsoluteCeilingMs}ms, kickoff ${kickoff.length} chars)`);
   }
   console.log(`   [measured ${label}] spawn()→kickoff-landed (total): ${Math.round(performance.now() - spawnStartedAt)}ms (kickoff ${kickoff.length} chars)`);
 
