@@ -18,7 +18,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       a broader name/port sweep;
 //   (d) `stop` on a directory with no tracked server is a safe no-op (exit 0, no error);
 //   (e) `start` refuses to double-track a still-alive server for the same dir.
+//   (f) card 177b9e7f — CONTENDED-PORT positive control: `start` records the port the child ACTUALLY
+//       bound, never the one it was configured/asked for. A decoy listener holds the configured port
+//       first, so the fixture (mimicking a dev server that steps to the next free port under contention,
+//       e.g. Vite) is FORCED to bind one higher; the recorded port must differ from the held one, must be
+//       genuinely accepting connections (not just a text match), and must survive a completely separate
+//       `stop` invocation re-reading it fresh from the tracking file (not just echoed once by `start`).
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -62,10 +69,17 @@ const controlOut = path.join(otherWorkDir, "control.txt");
 let trackedPid = null;
 let controlChild = null;
 
+// The heartbeat fixture never prints a port banner, so `start`'s own bounded port-detection wait would
+// otherwise run to its full default (15000ms) on every call below — override it short so this section
+// stays fast; the timeout mechanism itself is exercised for real by section (f)'s port fixture instead.
+const FAST_PORT_TIMEOUT_ENV = { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "300" };
+
 try {
   // (a) start: spawns the fixture, prints the pid, and the helper invocation itself exits promptly.
-  const startResult = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000 });
+  const startResult = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000, env: FAST_PORT_TIMEOUT_ENV });
   check("(a) start exits 0", startResult.status === 0);
+  check("(a) start prints the log path", /^Log: /m.test(startResult.stdout || ""));
+  check("(a) start reports the port as not detected (the fixture never announces one)", /Bound port not detected/.test(startResult.stdout || ""));
   const startMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
   check("(a) start prints a pid", !!startMatch);
   trackedPid = startMatch ? Number(startMatch[1]) : null;
@@ -75,7 +89,7 @@ try {
   check("(a) fixture is actually running (heartbeat file advancing)", heartbeatAdvanced);
 
   // (e) a second start over the same still-alive dir must refuse, not spawn a second untracked process.
-  const doubleStart = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000 });
+  const doubleStart = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000, env: FAST_PORT_TIMEOUT_ENV });
   check("(e) double-start over a live tracked dir refuses (nonzero exit)", doubleStart.status !== 0);
 
   // (c) an unrelated control process, never registered with the helper, must survive the coming stop().
@@ -127,7 +141,132 @@ try {
   // registered each one for guaranteed cleanup at process exit (card 995be21f).
 }
 
+// (f) card 177b9e7f — contended-port positive control. A fixture that mimics a dev server stepping to
+// the next free port under contention (e.g. Vite): it tries to bind its DESIRED port, and on EADDRINUSE
+// retries the next one up, printing a Vite-shaped banner once it actually binds. It ALSO writes its own
+// actual bound port to a sentinel file (argv[3]) — a GROUND TRUTH independent of both the helper's own
+// extraction and of network probing, so this test's own verification can't be fooled by a coincidental
+// listener elsewhere on a busy host answering on the wrong port (a live risk: this box runs plenty of
+// other node processes at any given time).
+//
+// The fixture ALSO prints a DECOY host:port line (argv[4]) BEFORE its real banner — reproducing, byte
+// for byte in shape, this repo's own `pnpm web`: `packages/web/vite.config.ts`'s `logProxyTarget` plugin
+// prints "[web] proxying → http://127.0.0.1:<daemon port>" during `configureServer()`, which runs BEFORE
+// Vite's own "Local: http://localhost:<port>/" ready banner — verified against a REAL captured `pnpm
+// web` log, not assumed. A naive first-match extraction records the daemon's port, not the dev server's
+// own; the manager review that caught this could not have been caught by a synthetic fixture that only
+// ever emits one clean banner (project memory `a-control-inherits-the-equivalence-you-assumed-building-
+// it`: a control is only as good as the corpus it runs against). The real banner ALSO has its port digits
+// wrapped in ANSI color codes (`\x1b[1m5317\x1b[22m`) — reproduced here too, since an SGR code commonly
+// contains a digit itself (bold is `\x1b[1m`) and that digit can land inside the port regex's own
+// "non-digit gap" and silently break the match; this fixture's banner is byte-for-byte the real captured
+// Vite line, not a hand-simplified stand-in.
+const portFixtureSrc = [
+  "const net = require('net');",
+  "const fs = require('fs');",
+  "const desired = Number(process.argv[2]);",
+  "const sentinelFile = process.argv[3];",
+  "const decoyProxyPort = Number(process.argv[4]);",
+  "console.log('[fixture] proxying \\u2192 http://127.0.0.1:' + decoyProxyPort);",
+  "function tryListen(port) {",
+  "  const srv = net.createServer(() => {});",
+  "  srv.once('error', (e) => {",
+  "    if (e && e.code === 'EADDRINUSE') { tryListen(port + 1); }",
+  "    else { console.error(String(e)); process.exit(1); }",
+  "  });",
+  "  srv.listen(port, '127.0.0.1', () => {",
+  "    const actual = srv.address().port;",
+  "    fs.writeFileSync(sentinelFile, String(actual));",
+  "    console.log('  \\u001b[32m\\u2192\\u001b[39m  \\u001b[1mLocal\\u001b[22m:   \\u001b[36mhttp://localhost:\\u001b[1m' + actual + '\\u001b[22m/\\u001b[39m');",
+  "  });",
+  "}",
+  "tryListen(desired);",
+].join("\n");
+const portFixtureScript = path.join(fixtureDir, "port-server.cjs");
+fs.writeFileSync(portFixtureScript, portFixtureSrc);
+const portSentinelFile = path.join(fixtureDir, "port-server-actual.txt");
+
+function canConnect(port, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port, timeout: timeoutMs });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => resolve(false));
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+  });
+}
+
+const portWorkDir = mkdtempManaged("loom-dev-server-port-");
+let portTrackedPid = null;
+let decoyServer = null;
+
+try {
+  // Hold a port first (the decoy) so the fixture's OWN first bind attempt is forced to fail and step —
+  // port contention is the entire failure mode this control exists to catch (a test on an uncontended
+  // port would prove nothing).
+  decoyServer = net.createServer(() => {});
+  const decoyPort = await new Promise((resolve, reject) => {
+    decoyServer.once("error", reject);
+    decoyServer.listen(0, "127.0.0.1", () => resolve(decoyServer.address().port));
+  });
+
+  // decoyPort does DOUBLE duty, deliberately: it's both the port the fixture must find contended and
+  // step around (argv[2]), AND the port named in its pre-banner decoy "proxying" line (argv[4]) — one
+  // number, playing the two roles the real `pnpm web` log conflates (the daemon's port is both a real,
+  // live thing on the host AND the value a naive extraction would wrongly record).
+  const startResult = spawnSync(
+    process.execPath,
+    [HELPER, "start", portWorkDir, "--", process.execPath, portFixtureScript, String(decoyPort), portSentinelFile, String(decoyPort)],
+    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+  );
+  check("(f) start (contended port) exits 0", startResult.status === 0);
+  const portStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+  portTrackedPid = portStartMatch ? Number(portStartMatch[1]) : null;
+
+  const boundMatch = /Bound port: (\d+)/.exec(startResult.stdout || "");
+  check("(f) start prints the ACTUAL bound port", !!boundMatch);
+  const recordedPort = boundMatch ? Number(boundMatch[1]) : null;
+
+  check(
+    "(f) recorded port differs from the configured/decoy-proxy-line port — proves it's neither echoing " +
+      "the config NOR picking up the pre-banner decoy line's port",
+    recordedPort != null && recordedPort !== decoyPort,
+  );
+
+  // GROUND TRUTH: the fixture wrote its own actual bound port straight to a sentinel file, independent
+  // of the helper's extraction logic and of any network probing. This is the check that can't be fooled
+  // by a coincidental listener elsewhere on the host answering on the wrong port.
+  const actualPort = fs.existsSync(portSentinelFile) ? Number(fs.readFileSync(portSentinelFile, "utf8")) : null;
+  check("(f) fixture wrote its own ground-truth actual-port sentinel", actualPort != null && !Number.isNaN(actualPort));
+  check(
+    "(f) helper's recorded port EXACTLY matches the fixture's own ground-truth actual port",
+    recordedPort != null && actualPort != null && recordedPort === actualPort,
+  );
+
+  const reallyBound = recordedPort != null && await canConnect(recordedPort);
+  check("(f) the recorded port is genuinely accepting connections (not a hallucinated value)", reallyBound);
+
+  // Independent re-verification: `stop` is a SEPARATE process invocation that must re-read the port from
+  // the tracking file on disk — proving DoD-1 (the port is the tracking file's, not just something
+  // `start` printed once and held in memory).
+  const stopResult = spawnSync(process.execPath, [HELPER, "stop", portWorkDir], { encoding: "utf8", timeout: 10_000 });
+  check("(f) stop exits 0", stopResult.status === 0);
+  const stopPortMatch = /\(port (\d+)\)/.exec(stopResult.stdout || "");
+  check(
+    "(f) stop's own fresh re-read of the tracking file reports the SAME actual bound port",
+    !!stopPortMatch && recordedPort != null && Number(stopPortMatch[1]) === recordedPort,
+  );
+
+  const portGone = recordedPort != null && await waitUntil(async () => !(await canConnect(recordedPort)), 5000);
+  check("(f) the port is freed after stop()", portGone);
+} catch (e) {
+  console.log(`FAIL  unexpected error (contended-port control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (portTrackedPid != null && isAlive(portTrackedPid)) { try { process.kill(portTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+  if (decoyServer) { try { decoyServer.close(); } catch { /* best effort */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched."
+  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, and records the ACTUAL bound port (not the configured one) even under port contention."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

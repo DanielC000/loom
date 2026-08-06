@@ -4,23 +4,70 @@
 // `netstat` + `taskkill` hunt (locale-fragile output parsing, and a name/port-based kill can reach an
 // unrelated process — even the self-hosting daemon itself). Dependency-free: only node:child_process/
 // node:fs/node:os/node:path/node:crypto, so it runs anywhere Node runs, no install step. Mirrors
-// serve-static.mjs in this same scripts/ dir (single-purpose, no deps, one printed line to act on).
+// serve-static.mjs in this same scripts/ dir (single-purpose, no deps, tracked-pid start/stop) — both
+// record their port to the SAME kind of tracking file, so a consumer reads one place regardless of
+// which helper launched the server; see PORT DETECTION below for why the mechanism differs.
 //
 // Usage:
 //   node dev-server.mjs start <dir> -- <command> [args...]
 //     Spawns <command> with cwd=<dir>, detached from THIS process so it outlives it, and prints:
 //       Started "<command...>" in <dir> (pid <pid>)
+//       Log: <path to the child's captured stdout/stderr>
 //       Stop with: node dev-server.mjs stop <dir>
-//     Records {pid, command, dir, startedAt} to a tracking file keyed off <dir>'s absolute path (see
-//     trackingFilePath) so a LATER, separate `stop` invocation — even from a different shell — can find
-//     and kill EXACTLY this process. Refuses to start a second tracked server over an already-tracked,
-//     still-alive one for the same <dir>; stop the first one before starting another.
+//       Bound port: <port> (recorded to the tracking file)   [or a "not detected" note — see below]
+//     Records {pid, command, dir, startedAt, logFile, port} to a tracking file keyed off <dir>'s
+//     absolute path (see trackingFilePath) so a LATER, separate `stop` invocation — even from a
+//     different shell — can find and kill EXACTLY this process. `port` starts `null` and is filled in
+//     once the child's own startup banner (e.g. Vite's "Local: http://localhost:5173/") appears in its
+//     captured output — see PORT DETECTION below. Refuses to start a second tracked server over an
+//     already-tracked, still-alive one for the same <dir>; stop the first one before starting another.
 //
 //   node dev-server.mjs stop <dir>
 //     Reads the tracking file for <dir>, kills the tracked pid (+ its process tree) BY THAT EXACT PID,
 //     and removes the tracking file. A no-op (exit 0) if no tracked server is found for <dir> — this
-//     never enumerates processes and never searches by name or port.
+//     never enumerates processes and never searches by name or port. Prints the tracked port (when
+//     known) alongside the pid, re-read fresh from the tracking file in this separate process.
 //
+// PORT DETECTION — why this differs from serve-static.mjs even though its OWN detached child still
+// spawns with `stdio: "ignore"` (unchanged there — see that file's own start()):
+// serve-static.mjs *is* the server, so it knows its own bound port the instant `listen()`'s callback
+// fires and can write it straight to its tracking file. This helper spawns an ARBITRARY command (vite,
+// next, webpack-dev-server, …) that picks its own port and steps to the next free one under contention —
+// there is no API to ask a foreign pid "what port did you bind," so the only generic signal available is
+// the child's own startup banner, captured to a log file and polled for a `host:port` pattern common to
+// most dev-server banners.
+//
+// SUPERVISOR — why the CAPTURE ITSELF needs an extra hop, not just a log file: the naive version (spawn
+// the real command directly, as the tracked+detached process, with its stdio wired straight to a log
+// file's fd) silently loses the output on Windows. Verified against a real spawn, repeatedly: a process
+// created with `detached:true` (Windows gives it its own new console) that itself needs a shell — cmd.exe
+// — to resolve a `.cmd`/`.ps1` shim (pnpm, npm, …), and THAT shell then spawns the real target as a
+// GRANDCHILD, loses that grandchild's stdout/stderr no matter how the redirection is wired: a real fd
+// handed to the top-level spawn, `stdio:"ignore"` plus cmd.exe's own `>logfile 2>&1` redirection syntax —
+// both tested, both silently empty, even though the grandchild itself runs to completion successfully
+// (proven by having it write a sentinel file directly). Quoting isn't the culprit either — an UNQUOTED,
+// no-spaces, PATH-resolved command (`node --version`) run the same way loses its output too; only a
+// direct, non-shell, single-hop child (no cmd.exe, no grandchild) keeps it. Since a shell is genuinely
+// needed here (`.cmd`/`.ps1` shim resolution is the whole reason `shell:win32` exists in this file), the
+// fix is to make the DETACHED, TRACKED process a small supervisor rather than the real command: `start`
+// spawns `node -e <SUPERVISOR_CODE> <payload>` directly (no shell — `process.execPath` is a real, directly
+// executable path, so Windows launches it via a normal argv-array CreateProcess call that needs no manual
+// quoting even though the path itself commonly contains spaces, e.g. "C:\Program Files\nodejs\node.exe").
+// That supervisor is the ONLY detached hop; it then spawns the REAL command as its own ordinary
+// (non-detached) child — using the exact same shell/quoting rules this file already has for win32 — and
+// pipes THAT child's stdout+stderr into the log file using Node's own stream API (`child.stdout.pipe`),
+// which only depends on the supervisor being an ordinary running process talking to its own immediate
+// child, never on OS-level handle inheritance across more than one hop. `stop`'s tracked-pid kill still
+// reaches the real command exactly as before: `taskkill /T` on win32 kills the supervisor's whole subtree
+// (verified: killing the supervisor's pid this way took the real command's own process down with it), and
+// on POSIX the supervisor's non-detached child simply inherits the same new process group `detached:true`
+// already gave the supervisor, so `killTracked`'s `-pid` group-kill reaches it too — unchanged.
+//
+// Bounded (LOOM_DEV_SERVER_PORT_TIMEOUT_MS, default 15000ms) so a framework that never announces a port —
+// or is just slow to boot — doesn't hang `start` forever; on timeout the tracking file's `port` stays
+// `null` for good (nothing keeps polling the log after `start`'s own process exits) and the printed log
+// path is the fallback — grep it directly once the child catches up, or raise the timeout if this
+// framework is just slow to boot.
 // SAFETY (the reason this helper exists): `stop` only ever acts on the pid THIS SAME HELPER recorded
 // in `start` for that exact <dir> — never a name/port/netstat search, never a bash `$!` (which on
 // Windows is the shell's pid, not the real listener). It never touches any process it didn't itself
@@ -45,13 +92,111 @@ function usageAndExit() {
   process.exit(1);
 }
 
-// Tracking file lives in the OS temp dir, keyed off the worktree's absolute path — never inside the
-// worktree itself, so it's never mistaken for part of the tree (git status, the merge gate, …) and
-// survives independently of whether the worktree dir itself is later removed.
-function trackingFilePath(absDir) {
-  const hash = crypto.createHash("sha256").update(absDir).digest("hex").slice(0, 16);
-  return path.join(os.tmpdir(), `loom-dev-server-${hash}.json`);
+// Tracking file (and its sibling log file, below) live in the OS temp dir, keyed off the worktree's
+// absolute path — never inside the worktree itself, so neither is ever mistaken for part of the tree
+// (git status, the merge gate, …) and both survive independently of whether the worktree dir itself is
+// later removed.
+function pathHash(absDir) {
+  return crypto.createHash("sha256").update(absDir).digest("hex").slice(0, 16);
 }
+
+function trackingFilePath(absDir) {
+  return path.join(os.tmpdir(), `loom-dev-server-${pathHash(absDir)}.json`);
+}
+
+// Captures the child's stdout+stderr — see the PORT DETECTION note at the top of this file for why.
+function logFilePath(absDir) {
+  return path.join(os.tmpdir(), `loom-dev-server-${pathHash(absDir)}.log`);
+}
+
+// Matches the port a dev server's own startup banner reports it bound to — Vite ("Local:
+// http://localhost:5173/"), Next.js ("- Local: http://localhost:3000"), webpack-dev-server ("Loopback:
+// http://localhost:8080/"), and similar frameworks that print a loopback (or all-interfaces) URL.
+// Deliberately generic rather than tied to one framework's exact wording, since `start` spawns an
+// ARBITRARY command and cannot know in advance which one.
+const PORT_BANNER_RE = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])\D{0,5}(\d{2,5})\b/i;
+
+// Strips ANSI/VT100 SGR escape sequences before matching — Vite (and most colorized CLIs) wraps just
+// the port digits in their own color codes (`\x1b[1m5317\x1b[22m`), and an SGR code commonly contains a
+// digit itself (bold is "\x1b[1m"), which lands INSIDE PORT_BANNER_RE's \D{0,5} gap and breaks the match
+// entirely — verified against a real captured `pnpm web` log, where the raw line failed to match at all
+// and only matched once stripped.
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
+
+// A LINE that mentions a host:port but describes it as a DESTINATION rather than something the command
+// itself bound — a reverse-proxy target being the concrete, verified case (this repo's own `pnpm web`
+// prints "[web] proxying → http://127.0.0.1:4317" — the DAEMON's port — before Vite's own ready banner;
+// a plain first-match-in-the-whole-log scrape would record the daemon, not the dev server, and a worker
+// would eyeball the wrong process while believing the check passed). Excluded regardless of whether it
+// also matches PORT_BANNER_RE.
+const DECOY_CONTEXT_RE = /\b(?:proxy|proxying|forward(?:ing)?|target|upstream)\b/i;
+// A LINE that additionally affirms "this is where I'm bound" rather than merely mentioning a port in
+// passing — preferred over a non-excluded-but-unaffirmed match when both exist on the same poll.
+const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
+
+// Scans line by line (a banner is one URL per line in every framework observed) rather than the whole
+// blob, so DECOY_CONTEXT_RE can be scoped to the SAME line the port appears on. Returns the first
+// AFFIRMED (non-excluded + keyword-matched) candidate if one exists, else the first non-excluded
+// candidate, else null — never a decoy line, even if it's the only match in the log.
+// KNOWN LIMIT (stated, not silently assumed): this is a heuristic, not a proof — a framework whose
+// banner happens to use none of BOUND_AFFIRMATION_RE's words falls back to "first non-excluded", which
+// is wrong if THAT line is itself an undetected decoy this list doesn't yet know to exclude, or if a
+// legitimate non-banner port mention (an HMR port, a "press h for help" hint) appears before the real
+// banner. Generalizing further (e.g. verifying the candidate is actually listening) doesn't strictly
+// dominate this: the observed real case (a reverse-proxy target) is genuinely alive too — it's the
+// daemon — so a liveness check alone cannot tell it apart from the real bind.
+function extractPort(logPath) {
+  let content;
+  try {
+    content = fs.readFileSync(logPath, "utf8");
+  } catch {
+    return null;
+  }
+  let firstNonDecoy = null;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.replace(ANSI_ESCAPE_RE, "");
+    if (DECOY_CONTEXT_RE.test(line)) continue;
+    const m = PORT_BANNER_RE.exec(line);
+    if (!m) continue;
+    if (BOUND_AFFIRMATION_RE.test(line)) return Number(m[1]);
+    if (firstNonDecoy == null) firstNonDecoy = Number(m[1]);
+  }
+  return firstNonDecoy;
+}
+
+// Poll the log file for the child's own bound-port banner, bounded — see PORT DETECTION above.
+async function waitForPort(logPath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const port = extractPort(logPath);
+    if (port != null) return port;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return extractPort(logPath);
+}
+
+// The DETACHED, TRACKED process `start` spawns is this supervisor, not the real command — see the
+// SUPERVISOR note at the top of this file for why. Plain CommonJS (invoked via `node -e`, which is
+// CJS by default) — no imports beyond core modules, kept as a single self-contained string since it
+// travels as one spawn argv entry, not a file on disk.
+const SUPERVISOR_CODE = [
+  "const fs = require('fs');",
+  "const { spawn } = require('child_process');",
+  "const payload = JSON.parse(process.argv[1]);",
+  // 'w': fresh truncate each `start` — a leftover log from a previous run at this <dir> could otherwise
+  // be mistaken for this one's port banner.
+  "const out = fs.createWriteStream(payload.logPath, { flags: 'w' });",
+  "const child = spawn(payload.cmd, payload.args, { cwd: payload.cwd, shell: payload.shell, stdio: ['ignore', 'pipe', 'pipe'] });",
+  // { end: false } on BOTH — the exit handler below owns closing `out` once the real command exits, so
+  // whichever of stdout/stderr happens to end first (e.g. a framework that only ever writes to stderr,
+  // while stdout stays open until process exit) can't prematurely end the shared stream and silently
+  // drop the other's later output.
+  "child.stdout.pipe(out, { end: false });",
+  "child.stderr.pipe(out, { end: false });",
+  // Exit once the real command does, so a target that dies on its own (a bad command, a crash) doesn't
+  // leave an orphaned supervisor sitting around forever.
+  "child.on('exit', (code) => { out.end(); process.exit(code == null ? 1 : code); });",
+].join("\n");
 
 function readTracked(absDir) {
   try {
@@ -88,7 +233,7 @@ function killTracked(pid) {
   try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
 }
 
-function start(dir, cmdArgs) {
+async function start(dir, cmdArgs) {
   const absDir = path.resolve(dir);
   if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
     console.error(`start: not a directory: ${absDir}`);
@@ -104,29 +249,53 @@ function start(dir, cmdArgs) {
 
   const [cmd, ...args] = cmdArgs;
   const win32 = process.platform === "win32";
-  // win32 needs a shell to resolve .cmd/.ps1 shims (npm, pnpm, …) the way an interactive shell would —
-  // but node's shell:true glues `cmd` + args into one command line for cmd.exe /c WITHOUT quoting
-  // `cmd` itself, so an unquoted executable path containing spaces (e.g. the very common
-  // "C:\Program Files\nodejs\node.exe") silently mis-parses: cmd.exe exits immediately, the target
-  // process never starts, and nothing errors (stdio is ignored). Quoting `cmd` ourselves fixes the
-  // spaced-path case and is a no-op for a bare command name like "pnpm" — verified against a real
-  // spawn, not assumed.
-  const child = spawn(win32 ? `"${cmd}"` : cmd, args, {
+  const logPath = logFilePath(absDir);
+  const payload = JSON.stringify({
+    logPath,
+    // win32 needs a shell to resolve .cmd/.ps1 shims (npm, pnpm, …) the way an interactive shell would —
+    // but a shell-joined command line mis-parses an UNQUOTED executable path containing spaces (e.g. the
+    // very common "C:\Program Files\nodejs\node.exe"): cmd.exe splits on the first space and reports
+    // "command not found". Quoting `cmd` fixes that case — but quoting is NOT a no-op for a bare,
+    // unspaced command name the way it looks like it should be: quoting "pnpm" (verified against a real
+    // spawn) makes cmd.exe resolve a DIFFERENT, broken pnpm entry (a corepack shim that throws
+    // MODULE_NOT_FOUND on this box) instead of the working one an unquoted "pnpm" finds — the previous
+    // comment here asserted the opposite and was wrong. Only quote when `cmd` actually needs it.
+    cmd: win32 && /\s/.test(cmd) ? `"${cmd}"` : cmd,
+    args,
     cwd: absDir,
-    // detached: own process group on POSIX (so the group-kill in killTracked reaches anything the
-    // command itself spawns), and lets the child outlive this launcher process either way.
+    shell: win32,
+  });
+  // See the SUPERVISOR note at the top of this file: the detached, TRACKED process is this supervisor,
+  // not `cmd` directly. No shell here — `process.execPath` is spawned directly (a real, directly
+  // executable path), so Windows launches it via a normal argv-array CreateProcess call that needs no
+  // manual quoting even though the path itself commonly contains spaces.
+  const child = spawn(process.execPath, ["-e", SUPERVISOR_CODE, payload], {
+    // detached: own process group on POSIX (so the group-kill in killTracked reaches the supervisor's
+    // own non-detached child too, which inherits that same group), and lets the whole thing outlive this
+    // launcher process either way. `stdio: "ignore"` for the supervisor itself — it writes the real
+    // command's output to logPath directly via fs (see SUPERVISOR_CODE), never through inherited stdio.
     detached: true,
     stdio: "ignore",
-    shell: win32,
   });
   if (!child.pid) {
     console.error("start: failed to spawn (no pid)");
     process.exit(1);
   }
   child.unref();
-  writeTracked(absDir, { pid: child.pid, command: cmdArgs, dir: absDir, startedAt: new Date().toISOString() });
+  writeTracked(absDir, { pid: child.pid, command: cmdArgs, dir: absDir, startedAt: new Date().toISOString(), logFile: logPath, port: null });
   console.log(`Started "${cmdArgs.join(" ")}" in ${absDir} (pid ${child.pid})`);
+  console.log(`Log: ${logPath}`);
   console.log(`Stop with: node ${SELF} stop ${dir}`);
+
+  const timeoutMs = Number(process.env.LOOM_DEV_SERVER_PORT_TIMEOUT_MS || 15000);
+  const port = await waitForPort(logPath, timeoutMs);
+  if (port != null) {
+    const current = readTracked(absDir);
+    if (current && current.pid === child.pid) writeTracked(absDir, { ...current, port });
+    console.log(`Bound port: ${port} (recorded to the tracking file)`);
+  } else {
+    console.log(`Bound port not detected within ${timeoutMs}ms — the tracking file's port stays unset (nothing keeps watching after this command exits); grep ${logPath} directly once the server has finished starting, or raise LOOM_DEV_SERVER_PORT_TIMEOUT_MS if this framework is just slow to boot.`);
+  }
 }
 
 function stop(dir) {
@@ -139,7 +308,8 @@ function stop(dir) {
   killTracked(tracked.pid);
   removeTracked(absDir);
   const label = Array.isArray(tracked.command) ? tracked.command.join(" ") : String(tracked.command);
-  console.log(`Stopped pid ${tracked.pid} ("${label}") tracked for ${absDir}`);
+  const portLabel = typeof tracked.port === "number" ? ` (port ${tracked.port})` : "";
+  console.log(`Stopped pid ${tracked.pid}${portLabel} ("${label}") tracked for ${absDir}`);
 }
 
 const [, , mode, dirArg, ...rest] = process.argv;
@@ -147,7 +317,7 @@ if (mode === "start") {
   if (!dirArg) usageAndExit();
   const sepIdx = rest.indexOf("--");
   if (sepIdx === -1) usageAndExit();
-  start(dirArg, rest.slice(sepIdx + 1));
+  await start(dirArg, rest.slice(sepIdx + 1));
 } else if (mode === "stop") {
   if (!dirArg) usageAndExit();
   stop(dirArg);

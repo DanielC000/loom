@@ -736,9 +736,9 @@ what you checked. Found none? Treat it as live.
    target, not just trust the worker's dev-server check (see *A project that runs its own deployed
    instance* below). And a worker that assumes a default dev-server port can verify another process's
    STALE server and report a false pass — workers must assert the bound port from the tracked server
-   process itself, by whatever means their OS exposes (the framework's own startup banner, when
-   captured, is one way but not the only one), never assume a default. Hold both when you review a
-   browser-capable worker's "verified live."
+   process itself: **read it from the tracked-pid helper's own tracking file** (`references/
+   serving-and-capture.md`, under this skill's own directory), never assume a default. Hold both when you
+   review a browser-capable worker's "verified live."
 
    **Even the right bound URL isn't proof of the right data** — a dev server can silently fall back onto
    a different live default and serve another instance's data while everything still renders looking

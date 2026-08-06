@@ -31,8 +31,12 @@ An id looks precise, which is exactly why it's the dangerous one: it matches eve
 has ever touched, not just the one you mean. Launch it through the **bundled** helper instead — it
 records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search):
 `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
-the pid and returns immediately (the server keeps running); eyeball via Playwright at whatever URL
-the command itself prints, then
+the pid, then waits briefly for the command's own startup banner (e.g. Vite's `Local:
+http://localhost:5173/`) to appear in its captured log and prints the **actual bound port** — the one
+the command really bound, not necessarily the one it was asked for (a dev server commonly steps to the
+next free port under contention). That same port is recorded to the helper's tracking file, so eyeball
+via Playwright at that bound port — never assume a default, and never re-derive it from the raw command
+output yourself; the helper already did that. Then
 `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
 merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
 `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
