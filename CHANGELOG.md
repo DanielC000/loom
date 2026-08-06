@@ -4,6 +4,68 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-08-06
+
+**A message-delivery and merge-gate reliability release.** A further hardening pass on the pty
+message-delivery layer closes several ways a turn or a worker report could be silently lost, misrouted,
+or misdiagnosed as stuck; the merge gate gains fairer admission and clearer, non-misleading outcomes; and
+managers pick up a handful of small visibility and automation additions.
+
+### Added
+- **`peer_message_status`** lets a manager verify a peer message it sent actually landed.
+- **Unresolved worker reports are now surfaced** to a manager instead of silently sitting unactioned.
+- **`escalation_status` distinguishes triaged from resolved**, so a manager can tell whether the Platform
+  Lead looked at an escalation versus closed it.
+- **`rate_limit_bailed` is now event-trigger eligible**, so automation can react when a session bails out
+  on a rate limit.
+- **A skill-currency warning at merge time.** Merging a change to a bundled skill now tells the manager
+  the live copy won't update until a restart or an explicit adopt.
+- Codescape is now surfaced in manager and worker prompt blocks when the project has it configured.
+- A passing merge gate now reports the same per-step breakdown (and gate-concurrency stamp) a failing
+  one already did, instead of a bare pass.
+
+### Changed
+- **Docs-only diffs skip the merge gate.** A branch that only touches non-code files (docs, bundled
+  skills) merges without waiting on a full build/test run.
+- **A single flaky test file gets one in-gate retry** before the merge gate declares a rejection, cutting
+  spurious failures from an isolated flake.
+
+### Fixed
+- **Message delivery reliability, continued.** A give-up escalation on a stranded paste now reaches an
+  actual channel instead of firing into nothing; a stale placeholder render can no longer trip the
+  paste-loss tripwire; a pre-existing turn's `Stop` no longer clears a human submit that's still pending;
+  a human pressing Enter can no longer race the turn it just started; a benign whitespace re-render is no
+  longer reported as lost content; the boot mode-cycle gets its own bounded readiness budget instead of
+  racing startup; a mismatched submit is now surfaced to the session it actually happened in; a paste/turn
+  fusion carrying content from an already-diverged prior generation is now detected (closing a real
+  subclass of collapsed turns); a sender now gets a replay signal when an established content mismatch is
+  lost, so it knows to resend; a confirmed turn's recorded content can no longer silently diverge from
+  what was actually written to the pty; and a surrogate-pair character (an emoji or other astral
+  codepoint) split across the paste-chunking boundary no longer corrupts.
+- **Merge-gate correctness.** The gate-admission semaphore now checks its concurrency cap before
+  admitting a waiter, and the per-repo merge guard now holds across the squash phase; a cancelled gate op
+  is no longer reported as a rejection in `gate_history`; a restart-orphaned gate op is now tagged as
+  orphaned rather than failed; `worker_list` can now tell a queued gate from a running one; a merge
+  confirm that throws now recovers or reports `unknown` instead of losing the op; a cap-queued
+  `worker_spawn` intent dropped by a daemon restart or its own TTL now notifies instead of silently
+  discarding the work.
+- **Memory reliability.** A pinned "never-drop" note is now capped at write time instead of only being
+  caught (and possibly still dropped) later; the kickoff budget now reserves a share for whichever tier a
+  note actually matched.
+- **Worker-facing notices.** A false "worker may be broken" nudge is now held off for 60s after a spawn;
+  worker nudges now report turnSeq/elapsed and a merge-in-flight caution instead of a bare claim; and the
+  kickoff give-up notice and the never-drop memory alarm now report their underlying numbers instead of
+  an unqualified assertion.
+- **`/worker`/`/orchestrate` doctrine.** The stray-process-kill warning was mis-scoped — stale in the
+  places Loom already pre-empts it (the gate, merge cleanup) and true-but-mistimed in a worker's own
+  shell; corrected after 4 hand-rolled hazardous kills in 48 hours.
+
+### Internal
+- A continued suite de-flaking, test-injection audit, and doctrine-currency sweep (~30 test/docs/refactor
+  commits): timing-guard hardening against fixed-wait races (including a flaky give-up test converted
+  from a fixed sleep to an observed poll), per-op gate-mutation instrumentation, and doctrine corrections
+  across the bundled `/worker`/`/orchestrate` and memory-authoring guidance.
+
 ## [0.26.0] — 2026-08-05
 
 **A delivery-reliability and observability release.** The Windows **command-line ceiling** that could refuse a session spawn outright before the daemon ever produced a process is gone — no role puts its startup prompt on argv any more. Message delivery, merge/git integrity, and give-up/recovery handling all get a deep hardening pass; managers gain **per-step gate timings, idle-vs-elapsed wedge diagnostics, and deploy staleness**; and the board learns **data-driven un-defer conditions**, duplicate detection, and CAS-checked edits.
