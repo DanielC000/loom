@@ -203,6 +203,19 @@ export function unregister(p) {
   registry.delete(p);
 }
 
+/**
+ * Immediately remove ONE path with the same bounded retry + real-delay backoff as the registry's own
+ * `exit` backstop (see CORRECTION 1 above for why a real delay matters) — WITHOUT registering it. For a
+ * caller that only learns the path to clean up lazily, at its OWN exit time (e.g. `_guard.mjs`'s
+ * WORKTREES_DIR sibling cleanup, card de7abf0b — derived from `LOOM_HOME`, which isn't set yet when
+ * `_guard.mjs` is imported, so it can't `registerForCleanup` a concrete path up front). Reuses this
+ * module's proven-correct retry logic rather than re-implementing it at the new call site.
+ * @param {string} dir
+ */
+export function cleanupPathSync(dir) {
+  cleanupOnePathSync(dir);
+}
+
 // Exported for this helper's OWN tests only (positive-controlling the EBUSY path needs to call the
 // retry logic directly) — not part of the public fixture-creation surface.
 export const _internal = { cleanupOnePathSync, cleanupOnePathAsync };

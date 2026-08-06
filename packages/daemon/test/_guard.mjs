@@ -29,9 +29,45 @@
 // helper and the full writeup of the anti-pattern and its two corollaries.
 import os from "node:os";
 import path from "node:path";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
+
+const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
 
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
+
+// LOOM_HOME-derived WORKTREES_DIR leak (card de7abf0b): `paths.ts` defines `WORKTREES_DIR` as a SIBLING
+// of LOOM_HOME (`<dirname>/<basename>-worktrees`), never a child of it. Every hermetic test that sets its
+// own temp LOOM_HOME (the near-universal pattern in this suite — see that file's own header) and then
+// touches `createWorktree` leaves this sibling behind: cleanup code everywhere targets LOOM_HOME itself
+// (or individual leaf worktree paths), never this derived path, so the per-project parent directories
+// `createWorktree` creates under it — and sometimes real worktree content, if a test's own cleanup never
+// ran — accumulate forever. Measured: a single run of worker-noop-done.mjs alone left a fresh
+// `<LOOM_HOME>-worktrees` dir with 6 empty per-project leftovers.
+// This hook is the ONE chokepoint: `_guard.mjs` is imported FIRST by every test in this convention
+// (measured 612/714 non-underscore files, 2026-08-07), so fixing it here needs no per-file edit. It must
+// be LAZY (read `process.env.LOOM_HOME` only when the hook actually fires) because every test sets its
+// OWN LOOM_HOME AFTER this import — `paths.ts` reads LOOM_HOME at module load, so the override always
+// happens later in the file. `exit` (not `beforeExit`) mirrors `_tmp-fixture.mjs`'s own reasoning: nearly
+// every file in this suite ends with an explicit `process.exit(N)`, which only `exit` fires for.
+// KNOWN NON-COVERAGE, STATED NOT FIXED: the ~14% of files that don't import `_guard.mjs` at all get none
+// of this (they predate, or opted out of, the shared prod-guard convention) — same class of gap as
+// `_tmp-fixture.mjs`'s own SIGKILL/`taskkill /F` caveat, not papered over here either.
+// CLEAN-ON-PASS-VS-RETAIN-ON-FAIL (card de7abf0b DoD-2): deliberately UNCONDITIONAL, not gated on the
+// exit code. A retained LOOM_HOME can be real post-mortem evidence (its db/logs/event history) — but
+// this cleans up a DIFFERENT thing, the WORKTREES_DIR sibling (git worktree checkouts), whose diagnostic
+// value on a failure is already covered by the runner's captured stdout/stderr (printed on FAIL — see
+// `runOne` in scripts/test-daemon.mjs) and by git history, not by an on-disk checkout. Every existing
+// per-file LOOM_HOME/worktree cleanup in this suite (600+ sites) is ALSO unconditional (a bare `finally`,
+// no pass/fail branch) — matching that established convention here avoids a new, surprising asymmetry
+// where this ONE derived path survives a failure and nothing else does.
+process.on("exit", () => {
+  const home = process.env.LOOM_HOME;
+  if (!home) return;
+  const resolved = path.resolve(home);
+  if (resolved === REAL_LOOM_HOME) return; // never touch the real ~/.loom-worktrees
+  cleanupPathSync(`${resolved}-worktrees`);
+});
 
 // Strip GIT_PAGER/PAGER from the test process env. This USED to be the only defense — card 42544916
 // proved the assumption behind it wrong: "production only runs in the supervisor-spawned daemon
@@ -47,7 +83,6 @@ process.env.LOOM_TEST = "1";
 delete process.env.GIT_PAGER;
 delete process.env.PAGER;
 
-const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
 const PROD_PORT = 4317;
 
 /**
