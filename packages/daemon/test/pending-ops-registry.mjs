@@ -195,15 +195,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // onSurfacedPending fires on EVERY call that observes "still pending" (idempotent by design — a
 // durable-marker upsert keyed by opId is a harmless no-op on a repeat) — unlike onSettledAfterPending,
 // it is NOT gated to only the entry-creating call.
+// Card 81a6e4e1: this block used to prove "still running" for the second attach() via a blind
+// `sleep(20)` racing the op's own `sleep(80)` — a 4x margin that still redded a real merge gate under
+// host load once the 20ms wait itself overran past 80ms, letting the op settle before the second
+// attach() landed and take the fast path (no onSurfacedPending fire, surfacedCount stuck at 1). Fixed
+// the same way as the sibling block above (:177-193): a manually-resolved deferred `run()` (no timer)
+// holds the op open indefinitely, so BOTH attach() calls are guaranteed to observe "still pending"
+// regardless of wall-clock timing — no sleep, no race.
 {
   const reg = new PendingOpRegistry();
   let surfacedCount = 0;
-  const slow = async () => { await sleep(80); return { ok: true }; };
-  const p1 = reg.attach("surf2", "gate", "mgr1", 10, slow, undefined, { onSurfacedPending: () => surfacedCount++ });
-  await sleep(20);
-  const p2 = reg.attach("surf2", "gate", "mgr1", 10, slow, undefined, { onSurfacedPending: () => surfacedCount++ }); // re-attach, still running
-  await Promise.all([p1, p2]);
+  let resolveOp;
+  const deferred = () => new Promise((resolve) => { resolveOp = resolve; });
+  const p1 = reg.attach("surf2", "gate", "mgr1", 10, deferred, undefined, { onSurfacedPending: () => surfacedCount++ });
+  const p2 = reg.attach("surf2", "gate", "mgr1", 10, deferred, undefined, { onSurfacedPending: () => surfacedCount++ }); // re-attach before either resolves — still running, no timing assumption
+  const [r1, r2] = await Promise.all([p1, p2]);
+  check("(onSurfacedPending repeat) precondition: both calls degraded to pending (op held open by the unresolved deferred)", r1.settled === false && r2.settled === false);
   check("(onSurfacedPending repeat) fires once per call that observes 'still pending' — idempotent-upsert-friendly", surfacedCount === 2);
+  resolveOp({ ok: true });
+  await sleep(10); // let the settle .then() microtask actually run before this block's reg/vars go out of scope
 }
 
 // onSurfacedPending does NOT fire on the fast path — the op already has an inline outcome, so there is
