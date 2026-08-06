@@ -2227,8 +2227,24 @@ interface Live {
   // hooks are lost for this turn: past it, drainPending treats the hold as expired and proceeds — so a
   // queued message is guaranteed to eventually drain (via the reconcile tick), never wedge forever. NOT
   // `busy`/M1: deliberately a separate, narrower gate so the M1 invariant (submit()'s own synchronous
-  // busy=true) stays untouched — this only ever governs the human-submit gap `busy` doesn't cover.
+  // busy=true) stays untouched — this only ever governs the human-submit gap `busy` doesn't cover — WITH
+  // ONE EXCEPTION: a Stop/UserPromptSubmit belonging to a DIFFERENT, already-in-flight turn (one that was
+  // running BEFORE this hold was armed) is not proof the human's own just-typed Enter has started —
+  // see `humanSubmitHeldArmedDuringTurn`'s own doc for how that variant is discriminated (card 3ff89cbc).
   humanSubmitHeldUntil: number | null;
+  // Card 3ff89cbc: true when `humanSubmitHeldUntil` (above) was armed WHILE an unrelated turn was already
+  // mid-flight (`live.busy` at arm time, snapshotted at the same writeStdin call that arms the hold). A
+  // Stop that fires while this is true can only be that PRE-EXISTING turn's own Stop — claude runs one
+  // turn at a time, so nothing else could be ending — and must NOT be read as confirmation that the
+  // human's own Enter has started. The Stop handler consumes this latch (flips it false) instead of
+  // clearing the hold on that first Stop; a LATER Stop (the belt-and-suspenders path for a lost
+  // UserPromptSubmit hook — see the Stop handler's own reasoning) then finds the latch already false and
+  // clears normally. UserPromptSubmit's own clear is UNAFFECTED by this latch (always correct — a turn
+  // fires UserPromptSubmit at most once, so the very next one after arming can only be a genuinely NEW
+  // turn, i.e. the human's own) and resets it to false alongside its clear, so a stale `true` never
+  // outlives the hold it was armed for. Always false when armed with nothing already in flight, so the
+  // ordinary (no pre-existing turn) case is byte-identical to before this card.
+  humanSubmitHeldArmedDuringTurn: boolean;
   // Card dbc6bcac: latches once the Stop null-stats branch's diagnostic has confirmed this session's
   // transcript is genuinely missing via `engineTranscriptExists`'s EXPENSIVE fallback path — a synchronous
   // O(projects) `readdirSync` of `~/.claude/projects` (the same hot-path-sync-scan class as the c12b550
@@ -3896,6 +3912,7 @@ export class PtyHost {
       drainHeld: false,
       rateLimited: false,
       humanSubmitHeldUntil: null,
+      humanSubmitHeldArmedDuringTurn: false,
       transcriptMissingDiagnosedOnce: false,
       promptFieldAbsentDiagnosedOnce: false,
       // Card 0050a17e: seed `lastPrompt` HERE, synchronously at spawn() — NOT left for the eventual
@@ -4086,7 +4103,7 @@ export class PtyHost {
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -4166,7 +4183,7 @@ export class PtyHost {
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -5081,7 +5098,12 @@ export class PtyHost {
         // Card 2521bf51: a real turn is now confirmed in flight — clear any bounded human-submit hold
         // (see `humanSubmitHeldUntil`'s own doc); `live.busy` above already blocks drainPending anyway,
         // this just resolves the wait promptly rather than leaving it to expire on its own bound.
+        // Card 3ff89cbc: UNCONDITIONAL, unlike the Stop/StopFailure clear below — a turn fires
+        // UserPromptSubmit at most once, so the very next one after the hold was armed can only be a
+        // genuinely NEW turn (the human's own), never the pre-existing turn's own second confirmation.
+        // Reset the latch alongside the clear so a stale `true` never outlives this hold.
         live.humanSubmitHeldUntil = null;
+        live.humanSubmitHeldArmedDuringTurn = false;
         break;
       }
       case "Stop":
@@ -5103,7 +5125,19 @@ export class PtyHost {
         // Card 2521bf51: same "Stop is itself proof" reasoning clears any bounded human-submit hold too
         // (see `humanSubmitHeldUntil`'s own doc) — belt-and-suspenders for the rare path where the
         // UserPromptSubmit rising edge above was the one that got lost, not this Stop.
-        live.humanSubmitHeldUntil = null;
+        // Card 3ff89cbc: EXCEPT when THIS Stop is itself the pre-existing, unrelated turn's own Stop —
+        // the one that was already mid-flight when the hold was armed (`humanSubmitHeldArmedDuringTurn`,
+        // see its own doc). Unlike UserPromptSubmit above, a Stop here is genuinely ambiguous between
+        // "the pre-existing turn just ended" (not proof of anything about the human's own not-yet-started
+        // Enter) and "the human's own turn just ended, confirming it via the belt-and-suspenders path"
+        // (legitimate). Consume the latch instead of clearing on this first, ambiguous Stop; once
+        // consumed, the pre-existing turn has genuinely ended, so a LATER Stop for this same hold can only
+        // be the human's own and is trusted normally.
+        if (live.humanSubmitHeldArmedDuringTurn) {
+          live.humanSubmitHeldArmedDuringTurn = false;
+        } else {
+          live.humanSubmitHeldUntil = null;
+        }
         // Card 3ce3fa39: same GATED reset as UserPromptSubmit's — see composerDirtyLenClearedByGen's doc.
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
@@ -8034,6 +8068,10 @@ export class PtyHost {
       // DELAYED, never lost, even in the backstop-bound case where a hook is lost outright.
       if (draft.submitted !== null) {
         live.humanSubmitHeldUntil = Date.now() + HUMAN_SUBMIT_CONFIRM_HOLD_MS;
+        // Card 3ff89cbc: snapshot whether an unrelated turn is ALREADY in flight right now — see
+        // `humanSubmitHeldArmedDuringTurn`'s own doc for why this discriminates the pre-existing turn's
+        // own Stop from the human's own turn's eventual confirmation.
+        live.humanSubmitHeldArmedDuringTurn = live.busy;
       } else if (wasDirty && live.composerLen === 0) {
         // A CLEAR drains PROMPTLY, unaffected: there is no engine-side turn in flight for Loom to race,
         // so it's safe to skip the reconcile tick and deliver right away — byte-identical to the old
