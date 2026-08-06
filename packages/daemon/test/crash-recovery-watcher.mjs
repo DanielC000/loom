@@ -494,6 +494,40 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (15) TIE — card bcdea586: sweep of the e2b6c434 same-millisecond mechanism ==
+// ============================ applied to the "is this episode already RESOLVED" gate =======================
+// e2b6c434 proved raw `.ts` STRING comparisons between two independently-clocked writers can silently
+// misread a same-millisecond tie. This sweeps that mechanism to `lastRecovered.ts >= lastTrigger.ts`
+// (crash-recovery-watcher.ts:278) — the highest-consequence candidate on that card: a tie here SKIPS a
+// genuine crash recovery, exactly the incident (a dead manager left unresumed) this watcher exists to
+// prevent. `lastRecovered` and `lastTrigger` both come from ONE `listEventsForWorker` call (line 272) —
+// the SAME clean provenance e2b6c434 exploited — so the fix compares ARRAY POSITION, not `.ts`.
+{
+  // (15a) POSITIVE CONTROL: a genuinely LATER recovery (by position, not merely a bigger ts) still
+  // resolves the episode and is NOT resumed — proves the fix didn't break the ordinary, non-tied case.
+  const e = makeEnv();
+  seedSession(e, "s15a", { role: "manager" });
+  die(e, "s15a", at(0));
+  e.db.appendEvent({ id: randomUUID(), ts: at(1000).toISOString(), managerSessionId: "s15a", workerSessionId: "s15a", taskId: null, kind: "session_recovered", detail: { afterAttempts: 1 } });
+  e.watcher.tick(at(1100));
+  check("(15a) CONTROL: a genuinely-resolved episode (recovery strictly after the trigger) is NOT resumed", !e.resumes.includes("s15a"));
+  cleanup(e);
+
+  // (15b) THE TIE: a NEW trigger landing at the IDENTICAL ts as the PRIOR episode's own recovery marker,
+  // but genuinely LATER by insertion (rowid) — appended after it, mirroring what `ORDER BY ts, rowid`
+  // treats as later — must still read as unresolved and get auto-resumed, never silently skipped.
+  const e2 = makeEnv();
+  seedSession(e2, "s15b", { role: "manager" });
+  const tieTs = at(500).toISOString();
+  e2.db.appendEvent({ id: randomUUID(), ts: tieTs, managerSessionId: "s15b", workerSessionId: "s15b", taskId: null, kind: "session_recovered", detail: { afterAttempts: 1 } });
+  e2.db.appendEvent({ id: randomUUID(), ts: tieTs, managerSessionId: "s15b", workerSessionId: "s15b", taskId: null, kind: "session_died", detail: { role: "manager" } });
+  e2.db.setProcessState("s15b", "exited");
+  e2.watcher.tick(at(600));
+  check("(15b) TIE: a same-millisecond NEW trigger (genuinely later by rowid) is STILL auto-resumed, not skipped", e2.resumes.includes("s15b"));
+  check("(15b) TIE: the new episode records its own resume attempt", evKinds(e2, "s15b", "session_resume_attempt").length === 1);
+  cleanup(e2);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default."
   : `\n❌ ${failures} FAILURE(S).`);

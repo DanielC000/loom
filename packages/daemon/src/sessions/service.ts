@@ -4786,12 +4786,29 @@ export class SessionService {
   private staleQueuedMessageReason(recipientId: string, e: OrchestrationEvent): string | undefined {
     const ownMsgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
     const timeline = this.db.listEventsForWorker(recipientId);
-    const supersededByRedirect = timeline.some((ev) =>
-      ev.id !== e.id && ev.ts > e.ts && ev.kind === "redirect_worker" && ev.detail?.queuedMsgId !== ownMsgId);
+    // Card bcdea586: "is `ev` LATER than `e`" must compare ARRAY POSITION, never raw `.ts` strings — ISO
+    // timestamps are millisecond-resolution and two independently-clocked writers (this queued message's
+    // own write vs a later, genuinely distinct redirect/report) can legitimately land on the identical
+    // millisecond. A raw `ev.ts > e.ts` reads that tie as "not later" and wrongly REDRIVES a directive a
+    // `worker_redirect` already declared superseded — sending the worker back at work already cancelled
+    // (the exact e2b6c434 mechanism, swept here). UNLIKE that fix, `e` and `timeline` are two SEPARATE
+    // queries (redriveQueuedMessage's caller fetches `e` on its own), not one shared array — so there is
+    // no single ordered array to take a position from directly; `e`'s own row must first be located WITHIN
+    // `timeline` by id. That lookup is sound: `listEventsForWorker` is unfiltered by kind/time/limit for
+    // this worker_session_id (db.ts), and `recipientId` IS `e.workerSessionId` by construction
+    // (redriveQueuedMessage derives it: `const recipientId = e.workerSessionId ?? null`) — so `e`'s row is
+    // guaranteed present in `timeline`. FAIL CLOSED if that guarantee is ever wrong: `findIndex` returning
+    // -1 falls back to the original raw `.ts` comparison (today's pre-fix behavior) rather than letting -1
+    // compare as "before everything" and silently misclassify every `ev` as earlier.
+    const eIndex = timeline.findIndex((t) => t.id === e.id);
+    const isLater = (ev: OrchestrationEvent, evIndex: number): boolean =>
+      eIndex === -1 ? ev.ts > e.ts : evIndex > eIndex;
+    const supersededByRedirect = timeline.some((ev, i) =>
+      ev.id !== e.id && isLater(ev, i) && ev.kind === "redirect_worker" && ev.detail?.queuedMsgId !== ownMsgId);
     if (supersededByRedirect) return "superseded-by-redirect";
     if (e.taskId) {
-      const alreadyReported = timeline.some((ev) =>
-        ev.id !== e.id && ev.ts > e.ts && ev.kind === "worker_report" && ev.taskId === e.taskId);
+      const alreadyReported = timeline.some((ev, i) =>
+        ev.id !== e.id && isLater(ev, i) && ev.kind === "worker_report" && ev.taskId === e.taskId);
       if (alreadyReported) return "already-reported";
     }
     return undefined;

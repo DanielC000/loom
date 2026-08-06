@@ -79,8 +79,17 @@ export interface CrashRecoveryDeps {
   stabilityMs?: number;
 }
 
-const lastOfKind = (events: OrchestrationEvent[], kind: OrchestrationEvent["kind"]): OrchestrationEvent | undefined => {
-  for (let i = events.length - 1; i >= 0; i--) if (events[i]!.kind === kind) return events[i];
+// Card bcdea586: returns the matched event's own ARRAY INDEX alongside it (not just the event) — both
+// callers below need to compare POSITION, never raw `.ts` strings, against another indexed lookup over
+// this SAME array. ISO timestamps are millisecond-resolution and two independently-clocked writers (this
+// watcher's own tick vs the pty-exit handler, or vs the report-delivery path) can legitimately land on the
+// identical millisecond; `events` is already `(ts, rowid)`-ordered (db.ts listEventsForWorker), so array
+// position is the tie-invariant source of truth a raw `.ts` comparison was throwing away — the exact
+// mechanism e2b6c434 proved and fixed at sessions/service.ts.
+const lastOfKind = (
+  events: OrchestrationEvent[], kind: OrchestrationEvent["kind"],
+): { event: OrchestrationEvent; index: number } | undefined => {
+  for (let i = events.length - 1; i >= 0; i--) if (events[i]!.kind === kind) return { event: events[i]!, index: i };
   return undefined;
 };
 
@@ -95,8 +104,10 @@ const lastOfKind = (events: OrchestrationEvent[], kind: OrchestrationEvent["kind
 const RECOVERY_TRIGGER_KINDS: ReadonlySet<OrchestrationEvent["kind"]> =
   new Set<OrchestrationEvent["kind"]>(["session_died", "worker_report_undelivered"]);
 
-const lastTriggerOf = (events: OrchestrationEvent[]): OrchestrationEvent | undefined => {
-  for (let i = events.length - 1; i >= 0; i--) if (RECOVERY_TRIGGER_KINDS.has(events[i]!.kind)) return events[i];
+const lastTriggerOf = (
+  events: OrchestrationEvent[],
+): { event: OrchestrationEvent; index: number } | undefined => {
+  for (let i = events.length - 1; i >= 0; i--) if (RECOVERY_TRIGGER_KINDS.has(events[i]!.kind)) return { event: events[i]!, index: i };
   return undefined;
 };
 
@@ -191,7 +202,11 @@ export function isCrashRecoveryEligible(
   if (control.isPaused(session.id) || (session.parentSessionId && control.isPaused(session.parentSessionId))) return false;
   const events = db.listEventsForWorker(session.id);
   const lastRecovered = lastOfKind(events, "session_recovered");
-  const episodeStart = lastRecovered?.ts ?? "";
+  // Card bcdea586: mechanical adaptation to lastOfKind's new {event,index} shape only — this boundary
+  // filter (`.ts` comparison against episodeStart) is UNCHANGED and deliberately not part of that card's
+  // fix; a same-ms tie here undercounts attempts, which reads the session as MORE eligible, the safe
+  // direction for the false-"will not come back" nudge this function exists to prevent.
+  const episodeStart = lastRecovered?.event.ts ?? "";
   const attempts = events.filter((e) => e.kind === "session_resume_attempt" && e.ts > episodeStart).length;
   return attempts < maxAttempts; // at/over the cap ⇒ the watchdog has abandoned (or is about to) — not eligible
 }
@@ -274,11 +289,19 @@ export class CrashRecoveryWatcher {
       if (!lastTrigger) continue;                                        // defensive only — id came from a trigger-kind query, so this can't actually miss
 
       const lastRecovered = lastOfKind(events, "session_recovered");
-      // RESOLVED: a recovery recorded at/after the latest trigger closed the episode (counter already reset).
-      if (lastRecovered && lastRecovered.ts >= lastTrigger.ts) continue;
+      // RESOLVED: a recovery recorded at/after the latest trigger closed the episode (counter already
+      // reset). Card bcdea586: compares ARRAY POSITION, never raw `.ts` strings — `lastRecovered` and
+      // `lastTrigger` are BOTH drawn from this SAME `events` array (one query, line 287), so unlike
+      // sessions/service.ts's own sweep (a cross-query id-join was needed there) the tie-invariant
+      // position is already in hand from the linear scans above. Two independently-clocked writers (this
+      // tick's own `session_recovered` stamp vs the pty-exit handler's `session_died`, or the
+      // report-delivery path's `worker_report_undelivered`) CAN legitimately land on the identical
+      // millisecond; a raw `>=` read that tie as "already resolved" and SILENTLY SKIPPED a genuine crash
+      // recovery — the exact incident (a dead manager left unresumed) this watcher exists to prevent.
+      if (lastRecovered && lastRecovered.index >= lastTrigger.index) continue;
 
       // Counter = resume attempts since the last reset marker (episodeStart). "" sorts before any ISO ts.
-      const episodeStart = lastRecovered?.ts ?? "";
+      const episodeStart = lastRecovered?.event.ts ?? "";
       const attemptEvents = events.filter((e) => e.kind === "session_resume_attempt" && e.ts > episodeStart);
       const attempts = attemptEvents.length;
 
@@ -287,7 +310,7 @@ export class CrashRecoveryWatcher {
         // episode RECOVERED (reset the counter)? Reference the latest of {last attempt, the death} — this
         // also re-arms after an EXTERNAL resume (resumeFleetOnBoot / a human) that left no attempt event.
         const lastAttempt = attemptEvents[attemptEvents.length - 1];
-        const refMs = Date.parse(lastAttempt ? lastAttempt.ts : lastTrigger.ts);
+        const refMs = Date.parse(lastAttempt ? lastAttempt.ts : lastTrigger.event.ts);
         if (nowMs - refMs >= this.stabilityMs) {
           fileEvent(s, "session_recovered", { afterAttempts: attempts });
           db.setLastError(s.id, null); // clear any crash-loop banner now that it's healthy again
@@ -387,13 +410,13 @@ export class CrashRecoveryWatcher {
           const impact = computeWakeImpact(db, s.id, s.role ?? null, {
             causal: false,
             liveWorkersResumed,
-            queuedIoReplayed: lastTrigger.kind === "worker_report_undelivered" ? 1 : 0,
+            queuedIoReplayed: lastTrigger.event.kind === "worker_report_undelivered" ? 1 : 0,
           });
           if (!isNoOpManagerWake(impact)) {
             // Tailor the manager nudge to the trigger: a `worker_report_undelivered` wake means a worker's
             // report reached nobody while this manager was stopped — point it straight at the review/merge
             // it missed (the task is already in `review`), not the generic "died unexpectedly" copy.
-            const note = lastTrigger.kind === "worker_report_undelivered"
+            const note = lastTrigger.event.kind === "worker_report_undelivered"
               ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
                 `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
                 `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`

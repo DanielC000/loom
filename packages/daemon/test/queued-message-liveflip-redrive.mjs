@@ -358,6 +358,74 @@ try {
     check("(8) it resolves as a PLAIN delivery, not a \"superseded-by-redirect\" retirement", marker !== undefined && marker.detail?.reason === undefined);
   }
 
+  // ===================== (9) TIE — card bcdea586: a redirect landing in the IDENTICAL millisecond as ======
+  // ===================== the queued record it supersedes must STILL retire it (not redrive it) ============
+  // Sweeps the e2b6c434 mechanism to this file's own scenario (5): staleQueuedMessageReason compared raw
+  // `.ts` strings, and two independently-clocked writers (the manager's queued-message write vs a LATER,
+  // genuinely DISTINCT redirect — not the self-match scenario (8) already covers) CAN legitimately land on
+  // the same wall-clock millisecond. A raw `ev.ts > e.ts` reads a tie as "not later" and wrongly REDRIVES a
+  // directive a `worker_redirect` already declared superseded — sending the worker back at work that
+  // redirect deliberately cancelled. Fixed by comparing ARRAY POSITION (id-joined into `timeline`, since
+  // `e` and `timeline` are two separate queries, not one shared array like e2b6c434's own fix).
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-I-mgr-${sfx}`, wkr = `qml-I-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    sessions.messageWorker(mgr, wkr, "STALE PRE-REDIRECT TIE");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("STALE PRE-REDIRECT TIE"));
+    const msgId = rec?.detail?.msgId;
+    check("(9) setup: the pre-redirect message is held + persisted", typeof msgId === "string");
+
+    // Recipient crashes before it can drain. A GENUINELY DISTINCT redirect (different queuedMsgId — never
+    // the self-match scenario (8) exercises) lands at the EXACT SAME ts as the record's own ts, inserted
+    // AFTER it (higher rowid → genuinely LATER per `ORDER BY ts, rowid`), forcing the tie.
+    db.setProcessState(wkr, "exited");
+    db.appendEvent({ id: randomUUID(), ts: rec.ts, managerSessionId: mgr, workerSessionId: wkr, taskId: null, kind: "redirect_worker", detail: { delivered: false, superseded: 0, queuedMsgId: "some-other-msgid-tie" } });
+
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(9) TIE: a same-millisecond, genuinely-distinct redirect STILL retires the record (not redriven)", dispatchCount(ptyBoot, wkr, "STALE PRE-REDIRECT TIE") === 0);
+    check("(9) TIE: the record resolves (zero undelivered), not left stuck or redriven", undelivered("STALE PRE-REDIRECT TIE") === 0);
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(9) TIE: the resolution records reason \"superseded-by-redirect\"", marker?.detail?.reason === "superseded-by-redirect");
+  }
+
+  // ===================== (10) TIE — card bcdea586: a worker_report landing in the IDENTICAL millisecond ===
+  // ===================== as the queued record for the SAME task must STILL retire it =======================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-J-mgr-${sfx}`, wkr = `qml-J-wkr-${sfx}`, taskId = `qml-J-task-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    sessions.messageWorker(mgr, wkr, "TIE ALREADY REPORTED");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("TIE ALREADY REPORTED"));
+    const msgId = rec?.detail?.msgId;
+    check("(10) setup: the background-check instruction is held + persisted", typeof msgId === "string");
+
+    // Recipient crashes before it can drain, resumes on its own, and reports done for the SAME task at the
+    // EXACT SAME ts as the record's own ts (inserted AFTER → genuinely later by rowid), forcing the tie.
+    db.setProcessState(wkr, "exited");
+    db.appendEvent({ id: randomUUID(), ts: rec.ts, managerSessionId: mgr, workerSessionId: wkr, taskId, kind: "worker_report", detail: { status: "done", summary: "checked in the same instant" } });
+
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(10) TIE: a same-millisecond worker_report for the SAME task STILL retires the record", dispatchCount(ptyBoot, wkr, "TIE ALREADY REPORTED") === 0);
+    check("(10) TIE: the record resolves (zero undelivered)", undelivered("TIE ALREADY REPORTED") === 0);
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(10) TIE: the resolution records reason \"already-reported\"", marker?.detail?.reason === "already-reported");
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

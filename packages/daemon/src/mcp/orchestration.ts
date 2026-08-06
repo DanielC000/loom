@@ -2046,6 +2046,11 @@ export class OrchestrationMcpRouter {
 
       const { deliveredAt, turnSeqAtDelivery } = outcome;
       const directive = { msgId: rootMsgId, state: "delivered" as const, at: deliveredAt };
+      // Card bcdea586 (swept, deliberately NOT fixed): `e.ts > deliveredAt` is a raw ts comparison, same
+      // class as the tie e2b6c434 proved elsewhere — a worker_report landing in the SAME millisecond as
+      // delivery would read as unacknowledged. Direction is the opposite of e2b6c434 (and of this card's
+      // sessions/service.ts sites): the failure mode is a FALSE "possibly stale directive" flag — an extra,
+      // spurious nudge — never a suppressed/silently-dropped one. Left as-is.
       const acknowledged = events.some((e) => e.kind === "worker_report" && e.ts > deliveredAt);
       if (acknowledged) return { directive, staleDirective: null, parkedDirective: null };
       const turnsSinceDelivery = currentTurnSeq - turnSeqAtDelivery;
