@@ -11,7 +11,7 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { cpuBusyPctDelta, createHostLoadSampler, formatHostLoadSummaryLine, runInstrumentedSuite } = await import(
+const { cpuBusyPctDelta, createHostLoadSampler, formatHostLoadSummaryLine, runInstrumentedSuite, diskProbeWriteMs, formatDiskProbeSummaryLine } = await import(
   pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "test-daemon.mjs")).href
 );
 
@@ -121,6 +121,55 @@ function cpu(user, idle) {
     threw = true;
   }
   check("[negative control] omitting onSample does not throw (default no-op preserves existing call sites)", !threw);
+}
+
+// ── diskProbeWriteMs (Card afd51f5d) ────────────────────────────────────────────────────────────────────
+{
+  // [positive control] a writeFn that succeeds reports a non-negative elapsed ms, never null.
+  const fast = diskProbeWriteMs("unused-path", Buffer.alloc(1), () => {});
+  check("[positive control] a successful write reports a real (non-null) elapsed ms", fast !== null && fast >= 0);
+
+  // The reported latency reflects the INJECTED writeFn's own duration, not a fixed constant — proven by a
+  // writeFn that deliberately busy-waits a known amount and asserting the reading is at least that long.
+  const slowMs = 15;
+  const slow = diskProbeWriteMs("unused-path", Buffer.alloc(1), () => {
+    const until = performance.now() + slowMs;
+    while (performance.now() < until) { /* busy-wait */ }
+  });
+  check("the reported latency reflects the injected writer's own duration, not a fabricated constant", slow !== null && slow >= slowMs - 1);
+
+  // [negative control] a writeFn that throws (unwritable path, disk full) reports null, never a fabricated
+  // number and never an uncaught throw — same posture as cpuBusyPctDelta's own null-on-failure convention.
+  let threw = false;
+  let result;
+  try {
+    result = diskProbeWriteMs("unused-path", Buffer.alloc(1), () => { throw new Error("ENOSPC (synthetic)"); });
+  } catch {
+    threw = true;
+  }
+  check("[negative control] a throwing writeFn reports null rather than propagating the throw", !threw && result === null);
+}
+
+// ── formatDiskProbeSummaryLine — the "AWAIT-TIME PROXY (not a true OS queue-depth counter)" framing must
+// survive in the line itself, same discipline formatHostLoadSummaryLine's own tests already apply to the
+// CPU line (the-qualifier-dies-in-the-summary-label: a caveat written once must still be checked at the
+// output that actually gets read).
+{
+  const line = formatDiskProbeSummaryLine([2.1, 5.8, 31.7], 5000);
+  check("[positive control] the line states \"AWAIT-TIME PROXY\" verbatim", line.includes("AWAIT-TIME PROXY"));
+  check("the line states \"not a true OS queue-depth counter\" verbatim", line.includes("not a true OS queue-depth counter"));
+  check("the line states the sample count inline", line.includes("3 sample(s)"));
+  check("the line states the interval inline", line.includes("@ 5000ms"));
+  check("the line reports min/mean/max, not just one statistic", line.includes("min 2.10ms") && line.includes("mean 13.20ms") && line.includes("max 31.70ms"));
+
+  // [negative control] a qualifier-stripped line must NOT be mistaken for the real thing by this same check.
+  const strippedLine = "# disk probe write latency: 13.2ms";
+  check("[negative control] a qualifier-stripped line correctly fails the same assertion", !strippedLine.includes("AWAIT-TIME PROXY"));
+
+  // Zero valid samples (every probe failed, or the run was too short) must not crash the formatter or
+  // fabricate a min/mean/max from nothing.
+  const emptyLine = formatDiskProbeSummaryLine([], 5000);
+  check("[negative control] zero samples reports 0 sample(s), no fabricated min/mean/max", emptyLine.includes("0 sample(s)") && !emptyLine.includes("min "));
 }
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-host-load-sampling: ${failures} check(s) failed.`);

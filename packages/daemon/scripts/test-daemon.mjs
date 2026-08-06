@@ -87,8 +87,20 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // distribution instead of by one point-in-time snapshot. Same `runUid` join key; same "unknown kind is
 // silently ignored" additivity. See `onHostSample` in the isMain run below for the emission site and
 // `cpuBusyPctDelta`'s own doc for why its `cpuBusyPct` field is a SAMPLED DELTA, never a cumulative total.
+//
+// Card afd51f5d: the same "host-sample" row also carries `diskProbeMs` — the disk-I/O signal the CPU-only
+// schema was missing (an investigation reached UNATTRIBUTED on two gate reds that both waited on disk-
+// bound work, with no disk metric available to check). Same additive-field posture as `diskProbeMs` moving
+// forward: an older row simply lacks the key. See `diskProbeWriteMs`'s own doc for what it measures, why
+// this metric (not a subprocess-based OS counter, not raw I/O-operation counts), and its measured cost.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
+// Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
+// every sample tick, NEVER appended to and NEVER grows. See `diskProbeWriteMs`'s own doc for why this file
+// exists and what it measures.
+const DISK_PROBE_FILE = path.join(LOOM_HOME, "gate-timing", ".disk-probe.bin");
+const DISK_PROBE_BYTES = 64 * 1024;
+const DISK_PROBE_BUF = Buffer.alloc(DISK_PROBE_BYTES, 7);
 
 // Card 17069e7e (CR follow-up, DIRECTIVE #3): tally, don't print, on each individual write failure. A
 // single gate run calls `appendGateTimingRow` up to ~633 times (1 run-start + 1 run-summary + one per test
@@ -203,6 +215,104 @@ export function formatHostLoadSummaryLine(busyPctSamples, intervalMs) {
   const max = Math.max(...busyPctSamples);
   const mean = busyPctSamples.reduce((sum, v) => sum + v, 0) / busyPctSamples.length;
   return `# host CPU busy — SAMPLED DELTA (not cumulative), ${busyPctSamples.length} sample(s) @ ${intervalMs}ms: min ${min.toFixed(1)}% / mean ${mean.toFixed(1)}% / max ${max.toFixed(1)}%`;
+}
+
+// Card afd51f5d: disk-I/O signal for the periodic "host-sample" row — the gap `5988a3fc`'s investigation
+// named: CPU was checked and RULED OUT (a clean contrast case, see project memory
+// `corroborating-a-premise-is-not-corroborating-the-inference`) as the discriminator for two gate reds
+// that both waited on DISK-bound work (a detached child process spawn; real git worktree provisioning),
+// but disk was never checked because nothing recorded it.
+//
+// METRIC CHOICE (DoD-2/3), decided empirically against this Windows host, not assumed:
+// - There is no Linux-`/proc/diskstats`-shaped counter on Windows, and the real system-wide, per-volume
+//   queue-depth/await-time metric (`typeperf`/`Get-Counter \PhysicalDisk(_Total)\...`) is ONLY reachable
+//   via a subprocess — measured directly on this host: a single `typeperf` sample costs ~454ms, a single
+//   `Get-Counter` sample ~1.35s. Riding a subprocess that expensive on the SAME 5s tick this sampler
+//   already uses would itself perturb the very host it's trying to measure (DoD-4) — the identical
+//   reasoning `createRssTracker`'s own doc comment already applies to a `tasklist`/`ps` shell-out for
+//   process-tree RSS ("would itself be the added subprocess DoD-6 forbids").
+// - `process.resourceUsage().fsRead`/`fsWrite` (libuv's Windows mapping of `GetProcessIoCounters`) IS
+//   cheap and genuinely obtainable — verified moving under real file I/O on this host (0/0 idle -> 301/300
+//   after 300 read+300 write ops) — but it counts THIS process's own I/O OPERATIONS, not disk latency: the
+//   count doesn't rise when the SAME operations take longer under contention, so it can't discriminate
+//   (DoD-5) and was rejected.
+// - CHOSEN: the wall-clock LATENCY of a small, fixed-size, forced-to-physical-media write (open + write +
+//   fsync + close) against a dedicated probe file — never the NDJSON itself, never grown, overwritten in
+//   place every tick. A contended physical disk queues this write behind other pending I/O, so its latency
+//   rises with contention. This answers "how long does a small synchronous disk write take on this host
+//   RIGHT NOW" — a directly-measured proxy for queue depth/await-time, not a guess. Verified empirically on
+//   this host (2026-08-06): idle mean ~2.2ms (range 1.6-2.6ms) vs. ~5.8ms mean (peak 31.7ms) while 4
+//   concurrent processes hammered the same disk with 4MB fsync'd writes, relaxing back to ~2.2ms once the
+//   contention stopped — see the card for the full trace.
+//
+// COST BOUND (DoD-4): synchronous, in-process, no added subprocess. Fixed 64KB buffer, one open+write+
+// fsync+close per 5s tick — measured ~2ms idle (<0.1% duty cycle at a 5000ms interval), ~32ms observed peak
+// under real induced contention. `writeFn` is injectable so a test can drive a synthetic slow/fast/throwing
+// writer instead of touching a real disk. Returns null (never throws) on ANY probe failure (unwritable
+// path, disk full) — same posture as every other reader feeding `onHostSample` below; a failed probe must
+// never affect this gate's own pass/fail or exit code.
+//
+// ⚠️ SCOPE LIMIT — READ BEFORE TREATING A FLAT READING AS "DISK WASN'T THE BOTTLENECK":
+// - This is a BULK SEQUENTIAL-WRITE canary (one 64KB open+write+fsync+close). `git worktree` creation —
+//   the actual workload behind card afd51f5d's two motivating specimens — is a DIFFERENT I/O shape:
+//   `createWorktree` (git/worktrees.ts) runs `git worktree add` (a checkout writing many small tracked
+//   files into the new tree) followed by `provisionWorktreeDeps` (a real `pnpm install`/`npm ci`/`npm
+//   install`, populating node_modules — a canonically massive small-file/metadata-heavy write pattern:
+//   many small creates + directory-entry updates, not one large sequential write). Metadata-heavy I/O can
+//   queue and stall independently of bulk-write latency on the same physical disk. **This probe may
+//   therefore be structurally insensitive to the exact contention this card was chasing** — a flat
+//   `diskProbeMs` is evidence this specific bulk-write pattern wasn't queued, NOT evidence disk wasn't
+//   the bottleneck for worktree/npm-install-shaped metadata I/O. Widening the probe to also measure a
+//   metadata-heavy pattern is a deliberate design decision for a SEPARATE card, not folded in here.
+// - MEASURED ON THIS HOST (2026-08-06): under two concurrent `test-daemon.mjs` gates running an 18-file
+//   worktree/merge-test selection (the `maxConcurrentGates=2` condition), host CPU pinned 80-99% in
+//   EVERY condition (including the "quiet" single-gate baseline) while this probe stayed flat (quiet mean
+//   2.73ms vs. contended 2.87-2.99ms — no clean separation). **CPU was pinned high throughout; the CAUSE
+//   is NOT isolated** — the "quiet" baseline was never checked against ambient third-party load on this
+//   shared self-hosting box, so the pinning cannot be cleanly attributed to this test population alone
+//   (a prior, unrelated investigation into this same box, `docs/investigations/e4a2e789-host-load-
+//   sampler`, already found its ambient CPU floor sits elevated — 40-56% — from non-gate fleet load with
+//   NOTHING under study running). Do not read the measurement above as "this workload is CPU-bound, not
+//   disk-bound" — read it only as "CPU was pinned and this probe was flat here; the cause of the pinning
+//   is unresolved." A flat reading elsewhere does not generalize to "disk is never the bottleneck" either
+//   way — check `cpuBusyPct` alongside `diskProbeMs`, and see project memory
+//   `disk-io-signal-windows-canary-write-not-op-counts` for the full trace (including a controlled
+//   experiment proving this SAME probe clearly separates idle vs. induced bulk
+//   disk contention, so the flatness above is a property of that workload/host, not of the instrument).
+export function diskProbeWriteMs(probeFilePath, buf, writeFn = defaultDiskProbeWrite) {
+  const t0 = performance.now();
+  try {
+    writeFn(probeFilePath, buf);
+  } catch {
+    return null;
+  }
+  return performance.now() - t0;
+}
+
+function defaultDiskProbeWrite(probeFilePath, buf) {
+  fs.mkdirSync(path.dirname(probeFilePath), { recursive: true });
+  const fd = fs.openSync(probeFilePath, "w");
+  try {
+    fs.writeSync(fd, buf, 0, buf.length, 0);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Human-readable whole-run disk-probe-latency summary line — same placement/posture as
+ *  `formatHostLoadSummaryLine` above: printed unconditionally, pass or fail. The "await-time PROXY, not a
+ *  true queue-depth counter" framing is baked into the line itself for the same reason the CPU line bakes
+ *  in "SAMPLED DELTA" — a reader must not mistake this for a real OS disk-queue metric.
+ *  `probeMsSamples` should already exclude any null (failed-probe) samples. */
+export function formatDiskProbeSummaryLine(probeMsSamples, intervalMs) {
+  if (probeMsSamples.length === 0) {
+    return `# disk probe write latency — AWAIT-TIME PROXY (not a true OS queue-depth counter): 0 sample(s) @ ${intervalMs}ms (run too short, or every probe failed)`;
+  }
+  const min = Math.min(...probeMsSamples);
+  const max = Math.max(...probeMsSamples);
+  const mean = probeMsSamples.reduce((sum, v) => sum + v, 0) / probeMsSamples.length;
+  return `# disk probe write latency — AWAIT-TIME PROXY (not a true OS queue-depth counter), ${probeMsSamples.length} sample(s) @ ${intervalMs}ms: min ${min.toFixed(2)}ms / mean ${mean.toFixed(2)}ms / max ${max.toFixed(2)}ms`;
 }
 
 /** Card 90678ee9 DoD-5: the one population field this NDJSON was missing. `testCount` only says HOW MANY
@@ -1130,11 +1240,16 @@ if (isMain) {
   // compute-sum-wall-slack.mjs or any other reader of this file.
   const gateTimingHostSampler = createHostLoadSampler();
   const gateTimingHostBusySamples = [];
+  // Card afd51f5d: parallel array to gateTimingHostBusySamples, same null-exclusion convention — see
+  // diskProbeWriteMs's own doc for what this measures and why.
+  const gateTimingDiskProbeSamples = [];
   let gateTimingHostSampleIndex = 0;
   const onHostSample = () => {
     try {
       const busyPct = gateTimingHostSampler.sample();
       if (busyPct !== null) gateTimingHostBusySamples.push(busyPct);
+      const diskProbeMs = diskProbeWriteMs(DISK_PROBE_FILE, DISK_PROBE_BUF);
+      if (diskProbeMs !== null) gateTimingDiskProbeSamples.push(diskProbeMs);
       appendGateTimingRow(GATE_TIMING_NDJSON, {
         kind: "host-sample",
         runIndex: gateTimingRunIndex,
@@ -1151,11 +1266,15 @@ if (isMain) {
         cpuBusyPct: busyPct,
         freeMemMB: Math.round(os.freemem() / 1e6),
         totalMemMB: Math.round(os.totalmem() / 1e6),
+        // Card afd51f5d DoD-1/2/3: disk-I/O signal, additive on this existing row kind — an OLDER row (or
+        // any reader that predates this field) simply lacks the key; every reader here already destructures
+        // by name rather than assuming a fixed field set (DoD-6). null on a failed probe, never fabricated.
+        diskProbeMs,
       });
     } catch {
       // Best-effort, same posture as appendGateTimingRow itself (which never throws on its own) — this
-      // guards the (should-never-throw) os.cpus()/os.freemem() reads feeding it. A sampling failure must
-      // never affect this gate's own pass/fail or exit code.
+      // guards the (should-never-throw) os.cpus()/os.freemem()/diskProbeWriteMs reads feeding it. A
+      // sampling failure must never affect this gate's own pass/fail or exit code.
     }
   };
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
@@ -1200,6 +1319,7 @@ if (isMain) {
   console.log(formatRssFloorLine(rssTracker.sampleCount(), RSS_SAMPLE_INTERVAL_MS, rssTracker.floorBytes()));
   console.log(formatMaxGapLine(maxGapMs(completionTimestamps)));
   console.log(formatHostLoadSummaryLine(gateTimingHostBusySamples, RSS_SAMPLE_INTERVAL_MS));
+  console.log(formatDiskProbeSummaryLine(gateTimingDiskProbeSamples, RSS_SAMPLE_INTERVAL_MS));
 
   // Card 17069e7e (DoD-2): per-file timing — human summary (unconditional, pass or fail, same placement as
   // the RSS/gap lines above) + a best-effort NDJSON artifact. Wrapped whole: this is observation only, and
