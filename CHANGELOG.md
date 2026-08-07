@@ -4,8 +4,38 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-08-07
+
+**A trust-boundary release.** Loom's loopback gateway used to treat *any* process on the machine as if it were the human at the browser — which, on a workspace whose whole purpose is running coding agents with shell access, meant an agent could reach past every "human-only" guard by curling the local API. This release closes that for writes, and closes a second path by which agent-authored text could arrive in the owner's own role slot. Alongside it: a batch of merge-gate correctness fixes and another pass on message delivery.
+
 ### Added
+
+- **A local access credential for the loopback API.** Every non-GET `/api/*` route and the `/ws/term` terminal socket now require a bearer secret (generated at boot, `0600`, under `LOOM_HOME`), even from `127.0.0.1`. `loom open` / `loom start` embed it in the browser URL, so the normal flow is unchanged; what stops working is an unauthenticated process on the same machine driving the API directly. **Honest scope:** this closes the incidental bypass, not a determined one — anything that can read your home directory can still read the key file. Real isolation for agent shells remains a separate, larger question.
 - **A declared Windows floor.** Loom now documents (README) and enforces at install time (`install.ps1`) a minimum of Windows 10 build 18309+ (version 1903, May 2019, or later) or Windows 11 — the floor node-pty itself requires to use ConPTY instead of falling back to winpty. This isn't a claim that older builds are broken today; Loom has simply never tested or claimed support for that winpty fallback, and a future node-pty upgrade removes winpty entirely, so an unaddressed older host would eventually lose the ability to spawn `claude` at all rather than hit a documentation gap.
+- **Disk I/O sampling in the gate's host-sample schema**, so the one resource that can discriminate a spawn-poll failure is no longer the one going unmeasured.
+- **A diff-scoped presence gate for newly-added raw-sleep synchronisation probes**, plus a `sleepPast` helper — new fixed-wait races get caught as they're written rather than after they flake.
+
+### Changed
+
+- **A Companion can no longer be driven through a raw terminal.** Text written to a Companion session via `POST /api/sessions/:id/input` or a `/ws/term` stdin frame used to land as *owner-authored* input, indistinguishable from the human's own keystrokes — which meant an agent could compose words the Companion then acted on in the owner's name. Both routes now refuse a Companion outright; its own chat surface is unaffected.
+- **A merge that can't safely skip the gate no longer skips it.** The inert-change classification is re-derived after the repo guard is held and re-checked against the branch as it stands at admission, so a commit landing during the wait can't ride a stale eligibility proof onto main ungated. The emit-compare gate also now fails closed when fixtures change.
+- **A waiting inert merge lands instead of being rejected**, turning a guaranteed self-abort into a successful merge.
+- **Clearer merge-gate outcomes.** A cancelled single-file retry now records a `gate_history` row instead of vanishing from the duration and rejection-rate series, and the transient-kill retry no longer books a cancelled-while-queued first attempt as a rejection.
+- **`run_gate`'s idle watchdog stops crying wolf.** It called a gate "possibly wedged" from elapsed time alone; it now reads the same idle clock the gate's own auto-extend uses, so a long-but-productive gate is no longer reported as stuck.
+- **`served_status` no longer says an assets-only merge needs no restart** — an `assets/skills/**` change leaves every agent on the old skill until one happens.
+- **The dev-server and serve-static helpers now honour one contract**, recording both pid and the actual bound URL. A consumer no longer has to guess between `127.0.0.1` and `localhost` — a guess that fails against a perfectly healthy IPv6-only server.
+
+### Fixed
+
+- **A reduced merge gate could reject a correct change without running it.** For a test-only diff, the gate invoked each changed test file directly, without the fresh temporary `LOOM_HOME` the test harness normally provides — so any test with a "don't run against production state" guard refused to start, and the merge was rejected as a test failure that never actually ran. Changed test files now run through the harness.
+- **Stale notices no longer redeliver byte-identically.** A prompt-mismatch notice could be delivered a second time, identical to the first, with nothing marking it as a repeat; repeats are now suppressed and the suppression is visible to the managing session. *(The re-mint path this guards is code-reachable but has no observed instance — both duplicates examined were delivery-layer, not re-mints. It closes a real gap; it is not a fix for the duplicates actually seen.)*
+- **A recognized replay no longer suppresses the wrapper-deficit verdict**, which had the benign case reporting an established loss.
+- **Same-millisecond ties no longer decide things arbitrarily** — event sweeps and directive ordering both break ties by position rather than raw timestamp, so a tie can't skip a genuine crash recovery or fire a superseded park notice.
+- **The daemon test suite stopped leaking a temp `LOOM_HOME` per run.** 221,297 stray directories had accumulated, and enumerating that directory had grown to cost 6–13s on every operation touching it.
+- **A wedged worktree removal is surfaced to the merging manager** instead of a warning nobody reads.
+- **`list_all_tasks` no longer inlines a 56k single-line JSON blob** — it spills as NDJSON, and both board reads gained a counts-only mode.
+- **Duplicate-card detection now requires a strong identifier.** Weak code-symbol evidence alone had produced five spurious refusals.
+- **An IPv6 test control no longer passes a bracketed host to a socket connect.** It was tolerated on Windows and rejected on Linux, so the change passed every merge gate and failed CI.
 
 ## [0.27.0] — 2026-08-06
 
