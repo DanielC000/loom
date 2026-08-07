@@ -4871,6 +4871,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const { text } = (req.body as { text?: string }) ?? {};
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
+    // SECURITY (card 018ce1db): a Companion (role:"assistant") session is REFUSED here, full stop — never
+    // even reaches enqueueStdin. This route's `ownerText:text` below (see the comment two lines down)
+    // makes it a Primitive-A owner-attestation writer, but that attestation is only trustworthy for THIS
+    // route's actual audience: whichever human/manager session the web UI's own Composer is bound to
+    // (Terminals.tsx deliberately excludes assistant-role sessions from ever rendering that Composer — "a
+    // companion is driven ONLY through its chat surface /ws/companion/:id, never a raw pty tile + STDIN
+    // Composer"). That client-side exclusion is NOT a security boundary — Loom's default (non-remote)
+    // gateway trusts loopback wholesale (gateway/trust-tier.ts's own doc: "there is no per-route auth"),
+    // and a loopback peer is any co-resident process, including a project MANAGER's own spawned Claude
+    // Code session with Bash — not only the human's browser. Before this fix, that manager could `curl`
+    // this exact route with the companion's sessionId and author words that land as `ownerText`, i.e. in
+    // the OWNER's role slot for the Companion's very next turn — the privilege-escalation path card
+    // 018ce1db exists to close. The Companion's OWN authenticated inbound path (chat-gateway.ts's
+    // handleInbound, reached via /ws/companion/:sessionId or an external channel adapter) is untouched by
+    // this check and keeps attesting ownerText exactly as before — this only removes a SECOND, unintended
+    // route into the same role slot. See gateway/server.ts's sibling fix on GET /ws/term/:sessionId's
+    // stdin path for the other inbound surface this same defect reached.
+    if (deps.db.getSession(id)?.role === "assistant") {
+      // Owner-facing wording (not internals-facing "assistant-role"/"generic composer route" jargon) —
+      // sibling card 9ccedbee's client fix (api.ts's post/del/put parsing a REST {error} body via
+      // errorMessageFrom, instead of throwing a bare status) is what will actually surface this text to
+      // the owner once both land; write it for THAT reader, not for a log line.
+      return reply.code(403).send({ error: "This is a Companion session — it's driven through Chat, not a raw terminal. Message it from the Chat tab instead." });
+    }
     // 'human' source: ONLY this composer path tags its entries human; every programmatic enqueue
     // (worker reports, nudges, resume notes) defaults to 'system'. That tag is what gates the mutators.
     // kind:"agent" — a human composer message is the human's own directive; it must land as its own turn.
@@ -4882,7 +4906,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Companion's decision_resolve or any other ctx.attest-gated lever to a non-Companion session — those
     // stay hard role-gated to role==="assistant" (registerCompanionCapabilities, companion/capabilities.ts)
     // regardless of whether ownerText is populated; the only new reader is question_resolve
-    // (mcp/questionTool.ts's resolveQuestionForAgent), which calls getActiveTurnOwnerText directly.
+    // (mcp/questionTool.ts's resolveQuestionForAgent), which calls getActiveTurnOwnerText directly. And
+    // (card 018ce1db) it can no longer reach a Companion session's own ownerText slot at all — see the
+    // role-gate immediately above.
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text));
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
@@ -5242,7 +5268,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const msg = parseWsJsonObject(raw) as TerminalInput | null;
       if (!msg) return;
       // RAW passthrough — NOT the busy-gated enqueueStdin (which is for programmatic agent turns).
-      if (msg.type === "stdin") deps.pty.writeStdin(sessionId, msg.data);
+      // SECURITY (card 018ce1db): a raw stdin write is ALSO a Primitive-A owner-attestation writer —
+      // PtyHost.writeStdin feeds the SAME `pendingRawOwnerSubmit`/UserPromptSubmit mechanism a genuine
+      // human keystroke does (see pty/host.ts, "card b4b9b707"), so anything typed here lands as
+      // `ownerText` for whatever turn it starts, indistinguishable from a real owner keystroke. This route
+      // accepts ANY sessionId with no per-request auth beyond loopback (gateway/trust-tier.ts: loopback is
+      // trusted wholesale by default — any co-resident process, not only the human's browser). A Companion
+      // (role:"assistant") is NEVER legitimately driven this way — Terminals.tsx already excludes it from
+      // ever rendering a raw pty tile ("a companion is driven ONLY through its chat surface, never a raw
+      // pty tile + STDIN Composer") — so refuse the WRITE for one here too (read/repaint/resize stay
+      // unaffected; only stdin injection can forge an owner attestation). Sibling fix on POST
+      // /api/sessions/:id/input above closes the same defect's other inbound surface.
+      if (msg.type === "stdin" && deps.db.getSession(sessionId)?.role !== "assistant") deps.pty.writeStdin(sessionId, msg.data);
       else if (msg.type === "repaint") deps.pty.repaint(sessionId);
       // resize is honored for SHELL terminals only; a no-op for pinned Claude ptys (see PtyHost.resize).
       else if (msg.type === "resize") deps.pty.resize(sessionId, msg.cols, msg.rows);
