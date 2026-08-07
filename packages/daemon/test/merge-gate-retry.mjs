@@ -32,11 +32,32 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       gets ZERO retry attempts (a hard-bounded `allowExtend:false` rerun of that exact run could not pass
 //       either); `reason` reports the budget-exceeded skip by name, distinct from a generic gate failure,
 //       and states plainly that a manager re-firing `worker_merge_confirm` is a separate, unaffected thing.
+//   (G) CANCELLING THE TRANSIENT-KILL RETRY'S OWN QUEUED ADMISSION (card 518e7ff6 — the SIBLING gap card
+//       318ac7b2 left open: this retry mints its OWN separate `runExclusive` admission, exactly like the
+//       single-file retry, so it can independently queue behind an unrelated cap-1 contender and be
+//       withdrawn there). UNLIKE 318ac7b2's fix: attempt 1's own `build_gate` row here is ALREADY written
+//       (before this retry ever starts, not after), so the cancel-while-queued catch does NOT touch that
+//       row — it stays a real, unmodified `outcome:"reject"` — and instead emits a SEPARATE
+//       `build_gate_retry` row stamped `cancelled:true`/`gateSpawned:false`, recording that the retry
+//       itself never reached a verdict. A reader now sees BOTH rows for the op, never a lone "reject".
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-retry.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Poll instead of a blind fixed sleep — mirrors merge-gate-single-file-retry.mjs's own `waitUntil`
+// verbatim (same reasoning: a blind sleep is the wall-clock-coincidence flake this suite's own DoD
+// rejects). Bounded generously (8s) so a real bug still fails fast rather than hanging.
+async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
+  const start = Date.now();
+  for (;;) {
+    const v = predicate();
+    if (v) return v;
+    if (Date.now() - start > timeoutMs) return predicate(); // one last try, then give up honestly
+    await sleep(intervalMs);
+  }
+}
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -274,6 +295,140 @@ try {
     })());
     check("(F) worktree RETAINED (fail-closed)", fs.existsSync(F.worktreePath));
     check("(F) task NOT moved to done", db.getTask(F.taskId).columnKey !== "done");
+  }
+
+  // ── (G) CANCELLING THE TRANSIENT-KILL RETRY'S OWN QUEUED ADMISSION — see this file's own header for the
+  //        summary. Mirrors merge-gate-single-file-retry.mjs's own (H) block for the SIBLING retry
+  //        mechanism, incl. its ordering guarantee: worker G's own first attempt is held open until AFTER
+  //        the holder has fired and is confirmed QUEUED, so `GateSemaphore.release()`'s synchronous
+  //        `grantNext()` deterministically hands the freed cap-1 slot to the already-queued holder, forcing
+  //        the retry's own fresh admission (after its settle delay) to queue instead of running
+  //        immediately — no race. ──
+  {
+    const G = mk("g", "feature-g1.txt");
+    makeRepo(G);
+    const db = new Db(); dbs.push(db);
+    db.setPlatformConfig({ maxConcurrentGates: 1 });
+
+    let call1AdmittedResolve;
+    const call1Admitted = new Promise((res) => { call1AdmittedResolve = res; });
+    let releaseCall1;
+    let holderAdmittedResolve;
+    const holderAdmitted = new Promise((res) => { holderAdmittedResolve = res; });
+    let releaseHolder;
+    // Scoped to worker G's OWN worktree only (mirrors merge-gate-single-file-retry.mjs's `callsForH`) —
+    // the proof that the retry's gate command never spawns a second time once its admission is cancelled.
+    let callsForG = 0;
+    const sharedGate = async (_gate, cwd) => {
+      if (cwd === G.worktreePath) {
+        callsForG++;
+        call1AdmittedResolve();
+        await new Promise((res) => { releaseCall1 = res; });
+        // A KILL classification (retry-eligible, never "genuine") — the TRANSIENT-KILL retry, not the
+        // single-file retry, is what fires next.
+        return { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, outputTail: "" };
+      }
+      // The holder's own gate — held open once admitted so it keeps occupying the cap-1 slot long enough
+      // for the retry's own admission to genuinely queue behind it and be observed/cancelled.
+      holderAdmittedResolve();
+      await new Promise((res) => { releaseHolder = res; });
+      return { passed: true };
+    };
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+
+    db.insertProject({ id: G.projId, name: "MGR-G", repoPath: G.repo, vaultPath: G.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: G.agentId, projectId: G.projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: G.taskId, projectId: G.projId, title: "MGR-G-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: G.mgrId, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: G.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
+    G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, G.file), "work for g\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: worktreePath });
+    db.insertSession({ id: G.workerId, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: G.mgrId, taskId: G.taskId, worktreePath, branch });
+
+    // A SEPARATE, unrelated project/worker to occupy the cap-1 slot once it frees — mirrors gate-cancel.mjs
+    // B2-2's own holder setup exactly.
+    const holderRepo = path.join(os.tmpdir(), `loom-mgr-g-holder-${sfx}`);
+    const holderProjId = `mgr-g-holder-proj-${sfx}`, holderAgentId = `mgr-g-holder-agent-${sfx}`;
+    const holderTaskId = `mgr-g-holder-task-${sfx}`, holderWorkerId = `mgr-g-holder-wkr-${sfx}`;
+    makeRepo({ repo: holderRepo });
+    db.insertProject({ id: holderProjId, name: "MGR-G-HOLDER", repoPath: holderRepo, vaultPath: holderRepo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: holderAgentId, projectId: holderProjId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: holderTaskId, projectId: holderProjId, title: "MGR-G-HOLDER-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wtHolder = await createWorktree(holderRepo, holderProjId, holderTaskId);
+    worktrees.push(wtHolder.worktreePath);
+    fs.writeFileSync(path.join(wtHolder.worktreePath, "holder.txt"), "holder\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "holder.txt"`, { cwd: wtHolder.worktreePath });
+    const holderMgrId = `${holderWorkerId}-mgr`;
+    db.insertSession({ id: holderMgrId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: holderRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: holderWorkerId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: holderMgrId, taskId: holderTaskId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+    // 1) Worker G's first attempt admits (cap 1, nothing else contending yet) and blocks mid-run.
+    const p1 = sessions.confirmWorkerMerge(G.mgrId, G.workerId);
+    await call1Admitted;
+
+    // 2) The holder fires NOW, while worker G's first attempt still occupies the cap-1 slot — it QUEUES.
+    const pHolder = sessions.confirmWorkerMerge(holderMgrId, holderWorkerId);
+    const holderQueued = await waitUntil(() => sessions.gateQueueForManager(holderProjId).queued.find((e) => e.gateType === "merge"));
+    check("(G) the holder is genuinely QUEUED behind worker G's first attempt (setup sanity)", !!holderQueued);
+
+    // 3) Release worker G's first attempt to fail for real (a KILL classification) — its slot frees, and
+    //    the ALREADY-QUEUED holder deterministically wins it, forcing the transient-kill retry's own fresh
+    //    admission (after its settle delay) to queue instead of running immediately.
+    releaseCall1("go");
+    await holderAdmitted;
+    const retryEntry = await waitUntil(() => sessions.gateQueueForManager(G.projId).queued.find((e) => e.gateType === "merge"));
+    check("(G) the transient-kill retry's OWN admission is genuinely QUEUED (setup sanity)", !!retryEntry);
+
+    if (retryEntry) {
+      const cancelResult = await sessions.cancelGateOp(G.mgrId, retryEntry.opId);
+      check("(G) cancelling the retry's QUEUED admission SUCCEEDS", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
+
+      const confirmG = await p1;
+      check("(G) confirmWorkerMerge settles cleanly with cancelled:true, never a thrown/misreported crash", confirmG.merged === false && confirmG.cancelled === true);
+      check("(G) the cancel is tagged 'manual' (gate_cancel, not an automatic supersede)", confirmG.cancelKind === "manual");
+      const mergeCancelledEvts = eventsOfKind(db, G.mgrId, "merge_cancelled");
+      check("(G) a merge_cancelled event was recorded (never a merge_rejected/merge-failed shape)", mergeCancelledEvts.length === 1 && mergeCancelledEvts[0].detail?.cancelKind === "manual");
+
+      // ── CARD 518e7ff6 — THE ASYMMETRY THIS CARD FIXES: attempt 1's OWN `build_gate` row was ALREADY
+      //    written (unconditionally, BEFORE this retry block even starts) by the time the retry's own
+      //    admission is cancelled — unlike the sibling single-file-retry path, there is nothing missing to
+      //    fill in on THAT row: it stays a real, unmodified `outcome:"reject"`. ──
+      const buildGateEvts = eventsOfKind(db, G.mgrId, "build_gate");
+      check("(G) attempt 1's real (kill) failure is recorded, UNCHANGED, as its own build_gate row (passed:false, no cancelled stamp)",
+        buildGateEvts.length === 1 && buildGateEvts[0].detail?.passed === false && buildGateEvts[0].detail?.cancelled === undefined);
+
+      // ── POSITIVE CONTROL (DoD-4): the MISSING half — a build_gate_retry row recording that the retry
+      //    itself never reached a verdict, stamped so it's distinguishable from a genuine rejection. Before
+      //    this card, cancelling this retry left NO build_gate_retry row at all — only the merge_cancelled
+      //    event above (excluded from GATE_HISTORY_KINDS) was recorded, and attempt 1's lone "reject" row
+      //    was the only thing gate_history ever showed for this op. ──
+      const buildGateRetryEvts = eventsOfKind(db, G.mgrId, "build_gate_retry");
+      check("(G) the retry's own fate is now recorded as a build_gate_retry row instead of vanishing entirely", buildGateRetryEvts.length === 1);
+      check("(G) that row is stamped cancelled:true — distinguishable from a genuine rejection", buildGateRetryEvts[0]?.detail?.cancelled === true);
+      check("(G) it is stamped gateSpawned:false — this retry's own admission never ran a process", buildGateRetryEvts[0]?.detail?.gateSpawned === false);
+      check("(G) it carries no fabricated passed verdict — the retry never ran to a verdict", !("passed" in (buildGateRetryEvts[0]?.detail ?? {})));
+      check("(G) the real gate_history read (listGateEvents/toGateHistoryRow) surfaces BOTH rows for this op: attempt 1 as outcome:'reject' (gateRan:true), the retry as outcome:'cancelled' (gateRan:false) — never a lone reject", (() => {
+        const page = db.listGateEvents({ projectId: G.projId, limit: 100, offset: 0 });
+        const rows = page.items.filter((r) => r.gateType === "merge" && r.sessionId === G.workerId);
+        const rejectRow = rows.find((r) => r.outcome === "reject");
+        const cancelledRow = rows.find((r) => r.outcome === "cancelled");
+        return rows.length === 2 && !!rejectRow && rejectRow.gateRan === true && !!cancelledRow && cancelledRow.gateRan === false;
+      })());
+
+      // Let the holder's own gate proceed and settle — cleanup hygiene, not itself asserted on.
+      releaseHolder("go");
+      const holderResult = await pHolder;
+      check("(G) the holder itself merged normally once it won the freed slot", holderResult.merged === true);
+      check("(G) the retry's OWN gate command never actually spawned — cancelled while queued, before admission (fn never invoked a second time for a withdrawn admission)", callsForG === 1);
+    } else {
+      // SETUP SANITY FAILED: release the holder and let both confirms settle BEFORE moving on, instead of
+      // leaving `p1`/`pHolder` dangling (mirrors merge-gate-single-file-retry.mjs's own (H) fallback).
+      console.log("SKIP  (G) cancel/settle assertions — setup sanity check above already failed");
+      releaseHolder("go");
+      await Promise.allSettled([p1, pHolder]);
+    }
   }
 
   // ── (E) INJECTION HYGIENE END-TO-END — REAL gate step, real runGateSequential, no injected runGate ──

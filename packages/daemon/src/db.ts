@@ -7200,10 +7200,18 @@ function gateTypeForKind(kind: string): GateType {
  *  row stamped `cancelled:true` whenever that retry's admission is withdrawn AFTER attempt 1 already ran a
  *  real, genuinely-failed full suite — recording that real run instead of letting it vanish from
  *  `gate_history` with no row at all. So a `build_gate` row can now ALSO carry `cancelled:true`, read here
- *  identically to a cancelled `worker_gate` row — `build_gate_retry` CANNOT: its one emit site
- *  (sessions/service.ts, the transient-kill auto-retry's own success path) never stamps `cancelled`, and
- *  that retry's OWN cancel-while-queued catch emits only `merge_cancelled`, no `build_gate_retry` row at
- *  all (a separate, sibling gap — not fixed by card 318ac7b2, tracked on its own card). Otherwise, truthy `passed`
+ *  identically to a cancelled `worker_gate` row. CORRECTED AGAIN (card 518e7ff6 — the sibling gap this
+ *  paragraph used to describe as unfixed): `build_gate_retry` CAN now also carry `cancelled:true` — the
+ *  transient-kill auto-retry's OWN cancel-while-queued catch (sessions/service.ts) emits its own
+ *  `build_gate_retry` row stamped `cancelled:true`/`gateSpawned:false` alongside `merge_cancelled`,
+ *  DIFFERENT SHAPE from the single-file-retry fix above: there, attempt 1's `build_gate` row didn't exist
+ *  yet at cancel time (the fix fills a void); here, attempt 1's `build_gate` row was ALREADY written
+ *  (unconditionally, before this retry ever starts) and stays a real `outcome:"reject"`, unmodified — the
+ *  new `build_gate_retry` row is a SEPARATE, second row recording that the retry itself never reached a
+ *  verdict. A caller computing a rejection rate must read the PAIRING (a `build_gate` "reject" immediately
+ *  followed, same `opId`, by a `build_gate_retry` "cancelled") as one unresolved op, not a rejection — see
+ *  `gate_history`'s own tool description (orchestration.ts) for the full consumer-facing contract.
+ *  Otherwise, truthy `passed`
  *  (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed run is
  *  `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`) detail
  *  otherwise only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance

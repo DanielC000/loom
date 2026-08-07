@@ -3218,10 +3218,19 @@ export class OrchestrationMcpRouter {
           "`outcome:\"reject\"`. CARD 318ac7b2 (later): a cancelled MERGE gate CAN now also reach this " +
           "table, in ONE specific shape — the single-file-retry-cancellation just described above, where " +
           "attempt 1 already genuinely ran and failed before the retry's own (withdrawn) admission — so " +
-          "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. A SIBLING shape (the " +
-          "transient-kill auto-retry's own cancel-while-queued case) does NOT yet do this — attempt 1 there " +
-          "is already recorded as an ordinary `\"reject\"` before that retry is ever reached, tracked " +
-          "separately (not this card's scope). A caller " +
+          "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. " +
+          "⚠️ CARD 518e7ff6 — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
+          "cancel-while-queued case ALSO now leaves a distinguishable record, but not by reclassifying " +
+          "attempt 1's row — that `build_gate` row was already written, unconditionally, BEFORE this " +
+          "retry ever starts, and stays a real, unmodified `outcome:\"reject\"` (a true, measured fact: " +
+          "attempt 1 genuinely failed a retry-eligible kill/timeout run). Instead, a SEPARATE " +
+          "`build_gate_retry` row is emitted for the SAME `opId`, stamped `outcome:\"cancelled\"` " +
+          "(`gateRan:false` — this retry's own admission never spawned a process), recording that the " +
+          "retry which could have confirmed or salvaged attempt 1's failure never ran. " +
+          "⭐ A CONSUMER COMPUTING A REJECTION RATE MUST READ THIS PAIRING: a `\"reject\"` `build_gate` row " +
+          "immediately followed (same `opId`) by a `\"cancelled\"` `build_gate_retry` row is ONE unresolved " +
+          "op, not a rejection — counting the reject row alone reproduces exactly the inflation fixed " +
+          "above for the single-file-retry shape. A caller " +
           "computing a pass/fail or REJECTION RATE from this table must filter on `outcome===\"reject\"`, " +
           "never on `passed===false` alone — `passed` stays `outcome===\"pass\"` exactly as before (so a " +
           "cancelled row still reads `passed:false`, since it is also not a pass), but `passed:false` on a " +

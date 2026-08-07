@@ -404,7 +404,11 @@ type ConfirmMergeResult = {
    *  queued path specifically, attempt 1 — a SEPARATE, EARLIER admission — already genuinely ran and
    *  genuinely failed before this retry was ever queued; that real run is what the sibling `build_gate`
    *  event (stamped `cancelled:true`, emitted right before this same return) records, so it is NOT lost —
-   *  just not carried on this particular return value's own fields. `cancelKind` distinguishes an automatic
+   *  just not carried on this particular return value's own fields. SIBLING CAVEAT (card 518e7ff6): the
+   *  transient-kill retry's own cancel-while-queued path ALSO has an earlier real attempt 1 — but there,
+   *  attempt 1's `build_gate` row was already written before this retry even started, so nothing needs
+   *  filling in on IT; instead a separate `build_gate_retry` row (also `cancelled:true`) records the
+   *  retry's own missing verdict. `cancelKind` distinguishes an automatic
    *  supersede from a manager's explicit `gate_cancel`; see {@link GateCancelKind}'s own doc. Only reachable
    *  while QUEUED — a RUNNING merge gate still refuses cancellation entirely (see `cancelGateOp`'s own doc
    *  for why those two phases deliberately differ). */
@@ -12427,6 +12431,39 @@ export class SessionService {
             // DISTINCT EVENT KIND, NOT merge_rejected — see the first attempt's identical catch above for
             // the full reasoning (card 361520a0, Half Four).
             concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+            // CARD 518e7ff6 — THE SIBLING GAP 318ac7b2 explicitly left open (see gate_history's tool doc
+            // and gateOutcomeFromDetail's doc, db.ts, both updated alongside this). NOT the same shape as
+            // 318ac7b2's fix: THAT retry's own `evt("build_gate", ...)` sits AFTER its retry block, so a
+            // cancel there means NO row exists yet for the op (318ac7b2 fills that void). THIS retry's
+            // sibling `evt("build_gate", ...)` for attempt 1 (line ~12297, ABOVE this block) already ran —
+            // attempt 1 genuinely spawned and genuinely failed a retry-eligible (kill/timeout, never
+            // "genuine" — see the guard gating this whole retry, above) run, and that row correctly reads
+            // `outcome:"reject"`. It is NOT wrong and is NOT touched here: orchestration_events is
+            // append-only (no UPDATE path), and attempt 1's own failure is a true, measured fact worth
+            // keeping regardless of what happens to the retry.
+            //
+            // What's missing without this: a record of what happened to the RETRY itself. Every OTHER way
+            // this transient-kill retry can end (a pass, a further failure) reaches its own
+            // `evt("build_gate_retry", ...)` a few lines below — a cancel-while-queued is the ONE path
+            // that skipped it, leaving attempt 1's "reject" as the ONLY row `gate_history` shows for this
+            // op — indistinguishable from a definitive, no-second-chance rejection, when the truth is "we
+            // don't know: the mechanism built to tell a real bug from a transient kill (card bcba83a1) was
+            // itself withdrawn before it could answer."
+            //
+            // Emit the missing `build_gate_retry` row here too: `cancelled:true` (checked FIRST by
+            // `gateOutcomeFromDetail`, db.ts — reads `outcome:"cancelled"`, never "pass"/"reject") and
+            // `gateSpawned:false` (this retry's OWN admission never happened — no process spawned for IT,
+            // unlike attempt 1's row, which correctly keeps `gateRan:true`). No `passed` field: fabricating
+            // one would claim a verdict this retry never reached. DoD-2: a consumer computing a REJECTION
+            // RATE from `gate_history` must read this PAIRING — a `build_gate` "reject" row immediately
+            // followed (same `opId`) by a `build_gate_retry` "cancelled" row — as ONE unresolved op, not a
+            // rejection: the retry that could have confirmed or salvaged attempt 1's failure never ran.
+            // Counting the reject row alone (ignoring the paired cancellation) reproduces exactly the
+            // inflation 318ac7b2 fixed on the sibling path.
+            evt("build_gate_retry", {
+              cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateSpawned: false,
+              gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+            });
             evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
             return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
           }

@@ -1385,9 +1385,13 @@ export interface GatesActive {
  *  and failed (see {@link GateHistoryRow.retriedFile}'s own doc). That row is stamped `cancelled:true` on
  *  the SAME `build_gate` kind (not a second `merge_cancelled`-kind row — `GATE_HISTORY_KINDS` still
  *  excludes that kind entirely), so it reads `"cancelled"` here too, recording attempt 1's real run
- *  instead of losing it. The sibling transient-kill-retry cancel-while-queued shape does NOT yet do this
- *  (attempt 1 there is already recorded as an ordinary `"reject"` before that retry is ever reached) —
- *  tracked as a separate, later card, not fixed here.
+ *  instead of losing it.
+ *  CORRECTED (card 518e7ff6): the SIBLING transient-kill-retry cancel-while-queued shape is now ALSO
+ *  handled, but differently — its own attempt-1 `build_gate` row was already written (unconditionally,
+ *  before that retry ever starts) and stays a real, unmodified `"reject"`; a SEPARATE `build_gate_retry`
+ *  row is emitted alongside it, stamped `cancelled:true`, recording that the retry itself never reached a
+ *  verdict. A rejection-rate consumer must read the PAIRING — a `"reject"` row immediately followed (same
+ *  `opId`) by a `"cancelled"` `build_gate_retry` row — as one unresolved op, not a rejection.
  *  Card db9b0130: `"skipped"` is likewise a DISTINCT non-verdict, not a `"pass"` — a merge whose diff was
  *  proven inert (see `isInertMergeDiff`) never spawned a gate process at all, so recording it as a pass
  *  would reintroduce the exact defect `gateRan` (below) was added to fix, via a new door: a rate computed
