@@ -2181,10 +2181,15 @@ export interface EmitCompareGateResult {
    *  `gateCommand` — the ~668-test `test:daemon` runtime suite is PROVABLY unable to change outcome for
    *  this diff. `false` ⇒ run the full gate exactly as today; `reason` names why, for diagnostics only. */
   eligible: boolean;
-  /** Repo-root-relative paths of changed, non-helper `test/*.mjs` files to run directly — populated only
-   *  when `eligible`. A changed test file never BLOCKS eligibility on its own; it only ever ADDS itself
-   *  here, since the guards + running the file itself is a strictly stronger check than the file merely
-   *  sitting unrun in a full suite pass it would have passed anyway. */
+  /** Repo-root-relative paths of changed, non-helper `test/*.mjs` files to run — populated only when
+   *  `eligible`. A changed test file never BLOCKS eligibility on its own; it only ever ADDS itself here.
+   *  {@link buildReducedGateCommand} runs every name here THROUGH THE HARNESS (`test:daemon --only=`),
+   *  never as a bare `node <path>` — card dd4349ff: a bare invocation can't supply the fresh temp
+   *  `LOOM_HOME`/`LOOM_PORT` the harness contract requires, so a file needing that env doesn't merely run
+   *  weaker, it doesn't run AT ALL (refuses at 0s, no assertion ever executes) — exactly the shape that
+   *  made this field's PRIOR doc claim of "strictly stronger [than the full suite]" false for that class.
+   *  Routed through the harness, running the file here really is at least as strong as leaving it unrun
+   *  in a full suite pass it would have passed anyway — the guarantee this field now actually delivers. */
   changedTestFiles: string[];
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
@@ -2531,11 +2536,32 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
 
 /** Builds the `&&`-chained reduced gate command for a diff {@link computeEmitCompareGate} proved eligible
  *  — `pnpm build` (unconditional, real typecheck+emit) + the static guards (unconditional, source-text
- *  scanners) + each changed `test/*.mjs` file run directly, so its OWN behavior is actually exercised
- *  rather than merely proven absent from `src/`. Never includes the ~668-test `test:daemon` suite — that
- *  omission is the entire saving this mechanism exists for. */
+ *  scanners, run as bare `node <path>` since they never touch `LOOM_HOME`/a port) + — only when a test
+ *  file actually changed — ONE `pnpm --filter @loom/daemon test:daemon --only=<names>` step naming every
+ *  changed file, so each runs THROUGH THE HARNESS (its own fresh temp `LOOM_HOME` + non-4317 `LOOM_PORT`,
+ *  per `scripts/test-daemon.mjs`'s own header contract) instead of as a bare `node <path>` with neither.
+ *
+ *  Card dd4349ff: the prior bare invocation left any changed file that needed that env unable to even
+ *  START (`test/_guard.mjs`'s `requireHermeticEnv` refuses at exit 99, 0s, no assertion ever run) —
+ *  rejecting a release-critical merge for a defect in the INVOCATION, not the code under test.
+ *
+ *  Each `--only=` name is the harness's own bare test-daemon name for a changed file — its repo-relative
+ *  path minus the `packages/daemon/test/` prefix and `.mjs` suffix, the exact shape
+ *  `discoverHermeticTests` (scripts/test-daemon.mjs) keys `NOT_HERMETIC`/`TEST_TIMEOUT_OVERRIDES` on and
+ *  returns as `hermetic`. `resolveSelection`'s own `--only=` validation REFUSES a name outside that
+ *  discovered set rather than silently selecting nothing — so a path this function is handed that the
+ *  harness doesn't actually discover as hermetic (excluded-dir, an underscore helper, a `looksLikeTest`
+ *  violation) fails this reduced gate LOUDLY instead of quietly running zero tests. Never runs the
+ *  ~668-test suite UNFILTERED — that omission is the entire saving this mechanism exists for; `--only=`
+ *  is what lets a changed file's OWN behavior be exercised (not merely proven absent from `src/`) without
+ *  paying for the rest of the suite. */
 export function buildReducedGateCommand(changedTestFiles: string[]): string {
-  return ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`), ...changedTestFiles.map((p) => `node ${p}`)].join(" && ");
+  const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
+  if (changedTestFiles.length > 0) {
+    const names = changedTestFiles.map((p) => p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length));
+    steps.push(`pnpm --filter @loom/daemon test:daemon --only=${names.join(",")}`);
+  }
+  return steps.join(" && ");
 }
 
 /**

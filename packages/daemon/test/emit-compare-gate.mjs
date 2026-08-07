@@ -45,7 +45,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, buildReducedGateCommand } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -209,9 +209,35 @@ try {
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
     check("(D) gateRan:true", confirm.gateRan === true);
     check("(D) the gate command WAS called exactly once", calls === 1);
-    check("(D) captured command is the REDUCED gate (test/*.mjs never blocks eligibility on its own)", capturedGate !== FULL_GATE && !capturedGate.includes("test:daemon"));
+    check("(D) captured command is the REDUCED gate (test/*.mjs never blocks eligibility on its own)", capturedGate !== FULL_GATE);
     for (const g of GUARD_BASENAMES) check(`(D) reduced command STILL runs guard ${g} despite the Date.now() text`, capturedGate.includes(g));
-    check("(D) reduced command runs the changed test file itself directly", capturedGate.includes("packages/daemon/test/placeholder.mjs"));
+    // Card dd4349ff: the changed test file must run THROUGH THE HARNESS (test:daemon --only=<name>),
+    // never as a bare `node <path>` — a bare invocation can't supply the fresh temp LOOM_HOME/LOOM_PORT
+    // the harness contract requires, so it refuses at 0s instead of actually running (see
+    // scripts/test-daemon.mjs's own header + test/_guard.mjs's requireHermeticEnv).
+    check("(D) reduced command runs the changed test file THROUGH THE HARNESS (--only=), never bare",
+      capturedGate.includes("pnpm --filter @loom/daemon test:daemon --only=placeholder") && !capturedGate.includes("node packages/daemon/test/placeholder.mjs"));
+  }
+
+  // ── (M) card dd4349ff — RED-PROOF: buildReducedGateCommand must invoke a changed test file THROUGH THE
+  //        HARNESS (`test:daemon --only=<names>`), never as a bare `node <path>` with no LOOM_HOME/LOOM_PORT.
+  //        Direct unit-level call (no git/daemon plumbing needed) so this fails for exactly the invocation
+  //        defect, not anything downstream: pre-fix, buildReducedGateCommand emitted a bare `node
+  //        packages/daemon/test/<file>.mjs` for each changed file — that is what made
+  //        test/dev-server.mjs refuse with exit 99 at 0s and block a real release merge. ─────────────────
+  {
+    const cmd = buildReducedGateCommand(["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"]);
+    check("(M) still runs pnpm build", cmd.includes("pnpm build"));
+    for (const g of GUARD_BASENAMES) check(`(M) still runs guard ${g} bare (guards never touch LOOM_HOME)`, cmd.includes(`node packages/daemon/test/${g}`));
+    check("(M) routes BOTH changed files through test:daemon --only=, comma-joined",
+      cmd.includes("pnpm --filter @loom/daemon test:daemon --only=dev-server,other-thing"));
+    check("(M) NEVER invokes a changed test file as a bare `node <path>` (the defect this card fixes)",
+      !cmd.includes("node packages/daemon/test/dev-server.mjs") && !cmd.includes("node packages/daemon/test/other-thing.mjs"));
+    check("(M) never runs the ~668-test suite UNFILTERED (any test:daemon step here always carries --only=)",
+      !cmd.includes("test:daemon") || cmd.includes("--only="));
+    // A diff with NO changed test files must still omit the test:daemon step entirely (build + guards only).
+    const noTestFilesCmd = buildReducedGateCommand([]);
+    check("(M) zero changed test files -> no test:daemon step at all", !noTestFilesCmd.includes("test:daemon"));
   }
 
   // ── (E) SCOPE BOUNDARY — an ADDED .ts file (status A) -> FULL gate ─────────────────────────────────
