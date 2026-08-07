@@ -48,6 +48,21 @@ export const DAEMON_TEST_DIR = path.resolve(__dirname, "..", "test");
  * never writes it. Resolve via LOOM_HOME here — never hard-code — and pass an override key path in tests.
  */
 export const SECRET_KEY_PATH = path.join(LOOM_HOME, "secret.key");
+/**
+ * Card 9ccedbee — the LOOPBACK human-only-write guard secret (`gateway/loopback-secret.ts`). Loom's
+ * default (no `remoteAccess`) daemon treats loopback as fully trusted with NO per-route auth at all
+ * (see trust-tier.ts's own doc comment) — meaning any co-resident process that can open a TCP connection
+ * to 127.0.0.1, including an agent session's own Bash tool, is exactly as privileged as the human at the
+ * browser. This 256-bit hex secret is the credential that closes that gap: required (as `Authorization:
+ * Bearer <secret>`) on every non-GET `/api/*` route AND the `/ws/term` upgrade, EVEN from loopback — see
+ * the guard hook's own doc in gateway/server.ts for why it covers ALL writes rather than a Tier-0
+ * subset. Lazily generated 0600 on first boot (same `wx`-exclusive-create pattern as SECRET_KEY_PATH
+ * above, PLUS an explicit corrupt-file regenerate path — see that function's own comment), named
+ * `*.key` to match SECRET_KEY_PATH's convention. In practice LOOM_HOME lives outside any project repo,
+ * so this is rarely near a `.gitignore` at all; `ensureLoomHomeGitignore` below is defense-in-depth for
+ * the rare case someone `git init`s their own home directory.
+ */
+export const LOOPBACK_SECRET_PATH = path.join(LOOM_HOME, "gateway-loopback.key");
 export const SETTINGS_DIR = path.join(LOOM_HOME, "tmp", "settings");
 export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 /**

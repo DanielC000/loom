@@ -78,6 +78,7 @@ import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
 import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied, selectWsSubprotocol, resolveWsSubprotocolToken } from "./trust-tier.js";
+import { verifyLoopbackSecret } from "./loopback-secret.js";
 import { createRemoteRateLimiter } from "./remote-rate-limit.js";
 import { registerWebhookIngress } from "../webhooks/ingress.js";
 import { listWebhookEndpoints, createWebhookEndpoint, deleteWebhookEndpoint, setWebhookEndpointEnabled } from "../webhooks/store.js";
@@ -206,6 +207,17 @@ export interface GatewayDeps {
    * the gateway (session/status/event emission, C3/C5/C7) threads its own instance through here.
    */
   fleetHub?: FleetHub;
+  /**
+   * Card 9ccedbee — the loopback human-only-write guard secret (gateway/loopback-secret.ts,
+   * `getOrCreateLoopbackSecret()`). When PRESENT, every Tier-0 (routeTier) non-GET `/api/*` route
+   * requires it as `Authorization: Bearer <secret>` even from 127.0.0.1 — see the guard hook below for
+   * the full rationale. Optional so existing partial-stub tests (dozens of them build a minimal
+   * GatewayDeps and call POST/PATCH/DELETE `/api/*` routes with no auth header at all) keep building a
+   * server with the guard INERT, exactly like every other optional dep in this interface — the real
+   * (non-test) boot path, index.ts, always supplies it, so production is fail-closed by construction;
+   * only an intentionally-partial test build ever runs without this guard active.
+   */
+  loopbackSecret?: string;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -478,6 +490,90 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         return reply.code(401).send({ error: "unauthorized" });
       }
       rateLimiter.clearAuthFailures(ip);
+    });
+  }
+
+  // --- Loopback human-only-write guard (card 9ccedbee — SECURITY. v2 after Code Review: v1 gated
+  // routeTier===0 only, which left every TIER-1 route open — and Tier 1 is exactly where the human's
+  // AUTHORITY lives, not just configuration: POST /api/sessions/:id/input tags text `source:"human"` and
+  // feeds it to `ownerText` (mcp/questionTool.ts's "ANTI-FABRICATION INVARIANT", whose entire basis is
+  // "ownerText comes from the SAME loopback-only, human-authenticated REST composer" — a premise v1 left
+  // false), POST /api/questions/:id/answer is a direct human decision, and /ws/term's `{type:"stdin"}}`
+  // writes raw bytes into ANY session's pty, including an elevated one. Tier 1 means "safe to expose to
+  // an authenticated REMOTE human" — a materially different predicate from "safe from an unauthenticated
+  // co-resident agent", and v1 conflated them. v2 does NOT inherit trust-tier.ts's classification at all:
+  // it asks its own question — "does an agent legitimately need this from a shell?" — and the answer is
+  // no for every non-GET `/api/*` route and for `/ws/term`'s stdin capability, so it gates ALL of them,
+  // uniformly, with no per-route allowlist to drift.
+  //
+  // The trust-tier wall directly above is deliberately INERT unless a non-loopback bind is configured
+  // (isTrustTierHookActive) — on the DEFAULT loopback-only daemon it never even registers, so every
+  // writer in this file reaches its handler with ZERO check beyond the CSRF/Host hook at the top of this
+  // function — which a same-host `curl` trivially satisfies (Host defaults to loopback; an absent Origin
+  // is the fail-safe ALLOW path). Any co-resident process that can open a TCP connection to this port —
+  // including an agent session's own Bash tool — is therefore exactly as privileged as the human at the
+  // browser. This is NOT hypothetical: a Loom agent did it (see the card). This hook closes that gap,
+  // UNCONDITIONALLY (registered regardless of isTrustTierHookActive — it must hold on the default
+  // daemon, which is precisely the case the wall above ships inert for):
+  //   - Scope: every non-GET/HEAD `/api/*` route (no Tier distinction — see above), PLUS the `/ws/term`
+  //     upgrade (both viewing AND the `stdin` write capability — gating the whole socket is simpler than
+  //     per-message auth and reuses the SAME subprotocol/query-token extraction the remote tier already
+  //     established, and it is the stronger posture: an agent shouldn't be able to snoop another
+  //     session's terminal output any more than write to it). `/mcp/:sessionId` (every agent's real,
+  //     legitimate tool surface), `/internal/*` (loomctl lifecycle: shutdown/update), `/hooks/*` (Tier-2
+  //     signature-gated webhook ingress), `/oauth/callback`, and the other two WS routes (`/ws/fleet` —
+  //     read-only event bookkeeping; `/ws/companion` — a SEPARATE known gap this card does NOT close, see
+  //     the card's own notes) are untouched — an agent's MCP tool calls are byte-identical before/after.
+  //     A GET read is a materially different risk from a WRITE; closing GET-level disclosure is a
+  //     separate concern this hook does not attempt.
+  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` (constant-time compared);
+  //     for `/ws/term`'s upgrade, the SAME secret via the remote tier's own established mechanism —
+  //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` (preferred) or a `?token=` query-param
+  //     fallback (resolveWsSubprotocolToken, trust-tier.ts) — reused verbatim rather than reinvented.
+  //     Optional dep (see GatewayDeps' own doc) — ABSENT ⇒ this hook is a no-op, so partial-stub tests
+  //     that don't wire it stay byte-identical; index.ts (the only real boot path) always supplies it, so
+  //     production is fail-closed by construction.
+  //   - TEST NOTE: `req.socket.remoteAddress` is what this hook (and the trust-tier wall above) key
+  //     loopback-vs-remote off — a real TCP connection always populates it, but Fastify's `injectWS` test
+  //     helper does NOT default it the way plain `.inject()` does (light-my-request quirk, confirmed via
+  //     debug instrumentation while building this: a bare `injectWS(url, {headers})` call yields an EMPTY
+  //     `remoteAddress`, which is NOT in the `LOOPBACK` set — the hook then silently no-ops instead of
+  //     rejecting). Any test exercising this hook's `/ws/term` path MUST pass an explicit `socket: {
+  //     remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS tests already pass
+  //     `socket: remoteSocket` for the remote-peer case. See test/loopback-write-guard.mjs.
+  if (deps.loopbackSecret !== undefined) {
+    const loopbackSecret = deps.loopbackSecret;
+    app.addHook("onRequest", async (req, reply) => {
+      const routePattern = req.routeOptions.url;
+      if (routePattern === undefined) return;
+      const isGuardedApiWrite = req.method !== "GET" && req.method !== "HEAD" && routePattern.startsWith("/api/");
+      const isTermSocket = routePattern === "/ws/term/:sessionId";
+      if (!isGuardedApiWrite && !isTermSocket) return;
+      // A non-loopback caller reaching here either already passed the trust-tier wall above (a valid
+      // remote gateway token on a Tier-1 route — unaffected by this hook, which only ever ACTS on
+      // loopback callers) or already failed it (Tier 0 ⇒ 403 before this hook ever runs) or there is no
+      // non-loopback bind open at all (the OS refuses the connection) — so this check is what actually
+      // scopes the hook to loopback, not a defensive no-op.
+      const ip = req.socket?.remoteAddress ?? "";
+      if (!LOOPBACK.has(ip)) return;
+      let presented: string | undefined;
+      if (isTermSocket) {
+        const proto = req.headers["sec-websocket-protocol"];
+        const resolved = resolveWsSubprotocolToken(typeof proto === "string" ? proto : undefined);
+        if (resolved.outcome === "rejected") {
+          // Malformed single-entry bearer offer (the shape card 42abca6a's leak relied on) — reject
+          // outright, never fall back to `?token=`, mirroring the remote tier's own reasoning exactly.
+          return reply.code(401).send({ error: "unauthorized — see `loom open` for how to obtain the local access credential" });
+        }
+        const q = req.query as { token?: unknown };
+        presented = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
+      } else {
+        const auth = req.headers.authorization;
+        presented = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+      }
+      if (!verifyLoopbackSecret(presented, loopbackSecret)) {
+        return reply.code(401).send({ error: "unauthorized — see `loom open` for how to obtain the local access credential" });
+      }
     });
   }
 

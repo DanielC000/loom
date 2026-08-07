@@ -3,11 +3,12 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
-import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isUsagePollerSuppressed } from "./paths.js";
+import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePollerSuppressed } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
 import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
+import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
@@ -774,6 +775,12 @@ async function main(): Promise<void> {
   // SAME const, so the reported state can never drift from the ticker's real state.
   const schedulerEnabled =
     process.env.LOOM_SCHEDULER_ENABLED === "1" || resolved.orchestration.schedulerEnabled;
+  // Card 9ccedbee: the loopback human-only-write guard secret. Generated lazily (0600, under LOOM_HOME)
+  // on first boot and re-read on every later boot — see gateway/loopback-secret.ts for why this MUST
+  // stay plaintext-recoverable (unlike the hashed-at-rest gateway_tokens store): `loom open`/`loom start`
+  // (bin/loom.mjs) re-reads this same file on every invocation to embed it in the browser-open URL, and a
+  // fresh browser tab that never saw that URL has no other way to obtain it.
+  const loopbackSecret = getOrCreateLoopbackSecret();
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,
     schedulerEnabled,
@@ -784,6 +791,7 @@ async function main(): Promise<void> {
     // paused/revoked, is a plain false; the trust-tier hook never distinguishes why).
     verifyGatewayToken: (token) => db.authenticateGatewayToken(token).ok,
     onHttpsResolved: (active) => { httpsActive = active; },
+    loopbackSecret,
   });
   // Access-story fail-closed boot check (Phase A card 766f8b50, extended by Phase C card 6bc02f50): a
   // non-loopback bind is only ever actually opened when a gateway token exists AND the TLS mandate is
@@ -810,6 +818,31 @@ async function main(): Promise<void> {
   const boundAddress = await app.listen({ port: PORT, host: remoteListenerOk ? remoteAccessConfig.bindHost : "127.0.0.1" });
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
+  // Card 9ccedbee follow-up (manager review, same card): `loom open`/`loom start` (bin/loom.mjs)
+  // constructs the tokenized browser URL itself by reading the SAME secret file directly, so console
+  // output is not that flow's only path to it. This line exists for the dev/self-host workflow (`pnpm
+  // daemon`/`pnpm daemon:stable` + a manually-opened browser tab, no loomctl involved) — but it must NOT
+  // print the secret itself: `pnpm daemon:stable`'s supervisor (scripts/daemon-supervisor.mjs) tees this
+  // process's own stdout into a DURABLE, rotated `~/.loom/logs/daemon-output.log` that agents routinely
+  // grep for unrelated diagnostics (gate/loom log lines) — printing the raw secret here would hand it to
+  // any Bash-capable session that greps that log for something else entirely, which is a materially
+  // larger and more incidental population than "an agent that deliberately hunts for the key file" (the
+  // named residual limit this fix already accepts). Print only the FILE PATH; the human reads the secret
+  // from disk themselves (or, in practice, uses `loom open`, which never touches this log at all).
+  // eslint-disable-next-line no-console
+  console.log(`[gateway] local access: open http://127.0.0.1:${PORT}/?token=<secret>, where <secret> is the contents of ${LOOPBACK_SECRET_PATH} (first visit only — the browser remembers the token after). The secret is intentionally NOT printed here — see the comment above.`);
+  // Code Review Major 2: `localStorage` is per-ORIGIN, and the token above is scoped to THIS daemon's own
+  // origin (127.0.0.1:PORT). `pnpm web`'s dev proxy serves the SPA from a DIFFERENT origin (127.0.0.1:5317
+  // by default — see packages/web/vite.config.ts) that proxies /api+/ws through to here, so a token
+  // captured while visiting the daemon's own origin directly is invisible to the dev-server origin's own
+  // localStorage — every write there 401s with no visible cause otherwise (exactly the failure mode
+  // CLAUDE.md's isolated-daemon UI-review recipe would hit). Print the SAME instruction for that origin
+  // too, dev builds only (a packaged install never runs a separate dev server, so this line would be
+  // noise there).
+  if (!isPackagedInstall()) {
+    // eslint-disable-next-line no-console
+    console.log(`[gateway] dev workflow (pnpm web on a separate origin): ALSO visit http://127.0.0.1:5317/?token=<secret> once (same <secret> as above) — its localStorage is separate from the daemon's own origin.`);
+  }
   // P5b hardening follow-up (card 80e2093f, item 2): 0.0.0.0/:: is an explicit, owner-decided supported
   // LAN-in-scope bind mode (still gated by the token+TLS wall above) — but binding every interface should
   // never be SILENT. Log it plainly the one time it's actually opened, distinct from the routine listen line.

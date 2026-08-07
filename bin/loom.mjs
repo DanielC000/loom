@@ -164,6 +164,37 @@ function isAlive(pid) {
 // --- HTTP probes ------------------------------------------------------------------------------------
 const urlFor = (port) => `http://127.0.0.1:${port}`;
 
+// Card 9ccedbee: the daemon now requires a shared secret (as `Authorization: Bearer <token>`) on every
+// human-only config WRITE, even from loopback — see packages/daemon/src/gateway/loopback-secret.ts. It
+// is generated lazily by the daemon itself at boot (0600, under LOOM_HOME); this CLI never mints it,
+// only reads the same file back to embed it in the browser URL it opens. The web SPA captures the
+// `?token=` query param on first load, remembers it (localStorage), and strips it from the visible URL —
+// so this is a one-time-per-browser-profile thing, not a per-launch requirement. A daemon still mid-boot
+// (the file not created yet) degrades to the bare URL: the browser just won't have a token until the
+// user revisits a tokenized URL once.
+//
+// `urlWithToken` (embeds the real secret) is for `openBrowser` ONLY — a one-time OS-process argv, not a
+// durable channel. It must NEVER be passed to `console.log`: `loom start --no-open` is how `loom service
+// install` registers the daemon with the OS service manager (systemd/launchd/Task Scheduler), which
+// commonly captures a foregrounded service's own stdout into ITS OWN durable, often broadly-readable log
+// (e.g. `journalctl`) — the exact same "secret lands in a durable log agents routinely read for unrelated
+// reasons" exposure a manager review caught in the daemon's OWN boot banner (see index.ts). `urlHint`
+// below is the console-safe counterpart: it prints the bare URL plus a pointer to the secret FILE PATH,
+// never the secret itself.
+function loopbackSecretPath() { return path.join(loomHome(), "gateway-loopback.key"); }
+function readLoopbackSecret() {
+  try { const s = fs.readFileSync(loopbackSecretPath(), "utf8").trim(); return s || null; } catch { return null; }
+}
+function urlWithToken(url) {
+  const secret = readLoopbackSecret();
+  return secret ? `${url}?token=${secret}` : url;
+}
+function urlHint(url) {
+  return readLoopbackSecret()
+    ? `${url}  (first visit: append ?token=<value>, where <value> is the contents of ${loopbackSecretPath()} — the browser remembers it after)`
+    : url;
+}
+
 // Poll GET /api/version until the gateway answers 200 (or the timeout elapses) → true when ready.
 function waitForReady(port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -261,7 +292,9 @@ function openBrowser(target) {
     else if (process.platform === "darwin") { cmd = "open"; cmdArgs = [target]; }
     else { cmd = "xdg-open"; cmdArgs = [target]; }
     const child = spawn(cmd, cmdArgs, { stdio: "ignore", detached: true });
-    child.on("error", () => { /* best-effort — URL already printed */ });
+    // best-effort: if this fails, the line printed just above (urlHint) has the FILE PATH to build the
+    // tokenized URL manually — it does NOT carry the token itself (card 9ccedbee; see urlHint's own doc).
+    child.on("error", () => {});
     child.unref();
   } catch { /* best-effort */ }
 }
@@ -290,8 +323,8 @@ async function startForeground({ port, open }) {
 
   const ready = await waitForReady(port, 30000);
   if (ready) {
-    console.log(`\n  Loom is running at ${url}\n  Press Ctrl-C to stop.\n`);
-    if (open) openBrowser(url);
+    console.log(`\n  Loom is running at ${urlHint(url)}\n  Press Ctrl-C to stop.\n`);
+    if (open) openBrowser(urlWithToken(url));
   } else {
     console.error(`loom: the daemon did not answer on ${url} within 30s — it may still be starting; open the URL manually.`);
   }
@@ -328,8 +361,8 @@ async function startDetached({ port, open }) {
 
   const ready = await waitForReady(port, 30000);
   if (ready) {
-    console.log(`\n  Loom is running at ${url}  (detached, PID ${child.pid})\n  Stop it with 'loom stop'.\n`);
-    if (open) openBrowser(url);
+    console.log(`\n  Loom is running at ${urlHint(url)}  (detached, PID ${child.pid})\n  Stop it with 'loom stop'.\n`);
+    if (open) openBrowser(urlWithToken(url));
     return 0;
   }
   console.error(`loom: the daemon did not answer on ${url} within 30s (PID ${child.pid}).
@@ -451,7 +484,7 @@ async function openCmd({ port }) {
     return 1;
   }
   console.log(`loom: opening ${url} …`);
-  openBrowser(url);
+  openBrowser(urlWithToken(url));
   return 0;
 }
 

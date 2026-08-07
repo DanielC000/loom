@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
+import { getLoopbackToken } from "../lib/api";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
 
@@ -161,7 +162,15 @@ export function TerminalPane({ sessionId, resizable = false, readOnly = false, h
 
     const decoder = new TextDecoder();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/term/${sessionId}`);
+    // Card 9ccedbee (v2, Code Review Critical): /ws/term now requires the loopback guard secret — it
+    // carries `{type:"stdin"}` writes into the pty, the exact "human authority" surface the review found
+    // still open. A WebSocket handshake can't carry a custom header, so this uses the SAME `?token=`
+    // fallback the remote-access tier already established (gateway/trust-tier.ts) rather than a new
+    // mechanism. No token captured yet (guard inert, or the user hasn't visited a tokenized URL) → the
+    // bare URL, unchanged from before — the server-side guard is itself optional-dep-gated the same way.
+    const loopbackToken = getLoopbackToken();
+    const wsUrl = `${proto}//${location.host}/ws/term/${sessionId}${loopbackToken ? `?token=${encodeURIComponent(loopbackToken)}` : ""}`;
+    const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
 
     /**
