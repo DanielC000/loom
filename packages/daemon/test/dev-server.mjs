@@ -208,10 +208,15 @@ function canConnect(port, timeoutMs = 2000) {
 
 // Like canConnect, but against an ARBITRARY host (not just 127.0.0.1) — needed for sections (g)/(h)
 // below, which must prove a connection succeeds or fails against a SPECIFIC host string (a URL's own
-// `.hostname`, already bracket-stripped by the WHATWG URL parser for an IPv6 literal).
+// `.hostname`, which for an IPv6 literal the WHATWG URL parser keeps BRACKETED, e.g. "[::1]" — a
+// socket connect needs the unbracketed literal, so strip a surrounding "[...]" here before connecting.
+// Confirmed on real Linux (node:22-bookworm): a bracketed "[::1]" host fails ENOTFOUND, while the
+// unbracketed "::1" connects — Windows silently tolerates the bracketed form, which is why this only
+// ever showed up in CI, not the (Windows) merge gate.
 function canConnectHost(host, port, timeoutMs = 2000) {
+  const unbracketed = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host, port, timeout: timeoutMs });
+    const socket = net.createConnection({ host: unbracketed, port, timeout: timeoutMs });
     socket.once("connect", () => { socket.destroy(); resolve(true); });
     socket.once("error", () => resolve(false));
     socket.once("timeout", () => { socket.destroy(); resolve(false); });
