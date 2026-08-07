@@ -848,6 +848,90 @@ try {
     check("13: no rule/suppression was invented for this shape — getLastMismatchReplay stays null",
       host.getLastMismatchReplay(sid) === null);
   }
+
+  // ===== 14. Card c0323f8a — EXACT-REPEAT SUPPRESSION. Real production evidence showed the SAME
+  // `[loom:prompt-mismatch]` notice (identical gen + writtenHash + reportedHash) delivered more than once,
+  // byte-identical, with no `[loom:possible-duplicate root:…]` frame — because this is a FRESH mint each
+  // time (the detector re-running), never a redrive of an already-queued entry, so the existing give-up/
+  // redrive tagging machinery structurally cannot see it. This suite cannot synthesize the exact upstream
+  // trigger (a synchronous double `deliverHook` call for one turn is itself blocked from re-entering this
+  // detector a second time — `submitWasOutstanding` reads `!live.enterConfirmed`, and this same case sets
+  // `enterConfirmed=true` before the detector ever runs, so a literal back-to-back duplicate call takes a
+  // different, harmless branch on its second call) — so this reproduces the SYMPTOM directly: the detector
+  // reached with an UNCHANGED `(gen, writtenHash, reportedHash)` triple, exactly what the real specimens'
+  // own logged fields showed, regardless of what upstream condition re-opens the gate. =====
+  {
+    const sid = newSession("ExactRepeat"); SIDS.push(sid);
+    const stranded = "leftover text from yet another prior turn";
+    const intended = "the message this turn actually intended to submit";
+    host.enqueueStdin(sid, intended); // gen=1, live.lastPrompt = intended, enterConfirmed=false
+    const firstWarnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    });
+    check("14: the first occurrence of this event fires the ordinary diagnostic", firstWarnings.length === 1);
+    const enqueued14 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("14: the first occurrence's notice actually enqueues", enqueued14);
+    check("14: exactly ONE mismatch notice is pending after the first occurrence",
+      host.getPendingEntries(sid).filter((e) => e.text.includes("[loom:prompt-mismatch]")).length === 1);
+
+    // Simulate whatever upstream condition re-opens the gate for the SAME turn (gen unchanged — the
+    // observed shape) without a genuine new submit() (which would bump the generation and change the
+    // signature by construction). The suite cannot claim to know the real upstream cause; it reproduces
+    // the resulting state precisely instead.
+    host.live.get(sid).enterConfirmed = false;
+    const suppressedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-notice-suppressed]")) suppressedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended }); // identical gen=1, identical hashes
+    } finally {
+      console.log = origLog;
+    }
+    check("14: the exact-repeat occurrence logs a suppression line naming the matched signature",
+      suppressedLines.length === 1 && /gen=1\b/.test(suppressedLines[0] ?? "") && /writtenHash=\w+/.test(suppressedLines[0] ?? "") && /reportedHash=\w+/.test(suppressedLines[0] ?? ""));
+    // Card c0323f8a (manager review): the suppression must also be DURABLY, manager-visibly recorded — a
+    // console line alone is invisible to the manager who needs to know an alarm was swallowed. Set
+    // synchronously inside deliverHook itself, so this is checkable immediately with no wait.
+    {
+      const suppressed = host.getLastMismatchNoticeSuppressed(sid);
+      check("14: the durable suppression pull-surface records the matched signature and starts count at 1",
+        suppressed !== null && suppressed !== undefined && suppressed.gen === 1 && suppressed.count === 1
+        && typeof suppressed.writtenHash === "string" && typeof suppressed.reportedHash === "string");
+    }
+    // A SECOND identical repeat (still gen=1, same content) must accumulate the count rather than reset it.
+    host.live.get(sid).enterConfirmed = false;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    check("14: a further exact repeat of the SAME signature increments count rather than resetting it",
+      host.getLastMismatchNoticeSuppressed(sid)?.count === 2);
+    // Same shape as scenario 8's own NEGATIVE CONTROL above: a would-be SECOND enqueue is scheduled via the
+    // SAME setTimeout(fn, 0) host.ts uses for the real notice — a synchronous check right here would
+    // trivially pass even on unpatched code, since an unsuppressed second setTimeout(0) has not run yet in
+    // the same tick. One macrotask tick is not a guessed duration; it's the exact, proven-sufficient bound
+    // (macrotasks execute FIFO, so anything scheduled by the deliverHook call above is guaranteed to have
+    // already run by the time a LATER-registered setTimeout(_, 0) resolves). The check reads
+    // getPendingEntries synchronously right after, no further await in between.
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — waits only for the KNOWN-required single macrotask tick
+    // (see scenario 8's own comment for the full reasoning); the negative check below runs synchronously
+    // immediately after, with no further await in between.
+    await new Promise((r) => setTimeout(r, 0));
+    check("14: THE SAFETY CASE — no SECOND notice was enqueued for the exact repeat (still exactly one pending)",
+      host.getPendingEntries(sid).filter((e) => e.text.includes("[loom:prompt-mismatch]")).length === 1);
+
+    // ===== 14b. NEGATIVE CONTROL — suppression must be scoped to the exact (gen, writtenHash,
+    // reportedHash) triple, never a blanket "this session already got a notice" latch: a genuinely
+    // DIFFERENT mismatch on a LATER generation must still fire in full. =====
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // drains the one pending notice as its own new turn, advancing the generation
+    const laterIntended = "a completely different later message";
+    const laterStranded = "unrelated stray content from a different prior turn";
+    host.enqueueStdin(sid, laterIntended);
+    const laterWarnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: laterStranded + laterIntended });
+    });
+    check("14b: a genuinely later, different mismatch on a new generation still fires the diagnostic (not over-suppressed)",
+      laterWarnings.length === 1);
+    const enqueued14b = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("14b: THE SAFETY CASE — a later, distinct mismatch still enqueues its own notice", enqueued14b);
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }

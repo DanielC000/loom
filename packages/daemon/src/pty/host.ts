@@ -2578,6 +2578,74 @@ interface Live {
   // session learning about ITSELF. Same PULL-surface posture as `lastMismatchReplay` otherwise — never
   // cleared once set, overwritten (not accumulated) by a later occurrence.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  /**
+   * Card c0323f8a — the SIGNATURE of the last `[loom:prompt-mismatch]` session-facing notice actually
+   * enqueued (see the `setTimeout(() => this.enqueueStdin(...))` call site below). Unlike
+   * `lastMismatchReplay`/`lastMismatchFusion` above (read-only PULL surfaces for a WATCHING manager,
+   * overwritten unconditionally on every detection, never gating anything), this field's ONLY job is
+   * SUPPRESSING an exact repeat: if the underlying `UserPromptSubmit` hook fires more than once for the
+   * SAME logical turn, this whole detection block re-runs from scratch and, before this field existed,
+   * re-enqueued a BYTE-IDENTICAL notice as a genuinely fresh turn — never tagged, since it is a fresh
+   * mint, not a redrive of an already-queued entry (the `[loom:possible-duplicate root:…]` machinery
+   * only ever tags a REDELIVERY of a message that was already durably queued or gave up; this notice is
+   * neither).
+   *
+   * ⚠️ THIS IS A DATA-LOSS ALARM — suppressing a genuinely NEW mismatch here would hide a real loss,
+   * silently. The soundness of suppressing on an exact `(gen, writtenHash, reportedHash)` triple match
+   * rests entirely on `gen` (`Live.submitGeneration`) being unable to repeat across two DIFFERENT
+   * underlying events, which is a stronger property than merely "gen advances". PROOF, established by
+   * READING THE CODE, not by observing a production incident:
+   * 1. `submitGeneration` is mutated ONLY by `++`, at exactly FOUR sites in this file, all monotonic
+   *    increments, none a reset/decrement: `submit()` itself (`const gen = ++live.submitGeneration;`),
+   *    `healIfStuck`'s out-of-band stale-busy bump, `stop()`'s bump on graceful/hard stop, and
+   *    `interruptForRedirect`'s bump on an Esc-cancel.
+   * 2. The ONLY place it is ever set to a value OTHER than an increment is `submitGeneration: 0` at Live
+   *    construction — and for a real Claude session there is exactly ONE construction site, `spawn()`
+   *    (this file). Every `SessionService` spawn path (fresh spawn, resume, fork, a `worker_recycle`
+   *    successor, boot-reconcile resume) calls `this.pty.spawn(...)` — the SAME method, unconditionally —
+   *    so a resume does NOT reuse an existing Live and dodge the reset; `isResume: !!opts.resumeId` is a
+   *    flag on THIS SAME constructor literal, not a separate code path.
+   * 3. This field is initialized to `null` at the SAME construction site (see the three `Live` literals
+   *    below) — so it resets in lockstep with `submitGeneration` across every boundary that resets gen. A
+   *    stale signature can never survive into a fresh gen sequence.
+   * 4. The specific case this project has ON RECORD as a real engine quirk — card 8a5bd0d0, the engine
+   *    firing a second `SessionStart` under a rotated `session_id` for the SAME live pty (see that
+   *    handling above) — does NOT construct a new Live and does NOT touch `submitGeneration`; it mutates
+   *    only `live.engineSessionId` in place. Checked specifically because it was the most plausible way
+   *    this proof could be wrong; it isn't.
+   * ⇒ Within one Live's lifetime, two reads of the identical `gen` can only happen if no `submit()` ran
+   * between them — meaning `live.lastPrompt` (Loom's own intended write for that generation) is STILL the
+   * same string both times. There is no way for a second, genuinely-distinct loss to exist "at gen=N"
+   * without a new submit() first, and a new submit() always bumps gen — so a full triple match cannot
+   * represent two different events.
+   * ⚠️ WHAT THIS DOES NOT PROVE: it does not establish HOW, in production, the detection block gets
+   * re-entered a second time with an unchanged `gen`. A literal synchronous double `deliverHook`
+   * (`UserPromptSubmit`) call for one turn is itself structurally blocked from reaching this a second
+   * time (`submitWasOutstanding = !live.enterConfirmed`, and this same case sets `enterConfirmed = true`
+   * before the detector runs, so a genuine back-to-back duplicate takes a different, harmless branch) —
+   * the real trigger for the specimens that motivated this field is UNCONFIRMED. This field guards
+   * against the symptom regardless of the trigger; it is not evidence the trigger is understood.
+   *
+   * Never cleared, overwritten (not accumulated) by the next notice actually sent — mirrors the
+   * PULL-surface fields' own "last one wins" posture. See `lastMismatchNoticeSuppressed` below for the
+   * durable, manager-visible record of when this field's match actually suppressed something — this field
+   * alone is not manager-visible.
+   */
+  lastMismatchNoticeSignature: { gen: number; writtenHash: string; reportedHash: string } | null;
+  /**
+   * Card c0323f8a (manager review) — the durable, PULL-surface counterpart to a suppression decided by
+   * `lastMismatchNoticeSignature` above. A suppressed alarm and no alarm are indistinguishable to any
+   * future reader unless something records that a suppression actually happened — a `console.log` line is
+   * fine for a human tailing the daemon's own stdout, but invisible to a manager, which is who actually
+   * needs to know an alarm was swallowed. Mirrors `lastMismatchReplay`/`lastMismatchFusion`'s own posture
+   * (read-only, never gates anything, overwritten — not accumulated as a struct — by the next SUPPRESSED
+   * occurrence) with one addition: `count` accumulates across repeated suppressions of the SAME signature,
+   * so "suppressed once" and "suppressed five times in a row" read differently. Reset to a fresh `count:1`
+   * the moment a DIFFERENT signature suppresses (which cannot happen without an intervening real notice —
+   * see `lastMismatchNoticeSignature`'s own proof), so `count` is always "how many repeats of the CURRENT
+   * signature have been suppressed", never a lifetime total across unrelated events.
+   */
+  lastMismatchNoticeSuppressed: { gen: number; writtenHash: string; reportedHash: string; count: number; detectedAt: number } | null;
 }
 
 export interface SpawnOpts {
@@ -3975,7 +4043,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -4143,7 +4211,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -4223,7 +4291,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -5131,7 +5199,69 @@ export class PtyHost {
                 // recognizable tag check mirroring `isPasteRecoveryAttempt`), that is a follow-up, not scope
                 // creep here — this comment exists so a future reader who spots the recursion finds this
                 // reasoning instead of re-deriving it or reaching for an unneeded guard.
-                setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
+                // Card c0323f8a — EXACT-REPEAT SUPPRESSION, orthogonal to the SELF-REFERENCE note above
+                // (that one is about this notice's OWN delivery mismatching; this one is about the
+                // DETECTION that produced `mismatchText` re-running for the SAME underlying event). A
+                // `(gen, writtenHash, reportedHash)` triple match against the last notice actually sent
+                // means this exact event already got a notice — the SOUNDNESS of suppressing on this match
+                // (this is a DATA-LOSS ALARM; a false suppression hides a real loss, silently) is proved on
+                // `lastMismatchNoticeSignature`'s own doc, not restated here.
+                //
+                // ⚠️⚠️ REQUIRED FRAMING (manager review, card c0323f8a) — do not describe this as fixing an
+                // OBSERVED duplicate. Guards a re-mint path that is CODE-REACHABLE but has NO OBSERVED
+                // INSTANCE. Two real production specimens were examined directly against daemon-output.log
+                // (each session's own `[prompt-echo]` line — emitted exactly once per detector entry,
+                // confirmed via a positive control: every `UserPromptSubmit` hook pairs 1:1 with one such
+                // line) and BOTH showed the detector ran ONCE, not twice, for the duplicated generation:
+                //   - The card's own motivating fusion specimen (session 3c676f17…, gen=26,
+                //     writtenHash=62638edc reportedHash=2ed5441f): exactly ONE `[prompt-echo]` line for
+                //     gen=26 in the ENTIRE available log history (verified: `62638edc`/`2ed5441f` appear on
+                //     exactly 2 lines total, both timestamped together, both describing this ONE detection
+                //     — not two). The resulting notice ALSO shows exactly one clean physical pty-write (one
+                //     chunk hash, one matching byteIdentical=true confirming echo) — no duplicate transmission
+                //     visible at the daemon level either. If this specimen genuinely reached its recipient
+                //     twice, the mechanism is invisible to every layer this daemon instruments.
+                //   - A manager's own gen=28 specimen: also exactly one `[prompt-echo]` line, yet the notice
+                //     was received twice — ONE MINT, TWO DELIVERIES. This fix (a mint-layer guard) would NOT
+                //     have prevented that specimen either; the duplication there happened downstream of the
+                //     mint, at a layer this fix does not touch.
+                // So: every real specimen examined so far is explained by something OTHER than a re-mint.
+                // This field's protection remains real and code-confirmed (see below), but it is a guard
+                // against a path that is reachable in principle, not a fix for anything observed.
+                //
+                // WHAT IS NOT PROVEN: how, in production, the detection block would get re-entered a second
+                // time with an unchanged `gen`, if it ever does — a literal synchronous double
+                // `UserPromptSubmit` hook call for one turn is itself structurally blocked from reaching
+                // here twice (`submitWasOutstanding = !live.enterConfirmed`, and this same case sets
+                // `enterConfirmed = true` before the detector runs — see the top of this case). Suppress the
+                // resend (still logged, and durably recorded below — never silent) rather than mint a
+                // byte-identical second turn the recipient has no way to distinguish from new direction.
+                // `lastMismatchReplay`/`lastMismatchFusion` above are deliberately UNTOUCHED by this check
+                // (they already fired, unconditionally, before this point) — they are a manager-facing PULL
+                // surface recording "a mismatch was detected", not "a notice was sent",
+                // so a suppressed resend must still update them like any other detection.
+                const noticeSignature = { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash };
+                const isExactRepeatNotice = live.lastMismatchNoticeSignature !== null
+                  && live.lastMismatchNoticeSignature.gen === noticeSignature.gen
+                  && live.lastMismatchNoticeSignature.writtenHash === noticeSignature.writtenHash
+                  && live.lastMismatchNoticeSignature.reportedHash === noticeSignature.reportedHash;
+                if (isExactRepeatNotice) {
+                  // eslint-disable-next-line no-console
+                  console.log(`[prompt-mismatch-notice-suppressed] ${sessionId} gen=${noticeSignature.gen} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — exact repeat of the last notice already sent for this event; not re-sending a byte-identical turn.`);
+                  // Card c0323f8a (manager review) — DURABLE, manager-visible record of the suppression
+                  // (see `lastMismatchNoticeSuppressed`'s own doc): a console line alone is invisible to
+                  // the manager who actually needs to know an alarm was swallowed. `count` accumulates
+                  // across repeats of the SAME signature (guaranteed to be this one — `isExactRepeatNotice`
+                  // already proved the match), reset to 1 whenever a genuinely different signature is
+                  // recorded (the `else` branch below, which can only run after a real notice fired).
+                  const prior = live.lastMismatchNoticeSuppressed;
+                  const sameAsPrior = prior !== null && prior.gen === noticeSignature.gen
+                    && prior.writtenHash === noticeSignature.writtenHash && prior.reportedHash === noticeSignature.reportedHash;
+                  live.lastMismatchNoticeSuppressed = { ...noticeSignature, count: (sameAsPrior ? prior.count : 0) + 1, detectedAt: Date.now() };
+                } else {
+                  live.lastMismatchNoticeSignature = noticeSignature;
+                  setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
+                }
               }
             }
           }
@@ -8532,6 +8662,17 @@ export class PtyHost {
    *  overwritten (not accumulated) by a later occurrence. */
   getLastMismatchFusion(sessionId: string): Live["lastMismatchFusion"] | undefined {
     return this.live.get(sessionId)?.lastMismatchFusion;
+  }
+
+  /** Card c0323f8a — the durable PULL surface for `Live.lastMismatchNoticeSuppressed`: how many times, and
+   *  under what signature, the EXACT-REPEAT SUPPRESSION guard (see the `UserPromptSubmit` case) has held
+   *  back a byte-identical `[loom:prompt-mismatch]` resend instead of delivering it as a fresh turn. `null`
+   *  = no suppression has fired yet this session, `undefined` = session not live in this process. Same
+   *  PULL-surface mechanics as `getLastMismatchReplay`/`getLastMismatchFusion`: never cleared once set,
+   *  overwritten (not accumulated as a struct — only its own `count` field accumulates, and only across
+   *  repeats of the SAME signature) by a later occurrence. */
+  getLastMismatchNoticeSuppressed(sessionId: string): Live["lastMismatchNoticeSuppressed"] | undefined {
+    return this.live.get(sessionId)?.lastMismatchNoticeSuppressed;
   }
 
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on
