@@ -23,7 +23,7 @@
 import { test as base, type Page } from "@playwright/test";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,45 @@ function waitForListenLine(child: ChildProcess, getLog: () => string): Promise<s
   });
 }
 
+// Card 9ccedbee's loopback human-only-write guard requires `Authorization: Bearer <secret>` on every
+// non-GET/HEAD /api/* write (see gateway/server.ts's guard hook). `currentLoopbackSecret`/
+// `currentDaemonBaseURL` are set once, right after THIS worker's isolated daemon finishes booting
+// (below) — module-level is safe because the harness runs a single Playwright worker with one daemon for
+// the whole suite (playwright.config.ts: `workers: 1`), so there's never a second daemon's secret to
+// conflict with.
+//
+// Card 783dca99: rather than threading the token through this fixture's own write helpers ONLY, patch
+// the Node-side GLOBAL `fetch` once, here, so EVERY write this test process issues to the daemon carries
+// it automatically — including the ~30 direct `fetch(loomDaemon.baseURL + ...)` calls specs already write
+// themselves for setup/assertions the fixture's REST helpers don't cover (a stale-version conflict write,
+// a hold/defer PATCH, a preset-prompt POST, an event-trigger DELETE, ...). Auditing and rewriting each of
+// those individually would both miss the next spec that writes the same pattern and violate the DoD's own
+// "no spec should have to know the guard exists" — a global wrapper is the one place that actually holds
+// for all of them, present and future. This is DELIBERATELY scoped to Node's global fetch (the test
+// runner's own HTTP client) — it has no effect on the BROWSER page's `window.fetch`, which api.ts drives
+// off a token captured from localStorage instead (seeded by the `context` fixture below, from the SAME
+// secret). A no-op (passthrough to the real fetch) until a daemon has actually booted and set the two
+// vars below, so nothing here affects fetches issued before boot or fetches to any other host.
+let currentLoopbackSecret: string | undefined;
+let currentDaemonBaseURL: string | undefined;
+
+(function installLoopbackAuthFetchPatch() {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (
+      currentDaemonBaseURL !== undefined && currentLoopbackSecret !== undefined &&
+      url.startsWith(currentDaemonBaseURL) && method !== "GET" && method !== "HEAD"
+    ) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      if (!headers.has("authorization")) headers.set("authorization", `Bearer ${currentLoopbackSecret}`);
+      return realFetch(input, { ...init, headers });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+})();
+
 async function apiPost<T>(baseURL: string, url: string, body: unknown): Promise<T> {
   const res = await fetch(baseURL + url, {
     method: "POST",
@@ -153,6 +192,14 @@ export interface LoomDaemon {
    * — reaching into the daemon's home to fake state REST owns would test a fiction.
    */
   loomHome: string;
+  /**
+   * Card 9ccedbee's loopback human-only-write guard secret, read from this daemon's own LOOM_HOME right
+   * after boot. `loomPage` seeds it into the browser's localStorage (the same key api.ts's
+   * `getLoopbackToken()` reads) so UI-DRIVEN writes — a spec clicking "Save", not just this fixture's own
+   * REST helpers — carry it too; a real user gets the same token via `loom open`'s `?token=` URL param,
+   * which api.ts captures into localStorage on first load.
+   */
+  loopbackSecret: string;
   /** Seed a project (with a real, empty git repo as repoPath + a plain dir as vaultPath) via REST. */
   createProject: (name?: string) => Promise<SeededProject>;
   /** Seed a board task on a project via REST — the same store the kanban UI and the MCP task tools share. */
@@ -363,8 +410,8 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
   // (rather than each spec's own beforeEach) applies the init script to every page the context creates,
   // including the built-in `page` fixture derived from it. Specs must NOT depend on dismissing it
   // themselves.
-  context: async ({ context }, use) => {
-    await context.addInitScript(() => {
+  context: async ({ context, loomDaemon }, use) => {
+    await context.addInitScript((loopbackToken: string) => {
       try {
         localStorage.setItem("loom.setupWelcomeDismissed", "1");
         // Card a53e6bc9: flip Terminal.tsx's xterm instances into screenReaderMode for e2e ONLY — prod
@@ -372,8 +419,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         // every terminal a spec's page ever mounts (incl. terminal-canned-pty.spec.ts's accessibility-tree
         // assertions).
         localStorage.setItem("loom.e2e", "1");
+        // Card 783dca99: card 9ccedbee's loopback write guard requires this Bearer token on every
+        // UI-driven write (a spec clicking "Save"), not just this fixture's own REST seed helpers. A real
+        // user gets it via `loom open`'s `?token=` URL param, which api.ts's `getLoopbackToken()` captures
+        // into this SAME localStorage key on first load — seeding it directly here is the harness's
+        // equivalent, live from this context's very first page with no token-bearing navigation needed.
+        localStorage.setItem("loom.loopbackToken", loopbackToken);
       } catch { /* storage may be unavailable */ }
-    });
+    }, loomDaemon.loopbackSecret);
     await use(context);
   },
 
@@ -459,6 +512,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       try { child.kill(); } catch { /* best-effort */ }
       throw err;
     }
+
+    // Card 9ccedbee generates this secret UNCONDITIONALLY before the gateway ever starts listening
+    // (index.ts's `main()` calls getOrCreateLoopbackSecret() before buildServer()) — so it's already on
+    // disk under this daemon's own LOOM_HOME by the time the listen line above resolves. Read it once so
+    // every write helper below (and the browser page, via loomPage) can present it.
+    const loopbackSecret = readFileSync(path.join(loomHome, "gateway-loopback.key"), "utf8").trim();
+    currentLoopbackSecret = loopbackSecret;
+    currentDaemonBaseURL = baseURL;
 
     const createProject = async (name?: string): Promise<SeededProject> => {
       const dirId = randomUUID();
@@ -660,7 +721,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

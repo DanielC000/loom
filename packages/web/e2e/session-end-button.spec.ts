@@ -60,8 +60,15 @@ test.describe("End Session button (card f55bd338)", () => {
     ]);
     expect(res.status()).toBe(200);
 
-    // (3) Role-gate backstop: a direct POST against the WORKER session is refused 403.
-    const workerRes = await page.request.post(`${loomDaemon.baseURL}/api/sessions/${wkr.sessionId}/end`);
+    // (3) Role-gate backstop: a direct POST against the WORKER session is refused 403 — NOT 401. `page.request`
+    // is Playwright's own network stack, independent of both the page's `window.fetch` (which the loopback
+    // token seeded into localStorage authenticates — see fixtures/daemon.ts's `context` fixture) and Node's
+    // global `fetch` (patched in that same fixture) — card 9ccedbee's loopback guard would otherwise 401 this
+    // call BEFORE it ever reaches the role-gate check this assertion means to exercise, so the credential is
+    // attached explicitly here.
+    const workerRes = await page.request.post(`${loomDaemon.baseURL}/api/sessions/${wkr.sessionId}/end`, {
+      headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` },
+    });
     expect(workerRes.status()).toBe(403);
   });
 
