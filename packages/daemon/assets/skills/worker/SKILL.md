@@ -234,8 +234,17 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    own note below), its recorded `url` is a starting point, not a given — the recorded value can itself be
    wrong.** On a host where OTHER browser-capable workers may be running their own dev servers
    concurrently, confirm the recorded port is actually owned by YOUR tracked pid before trusting what you
-   see (the startup banner, or the listening socket's owning pid resolved back to your worktree path);
-   skip this cross-check on a solo-worker host where nothing else could own the port. **A sibling's
+   see (the startup banner, or the listening socket's owning pid confirmed to be a DESCENDANT of the pid
+   your launcher printed — walk the FULL process tree, not one hop; an intermediate shim between the
+   launcher and the real listener is common, and a walk that stops early lands on the shim and falsely
+   "proves" ownership of the wrong process). **Matching by worktree path is not available on every OS —
+   check before relying on it:** Windows exposes no readable current-working-directory for a running
+   process (not in the process-listing API, and a launch-time working-directory parameter is not a
+   readback of one), so path-matching only works on a platform that exposes it (e.g. Linux's
+   `/proc/<pid>/cwd`). And two Windows fields that LOOK like ownership proof aren't: a process's
+   working-set/memory-size field is memory, not a path, and its executable/image-path field is identical
+   for every sibling running the same app — neither discriminates YOUR instance from a sibling's. Skip
+   this cross-check on a solo-worker host where nothing else could own the port. **A sibling's
    instance of the same app renders identically — nothing on screen distinguishes "my fixture" from "a
    sibling's fixture" — so an unverified port yields a plausible, screenshot-able, completely wrong
    result:** a worker has been caught one step from driving another worker's dev server and reporting that
