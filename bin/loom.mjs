@@ -265,9 +265,22 @@ function probePort(port, timeoutMs = 1500) {
 }
 
 // POST /internal/shutdown (the daemon's graceful control hook) → { status } or { error }.
+// Card 93249b52: this route now requires the SAME loopback-secret bearer credential every /api/* write
+// does (see gateway/server.ts's `isGuardedInternalWrite`) — this CLI runs on the same host and can read
+// the secret file directly (`readLoopbackSecret`, already used above for `urlWithToken`/`urlHint`), so no
+// new discovery mechanism is needed. `stop()` only ever targets an ALREADY-running daemon (found via the
+// PID file / a live port probe), and `getOrCreateLoopbackSecret()` runs in index.ts's `main()` BEFORE the
+// gateway ever starts listening — so by the time a daemon is reachable at all, the secret file is
+// guaranteed to already exist; there's no boot-race window here. A daemon that predates this card (no
+// guard wired) just ignores the extra header. If the secret is somehow still unreadable (a permissions
+// problem, a corrupt-then-mid-regenerate file), `postShutdown` sends no header, the guarded daemon 401s,
+// and `stop()`'s existing SIGTERM/SIGKILL fallback ladder (below) still gets the daemon down — so this
+// never leaves a user unable to stop their own daemon, only ungraceful in that one edge case.
 function postShutdown(port) {
   return new Promise((resolve) => {
-    const req = http.request({ host: "127.0.0.1", port, path: "/internal/shutdown", method: "POST", timeout: 2000 }, (res) => {
+    const secret = readLoopbackSecret();
+    const headers = secret ? { authorization: `Bearer ${secret}` } : {};
+    const req = http.request({ host: "127.0.0.1", port, path: "/internal/shutdown", method: "POST", timeout: 2000, headers }, (res) => {
       res.resume();
       resolve({ status: res.statusCode });
     });
@@ -400,6 +413,12 @@ async function stop() {
     if (await waitForDown(port, 12000)) graceful = true;
   } else if (hook.status === 404) {
     console.error("loom: this daemon predates the graceful-shutdown hook — falling back to a signal.");
+  } else if (hook.status === 401) {
+    // Card 93249b52: the daemon rejected our credential (or we couldn't read one — see postShutdown's own
+    // comment for why that shouldn't normally happen). Falls through to the signal ladder below, same as
+    // a 404 — on POSIX that's still a graceful SIGTERM; on Windows (no real SIGTERM) it goes straight to
+    // a hard kill, so this is worth telling the user about rather than failing silently.
+    console.error(`loom: the daemon rejected our stop credential (401) — falling back to a signal.${process.platform === "win32" ? " On Windows this means a HARD kill (no graceful teardown)." : ""}`);
   }
 
   // Identity check before EITHER signal step below. The hook already confirms identity when it got any

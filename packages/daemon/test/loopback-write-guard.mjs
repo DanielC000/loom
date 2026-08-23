@@ -39,6 +39,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       WRONG bearer subprotocol is also rejected; a VALID [generic, bearer] offer OR a valid `?token=`
 //       fallback is ACCEPTED — mirroring (H) exactly, proving the SAME mechanism was reused, not a
 //       parallel one. (loopbackSecret omitted ⇒ inert, proven alongside (A).)
+//
+// v4 (card 93249b52, SECURITY follow-up — renumbered (L)/(M)/(N) to avoid colliding with v3's own (I)
+// above, both landed on main around the same time): the guard also covers POST /internal/shutdown and
+// POST /internal/update — the two loomctl lifecycle writers left on the old loopback-only posture, one of
+// which (/internal/update) fetches and INSTALLS code, a strictly larger blast radius than any /api/* write
+// this guard already covered.
+//   (L) POST /internal/shutdown, (M) POST /internal/update: 401 with no credential, 401 with a wrong one,
+//       and the real handler reached (a deferred spy fires) with the correct one — same shape as (B)-(D).
+//   (N) POST /internal/hook is proven to stay UNGATED even with loopbackSecret wired — a deliberate
+//       exclusion (see server.ts's own comment at that route for why, and for the honest accounting of
+//       what staying ungated does and doesn't defend against), not an oversight.
 import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -60,6 +71,17 @@ const { WS_GENERIC_SUBPROTOCOL, WS_BEARER_PREFIX } = await import("../dist/gatew
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Anchored to the OBSERVABLE event (the spy counter actually incrementing), not a fixed sleep — mirrors
+// shutdown-endpoint.mjs / update-endpoint.mjs's own waitUntil for the same deferred-setTimeout shape.
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 const now = new Date().toISOString();
 const stub = {};
@@ -103,12 +125,18 @@ try {
   check("(A) loopbackSecret omitted → /ws/companion upgrade with NO credential still succeeds (unaffected)", !!unguardedCompanionSocket);
   unguardedCompanionSocket.close();
 
-  // ===================== (B)-(H) the real guard, wired =====================
+  // ===================== (B)-(K) the real guard, wired =====================
   const SECRET = "test-loopback-secret-0123456789abcdef";
+  let shutdownCalls = 0, updateCalls = 0;
   appWithSecret = await buildServer({
     db, pty: ptyStub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
     userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub,
     loopbackSecret: SECRET,
+    // Spies for (I)/(J) below — POST /internal/shutdown/update defer these one tick via setTimeout, so an
+    // undefined dep here would throw an uncaught TypeError once the POSITIVE-CONTROL case (correct secret)
+    // actually reaches the real handler.
+    requestShutdown: () => { shutdownCalls++; },
+    beginSelfUpdate: () => { updateCalls++; },
   });
   const patchConfig = (bearer) => appWithSecret.inject({ method: "PATCH", url: "/api/platform/config", headers: authH(bearer), payload: {} });
 
@@ -191,6 +219,55 @@ try {
   check("(I) POSITIVE CONTROL: /ws/companion upgrade with a VALID ?token= query fallback → ACCEPTED", !!wsCompanionOkQuery);
   wsCompanionOkQuery.close();
 
+  // ===================== (L) POST /internal/shutdown =====================
+  // Card 93249b52: this loomctl lifecycle writer joins the same guard — proven the same way as every
+  // other write above: 401 with no credential, 401 with a wrong one, and the real handler reached (its
+  // deferred requestShutdown spy fires) with the correct one.
+  // `payload: {}` on every call below: `H` sets content-type:application/json, and a request that CLEARS
+  // the guard now proceeds to Fastify's body parser — an empty body under that content-type is its own
+  // 400 (FST_ERR_CTP_EMPTY_JSON_BODY), which would masquerade as a guard failure on the positive-control
+  // calls specifically (found by running this positive control and reading its actual, non-401 status).
+  const shutdownNoAuth = await appWithSecret.inject({ method: "POST", url: "/internal/shutdown", headers: H, payload: {}, remoteAddress: "127.0.0.1" });
+  check("(L) POST /internal/shutdown with NO auth header → 401 (was loopback-only pre-fix)", shutdownNoAuth.statusCode === 401);
+  const shutdownWrongAuth = await appWithSecret.inject({ method: "POST", url: "/internal/shutdown", headers: authH("not-the-real-secret"), payload: {}, remoteAddress: "127.0.0.1" });
+  check("(L) POST /internal/shutdown with a WRONG bearer value → 401", shutdownWrongAuth.statusCode === 401);
+  const shutdownRightAuth = await appWithSecret.inject({ method: "POST", url: "/internal/shutdown", headers: authH(SECRET), payload: {}, remoteAddress: "127.0.0.1" });
+  check("(L) POSITIVE CONTROL: POST /internal/shutdown with the CORRECT secret → 202 (reaches the real handler)",
+    shutdownRightAuth.statusCode === 202);
+  check("(L) the real handler actually ran (requestShutdown spy fired) once authorized",
+    await waitUntil(() => shutdownCalls === 1, 3000)); // > the endpoint's own 50ms defer, generous bound
+
+  // ===================== (M) POST /internal/update =====================
+  // Same proof, plus: the correct secret reaches PAST the guard into the packaged/source gate (409 here,
+  // since this test process is a from-source checkout) rather than the guard's own 401 — i.e. the 409
+  // proves routing reached the real handler, the same "not a coincidence" shape (F) proved for Tier-1.
+  const updateNoAuth = await appWithSecret.inject({ method: "POST", url: "/internal/update", headers: H, payload: {}, remoteAddress: "127.0.0.1" });
+  check("(M) POST /internal/update with NO auth header → 401 (was loopback-only pre-fix)", updateNoAuth.statusCode === 401);
+  const updateWrongAuth = await appWithSecret.inject({ method: "POST", url: "/internal/update", headers: authH("not-the-real-secret"), payload: {}, remoteAddress: "127.0.0.1" });
+  check("(M) POST /internal/update with a WRONG bearer value → 401", updateWrongAuth.statusCode === 401);
+  const updateRightAuthSource = await appWithSecret.inject({ method: "POST", url: "/internal/update", headers: authH(SECRET), payload: {}, remoteAddress: "127.0.0.1" });
+  check("(M) POSITIVE CONTROL: POST /internal/update with the CORRECT secret reaches the real handler (409 from-source, not 401)",
+    updateRightAuthSource.statusCode === 409);
+  process.env.LOOM_PACKAGED = "1";
+  try {
+    const updateRightAuthPackaged = await appWithSecret.inject({ method: "POST", url: "/internal/update", headers: authH(SECRET), payload: {}, remoteAddress: "127.0.0.1" });
+    check("(M) POSITIVE CONTROL: on a PACKAGED install, the CORRECT secret → 202 (reaches the real handler)",
+      updateRightAuthPackaged.statusCode === 202);
+  } finally {
+    delete process.env.LOOM_PACKAGED;
+  }
+  check("(M) the real handler actually ran (beginSelfUpdate spy fired) once authorized+packaged",
+    await waitUntil(() => updateCalls === 1, 3000)); // > the endpoint's own 50ms defer, generous bound
+
+  // ===================== (N) POST /internal/hook stays DELIBERATELY UNGATED =====================
+  // Even with loopbackSecret wired, the SessionStart hook relay must keep working with NO credential at
+  // all — see server.ts's own comment at that route for why (high-frequency, not human-driven, no
+  // credential to attach). This is the negative-scope proof: NOT gating this route is a decision, not an
+  // oversight — see (G) below for the structural check that the guard's own predicate excludes it by name.
+  const hookNoAuth = await appWithSecret.inject({ method: "POST", url: "/internal/hook", headers: H, remoteAddress: "127.0.0.1", payload: {} });
+  check("(N) POST /internal/hook with NO auth header still succeeds (deliberately excluded from the guard)",
+    hookNoAuth.statusCode === 200);
+
   // (G) structural: v2 no longer consults routeTier at all in the guard (it gates unconditionally) —
   // confirmed by reading the compiled source, mirroring gateway-token.mjs's own (F) pattern.
   {
@@ -198,13 +275,21 @@ try {
     const src = fs.readFileSync(serverPath, "utf8");
     const guardIdx = src.indexOf("Loopback human-only-write guard");
     check("(G) the guard block exists in compiled output", guardIdx !== -1);
-    const guardSlice = src.slice(guardIdx, guardIdx + 7000);
+    // 10000 (was 7000): card 93249b52's own doc comments on the guard hook pushed the isGuardedInternalWrite
+    // check + its /internal/shutdown /internal/update literals past the old 7000-char window — widened so
+    // the (G) structural checks below actually see them rather than silently falling off the slice.
+    const guardSlice = src.slice(guardIdx, guardIdx + 10000);
     check("(G) v2 gates every /api/* write unconditionally — no routeTier check inside the guard hook",
       !/routeTier\(req\.method, routePattern\)/.test(guardSlice.slice(guardSlice.indexOf("app.addHook"))));
     check("(G) the guard also matches the /ws/term upgrade route by pattern",
       /routePattern === ["']\/ws\/term\/:sessionId["']/.test(guardSlice));
     check("(G) v3: the guard also matches the /ws/companion upgrade route by pattern (card 351e89af)",
       /routePattern === ["']\/ws\/companion\/:sessionId["']/.test(guardSlice));
+    // (G) card 93249b52: the guard's route-matching literally names /internal/shutdown + /internal/update,
+    // and does NOT name /internal/hook — corroborates the behavioral (L)/(M)/(N) proof above structurally.
+    check("(G) the guard matches /internal/shutdown by pattern", /["']\/internal\/shutdown["']/.test(guardSlice));
+    check("(G) the guard matches /internal/update by pattern", /["']\/internal\/update["']/.test(guardSlice));
+    check("(G) the guard does NOT match /internal/hook by pattern", !/["']\/internal\/hook["']/.test(guardSlice));
   }
 } finally {
   try { await appNoSecret?.close(); } catch { /* ignore */ }
@@ -213,6 +298,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the loopback human-only-write guard (v3) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, AND the /ws/companion inbound chat socket (card 351e89af) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
+  ? "\n✅ ALL PASS — the loopback human-only-write guard (v4) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, the /ws/companion inbound chat socket (card 351e89af), AND POST /internal/shutdown + POST /internal/update (card 93249b52 — the loomctl lifecycle writers, one of which fetches+installs code) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, proves POST /internal/hook stays deliberately ungated, and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

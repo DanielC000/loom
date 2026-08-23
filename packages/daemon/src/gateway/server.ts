@@ -209,13 +209,14 @@ export interface GatewayDeps {
   fleetHub?: FleetHub;
   /**
    * Card 9ccedbee — the loopback human-only-write guard secret (gateway/loopback-secret.ts,
-   * `getOrCreateLoopbackSecret()`). When PRESENT, every Tier-0 (routeTier) non-GET `/api/*` route
-   * requires it as `Authorization: Bearer <secret>` even from 127.0.0.1 — see the guard hook below for
-   * the full rationale. Optional so existing partial-stub tests (dozens of them build a minimal
-   * GatewayDeps and call POST/PATCH/DELETE `/api/*` routes with no auth header at all) keep building a
-   * server with the guard INERT, exactly like every other optional dep in this interface — the real
-   * (non-test) boot path, index.ts, always supplies it, so production is fail-closed by construction;
-   * only an intentionally-partial test build ever runs without this guard active.
+   * `getOrCreateLoopbackSecret()`). When PRESENT, every non-GET `/api/*` route, `/ws/term`, and (card
+   * 93249b52) `POST /internal/shutdown` / `POST /internal/update` require it as `Authorization: Bearer
+   * <secret>` even from 127.0.0.1 — see the guard hook below for the full rationale. Optional so existing
+   * partial-stub tests (dozens of them build a minimal GatewayDeps and call POST/PATCH/DELETE `/api/*`
+   * routes with no auth header at all) keep building a server with the guard INERT, exactly like every
+   * other optional dep in this interface — the real (non-test) boot path, index.ts, always supplies it,
+   * so production is fail-closed by construction; only an intentionally-partial test build ever runs
+   * without this guard active.
    */
   loopbackSecret?: string;
 }
@@ -522,16 +523,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     snoop another session's terminal/chat output any more than write to it). `/ws/companion` was
   //     originally a SEPARATE known gap this card deliberately left open (v1/v2's own notes said so) —
   //     closed by card 351e89af, which reuses this exact hook + mechanism rather than inventing a second
-  //     scheme; see that route's own doc comment below for the predicate this closes. `/mcp/:sessionId`
-  //     (every agent's real, legitimate tool surface), `/internal/*` (loomctl lifecycle: shutdown/update),
+  //     scheme; see that route's own doc comment below for the predicate this closes. PLUS (card 93249b52)
+  //     `POST /internal/shutdown` and `POST /internal/update` — the loomctl lifecycle writers, gated for
+  //     the same reason and by the same predicate (see that card's own comment at the
+  //     `isGuardedInternalWrite` check below). `/mcp/:sessionId` (every agent's real, legitimate tool
+  //     surface), `POST /internal/hook` (a DELIBERATE exception — see the same comment below for why),
   //     `/hooks/*` (Tier-2 signature-gated webhook ingress), `/oauth/callback`, and the one remaining WS
   //     route (`/ws/fleet` — read-only event bookkeeping) are untouched — an agent's MCP tool calls are
   //     byte-identical before/after. A GET read is a materially different risk from a WRITE; closing
   //     GET-level disclosure is a separate concern this hook does not attempt.
-  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` (constant-time compared);
-  //     for `/ws/term`'s upgrade, the SAME secret via the remote tier's own established mechanism —
-  //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` (preferred) or a `?token=` query-param
-  //     fallback (resolveWsSubprotocolToken, trust-tier.ts) — reused verbatim rather than reinvented.
+  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and `/internal/shutdown` /
+  //     `/internal/update` (constant-time compared); for `/ws/term`'s and `/ws/companion`'s upgrades, the
+  //     SAME secret via the remote tier's own established mechanism — `Sec-WebSocket-Protocol: loom.v1,
+  //     loom.bearer.<secret>` (preferred) or a `?token=` query-param fallback (resolveWsSubprotocolToken,
+  //     trust-tier.ts) — reused verbatim rather than reinvented.
   //     Optional dep (see GatewayDeps' own doc) — ABSENT ⇒ this hook is a no-op, so partial-stub tests
   //     that don't wire it stay byte-identical; index.ts (the only real boot path) always supplies it, so
   //     production is fail-closed by construction.
@@ -554,7 +559,27 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
       // already proves the loopback secret, exactly like /ws/term.
       const isCompanionSocket = routePattern === "/ws/companion/:sessionId";
-      if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket) return;
+      // Card 93249b52 (SECURITY follow-up on 9ccedbee, surfaced by that card's own Code Review): the two
+      // `/internal/*` lifecycle writers with real capability — POST /internal/shutdown (stops the daemon)
+      // and POST /internal/update (fetches + INSTALLS code on a packaged install, a strictly LARGER blast
+      // radius than any /api/* write this guard already covers) — were left on the old loopback-only
+      // posture this guard exists to replace. THE PREDICATE, stated explicitly per that card's own
+      // instruction: this asks "does an agent legitimately need this from a shell?", NOT trust-tier.ts's
+      // "is this safe for an authenticated REMOTE human?" (a materially different question — routeTier
+      // classifies BOTH of these Tier 0 today, i.e. "not yet decided to expose remotely", which says
+      // nothing about the co-resident-agent predicate this hook enforces). The answer for both is no, so
+      // both are gated identically to every other loopback write here.
+      // DELIBERATELY EXCLUDED: POST /internal/hook (the SessionStart hook relay, assets/hook-relay.mjs) —
+      // it is called by a child of the vendor CLI on EVERY session start, is high-frequency and NOT
+      // human-driven, and has no credential to present; gating it wrong breaks every spawn on the daemon.
+      // This exclusion is a scope decision, NOT a "this is already safe" claim — see the route's own
+      // comment at its registration below for the honest accounting of what it does and doesn't defend
+      // against (an earlier draft of this comment claimed it can't target an arbitrary session; that was
+      // FALSE — deliverHook's target sessionId is caller-supplied, not connection-derived — caught in
+      // review before merge; corrected there, not restated here).
+      const isGuardedInternalWrite = req.method === "POST" &&
+        (routePattern === "/internal/shutdown" || routePattern === "/internal/update");
+      if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
       // A non-loopback caller reaching here either already passed the trust-tier wall above (a valid
       // remote gateway token on a Tier-1 route — unaffected by this hook, which only ever ACTS on
       // loopback callers) or already failed it (Tier 0 ⇒ 403 before this hook ever runs) or there is no
@@ -2640,7 +2665,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  // --- Hook relay target (loopback only) ---
+  // --- Hook relay target (loopback only). DELIBERATELY left OFF the loopback-secret bearer guard (card
+  // 93249b52 considered and rejected extending it here, alongside gating /internal/shutdown +
+  // /internal/update): this is the SessionStart hook relay (assets/hook-relay.mjs), invoked by a child of
+  // the vendor CLI on EVERY session start/resume — high-frequency, not human-driven, and with no
+  // credential to attach even if it wanted to (the relay is a child of the vendor CLI, not something this
+  // project controls the invocation of). Gating it wrong breaks every spawn on the daemon — that alone is
+  // the reason it's excluded here.
+  //
+  // ⛔ THIS IS NOT A "SAFE AS-IS" CLAIM — a known, OPEN gap, deliberately left out of THIS card's scope
+  // (manager review on 93249b52 caught an earlier draft of this comment overclaiming the opposite; see
+  // that card's history). `body.sessionId` below is CALLER-SUPPLIED, not derived from the connection —
+  // `deliverHook` (pty/host.ts) early-returns only on an unknown id or a non-"claude" kind, so it accepts
+  // a forged hook for ANY live claude session, not just one the caller owns. Session ids are discoverable
+  // too: 9ccedbee gates only non-GET `/api/*`, so `GET /api/sessions` and friends stay open even from
+  // loopback. An unauthenticated co-resident caller can therefore POST a forged hook naming an arbitrary
+  // live session and drive its SessionStart engine-id capture, its busy/readiness state machine, the
+  // usage-limit detect, and the prompt-mismatch detector — a real capability, not a hypothetical one. A
+  // separate card tracks closing this; it is out of scope here only because gating this specific route
+  // needs its own credential mechanism the vendor-CLI-invoked relay doesn't have yet, not because the gap
+  // is small. ---
   app.post("/internal/hook", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     const body = req.body as { sessionId?: string; hook?: Record<string, unknown> };
@@ -2653,8 +2697,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // daemon into its graceful teardown; it POSTs here instead. This triggers the SAME path the
   // SIGINT/SIGTERM handlers run (snapshot live transcripts → stop every watcher → exit 0). Exits 0
   // (clean stop), NOT 75 (75 is the supervisor's RESTART sentinel — a stop must never relaunch).
-  // Trust posture mirrors /internal/hook EXACTLY: loopback-gated, NOT an agent MCP tool, unreachable by
-  // any agent session (same boundary as the gate/vault/git writers). We ack 202 first and defer the exit
+  // Trust posture: loopback-gated (the explicit !LOOPBACK → 403 below), NOT an agent MCP tool,
+  // unreachable by any agent session (same boundary as the gate/vault/git writers) — AND (card 93249b52,
+  // closing the gap 9ccedbee's own Code Review flagged: this route fetches nothing but STOPS the daemon,
+  // a real capability an unauthenticated co-resident agent should not have) additionally covered by the
+  // SAME loopback-secret bearer guard as every /api/* write, via the `isGuardedInternalWrite` check in
+  // the onRequest hook above — this route's own `!LOOPBACK` check stays as the fail-closed backstop for a
+  // non-loopback caller and for the (test-only) case where `deps.loopbackSecret` is unset. `bin/loom.mjs`
+  // (`loom stop`) reads the SAME secret file the browser reads (`readLoopbackSecret`) and sends it as
+  // `Authorization: Bearer <secret>` — see that file's `postShutdown`. We ack 202 first and defer the exit
   // one tick so the response flushes before the process dies (the CLI reads the ack, then polls the port
   // until it stops answering).
   app.post("/internal/shutdown", async (req, reply) => {
@@ -2664,14 +2715,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Self-update control hook (Epic 2c-2, UI half) — the "Update & restart" button's target. Trust
-  // posture mirrors /internal/shutdown EXACTLY: loopback-gated (the explicit !LOOPBACK → 403), NOT an
-  // agent MCP tool, unreachable by any agent session (same boundary as gateCommand / the vault+git
-  // writers). PACKAGED-ONLY (load-bearing): the npm reinstall is valid only for an npm-global `loomctl`
-  // install — npm-installing over a checkout would be wrong — so a from-source daemon REFUSES with 409 and
-  // a clear message (and its banner never shows anyway: GET /api/update-status reports packaged:false). On
-  // a packaged install we ack 202 and defer the spawn one tick so the response flushes first; the detached
-  // `loom update` (E2c-1) then runs stop→install→start. (A packaged end-user daemon runs NO supervisor, so
-  // the exit-75 restart sentinel never applies here — the stop→install→start cycle is the restart path.) ---
+  // posture: loopback-gated (the explicit !LOOPBACK → 403 below), NOT an agent MCP tool, unreachable by
+  // any agent session (same boundary as gateCommand / the vault+git writers) — AND (card 93249b52) ALSO
+  // covered by the loopback-secret bearer guard, same as /internal/shutdown just above: this route
+  // FETCHES AND INSTALLS CODE on a packaged install, a strictly larger blast radius than any /api/* write
+  // the guard already covered, so leaving it on the old loopback-only posture was the larger gap. The
+  // browser is the only real-world caller (`packages/web/src/lib/api.ts`'s `triggerUpdate`) and already
+  // sends the same bearer header every other write does (`authHeaders()`) — `bin/loom.mjs`'s `loom
+  // update` CLI command does NOT call this route at all, it drives its own stop→npm-install→start cycle
+  // directly (verified by reading bin/loom.mjs: no `/internal/update` reference anywhere in it), so no
+  // CLI change was needed here (contrast /internal/shutdown, which the CLI DOES call). PACKAGED-ONLY
+  // (load-bearing): the npm reinstall is valid only for an npm-global `loomctl` install — npm-installing
+  // over a checkout would be wrong — so a from-source daemon REFUSES with 409 and a clear message (and
+  // its banner never shows anyway: GET /api/update-status reports packaged:false). On a packaged install
+  // we ack 202 and defer the spawn one tick so the response flushes first; the detached `loom update`
+  // (E2c-1) then runs stop→install→start. (A packaged end-user daemon runs NO supervisor, so the exit-75
+  // restart sentinel never applies here — the stop→install→start cycle is the restart path.) ---
   app.post("/internal/update", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     if (!isPackagedInstall()) {
