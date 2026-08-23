@@ -8829,6 +8829,30 @@ export class SessionService {
           // there is no durable report to surface, so this is a genuine non-delivery, not a queue.
           return { reported: false, refused: true, error, uncommittedFiles: precheck.files, deliveryStatus: "dropped" };
         }
+        // NOCHANGES-WITH-COMMITS PRE-CHECK (board card 6b605d15): refuse a `done` that DECLARES
+        // noChanges:true while the assigned branch actually carries verified commits ahead of base — no
+        // legitimate case exists for asserting zero work while real commits sit on the branch (the incident
+        // this guards: a sub-agent-originated report claimed "0 commits / no files touched" twice while a
+        // real commit sat on the branch). Directionality is load-bearing and ONE-WAY — see CLAUDE.md: the
+        // OPPOSITE direction (a done implying work with 0 commits, e.g. the Code Reviewer's noCommit
+        // filesChanged:0 shape, or a genuine no-op) is deliberately left to the WARN-only zeroAhead branch
+        // below and must never be refused here. Gated STRICTLY on `precheck.aheadCount` being a verified
+        // POSITIVE number (not merely `!zeroAhead`) so this can never fire on the fail-safe degrade — a git
+        // error/timeout leaves `aheadCount` undefined, and `typeof x === "number"` excludes that case.
+        if (report.noChanges && typeof precheck.aheadCount === "number" && precheck.aheadCount > 0) {
+          const error =
+            `worker_report(done) REFUSED — you reported noChanges:true, but your assigned branch '${worker.branch}' ` +
+            `has ${precheck.aheadCount} commit(s) actually ahead of base. A done claiming no changes cannot be reconciled ` +
+            `with real commits already on the branch. Either drop noChanges and report the work you actually did, or ` +
+            `explain the discrepancy in your report. Your task stays in_progress.`;
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(),
+            managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
+            detail: { reason: "nochanges-with-commits", aheadCount: precheck.aheadCount },
+          });
+          // `dropped`: nothing was routed and the task was NOT moved (stays in_progress to re-report).
+          return { reported: false, refused: true, error, deliveryStatus: "dropped" };
+        }
         if (precheck.zeroAhead) {
           if (worker.noCommit) {
             // DECLARED no-commit role (e.g. the Code Reviewer rig): 0 commits ahead is its CORRECT

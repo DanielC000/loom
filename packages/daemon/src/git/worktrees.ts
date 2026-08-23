@@ -1340,6 +1340,12 @@ export interface DoneReportPrecheck {
   files: string[];
   /** clean working tree, but the assigned branch is 0 commits ahead of base — a legit no-op done, surfaced as a WARNING (never a refusal). */
   zeroAhead: boolean;
+  /** commits ahead of base on the assigned branch, when the `rev-list --count` step actually ran and
+   *  parsed cleanly (0 when {@link zeroAhead} is true) — undefined whenever that step didn't run or
+   *  failed (the dirty-tree short-circuit, no branch, or any git error/timeout under the FAIL SAFE
+   *  degrade below). A caller that needs to distinguish "verified N commits ahead" from "couldn't
+   *  determine" must check this is a number before trusting it — a falsy/undefined value is NOT 0. */
+  aheadCount?: number;
 }
 
 /**
@@ -1352,7 +1358,10 @@ export interface DoneReportPrecheck {
  *     files} ⇒ the caller REFUSES the done and keeps the task in_progress so the worker commits + re-reports.
  *   - CLEAN but the assigned `branch` is 0 commits ahead of `base` → {zeroAhead:true} ⇒ the caller WARNS only
  *     (a genuine no-op task can legitimately report done — never a hard refusal).
- *   - otherwise (clean + ahead, the normal path) → all-false ⇒ the done proceeds unchanged.
+ *   - otherwise (clean + ahead, the normal path) → all-false, `aheadCount` set to the verified count ⇒
+ *     the done proceeds unchanged (the caller separately refuses a `report.noChanges:true` claim against
+ *     this verified-positive `aheadCount` — see board card 6b605d15 — but that check lives in the caller,
+ *     not here: this function only ever reports the git-verified facts).
  *
  * FAILS SAFE: every git op is bounded by the same block-timeout + {@link withTimeout} guard as the other
  * helpers, and ANY error/timeout/parse-failure degrades to {uncommitted:false, zeroAhead:false} (ALLOW) —
@@ -1388,7 +1397,8 @@ export async function precheckWorkerDone(
         (await withTimeout(git.raw(["rev-list", "--count", `${base}..${branch}`]), timeoutMs, "git rev-list --count")).trim(),
         10,
       );
-      if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true };
+      if (Number.isFinite(ahead) && ahead === 0) return { uncommitted: false, files: [], zeroAhead: true, aheadCount: 0 };
+      if (Number.isFinite(ahead)) return { uncommitted: false, files: [], zeroAhead: false, aheadCount: ahead };
     } catch {
       return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE
     }

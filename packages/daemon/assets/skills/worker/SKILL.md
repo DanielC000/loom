@@ -10,6 +10,10 @@ worktree branch, and report up when done or blocked. You are a **worker**: your 
 `worker_report`, and it reaches your **manager**, never the human. **Depth-1** — you do not spawn
 workers of your own.
 
+**If you use Agent sub-agents, they inherit your FULL MCP tool surface and run in-process** — a
+sub-agent's `worker_report` / `memory_write` / board write is indistinguishable from your own. Sub-agents
+**RETURN findings to you**; **you** do every write, every report, every board move.
+
 Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
 gate command). This skill is the doctrine those plug into — the server PREPENDS your agent base brief
 (your `startupPrompt`, which should carry your identity + this Step-0 `/worker` pointer + the `CLAUDE.md`

@@ -17,6 +17,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       WARNING (reported:true, warning present), task → review (a real no-op task can report done).
 //   (E) GIT-ERROR — worktree path is not a git repo so `git status` throws: FAIL-SAFE ALLOWED
 //       (reported:true, no warning), task → review (a flaky git call must never wedge a legit done).
+//   (N) NOCHANGES-WITH-COMMITS (board card 6b605d15) — clean worktree, assigned branch HAS commits ahead
+//       of base, but the report DECLARES noChanges:true: workerReport REFUSES (reported:false,
+//       refused:true, error names the verified commit count), the task STAYS in_progress (NOT moved to
+//       review), and a worker_report_rejected(reason:nochanges-with-commits) event is recorded. This is
+//       the ONLY refuse direction — the opposite (report implies work, 0 commits) is the Code Reviewer's
+//       normal filesChanged:0 shape and must NEVER be refused (see no-commit-reviewer.mjs / (Z) above).
 //   plus a UNIT check of precheckWorkerDone's fail-safe bound via an injected throwing git seam.
 // Run: 1) build daemon (pnpm build), 2) node test/worker-report-precheck.mjs
 import fs from "node:fs";
@@ -67,7 +73,8 @@ const U = mk("u", { file: "work.txt" });
 const C = mk("c", { file: "done.txt" });
 const Z = mk("z");
 const E = mk("e");
-const all = [U, C, Z, E];
+const N = mk("n", { file: "sneaky.txt" });
+const all = [U, C, Z, E, N];
 
 try {
   // ── (U) UNCOMMITTED → REFUSED ───────────────────────────────────────────────────────────────────
@@ -124,6 +131,21 @@ try {
   check("(git-error) workerReport → reported:true (fail-safe, NOT refused)", rE.reported === true && !rE.refused);
   check("(git-error) task moved to review (legit done not blocked by a flaky check)", db.getTask(E.taskId).columnKey === "review");
 
+  // ── (N) NOCHANGES-WITH-COMMITS → REFUSED ─────────────────────────────────────────────────────────
+  initRepo(N.repo);
+  { const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId); N.worktreePath = worktreePath; N.branch = branch; }
+  fs.writeFileSync(path.join(N.worktreePath, N.file), "real committed work, but the report will lie about it\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${N.file}"`, { cwd: N.worktreePath }); // 1 real commit ahead of base
+  seed(N);
+  const rN = await sessions.workerReport(N.workerId, { status: "done", summary: "nothing to see here", noChanges: true });
+  check("(nochanges-with-commits) workerReport → reported:false, refused:true", rN.reported === false && rN.refused === true);
+  check("(nochanges-with-commits) error names the verified commit count", typeof rN.error === "string" && rN.error.includes("1 commit"));
+  check("(nochanges-with-commits) task STAYS in_progress (NOT moved to review)", db.getTask(N.taskId).columnKey === "in_progress");
+  check("(nochanges-with-commits) a worker_report_rejected(reason:nochanges-with-commits) event recorded",
+    db.listEvents(N.mgrId).some((e) => e.kind === "worker_report_rejected" && e.detail && e.detail.reason === "nochanges-with-commits" && e.detail.aheadCount === 1));
+  check("(nochanges-with-commits) NO worker_report(done) event recorded (the done never landed)",
+    !db.listEvents(N.mgrId).some((e) => e.kind === "worker_report" && e.detail && e.detail.status === "done"));
+
   // ── UNIT: precheckWorkerDone fail-safe bound via an injected throwing git seam ────────────────────
   const throwingGit = { raw: async () => { throw new Error("simulated hung/failed git child"); } };
   const det = await precheckWorkerDone(C.repo, C.worktreePath, C.branch, "HEAD", { gitFactory: () => throwingGit, timeoutMs: 200 });
@@ -138,6 +160,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_report(done) pre-check: uncommitted work is REFUSED (task stays in_progress, files named); committed-on-assigned-branch is allowed unchanged; clean+0-ahead is allowed with a warning; a git error fails safe to allowed."
+  ? "\n✅ ALL PASS — worker_report(done) pre-check: uncommitted work is REFUSED (task stays in_progress, files named); committed-on-assigned-branch is allowed unchanged; clean+0-ahead is allowed with a warning; a git error fails safe to allowed; noChanges:true against a branch with verified commits ahead is REFUSED (task stays in_progress, commit count named)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
