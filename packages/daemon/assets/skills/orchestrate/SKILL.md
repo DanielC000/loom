@@ -736,12 +736,19 @@ what you checked. Found none? Treat it as live.
    target, not just trust the worker's dev-server check (see *A project that runs its own deployed
    instance* below). And a worker that assumes a default dev-server port can verify another process's
    STALE server and report a false pass — workers must assert the bound URL from the tracked server
-   process itself: **read it from the tracked-pid helper's own tracking file, and use its recorded `url`
-   AS GIVEN** (`references/serving-and-capture.md`, under this skill's own directory), never assume a
+   process itself: **read it from the tracked-pid helper's own tracking file as the starting point**
+   (`references/serving-and-capture.md`, under this skill's own directory), never assume a
    default and never reassemble a URL from the bare port yourself — the same port can be reachable at one
    loopback host and refuse another on a perfectly healthy server, so a guessed host fails exactly like
-   "the server never started" against a server that's fine. Hold both when you review a browser-capable
-   worker's "verified live."
+   "the server never started" against a server that's fine. **The recorded value can itself be wrong —
+   when other browser-capable workers may be running their own dev servers on this same host, confirm the
+   recorded port is actually owned by YOUR tracked pid before trusting what you see** (the server's own
+   startup banner, or the listening socket's owning pid resolved back to your worktree path); skip this
+   cross-check on a solo-worker host where nothing else could own the port. **A sibling's instance of the
+   same app renders identically — nothing on screen distinguishes "my fixture" from "a sibling's fixture" —
+   so an unverified port yields a plausible, screenshot-able, completely wrong result:** a worker has been
+   caught one step from driving another worker's dev server and reporting that app's data as its own
+   corpus. Hold all three when you review a browser-capable worker's "verified live."
 
    **Even the right bound URL isn't proof of the right data** — a dev server can silently fall back onto
    a different live default and serve another instance's data while everything still renders looking

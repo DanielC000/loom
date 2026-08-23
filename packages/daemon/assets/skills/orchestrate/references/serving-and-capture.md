@@ -36,7 +36,15 @@ http://localhost:5173/`) to appear in its captured log and prints the **actual b
 the host the command's own banner reported, not a guessed one, and the port it really bound, not
 necessarily the one it was asked for (a dev server commonly steps to the next free port under
 contention). That URL is recorded to the helper's tracking file (`url`, alongside the raw `host`/`port`
-it was built from) — eyeball via Playwright at that **recorded URL, used exactly as given**. 🔴 **Never
+it was built from) — treat that **recorded URL as the starting point** for eyeballing via Playwright, not
+as a given: **the recorded value can itself be wrong.** On a host where OTHER browser-capable workers may
+be running their own dev servers concurrently, confirm the recorded port is actually owned by YOUR tracked
+pid before trusting what you see (the printed startup banner, or the listening socket's owning pid
+resolved back to your worktree path); skip this cross-check on a solo-worker host where nothing else could
+own the port. **A sibling's instance of the same app renders identically — nothing on screen distinguishes
+"my fixture" from "a sibling's fixture" — so an unverified port yields a plausible, screenshot-able,
+completely wrong result:** a worker has been caught one step from driving another worker's dev server and
+reporting that app's data as its own corpus. 🔴 **Never
 reassemble a URL from the bare port yourself** (`http://127.0.0.1:<port>` or `http://localhost:<port>`) —
 the host a server actually answers on is that server's own choice, not something a consumer can safely
 guess: the same port can be reachable at one loopback address and refuse the other on a perfectly healthy

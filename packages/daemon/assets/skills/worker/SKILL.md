@@ -230,7 +230,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    assert the bound port from the tracked server process itself, by whatever means your OS exposes (the
    framework's own startup banner, when captured, is one way but not the only one); never assume a
    default (a stale server already holding the default port would silently verify the wrong thing and
-   report a false pass). Even the
+   report a false pass). **If you launched via the bundled `dev-server.mjs` tracked-pid helper (see its
+   own note below), its recorded `url` is a starting point, not a given — the recorded value can itself be
+   wrong.** On a host where OTHER browser-capable workers may be running their own dev servers
+   concurrently, confirm the recorded port is actually owned by YOUR tracked pid before trusting what you
+   see (the startup banner, or the listening socket's owning pid resolved back to your worktree path);
+   skip this cross-check on a solo-worker host where nothing else could own the port. **A sibling's
+   instance of the same app renders identically — nothing on screen distinguishes "my fixture" from "a
+   sibling's fixture" — so an unverified port yields a plausible, screenshot-able, completely wrong
+   result:** a worker has been caught one step from driving another worker's dev server and reporting that
+   app's data as its own corpus. Even the
    right port isn't proof of the right data — a server can fall back onto another live default and serve
    someone else's data with everything still rendering correctly, so **assert the fixture's identity** (a
    count, sentinel, or id) rather than just that the page looks right. **Pick the control by the POLARITY
