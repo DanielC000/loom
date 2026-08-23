@@ -1811,7 +1811,11 @@ export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
  * (a1a8c5c4) and `steps` (card 720bb7ad — BEFORE this card `steps` was "gate"-kind only, exactly the
  * `outputTail` gap a1a8c5c4 had already closed; see that card's DoD for why a PASSING merge is the one
  * outcome this closes the last hole for) are the two fields BOTH kinds populate, on BOTH `"pass"` and
- * `"fail"` — `outputTail` is the bounded (~4KB, `OUTPUT_TAIL_BYTES`) last-step tail, `steps` is the
+ * `"fail"` — `outputTail` is the last-step tail, bounded to ~4KB (`OUTPUT_TAIL_BYTES`) on a `"pass"` — a
+ * passing step never needs content-selection — but on a `"fail"` (card 6ffee3e2) it's CONTENT-SELECTED
+ * rather than positional, and can run up to ~16KB (`FAILURE_BLOCK_CAP_BYTES`) when that recovers a real
+ * per-file assertion body from a `test-daemon.mjs` `FAILURES:` block a plain trailing tail would have
+ * truncated off; `steps` is the
  * sub-ms-precision per-step `{step, durationMs, status}` breakdown. For a "gate" row `steps` is
  * unconditional whenever a gate ran; for a "merge" row it's populated whenever `ConfirmMergeResult.
  * gateSteps` was — the SAME "nothing to report" scope `outputTail`/`extended` already follow (gateless
@@ -1850,8 +1854,12 @@ export interface PendingGateOpVerdict {
     exitCode?: number | null;
     signal?: string | null;
     timedOut?: boolean;
-    /** Card 361520a0, Half Three: a bounded (~4KB) stdout+stderr tail — the SAME diagnostic the push
-     *  `[loom:merge-rejected]` nudge already carries (see `ConfirmMergeResult.detailText`'s own tail block)
+    /** Card 361520a0, Half Three: a stdout+stderr tail — CONTENT-SELECTED since card 6ffee3e2, not
+     *  positional: ~4KB (`OUTPUT_TAIL_BYTES`) as a plain trailing tail, or up to ~16KB
+     *  (`FAILURE_BLOCK_CAP_BYTES`) when it instead recovers a real per-file assertion body from a
+     *  `test-daemon.mjs` `FAILURES:` block. This field is fail-only (see below), so — unlike the top-level
+     *  `outputTail` above — there is no separate pass-path/~4KB-only case to distinguish here. The SAME
+     *  diagnostic the push `[loom:merge-rejected]` nudge already carries (see `ConfirmMergeResult.detailText`'s own tail block)
      *  but, until this card, never written here — leaving the pull-based `gate_history`/`gate_status` read
      *  path with strictly less detail than the push notify for the identical rejection. Populated for a
      *  "merge" row only (mirrors this whole `gateDetail` sub-object's current scope); a "gate" (worker

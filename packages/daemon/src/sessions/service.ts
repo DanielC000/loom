@@ -357,8 +357,11 @@ type ConfirmMergeResult = {
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
-  /** Card a1a8c5c4: the merge gate's own bounded last-step tail (`OUTPUT_TAIL_BYTES`, ~4KB — the SAME
-   *  ring `gate-runner.ts` already computes on every outcome, pass or fail). Set on the two DOMINANT
+  /** Card a1a8c5c4: the merge gate's own last-step tail (the SAME value `gate-runner.ts` already computes
+   *  on every outcome, pass or fail) — bounded to `OUTPUT_TAIL_BYTES` (~4KB) on a PASS, but CONTENT-
+   *  SELECTED since card 6ffee3e2 on a FAIL, where it can run up to `FAILURE_BLOCK_CAP_BYTES` (~16KB) when
+   *  that recovers a real per-file assertion body from a `test-daemon.mjs` `FAILURES:` block. Set on the
+   *  two DOMINANT
    *  return paths only — a plain gate-fail rejection and a plain successful merge — NOT on every path
    *  where a gate genuinely spawned (`gateRan:true`): a rarer post-gate-PASS rejection (`merge.conflict`,
    *  `gateBaseInvalidated`, an orphaned/stage-empty no-op) still returns `outputTail:undefined` even
@@ -602,7 +605,9 @@ function deriveWorkerGateVerdict(
  *     here even though `GateRejectionDetail` always carried both, leaving `gate_history`/`gate_status` (the
  *     pull-based read path) with strictly LESS diagnostic richness than the push `[loom:merge-rejected]`
  *     nudge for the identical rejection.
- * Card a1a8c5c4 widens BOTH branches to also carry `outputTail` (the bounded ~4KB last-step tail) —
+ * Card a1a8c5c4 widens BOTH branches to also carry `outputTail` (the last-step tail — bounded to ~4KB
+ * on a PASS, or CONTENT-SELECTED up to ~16KB on a FAIL since card 6ffee3e2; see `ConfirmMergeResult.
+ * outputTail`'s own doc for the full asymmetry) —
  * before this card a "merge" row's verdict never persisted ANY gate output, on either outcome, unlike the
  * sibling "gate" (worker self-check) row which has carried it on both outcomes since 4c5bf820. `undefined`
  * here means "no gate spawned" OR "one spawned on a rarer post-gate-PASS rejection path (merge conflict,
@@ -643,8 +648,9 @@ function deriveMergeGateVerdict(
     kind: v.merged ? "pass" : "fail",
     payload: {
       reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended, proximity: v.gateProximity,
-      // Card a1a8c5c4: the SAME bounded (~4KB, OUTPUT_TAIL_BYTES) last-step tail a "gate" row's own
-      // deriveWorkerGateVerdict has persisted since 4c5bf820 — set on BOTH "pass" and "fail" (mirroring
+      // Card a1a8c5c4: the SAME last-step tail a "gate" row's own deriveWorkerGateVerdict has persisted
+      // since 4c5bf820 — bounded to ~4KB (OUTPUT_TAIL_BYTES) on a PASS, or CONTENT-SELECTED up to ~16KB
+      // (FAILURE_BLOCK_CAP_BYTES) on a FAIL since card 6ffee3e2. Set on BOTH "pass" and "fail" (mirroring
       // that sibling exactly), `undefined` when `ConfirmMergeResult.outputTail` was never set (no gate
       // spawned: gateless project, a REUSED self-check, or a pre-gate rejection). Before this card a
       // MERGE-kind row's verdict never carried ANY output at all, on either outcome — this is the fix for
@@ -12661,8 +12667,11 @@ export class SessionService {
         // still be diagnosed after the fact by grepping this opId. Deliberately a SEPARATE console.log from
         // the pty notify above (which can be suppressed) — this line always fires when a real gate failure
         // was observed, independent of whether the manager was notified. Includes `tailBlock` (the same
-        // bounded ~4KB output tail the rich notify carries) — the actual gate stderr, not just the summary
-        // bits, so a settled op can be diagnosed from the log alone without needing the pty transcript.
+        // output tail the rich notify carries — CONTENT-SELECTED since card 6ffee3e2, not positional:
+        // ~4KB (OUTPUT_TAIL_BYTES) as a plain trailing tail, or up to ~16KB (FAILURE_BLOCK_CAP_BYTES) when
+        // it instead recovers a real per-file assertion body from a test-daemon.mjs FAILURES: block) —
+        // the actual gate stderr, not just the summary bits, so a settled op can be diagnosed from the
+        // log alone without needing the pty transcript.
         console.log(`[gate opId=${thisOpId}] branch=${branch} task=${taskId ?? "none"} passed=false ${detailBits}${tailBlock}`);
         return {
           merged: false,

@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
+const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, createFailureBlockTracker, identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -34,16 +34,24 @@ const dir = mkdtempManaged("loom-gr-trunc-");
 
   const res = await runGateStep("node fail-then-flood.mjs", dir, 15_000);
   check("(A) the step failed as expected (exit 1)", res.status === 1);
-  check("(A) outputTail is bounded and the early failing line was genuinely evicted (proves the truncation is real, not assumed)",
-    typeof res.outputTail === "string" && res.outputTail.length <= 4096 && !res.outputTail.includes("widget.spec.js"));
-  check("(A) extractFailingTest against that SAME truncated tail finds NOTHING — proves the OLD post-hoc-only path was blind here",
-    extractFailingTest(res.outputTail ?? "") === undefined);
   check("(A) failingTest STILL names the test — the live scan survived the truncation",
     res.failingTest === "FAIL widget.spec.js > renders correctly");
+  // Card 6ffee3e2: outputTail itself is now CONTENT-SELECTED on a failing step, not the positional
+  // trailing ring — no `FAILURES:` marker was ever printed here, so it falls back to the same
+  // content-selected line `failingTest` already names (see createFailingTestTracker's own doc; this
+  // fallback tier is exactly what DoD-1 calls "select by content, not position" for a gate command that
+  // isn't test-daemon.mjs). Before this card, outputTail was the naive last-OUTPUT_TAIL_BYTES ring, which
+  // this exact specimen (an early failing line + ~80KB of unrelated trailing flood) genuinely evicted —
+  // the old assertion here proved that eviction; this one proves it no longer determines what's reported.
+  check("(A) outputTail is content-selected, not positional — it recovers the early failing line the OLD trailing-4KB ring would have evicted",
+    res.outputTail === res.failingTest);
+  check("(A) extractFailingTest against the NEW (content-selected) outputTail now finds it directly — proves outputTail itself carries the diagnosis, not just the separate failingTest field",
+    extractFailingTest(res.outputTail ?? "") === "FAIL widget.spec.js > renders correctly");
 
   const seq = await runGateSequential("node fail-then-flood.mjs", dir, 15_000);
   check("(B) runGateSequential forwards failingTest verbatim from the failing step", seq.failingTest === res.failingTest);
   check("(B) runGateSequential still reports the failed step + exit status", seq.passed === false && seq.failedStep === "node fail-then-flood.mjs" && seq.failedStatus === 1);
+  check("(B) runGateSequential forwards the SAME content-selected outputTail from the failing step", seq.outputTail === res.outputTail);
 
   // A run with NO recognizable failing-test marker at all (a genuinely unattributable failure) must
   // report `failingTest: undefined` — an honest miss, never a fabricated guess.
@@ -51,11 +59,113 @@ const dir = mkdtempManaged("loom-gr-trunc-");
   const unrecognizable = await runGateStep("node fail-unrecognizable.mjs", dir, 15_000);
   check("(C) a failure with no recognizable marker reports failingTest:undefined (never a guessed name)",
     unrecognizable.status === 1 && unrecognizable.failingTest === undefined);
+  // Card 6ffee3e2, CORRECTED (Code Review, merge-gate-retry.mjs case (E)): this specimen's total output
+  // is tiny — well under OUTPUT_TAIL_BYTES — so NOTHING was ever evicted from the ring. Content-selection
+  // is a replacement for a LOSSY tail, not a blanket ban on the raw one; when the raw tail already IS the
+  // complete output, showing it is honest (not "an arbitrary tail that looks like an answer" — it's not
+  // arbitrary, it's everything). DoD-3's "no failure line matched" honest-miss is exercised properly by
+  // (C2) below, where the output genuinely exceeds the cap.
+  check("(C) outputTail is the untruncated raw tail — nothing was evicted, so there is nothing to hide behind an honest-miss string",
+    unrecognizable.outputTail === "kaboom, no idea why");
+
+  // ── (C2) Card 6ffee3e2 DoD-3, THE REAL TEST: an unattributable failure whose output GENUINELY exceeds
+  //        the tail budget — here content-selection actually applies, finds nothing in the flood, and the
+  //        explicit honest-miss string is what must come back, never a lossy/evicted positional fragment. ──
+  fs.writeFileSync(path.join(dir, "fail-unrecognizable-flood.mjs"), [
+    "for (let i = 0; i < 2000; i++) console.log('unrelated noise line ' + i + ' padding padding padding');",
+    "process.exit(1);",
+  ].join("\n"));
+  const unrecognizableFlood = await runGateStep("node fail-unrecognizable-flood.mjs", dir, 15_000);
+  check("(C2) the flood genuinely exceeds the 4096-byte budget (proves this exercises the lossy-tail branch, not (C)'s untouched-raw-tail one)",
+    unrecognizableFlood.status === 1);
+  check("(C2) DoD-3: nothing recognizable matched anywhere in a genuinely-truncated run — outputTail says so EXPLICITLY, never an arbitrary evicted fragment",
+    unrecognizableFlood.outputTail === "no failure line matched");
 
   // A green step reports no failingTest at all.
   fs.writeFileSync(path.join(dir, "ok.mjs"), "process.exit(0);");
   const ok = await runGateStep("node ok.mjs", dir, 15_000);
   check("(D) a passing step reports failingTest:undefined", ok.status === 0 && ok.failingTest === undefined);
+  check("(D) card 4c5bf820's green-path outputTail is UNTOUCHED by this card — still the plain (here: empty) positional tail, never content-selected or the honest-miss string",
+    ok.outputTail === "");
+
+  // ── (A2) Card 6ffee3e2 DoD-4, THE REQUIRED POSITIVE CONTROL: reconstruct the exact op `a2679c1f`
+  //        specimen HERMETICALLY — hundreds of PASS lines (positional budget consumers) ahead of ONE
+  //        failing file whose real assertion body is printed via test-daemon.mjs's own `FAILURES:` echo
+  //        shape, followed by pnpm's own recursive-run epilogue (`ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL` +
+  //        "Exit status 1") — the exact trailing noise the card's specimen showed swallowing the body. If
+  //        the fix recovers this assertion, it works (the card's own acceptance bar). ──────────────────
+  {
+    // Deliberately contains single quotes (a REAL assertion message shape) — embedded via JSON.stringify
+    // below (a valid, properly-escaped JS string literal), never hand-wrapped in single quotes, so this
+    // fixture can't silently generate a syntactically-broken specimen script (caught in review: an
+    // earlier hand-quoted version DID break the specimen's own JS syntax, and the resulting SyntaxError
+    // text — echoed to stderr, which this tracker also scans — happened to CONTAIN this same substring,
+    // making the acceptance-bar check below pass VACUOUSLY for the wrong reason; JSON.stringify closes
+    // that hole structurally instead of relying on hand-escaping never regressing).
+    const REAL_ASSERTION = "AssertionError: expected vault push status 'clean' but got 'dirty' (uncommitted: .loom/session.lock)";
+    const PASS_LINES = Array.from({ length: 690 }, (_, i) => `console.log('PASS  fixture-test-${i}');`).join("\n");
+    const SPECIMEN_SCRIPT = [
+      PASS_LINES,
+      "console.log('691/691 hermetic daemon tests passed. (pool size 3)');", // never actually reached — this run fails; mirrors the real summary line's position ahead of FAILURES:
+      "console.log('FAILURES:');",
+      "console.log('  - vault-push-status (exit 1): C:\\\\Users\\\\danie\\\\.loom-worktrees\\\\fixture\\\\packages\\\\daemon:');",
+      `console.log(${JSON.stringify(`      ${REAL_ASSERTION}`)});`,
+      "console.log('      at Object.<anonymous> (vault-push-status.mjs:42:9)');",
+      // pnpm's own recursive-run wrapper epilogue — printed by the OUTER pnpm process, after the inner
+      // node script (test-daemon.mjs) has already exited — exactly what pushed the real specimen's body
+      // out of a naive trailing-4KB ring.
+      "console.log(' ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @loom/daemon@0.0.0 test:daemon: `node scripts/test-daemon.mjs`');",
+      "console.log('Exit status 1');",
+      "process.exit(1);",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, "specimen-a2679c1f.mjs"), SPECIMEN_SCRIPT);
+
+    // The ACTUAL printed output (not the source script's own text) is what the positional ring measures —
+    // compute it the same way the script itself will print it, so this check reflects real runtime bytes.
+    const specimenPassOutputBytes = Buffer.byteLength(
+      Array.from({ length: 690 }, (_, i) => `PASS  fixture-test-${i}`).join("\n"), "utf-8",
+    );
+    const specimen = await runGateStep("node specimen-a2679c1f.mjs", dir, 15_000);
+    check("(A2) the specimen's PASS-line flood alone genuinely exceeds the 4096-byte positional tail budget (proves this isn't a short-suite no-op)",
+      specimenPassOutputBytes > 4096 && specimen.status === 1);
+    check("(A2) the recovered outputTail contains the FAILURES: header",
+      typeof specimen.outputTail === "string" && specimen.outputTail.includes("FAILURES:"));
+    check("(A2) the recovered outputTail contains the failing file's name + exit code",
+      specimen.outputTail.includes("vault-push-status (exit 1)"));
+    check("(A2) THE ACCEPTANCE BAR: the recovered outputTail contains the ACTUAL assertion body — the exact content a positional trailing ring pushed out in the real op a2679c1f",
+      specimen.outputTail.includes(REAL_ASSERTION));
+    check("(A2) the recovered outputTail is genuinely front-anchored FROM the marker — none of the 690 preceding PASS lines leaked into it",
+      !specimen.outputTail.includes("fixture-test-"));
+    check("(A2) HARD SCOPE FENCE: this card never touches verdict — the step still genuinely fails (status 1), unchanged from before this fix",
+      specimen.status === 1);
+  }
+
+  // ── (A3) createFailureBlockTracker, driven directly (hermetic, no spawn) — mirrors this file's own
+  //        createFailingTestTracker unit-test convention below. ────────────────────────────────────────
+  {
+    const noMarker = createFailureBlockTracker();
+    noMarker.feed(Buffer.from("PASS one\nPASS two\nAssertionError: unrelated to a FAILURES echo\n", "utf-8"));
+    check("(A3) negative control: no FAILURES: marker anywhere reports undefined (never a guess)",
+      noMarker.result() === undefined);
+
+    const withMarker = createFailureBlockTracker();
+    withMarker.feed(Buffer.from("PASS one\nPASS two\n", "utf-8"));
+    withMarker.feed(Buffer.from("FAILURES:\n  - some-test (exit 1): body line one\n", "utf-8"));
+    withMarker.feed(Buffer.from("      body line two\n", "utf-8"));
+    const found = withMarker.result();
+    check("(A3) once the marker is seen, everything from it forward is captured, across multiple feed() calls",
+      found !== undefined && found.includes("FAILURES:") && found.includes("body line one") && found.includes("body line two"));
+
+    const capped = createFailureBlockTracker();
+    capped.feed(Buffer.from("FAILURES:\n", "utf-8"));
+    capped.feed(Buffer.from("x".repeat(30_000) + "\n", "utf-8"));
+    capped.feed(Buffer.from("this arrives after the cap and must be dropped\n", "utf-8"));
+    const cappedResult = capped.result();
+    check("(A3) the front-anchored capture is bounded (never grows to hold the whole stream) — proves the cap is an ACTIVE bound, not just documented",
+      cappedResult !== undefined && cappedResult.length <= 16_384);
+    check("(A3) content AFTER the cap was reached is genuinely dropped, not silently included",
+      !cappedResult.includes("arrives after the cap"));
+  }
 
   // ── (E) Code Review follow-up (card 55cba5c5): `carry` — the not-yet-terminated remainder
   //        createFailingTestTracker holds between feed() calls — must be BOUNDED. A bare-`\r` progress/

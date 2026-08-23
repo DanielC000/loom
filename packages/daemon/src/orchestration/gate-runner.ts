@@ -212,6 +212,71 @@ export function createFailingTestTracker(): {
   };
 }
 
+/** Marks the start of `test-daemon.mjs`'s own end-of-run failure echo (`console.log("FAILURES:")` —
+ *  packages/daemon/scripts/test-daemon.mjs — followed by each failed file's name/exit-code line and its
+ *  FULL captured stdout+stderr). Card 6ffee3e2: on a verbose suite (hundreds of `PASS` lines ahead of the
+ *  first failure) `runGateStep`'s own {@link OUTPUT_TAIL_BYTES} TRAILING ring is structurally guaranteed to
+ *  hold summary/pnpm-epilogue noise instead of the failure — measured specimen (op `a2679c1f`): the
+ *  block's header + per-file name/exit-code line survived into a 4KB trailing tail, but the per-file BODY
+ *  (the actual assertion) — echoed immediately after that line, before the pnpm wrapper's own epilogue —
+ *  was exactly what got pushed out. Anchoring on this marker and keeping bytes FORWARD from it
+ *  (front-anchored, not trailing) recovers that body regardless of how much output preceded it. */
+const FAILURE_BLOCK_START_RE = /^FAILURES:\s*$/;
+
+/** Cap (bytes) on the front-anchored FAILURES:-block capture below — generous enough to hold a real
+ *  per-file diagnostic (name + exit code + the full stdout/stderr a failing file printed) without
+ *  retaining the whole stream. Deliberately a SEPARATE constant from {@link OUTPUT_TAIL_BYTES}: that one
+ *  bounds a TRAILING ring (evicts old bytes as new ones arrive); this one bounds a FRONT-anchored capture
+ *  (stops accepting new bytes once full) — the two answer different questions and must not be conflated. */
+const FAILURE_BLOCK_CAP_BYTES = 16_384;
+
+/**
+ * Card 6ffee3e2: streams a step's stdout+stderr for `test-daemon.mjs`'s own `FAILURES:` marker (see
+ * {@link FAILURE_BLOCK_START_RE}) and, once seen, captures bytes FORWARD from it (front-anchored),
+ * bounded to {@link FAILURE_BLOCK_CAP_BYTES} — the OPPOSITE eviction direction from `runGateStep`'s own
+ * trailing {@link OUTPUT_TAIL_BYTES} ring, which is exactly why that ring alone can lose this content (see
+ * the marker's own doc). Mirrors {@link createFailingTestTracker}'s streaming/carry-cap shape (same
+ * TextDecoder + `\r\n|\r|\n` line-boundary splitting, same {@link FAILING_TEST_CARRY_CAP_BYTES} bound on
+ * the not-yet-terminated remainder) rather than inventing a second convention. `result()` returns
+ * `undefined` when the marker was never seen — an honest miss (the gate command isn't `test-daemon.mjs`,
+ * or the run never reached its own end-of-suite echo), never a guess.
+ */
+export function createFailureBlockTracker(): { feed(chunk: Buffer): void; result(): string | undefined } {
+  const decoder = new TextDecoder("utf-8");
+  let carry = "";
+  let triggered = false;
+  let buf = "";
+  let capped = false;
+  const appendLine = (line: string): void => {
+    if (capped) return;
+    buf += (buf ? "\n" : "") + line;
+    if (buf.length >= FAILURE_BLOCK_CAP_BYTES) { buf = buf.slice(0, FAILURE_BLOCK_CAP_BYTES); capped = true; }
+  };
+  return {
+    feed(chunk: Buffer): void {
+      if (capped) return;
+      const text = carry + decoder.decode(chunk, { stream: true });
+      const lines = text.split(/\r\n|\r|\n/);
+      carry = lines.pop() ?? "";
+      if (carry.length > FAILING_TEST_CARRY_CAP_BYTES) carry = carry.slice(-FAILING_TEST_CARRY_CAP_BYTES);
+      for (const line of lines) {
+        if (!triggered) {
+          if (!FAILURE_BLOCK_START_RE.test(line)) continue;
+          triggered = true;
+        }
+        appendLine(line);
+        if (capped) return;
+      }
+    },
+    result(): string | undefined {
+      if (!triggered && FAILURE_BLOCK_START_RE.test(carry)) triggered = true;
+      if (!triggered) return undefined;
+      if (!capped) appendLine(carry);
+      return buf.length ? buf : undefined;
+    },
+  };
+}
+
 /** Idle-liveness threshold for the ONE-TIME auto-extend (card 24642c3d, see {@link runGateStep}): if the
  *  child has produced any stdout/stderr byte within this many ms of the timeout firing, it's still
  *  actively working, not stalled — worth one more full `timeoutMs` window instead of an immediate kill.
@@ -328,6 +393,13 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
   const chunks: Buffer[] = [];
   let bytes = 0;
+  // Card 6ffee3e2 (Code Review, merge-gate-retry.mjs case (E)): CUMULATIVE, never decremented — unlike
+  // `bytes` above (the ring's CURRENT tracked size, which DOES shrink on eviction), this is the ONLY way
+  // to tell "the ring's current small size is because the whole run was small" apart from "...because a
+  // much bigger run got evicted down to the cap" — both leave `bytes` looking identical. `resolveOutputTail`
+  // below reads this to decide whether `tail()` is genuinely the COMPLETE output (nothing lost — safe to
+  // use as-is) or has been truncated (content-selection needed instead).
+  let totalBytesSeen = 0;
   // Liveness stamp for the auto-extend decision below — updated on EVERY chunk regardless of the ring's
   // own eviction, so it stays accurate even once the ring has dropped early output. MONOTONIC
   // (performance.now(), not Date.now()/wall clock) to match the deadlines it's compared against
@@ -341,13 +413,18 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // OUTPUT_TAIL_BYTES eviction above — see createFailingTestTracker's doc for why the ring alone isn't
   // enough (a tail dominated by trailing warnings/a pnpm epilogue truncates the marker right out of it).
   const failingTestTracker = createFailingTestTracker();
+  // Card 6ffee3e2: independent front-anchored capture of test-daemon.mjs's own FAILURES: block — see
+  // createFailureBlockTracker's own doc for why this recovers content the trailing ring above cannot.
+  const failureBlockTracker = createFailureBlockTracker();
   const capture = (b: Buffer): void => {
     chunks.push(b);
     bytes += b.length;
+    totalBytesSeen += b.length;
     lastOutputAt = performance.now();
     hooks?.onOutput?.();
     while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
     failingTestTracker.feed(b);
+    failureBlockTracker.feed(b);
   };
   const tail = (): string => {
     const s = Buffer.concat(chunks).toString("utf-8").trim();
@@ -362,6 +439,38 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     if (atBoundary >= 0xdc00 && atBoundary <= 0xdfff) start += 1;
     return s.slice(start);
   };
+  /** Card 6ffee3e2 DoD 1/3: the RETAINED+REPORTED bytes for a FAILING step, selected by CONTENT rather
+   *  than position — never a change to pass/fail determination (that's decided entirely by `result.status`/
+   *  `error`/`timedOut` upstream of this call, untouched here).
+   *
+   *  ⚠️ CORRECTED (Code Review, merge-gate-retry.mjs case (E) — a real regression a first version of this
+   *  fix shipped): content-selection is a REPLACEMENT for `tail()`, so it only fires when `tail()` is
+   *  actually LOSSY — i.e. `totalBytesSeen` exceeds {@link OUTPUT_TAIL_BYTES}, meaning the ring genuinely
+   *  evicted something. When the WHOLE step's output fits inside the cap, `tail()` IS the complete output
+   *  (nothing was ever truncated) — falling back to it loses nothing and invents nothing, which is exactly
+   *  what DoD-3 asks for ("never an arbitrary TRUNCATED chunk"), not "never the raw tail, period". The
+   *  first version always preferred content-selection on any failure, which broke a real, common case: a
+   *  short gate command (not `test-daemon.mjs`) whose failure line survives ANSI color codes wrapped around
+   *  it (`\x1b[31mFAIL widget.spec.js\x1b[0m`) — {@link createFailingTestTracker}'s FAIL-tier pattern
+   *  requires the line to START with `FAIL` (after optional whitespace), so the leading escape sequence
+   *  defeats that match and the tracker falls through to a LOWER-priority tier (e.g. a same-run
+   *  `AssertionError` line) that doesn't name the test — content-selection silently produced WORSE output
+   *  than the untruncated raw tail it replaced. Bounding this to the genuinely-lossy case removes that
+   *  regression without reopening the original bug: a verbose ~700-file suite still exceeds the cap by a
+   *  wide margin, so it always takes the content-selected branch below, unchanged from before this fix.
+   *
+   *  Priority once content-selection DOES apply: (1) the front-anchored FAILURES: block, when
+   *  `test-daemon.mjs`'s own marker was seen — the richest available diagnostic, a real per-file assertion
+   *  body, not just a name; (2) the single best failing-test/assertion LINE `createFailingTestTracker`
+   *  already scans for (content-selected, just not a whole block) — the fallback for a gate command that
+   *  isn't `test-daemon.mjs`, or a genuine failure whose runner never reaches its own end-of-suite echo
+   *  (e.g. a build/lint step); (3) an EXPLICIT honest-miss string, never a silent fall-through to a
+   *  positional chunk that's already known to be missing content (DoD-3). The PASSING path is untouched —
+   *  see card 4c5bf820's own doc on `tail()`'s continued green-path use above. */
+  const resolveOutputTail = (): string =>
+    totalBytesSeen <= OUTPUT_TAIL_BYTES
+      ? tail()
+      : (failureBlockTracker.result() ?? failingTestTracker.result() ?? "no failure line matched");
   // GIT_TERMINAL_PROMPT=0 — a gateCommand/deployCommand step may run `git push` (or any git op); without
   // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead
   // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard). `envOverride` (card 7f96aa09)
@@ -396,9 +505,16 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     if (timer) clearTimeout(timer);
     const failingTest = failingTestTracker.result();
     const failTierTest = failingTestTracker.failTierResult();
+    // Card 6ffee3e2: content-selected retention only for a GENUINE failure, matching this step's own
+    // pass/fail determination (`result.status`/`error`) — never for a cancel (a killed-mid-run step has no
+    // "failure" to select content for; it keeps the plain positional tail, unchanged from before this card).
+    // `onTimeout` below (Code Review) applies this SAME `!cancelling` carve-out to its own settle path —
+    // see its comment for why the two must agree regardless of which one verifies the child's death.
+    const isGenuineFailure = !cancelling && (!!result.error || result.status !== 0);
     resolve({
       ...result, ...(cancelling ? { cancelled: true } : {}),
-      outputTail: tail(), failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
+      outputTail: isGenuineFailure ? resolveOutputTail() : tail(),
+      failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
       failTierTest, failTierTestCount: failTierTest ? failingTestTracker.failTierMatchCount() : undefined,
       decidedAt: performance.now(),
     });
@@ -468,7 +584,18 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         // finally fired, tag it cancelled too — a caller checking `cancelled` must see it even when the
         // eventual settle came from the timeout path rather than a fresh close/error after the kill.
         ...(cancelling ? { cancelled: true } : {}),
-        outputTail: tail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
+        // Card 6ffee3e2 (Code Review): a timeout that settles via THIS path is always a genuine failure to
+        // report EXCEPT when `cancelling` is also true — the SAME `!cancelling` carve-out `done()` applies
+        // above, extended here on purpose rather than left as an asymmetry. Why the two settle paths must
+        // agree: `cancelling` records INTENT (a `cancelSignal` abort was requested), not WHICH mechanism
+        // eventually verifies the child died — a killed process can be confirmed dead either by its own
+        // `close` event (routed through `done()`) or, if that kill hasn't taken effect by the time this
+        // step's own `timeoutMs` bound also expires, by this backstop instead. Both are the SAME cancelled
+        // step, discovered by two different clocks; which one wins the race is timing, not semantics, so
+        // the retained output must not depend on it. A killed-mid-run step has no failure to select
+        // content for either way — it was deliberately terminated, not naturally failing — so it keeps the
+        // plain positional tail here too, matching `done()` exactly.
+        outputTail: cancelling ? tail() : resolveOutputTail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
         failTierTest: timeoutFailTierTest, failTierTestCount: timeoutFailTierTest ? failingTestTracker.failTierMatchCount() : undefined,
         decidedAt,
       });
