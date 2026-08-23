@@ -395,13 +395,21 @@ away real accumulated work for nothing.
 
 **The free discriminator: something ADVANCING, or a real turn-end.** `turnSeq`/`ctxTurns` moving between two reads, or a `Stop` hook having already fired for the worker, both prove a turn genuinely ran — check either before trusting the composerDirtyLen+lastActivity pairing above. Better still, when daemon logs are readable: a `[submit] … CONFIRMED` line followed by `[prompt-echo] byteIdentical=true` for that worker settles it outright — that is the daemon's own decisive, already-acted-upon proof of delivery, and once you see it, treat the worker as genuinely running. **`byteIdentical=false` is the other half of that same signal, not silence about it — never read a CONFIRMED line alone as proof of delivery without also checking this.** It means the content actually submitted did not match what was written for that turn: the text you intended for that worker may never have reached it (a possible LOSS), and separately, whatever content WAS actually submitted may itself be a re-delivery of an earlier message resurfacing as if new (a possible DUPLICATE) — a turn confirmed this way ran on unverified content, not necessarily yours, so don't assume a report or decision that followed it was actually based on what you sent. A dedicated mismatch notice is delivered into the affected session itself when this happens, naming both possibilities with the observed lengths/hashes — read it as a real signal, not routine daemon chatter, and re-check what that turn actually acted on before trusting it.
 
-**A confirmed dirty composer has a submit-only remedy — try it before anything more destructive.**
-`worker_flush` presses Enter on that worker's OWN composer, writing nothing new: it's a third option
+**Try `worker_flush` BEFORE you trust a non-zero `composerDirtyLen` read, not only after — it is a
+disambiguator first, a remedy second.** A non-zero reading is not always a genuinely stranded composer:
+one specific give-up shape (the engine produced output after Loom's own final Enter attempt, so Loom
+believed the turn already started) has no automatic clear path on its own generation and can sit
+non-zero indefinitely against a composer that is actually empty and a worker that is actually healthy —
+observed in production against a worker sitting idle post-turn AND, separately, against one busy mid-way
+through its very first turn. `worker_flush` presses Enter on that worker's OWN composer, writing nothing
+new, and its result answers the question directly: `composer-empty` means nothing was actually stranded
+— stop there, no further action needed — while a genuine attempt-and-fail result means something really
+is sitting unsubmitted. It's also a real remedy once you DO know the composer is dirty: a third option
 alongside `worker_message` (which APPENDS, compounding an already-oversized unconfirmed payload) and
-`worker_stop` + respawn (which DISCARDS whatever the worker had accumulated). It's a remedy to try, not a
-guaranteed recovery — a `confirmed:false` result means this attempt didn't land, not that nothing can be
-done — and it's a documented no-op on a genuinely clean composer, so calling it speculatively costs
-nothing.
+`worker_stop` + respawn (which DISCARDS whatever the worker had accumulated) — but call it FIRST, before
+either of those, and always before any destructive remedy. It's a documented no-op on a genuinely clean
+composer, so calling it speculatively costs nothing; a `confirmed:false` result on a truly dirty one just
+means this attempt didn't land, not that nothing can be done.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 

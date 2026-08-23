@@ -2170,6 +2170,27 @@ interface Live {
   // to have actually landed — see submit()'s own doc for why the clear is deliberately DEFERRED to the next
   // submit() rather than attempted at give-up time. ADDITIVE, never overwritten by a give-up: a second
   // unresolved give-up on top of an already-dirty composer must not lose track of the first.
+  // ⚠️ Card d4b3fa6c — NOT AUTHORITATIVE ALONE, DOCUMENTED LIMITATION (deliberately not "fixed" — see below):
+  // a GIVE-UP SUPPRESSED mark (`fireEnterAndVerify`'s "engine produced output after the final Enter write"
+  // branch) never calls `requeueGiveUpOrigin`, so it seeds neither `ambiguousDispatches`/`giveUpConfirmQueue`
+  // nor `composerDirtyLenClearedByGen` — meaning BOTH of this field's clear paths (`clearComposerDirtyOnConfirm`
+  // via `purgeConfirmedGiveUpRequeue`, and the `composerDirtyLenClearedByGen === submitGeneration` gate below)
+  // are structurally UNREACHABLE for a SUPPRESSED-only mark on its OWN generation. The field then reads
+  // stale-nonzero against a GENUINELY EMPTY composer — confirmed twice in production, in two different
+  // lifecycle states (idle post-turn; busy mid-first-turn, turnSeq still 0) — and clears ONLY once some
+  // wholly UNRELATED, LATER submit() (a fresh message) issues its own defensive clear-prefix and that gets
+  // confirmed. See `pty-giveup-suppressed-composerdirty-sticky.mjs` for the reproduction: the staleness
+  // survives BOTH the same generation's own UserPromptSubmit confirm AND its later Stop. A CANDIDATE FIX
+  // (enrolling the SUPPRESSED mark into `ambiguousDispatches`/`giveUpConfirmQueue` the same way, minus the
+  // `live.pending` requeue) was evaluated and REJECTED: `healIfStuck`'s own backstop unconditionally calls
+  // `requeueGiveUpOrigin` for a still-unconfirmed generation regardless of whether it was already marked
+  // dirty (only the dirty-MARK is gated on `composerDirtyMarkedForGen`, not the requeue call) — so an
+  // already-enrolled SUPPRESSED generation would get double-enrolled into `giveUpConfirmQueue`, corrupting
+  // its FIFO-position correlation and risking a LATER, unrelated confirming hook being misattributed to an
+  // already-resolved generation. The safe direction here is fail-toward-DIRTY: consumers must treat a
+  // non-zero read as a SUSPICION, not proof, and call `worker_flush`'s submit-only, write-nothing recheck
+  // BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
+  // worker_list/worker_status/my_context's own tool descriptions and the `/orchestrate` doctrine.
   composerDirtyLen: number;
   // Card 3ce3fa39: the `submitGeneration` whose submit() most recently issued a defensive clear-prefix for
   // `composerDirtyLen` — null when no clear-prefix is currently outstanding. GATES the reset: a confirming

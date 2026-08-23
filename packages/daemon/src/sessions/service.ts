@@ -1035,11 +1035,15 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
     `${confirmationLatencyProportionalityClause()} ` +
     `Observed (single point-in-time read): engineSessionId=${w.engineSessionId ?? "none"}, turnSeq=${w.turnSeq ?? 0} ` +
     `(confirm via a second read before treating this as settled — a lone reading can't rule out a race still resolving), ` +
-    `composerDirtyLen=${composerDirtyLen ?? "n/a"} (>0 confirms an unsent kickoff sitting in the composer; 0 or n/a does NOT rule that out — the ` +
+    `composerDirtyLen=${composerDirtyLen ?? "n/a"} (>0 SUGGESTS an unsent kickoff sitting in the composer but does NOT by itself confirm it — a ` +
+    `GIVE-UP SUPPRESSED mark can read stale-nonzero against a genuinely empty composer indefinitely, card d4b3fa6c; call worker_flush to ` +
+    `disambiguate before treating this as settled. 0 or n/a does NOT rule the stranded-kickoff case out either — the ` +
     `counter is only set once Loom's own retry budget exhausts, and n/a means not live in this process), resumability=${w.resumability}. ` +
     `${giveUpConfirmationHedge("the kickoff")} This is NOT a benign idle park, but it is also not proof of a broken one. VERIFY, cheapest first: ` +
-    `(1) worker_status({workerSessionId:"${w.id}"}) for a fresh composerDirtyLen/unconfirmedDeliveryMs/turnSeq read — free, no risk; ` +
-    `(2) worker_transcript ${w.id} — the DECISIVE check. Until BOTH agree nothing happened, do NOT worker_message it (returns a false ` +
+    `(1) worker_flush({workerSessionId:"${w.id}"}) — submit-only, writes nothing, a documented no-op on a clean composer; a "composer-empty" ` +
+    `result already disproves a stranded kickoff without needing steps 2/3 below; ` +
+    `(2) worker_status({workerSessionId:"${w.id}"}) for a fresh composerDirtyLen/unconfirmedDeliveryMs/turnSeq read — free, no risk; ` +
+    `(3) worker_transcript ${w.id} — the DECISIVE check. Until these agree nothing happened, do NOT worker_message it (returns a false ` +
     `delivered:true against a session that never started a turn) and do NOT worker_merge it; only if worker_transcript shows truly nothing ` +
     `(0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
 }
