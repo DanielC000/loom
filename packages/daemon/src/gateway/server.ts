@@ -3508,7 +3508,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (GET → PUT the same body) doesn't trip validateProfile's .strict() unknown-key guard.
     const { id: _drop, bundled: _b, customized: _c, updateAvailable: _u, ...patch } = (req.body ?? {}) as Record<string, unknown>;
     const { id: _eid, ...base } = existing;
-    const v = validateProfile({ ...base, ...patch });
+    // previousRole + the raw un-merged patch let validateProfile's assistant-role restrictedTools gate
+    // (card 8feb55b8) tell a genuine role TRANSITION into "assistant" (must state restrictedTools) apart
+    // from an unrelated edit to an already-assistant profile (must not be forced to restate it).
+    const v = validateProfile({ ...base, ...patch }, { previousRole: existing.role, patch });
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
     // Same P4↔P5a guard as POST — see capabilityGrantBindingError's doc.
     const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);

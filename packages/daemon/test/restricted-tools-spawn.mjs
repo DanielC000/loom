@@ -139,8 +139,16 @@ check("(B) a profile with restrictedTools:true ⇒ true (passthrough)", resolveP
 {
   const okOn = validateProfile({ name: "Companion", role: "assistant", restrictedTools: true });
   check("(H) PROFILE validator (human REST) ACCEPTS restrictedTools:true (carried through)", okOn.ok === true && okOn.value.restrictedTools === true);
-  const okDefault = validateProfile({ name: "Companion", role: "assistant" });
-  check("(H) PROFILE validator normalizes an absent restrictedTools to false", okDefault.ok === true && okDefault.value.restrictedTools === false);
+  const okOff = validateProfile({ name: "Companion", role: "assistant", restrictedTools: false });
+  check("(H) PROFILE validator ACCEPTS an explicit restrictedTools:false for role assistant (a stated choice, not an accident)", okOff.ok === true && okOff.value.restrictedTools === false);
+  // Card 8feb55b8: an assistant-role profile must STATE restrictedTools explicitly — omitting it used to
+  // silently normalize to false with no record a choice was made; it now REJECTS instead (either value is
+  // accepted, see okOn/okOff above — only the omission is rejected). See test/profiles.mjs for the full
+  // create-vs-update-shaped coverage (why this doesn't force every unrelated edit to restate the field).
+  const omitted = validateProfile({ name: "Companion", role: "assistant" });
+  check("(H) PROFILE validator REJECTS an assistant profile with restrictedTools omitted (card 8feb55b8)", omitted.ok === false);
+  const omittedNonAssistant = validateProfile({ name: "Dev", role: "worker" });
+  check("(H) a non-assistant role with restrictedTools omitted is UNAFFECTED — still normalizes to false", omittedNonAssistant.ok === true && omittedNonAssistant.value.restrictedTools === false);
   // The AGENT-facing PROJECT-CONFIG validator (the gateCommand/alertWebhook rejecter) must NOT accept
   // restrictedTools — it is a PROFILE field, not a config field, so a strict schema rejects it. This is
   // the "no agent path to set it via config" guard (an agent CAN patch project config; it must not smuggle

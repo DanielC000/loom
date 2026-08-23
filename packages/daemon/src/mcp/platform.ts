@@ -1347,7 +1347,11 @@ export class PlatformMcpRouter {
         const forbiddenErr = agentProfileKeyError(patchNoId);
         if (forbiddenErr) return ok({ error: forbiddenErr });
         const { id: _eid, ...base } = existing;
-        const v = validateProfile({ ...base, ...patchNoId });
+        // previousRole + the raw un-merged patch let validateProfile's assistant-role restrictedTools
+        // gate (card 8feb55b8) tell a genuine role TRANSITION into "assistant" (must state
+        // restrictedTools) apart from an unrelated edit to an already-assistant profile (must not be
+        // forced to restate it).
+        const v = validateProfile({ ...base, ...patchNoId }, { previousRole: existing.role, patch: patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
         db.updateProfile(profileId, v.value);
         return ok(db.getProfile(profileId));

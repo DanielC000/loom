@@ -188,6 +188,70 @@ check("(validator) accepts noCommit + normalizes the default to false", (() => {
   return on.ok && on.value.noCommit === true && off.ok && off.value.noCommit === false;
 })());
 
+// --- (guard) card 8feb55b8: an assistant-role profile must state restrictedTools explicitly ---------
+// (1) CREATE-shaped submission (role:assistant, restrictedTools omitted) ⇒ REJECTED — the measured gap
+// (a fresh submission silently normalizing to false with no record a choice was made).
+check("(validator) CREATE: assistant role + restrictedTools omitted ⇒ rejected",
+  validateProfile({ name: "Companion", role: "assistant" }).ok === false);
+// (2) CREATE with an explicit false ⇒ accepted, unchanged — the gate requires a STATED value, not `true`
+// (the owner explicitly declined enforcing true; Request 34923f42 / card ccd0d05f WON'T-DO).
+check("(validator) CREATE: assistant role + explicit restrictedTools:false ⇒ accepted, value false", (() => {
+  const r = validateProfile({ name: "Companion", role: "assistant", restrictedTools: false });
+  return r.ok && r.value.restrictedTools === false;
+})());
+// (3) CREATE with an explicit true ⇒ accepted, unchanged (the seeded template's own shape).
+check("(validator) CREATE: assistant role + explicit restrictedTools:true ⇒ accepted, value true", (() => {
+  const r = validateProfile({ name: "Companion", role: "assistant", restrictedTools: true });
+  return r.ok && r.value.restrictedTools === true;
+})());
+// (4) A NON-assistant role omitting restrictedTools is completely unaffected — the gate only reaches
+// role:"assistant"; every other role keeps normalizing the omission to false, as before this change.
+check("(validator) non-assistant role + restrictedTools omitted ⇒ unaffected (normalizes to false)", (() => {
+  const r = validateProfile({ name: "X", role: "worker" });
+  return r.ok && r.value.restrictedTools === false;
+})());
+check("(validator) role:null + restrictedTools omitted ⇒ unaffected (normalizes to false)", (() => {
+  const r = validateProfile({ name: "X" });
+  return r.ok && r.value.restrictedTools === false;
+})());
+// (5) UPDATE-shaped submission, mirroring the REAL call sites (gateway/server.ts PUT, setup.ts,
+// mcp/platform.ts profile_update) exactly: they all validate `{ ...existingProfile, ...patch }` AND pass
+// `{ previousRole: existing.role, patch }` so the gate can tell an unrelated edit to an ALREADY-assistant
+// profile apart from a genuine role transition. An unrelated edit (patch never mentions restrictedTools,
+// previousRole is already "assistant") is NOT forced to restate it — e.g. the owner's live Companion
+// (Request 34923f42, keeps Bash) survives an unrelated save untouched.
+check("(validator) UPDATE-shaped, already-assistant (previousRole=assistant, patch omits restrictedTools) ⇒ carries the stored value forward, unaffected", (() => {
+  const existingCompanionRow = { name: "Companion", role: "assistant", restrictedTools: false, description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { description: "renamed, unrelated edit" }; // does NOT mention restrictedTools
+  const r = validateProfile({ ...existingCompanionRow, ...patch }, { previousRole: existingCompanionRow.role, patch });
+  return r.ok && r.value.restrictedTools === false && r.value.description === "renamed, unrelated edit";
+})());
+// (6) UPDATE-shaped submission that TRANSITIONS role INTO "assistant" from something else: the row was
+// never assistant-role before, so this is a genuinely undecided case — same as CREATE — and the patch's
+// own omission of restrictedTools must be rejected (manager-requested extension of the gate: DoD-2 says
+// "at create/update", and a role transition on update is exactly the update-time version of the same gap).
+check("(validator) UPDATE-shaped TRANSITION into assistant (previousRole=worker, patch omits restrictedTools) ⇒ rejected", (() => {
+  const existingWorkerRow = { name: "Rig", role: "worker", restrictedTools: false, description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { role: "assistant" }; // transitions role, does NOT state restrictedTools
+  const r = validateProfile({ ...existingWorkerRow, ...patch }, { previousRole: existingWorkerRow.role, patch });
+  return r.ok === false;
+})());
+check("(validator) UPDATE-shaped TRANSITION into assistant + explicit restrictedTools ⇒ accepted, value carried through", (() => {
+  const existingWorkerRow = { name: "Rig", role: "worker", restrictedTools: false, description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { role: "assistant", restrictedTools: true }; // states the value at the same time
+  const r = validateProfile({ ...existingWorkerRow, ...patch }, { previousRole: existingWorkerRow.role, patch });
+  return r.ok && r.value.role === "assistant" && r.value.restrictedTools === true;
+})());
+// (7) UPDATE call sites that pass NO opts at all (a caller not yet retrofitted) fall back to checking
+// `raw` itself, i.e. today's CREATE-only behavior — never silently more permissive than before this
+// extension shipped.
+check("(validator) no opts passed (legacy call shape) ⇒ falls back to checking raw itself, same as CREATE", (() => {
+  const existingWorkerRow = { name: "Rig", role: "worker", restrictedTools: false, description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const merged = { ...existingWorkerRow, role: "assistant" }; // restrictedTools present via the merge itself
+  const r = validateProfile(merged); // no opts ⇒ patch defaults to raw (= merged), which DOES carry the key
+  return r.ok === true; // raw (merged) carries restrictedTools as an own key, so the fallback still passes
+})());
+
 // --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
 // requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
 // closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------

@@ -151,8 +151,46 @@ export function capabilityGrantBindingError(
   return null;
 }
 
+/**
+ * Blast-radius gate for card 8feb55b8: `restrictedTools` must never resolve to `false` for an
+ * assistant-role profile by silent omission — a companion is driven by untrusted inbound chat, so
+ * whether its raw-shell/host-write blast radius is withdrawn has to be a RECORDED decision, not an
+ * accident of a field nobody set. This deliberately does NOT enforce `true` (the owner explicitly
+ * declined that for their own Companion, Request 34923f42 / card ccd0d05f WON'T-DO) — it only requires
+ * the caller state a value, either one, so the stored `false` this normalizes to is provably a choice.
+ *
+ * Fires when the profile is BECOMING assistant-role for the first time — a fresh CREATE, or an UPDATE
+ * whose patch transitions `role` INTO "assistant" from something else — and the caller's OWN submission
+ * (the create payload, or the raw UN-MERGED patch on update) doesn't state `restrictedTools` as an own
+ * key. It does NOT fire on an unrelated edit to an ALREADY-assistant profile (`previousRole ===
+ * "assistant"`): every update call site (gateway/server.ts PUT, setup.ts, mcp/platform.ts
+ * profile_update) validates `{ ...existingProfile, ...patch }`, so that case already carries a
+ * previously-decided `restrictedTools` forward — re-forcing it on every unrelated save would be a
+ * refusal with nothing new to decide, not a recorded choice.
+ *
+ * `submittedPatch` must be the CALLER'S raw, UN-MERGED input — never the merged `{ ...base, ...patch }`
+ * object also passed as `validateProfile`'s first argument, which (once a base row exists) always shows
+ * `restrictedTools` as "present" via the base row's own concrete value and could never distinguish a
+ * genuine restatement from silent inheritance. `validateProfile` defaults this to its own `raw` param
+ * when the caller passes no `opts.patch` (the CREATE shape, where raw already IS the full unmerged
+ * submission).
+ */
+function assistantRestrictedToolsOmittedError(
+  resolvedRole: string | null | undefined,
+  previousRole: string | null | undefined,
+  submittedPatch: unknown,
+): string | null {
+  if (resolvedRole !== "assistant") return null;
+  if (previousRole === "assistant") return null; // already decided; not this gate's concern
+  const hasOwnKey =
+    submittedPatch != null && typeof submittedPatch === "object" && !Array.isArray(submittedPatch) && "restrictedTools" in (submittedPatch as Record<string, unknown>);
+  if (hasOwnKey) return null;
+  return "restrictedTools must be stated explicitly (true or false) when a profile becomes assistant-role (create, or a role change into assistant) — a chat-reachable companion's blast radius is a deliberate choice, not a default. Set it to true (least-privilege, dangerous native tools withdrawn) or false (accept the risk) and resubmit.";
+}
+
 export function validateProfile(
   raw: unknown,
+  opts?: { previousRole?: string | null; patch?: unknown },
 ): { ok: true; value: Omit<Profile, "id"> } | { ok: false; error: string } {
   const r = profileSchema.safeParse(raw ?? {});
   if (!r.success) {
@@ -160,6 +198,8 @@ export function validateProfile(
     return { ok: false, error: msg };
   }
   const d = r.data;
+  const restrictedToolsError = assistantRestrictedToolsOmittedError(d.role, opts?.previousRole, opts?.patch ?? raw);
+  if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
   return {
     ok: true,
     value: {
