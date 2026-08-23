@@ -2168,8 +2168,12 @@ const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
  *  adding its basename to `GUARD_BASENAMES` fails SILENTLY — the new guard genuinely runs (this list
  *  drives the real command), but nothing asserts it does, so a mis-registered addition ships green.
  *  Whoever adds a guard to this list must add the same basename to `GUARD_BASENAMES` in the same change.
+ *
+ *  EXPORTED (card 245a3708) so `scripts/run-static-guards.mjs` (the `pnpm guards` command) can run
+ *  exactly this list without restating it — see that script's own header for why a second copy of these
+ *  paths anywhere is worse than not having a runner at all.
  */
-const STATIC_GUARD_REPO_PATHS = [
+export const STATIC_GUARD_REPO_PATHS = [
   "packages/daemon/test/clock-path-regression-guard.mjs",
   "packages/daemon/test/fixed-wait-negative-guard.mjs",
   "packages/daemon/test/onexit-discard-guard.mjs",

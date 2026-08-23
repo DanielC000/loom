@@ -75,7 +75,8 @@
     "test:cli-direct-invocation": "node test/cli-direct-invocation.mjs",
     "test:cli-service": "node test/cli-service.mjs",
     "test:cli-channel": "node test/cli-channel.mjs",
-    "test:daemon": "node scripts/test-daemon.mjs"
+    "test:daemon": "node scripts/test-daemon.mjs",
+    "guards": "node scripts/run-static-guards.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",
