@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // SKILL-LIVENESS WARNING test (card 64a30c79) — a merge that lands a change under
 // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents at merge time: skills/inject.ts delivers
 // a session's skills from the STORE (`<LOOM_HOME>/skills/<name>/SKILL.md`), never from `assets/` directly

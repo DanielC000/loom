@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Git worktree manager test (PR #12 + H1 hardening). REAL git on a temp repo (like busy-flag's
 // repo setup). LOOM_HOME is set to a temp dir BEFORE importing dist/* so WORKTREES_DIR is isolated
 // (paths.ts reads LOOM_HOME at module load). Run: 1) build daemon, 2) node test/worktrees.mjs

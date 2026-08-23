@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Worktree dep-provisioning test (task 650bb061). Proves the two load-bearing properties of the
 // at-creation `pnpm install`:
 //   (i)  after createWorktree a pnpm-workspace worktree is BUILD-READY (its own node_modules exists),

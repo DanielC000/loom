@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // getWorkerDiffCached test — the perf fix for the polled orchestration-view diff endpoint
 // (GET /api/sessions/:id/diff): `reviewQueue.tsx` polls this every 8000ms for a worker awaiting merge;
 // `Overview.tsx`/`ReviewPanel.tsx` set no interval at all and refetch on every mount instead (react-query's

@@ -1,3 +1,4 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // workerDiff lifecycle test — the fix for "/orchestration worker diffs are all empty". REAL git on a
 // temp repo (worktrees.mjs style). Proves workerDiff is robust across a worker's whole lifecycle where
 // the old diffBranch was not: it reads UNCOMMITTED in-progress work from a live worktree (was empty),
