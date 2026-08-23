@@ -28,9 +28,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rengbd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+registerForCleanup(process.env.LOOM_HOME);
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
