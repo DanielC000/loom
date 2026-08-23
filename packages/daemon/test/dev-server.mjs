@@ -464,6 +464,94 @@ try {
   failures++;
 }
 
+// (j) card 7d0eceab — THE POSITIVE CONTROL, the whole point of this card: the LAUNCHER used to read the
+// log for the FIRST time before the DETACHED supervisor had truncated it (that truncation happens inside
+// the supervisor's own just-spawned node process, which is still booting). A leftover, PARSEABLE, AFFIRMED
+// banner from a PREVIOUS run at the same <dir> was read as if it were this run's — a test with no
+// pre-existing log cannot exercise this at all, which is exactly what every prior fix in this area
+// (6cfbc55, 942abd6f) lacked. This plants a stale, affirmed banner naming port A at the dir's tracking log
+// BEFORE calling `start`, then launches a REAL fixture that binds a different, OS-chosen port B, and
+// asserts the recorded port is B — never A.
+const staleRaceFixtureSrc = [
+  "const net = require('net');",
+  "const fs = require('fs');",
+  "const sentinelFile = process.argv[2];",
+  "const srv = net.createServer(() => {});",
+  "srv.listen(0, '127.0.0.1', () => {",
+  "  const actual = srv.address().port;",
+  "  fs.writeFileSync(sentinelFile, String(actual));",
+  "  console.log('  \\u001b[32m\\u2192\\u001b[39m  \\u001b[1mLocal\\u001b[22m:   \\u001b[36mhttp://localhost:\\u001b[1m' + actual + '\\u001b[22m/\\u001b[39m');",
+  "});",
+].join("\n");
+const staleRaceFixtureScript = path.join(fixtureDir, "stale-race-server.cjs");
+fs.writeFileSync(staleRaceFixtureScript, staleRaceFixtureSrc);
+const staleRaceSentinelFile = path.join(fixtureDir, "stale-race-actual.txt");
+
+// Re-derive the helper's own pathHash/logFilePath so this test can plant a log at the EXACT path `start`
+// will read from for a given <dir> — outside the ephemeral OS-assigned range (Linux ~32768-60999, Windows
+// default dynamic range starts at 49152) so it can never coincidentally collide with the fixture's own
+// OS-chosen bound port.
+function pathHashForTest(absDir) {
+  return crypto.createHash("sha256").update(absDir).digest("hex").slice(0, 16);
+}
+const STALE_PORT = 22222;
+const staleRaceWorkDir = mkdtempManaged("loom-dev-server-stalerace-");
+const staleRaceAbsDir = path.resolve(staleRaceWorkDir);
+const staleRaceLogPath = path.join(os.tmpdir(), `loom-dev-server-${pathHashForTest(staleRaceAbsDir)}.log`);
+let staleRaceTrackedPid = null;
+
+try {
+  // Plant the stale, PARSEABLE, AFFIRMED banner — a genuine "previous run's" log — BEFORE `start` is ever
+  // invoked for this dir.
+  fs.writeFileSync(
+    staleRaceLogPath,
+    `  \x1b[32m\u2192\x1b[39m  \x1b[1mLocal\x1b[22m:   \x1b[36mhttp://localhost:\x1b[1m${STALE_PORT}\x1b[22m/\x1b[39m\n`,
+    "utf8",
+  );
+  check("(j) stale log planted at the dir's tracking log path (test precondition)", fs.existsSync(staleRaceLogPath));
+
+  const startResult = spawnSync(
+    process.execPath,
+    [HELPER, "start", staleRaceWorkDir, "--", process.execPath, staleRaceFixtureScript, staleRaceSentinelFile],
+    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+  );
+  check("(j) start (stale-log race control) exits 0", startResult.status === 0);
+  const staleRaceStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+  staleRaceTrackedPid = staleRaceStartMatch ? Number(staleRaceStartMatch[1]) : null;
+
+  const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+  check("(j) start prints a Bound: url line", !!boundMatch);
+  const boundUrl = boundMatch ? boundMatch[1] : null;
+  let boundParsed = null;
+  try { boundParsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+  const recordedPort = boundParsed ? Number(boundParsed.port) : null;
+
+  // GROUND TRUTH: the fixture wrote its own actual bound port straight to a sentinel file, independent of
+  // both the helper's extraction and of the planted stale content.
+  const actualPort = fs.existsSync(staleRaceSentinelFile) ? Number(fs.readFileSync(staleRaceSentinelFile, "utf8")) : null;
+  check("(j) fixture wrote its own ground-truth actual-port sentinel", actualPort != null && !Number.isNaN(actualPort));
+
+  check(
+    "(j) THE POSITIVE CONTROL: recorded port is the NEW run's actual bound port, never the stale planted one",
+    recordedPort != null && recordedPort !== STALE_PORT && actualPort != null && recordedPort === actualPort,
+  );
+
+  // Independent re-verification: `stop` is a SEPARATE process invocation that must re-read the (correct)
+  // port from the tracking file on disk, not just echo what `start` printed once in-process.
+  const stopResult = spawnSync(process.execPath, [HELPER, "stop", staleRaceWorkDir], { encoding: "utf8", timeout: 10_000 });
+  check("(j) stop exits 0", stopResult.status === 0);
+  const stopPortMatch = /\(port (\d+)\)/.exec(stopResult.stdout || "");
+  check(
+    "(j) stop's own fresh re-read of the tracking file also reports the NEW port, never the stale one",
+    !!stopPortMatch && recordedPort != null && Number(stopPortMatch[1]) === recordedPort,
+  );
+} catch (e) {
+  console.log(`FAIL  unexpected error (stale-log race control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (staleRaceTrackedPid != null && isAlive(staleRaceTrackedPid)) { try { process.kill(staleRaceTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), and that recorded url connects on a real single-stack server where a naively-rebuilt one refuses."
   : `\n❌ ${failures} FAILURE(S).`);

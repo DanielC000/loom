@@ -165,6 +165,10 @@ const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
 // banner. Generalizing further (e.g. verifying the candidate is actually listening) doesn't strictly
 // dominate this: the observed real case (a reverse-proxy target) is genuinely alive too — it's the
 // daemon — so a liveness check alone cannot tell it apart from the real bind.
+// Returns `{host, port, affirmed}` for the first candidate found (affirmed preferred over non-affirmed —
+// see below), or null if none. `affirmed` lets waitForBinding tell "this IS the bind" from "this merely
+// mentions a port", so it can keep polling for a later, better line instead of locking onto the first
+// port-shaped mention it sees.
 function extractBinding(logPath) {
   let content;
   try {
@@ -179,18 +183,22 @@ function extractBinding(logPath) {
     const m = PORT_BANNER_RE.exec(line);
     if (!m) continue;
     const candidate = { host: m[1], port: Number(m[2]) };
-    if (BOUND_AFFIRMATION_RE.test(line)) return candidate;
+    if (BOUND_AFFIRMATION_RE.test(line)) return { ...candidate, affirmed: true };
     if (firstNonDecoy == null) firstNonDecoy = candidate;
   }
-  return firstNonDecoy;
+  return firstNonDecoy ? { ...firstNonDecoy, affirmed: false } : null;
 }
 
 // Poll the log file for the child's own bound-host:port banner, bounded — see PORT DETECTION above.
+// Only an AFFIRMED candidate short-circuits the loop; a non-affirmed one (a port mentioned without a
+// "local/listening/ready/…" keyword on its line) keeps polling in case a real, affirmed banner shows up
+// later in the log — accepting the non-affirmed candidate only if the deadline is reached with nothing
+// better (the post-loop extractBinding call below already does exactly that).
 async function waitForBinding(logPath, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const binding = extractBinding(logPath);
-    if (binding != null) return binding;
+    if (binding != null && binding.affirmed) return binding;
     await new Promise((r) => setTimeout(r, 100));
   }
   return extractBinding(logPath);
@@ -286,6 +294,16 @@ async function start(dir, cmdArgs) {
     cwd: absDir,
     shell: win32,
   });
+  // Truncate the log HERE, in the launcher, synchronously, BEFORE spawning the supervisor. This is the
+  // actual fix for the stale-port race (card 7d0eceab): waitForBinding's first read fires immediately
+  // after spawn, while the detached supervisor is still booting its own node process — well before it
+  // reaches its own `fs.createWriteStream(logPath, { flags: 'w' })` truncation below. A leftover log from
+  // a previous `start` at this same <dir> would otherwise be read as this run's port banner, and since
+  // this first read is essentially instantaneous, it wins virtually always when a stale log exists. The
+  // supervisor's own truncating open still runs too (harmless, and correct for its own writes) but must
+  // never be the ONLY barrier — this synchronous truncate is what actually closes the race.
+  fs.writeFileSync(logPath, "", "utf8");
+
   // See the SUPERVISOR note at the top of this file: the detached, TRACKED process is this supervisor,
   // not `cmd` directly. No shell here — `process.execPath` is spawned directly (a real, directly
   // executable path), so Windows launches it via a normal argv-array CreateProcess call that needs no
