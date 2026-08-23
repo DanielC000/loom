@@ -1032,12 +1032,75 @@ try {
     const enqueued14b = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("14b: THE SAFETY CASE — a later, distinct mismatch still enqueues its own notice", enqueued14b);
   }
+
+  // Production default (pty-write-chunk-surrogate-boundary.mjs's own convention: no
+  // LOOM_PTY_WRITE_CHUNK_BYTES override, so this matches host.ts's real PTY_WRITE_CHUNK_UNITS).
+  const CHUNK_UNITS = 1024;
+
+  // ===== 15. Card 2b57b5a9 (n=13, 10 distinct positions, zero exceptions) — a THIRD suppression class:
+  // a stray U+000C (form feed) inserted mid-token at an EXACT MULTIPLE of PTY_WRITE_CHUNK_UNITS. Root
+  // cause (DoD-4): `repaint()` writes a raw Ctrl-L directly to the pty, racing `writeChunked`'s
+  // inter-chunk pacing gap — landing inside an open bracketed-paste run exactly at a chunk seam. The
+  // raw byte-wise scan still diverges (diagnostic log must still fire — corpus preserved); what must
+  // change is the SESSION-FACING notice must NOT fire, because stripping the single form feed makes the
+  // remainder byte-IDENTICAL to `intended` (the reconciliation bar this card made binding). =====
+  {
+    const sid = newSession("ChunkSeamFormFeed"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "x".repeat(CHUNK_UNITS) + "RUNNING: the rest of this turn's content after the chunk seam, unchanged";
+    const reported = intended.slice(0, CHUNK_UNITS) + "\u000c" + intended.slice(CHUNK_UNITS); // one FF inserted exactly at the seam
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("15: the raw byte-wise scan still diverges — the diagnostic log still fires (corpus preserved)", warnings.length === 1);
+    check("15: divergesAtChar sits exactly at the chunk seam (an exact multiple of PTY_WRITE_CHUNK_UNITS) and lenDelta is exactly 1",
+      new RegExp(`divergesAtChar=${CHUNK_UNITS}\\b`).test(warnings[0] ?? "") && /lenDelta=1\b/.test(warnings[0] ?? ""));
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — see scenario 8's own comment for why exactly one tick is
+    // provably sufficient; the negative check below runs synchronously immediately after, no further await.
+    await new Promise((r) => setTimeout(r, 0));
+    check("15: NEGATIVE CONTROL — despite the raw byte divergence, the session-facing notice does NOT enqueue (chunk-seam form feed, byte-reconciles exactly)", !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
+    check("15: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("15: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 16. Card 2b57b5a9 DoD-5's own binding constraint — THE SAFETY CASE, directly reproducing the
+  // "outcome uniformity" concern the card's own dissolved counter-specimen (`f1a8dce1`) raised: a form
+  // feed lands at the exact same chunk-seam POSITION as scenario 15, but this time a real character was
+  // ALSO genuinely dropped one position later — same SIGNATURE (a mid-token insertion at a chunk-seam
+  // multiple), but the OUTCOME is a real loss (lenDelta=0: one char added, one char lost, masking the
+  // length-based tell). Reconciliation must FAIL here (stripping the FF does NOT reproduce `intended`
+  // exactly), so this MUST keep firing loudly — proving suppression is keyed on exact byte-equality of
+  // the remainder, never merely on the FF-at-a-chunk-seam signature alone. =====
+  {
+    const sid = newSession("ChunkSeamFormFeedRealLoss"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "y".repeat(CHUNK_UNITS) + "REFUSED: the rest of this turn's content after the chunk seam, unchanged";
+    // Same FF insertion point as scenario 15, but ALSO drops the very next real character —
+    // lenDelta ends up 0 (one added, one lost), so a length-only check would wrongly look clean.
+    const reported = intended.slice(0, CHUNK_UNITS) + "\u000c" + intended.slice(CHUNK_UNITS + 1);
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("16: reproduces the same chunk-seam divergence position as scenario 15", new RegExp(`divergesAtChar=${CHUNK_UNITS}\\b`).test(warnings[0] ?? ""));
+    check("16: reported[divergesAtChar] is the same U+000C as the benign scenario 15 (same raw signature)", reported[CHUNK_UNITS] === "\u000c");
+    const enqueued16 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("16: THE SAFETY CASE — a chunk-seam form feed that does NOT byte-reconcile (a real char was also lost) still enqueues the session-facing notice", enqueued16);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("16: the notice actually reached the pty", noticeWrite.includes("[loom:prompt-mismatch]"));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the frame-splice detector (card 7114838d) FIRES on a synthesized mismatch and names the divergence point (self-classifying via lenDelta + both tail lengths — a real splice's large tails read differently from a benign trailing artifact's tiny ones), stays SILENT on a matching pair, is correctly GATED on submitWasOutstanding (never misfires a raw human-typed turn against a stale lastPrompt), and is SELF-DIAGNOSING when the engine sends no usable prompt field (logs once per session, not once per turn). Card 201d0d95 Q1: a mismatch now SURFACES as its own pty submission to the affected session (previously LOG-ONLY) naming both the possible LOSS and the possible DUPLICATE (identifying the specific earlier generation when `recentWrittenTurns` still holds it) — and, the positive control's other, easier-to-break direction, an ordinary byteIdentical=true turn schedules no such notice at all. Card cf2fef73 (owner-reported false LOSS alarm): tail size alone cannot discriminate a benign whitespace re-render from a real splice (scenario 6b reproduces the owner's own tab-re-render specimen with LARGE-looking tails, same as a real splice) — so the session-facing notice is now gated on TWO precise, non-heuristic suppression checks, each with its own safety case proving it fails closed: whitespace-normalized equality (6b benign / 9 the real-substitution safety case, unchanged) and an exact stale-placeholder-prefix match — the strip is GLOBAL (one-or-more repetitions consumed as a single leading run, not a single-shot match) across BOTH measured placeholder forms and STACKED runs mixing them (6c: `[Pasted text #N +M lines]` / 6d: `[Pasted text #N]` with no line count / 6e: a real three-placeholder mixed-form stacked specimen, delta=71=17+27+27 / 10, 11, 12: the placeholder-that-replaced-content safety case for each shape — a single-shot strip would FAIL OPEN on a stacked run, firing the alarm on provably benign content, exactly the dense-multi-paste case where a false alarm costs the most) — all benign scenarios still log the diagnostic but never surface the session-facing notice, every safety case keeps firing it exactly as before. NOTE: this suite synthesizes every hook payload — it proves the detector's own logic, not that Claude Code actually sends `prompt` or reports it byte-identical; only the first real hook after deploy answers that."
+  ? "\n✅ ALL PASS — the frame-splice detector (card 7114838d) FIRES on a synthesized mismatch and names the divergence point (self-classifying via lenDelta + both tail lengths — a real splice's large tails read differently from a benign trailing artifact's tiny ones), stays SILENT on a matching pair, is correctly GATED on submitWasOutstanding (never misfires a raw human-typed turn against a stale lastPrompt), and is SELF-DIAGNOSING when the engine sends no usable prompt field (logs once per session, not once per turn). Card 201d0d95 Q1: a mismatch now SURFACES as its own pty submission to the affected session (previously LOG-ONLY) naming both the possible LOSS and the possible DUPLICATE (identifying the specific earlier generation when `recentWrittenTurns` still holds it) — and, the positive control's other, easier-to-break direction, an ordinary byteIdentical=true turn schedules no such notice at all. Card cf2fef73 (owner-reported false LOSS alarm): tail size alone cannot discriminate a benign whitespace re-render from a real splice (scenario 6b reproduces the owner's own tab-re-render specimen with LARGE-looking tails, same as a real splice) — so the session-facing notice is now gated on THREE precise, non-heuristic suppression checks, each with its own safety case proving it fails closed: whitespace-normalized equality (6b benign / 9 the real-substitution safety case, unchanged), an exact stale-placeholder-prefix match — the strip is GLOBAL (one-or-more repetitions consumed as a single leading run, not a single-shot match) across BOTH measured placeholder forms and STACKED runs mixing them (6c: `[Pasted text #N +M lines]` / 6d: `[Pasted text #N]` with no line count / 6e: a real three-placeholder mixed-form stacked specimen, delta=71=17+27+27 / 10, 11, 12: the placeholder-that-replaced-content safety case for each shape — a single-shot strip would FAIL OPEN on a stacked run, firing the alarm on provably benign content, exactly the dense-multi-paste case where a false alarm costs the most), and (card 2b57b5a9) an exact-reconciliation strip of a single U+000C landing at a chunk-seam multiple of PTY_WRITE_CHUNK_UNITS — a race between `repaint()`'s raw Ctrl-L write and `writeChunked`'s paced chunk gap — where stripping that one byte must reproduce `intended` byte-for-byte (15 benign / 16 the safety case: the SAME chunk-seam FF signature with a real char ALSO lost elsewhere, still fires in full, proving suppression never relaxes to a signature match) — all benign scenarios still log the diagnostic but never surface the session-facing notice, every safety case keeps firing it exactly as before. NOTE: this suite synthesizes every hook payload — it proves the detector's own logic, not that Claude Code actually sends `prompt` or reports it byte-identical; only the first real hook after deploy answers that."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
