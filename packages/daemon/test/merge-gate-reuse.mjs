@@ -41,6 +41,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgru-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -81,6 +82,7 @@ function seed(db, p, gateCommand) {
 
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgru\n");
   execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
@@ -912,6 +914,7 @@ try {
   {
     const qRepo = path.join(os.tmpdir(), `loom-mgru-q-${sfx}`);
     fs.mkdirSync(qRepo, { recursive: true });
+    registerForCleanup(qRepo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
     fs.writeFileSync(path.join(qRepo, "README.md"), "# mgru-q\n");
     execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: qRepo });
 
@@ -1075,6 +1078,7 @@ try {
   {
     const S = mk("s", "feature-s.txt");
     fs.mkdirSync(S.repo, { recursive: true });
+    registerForCleanup(S.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
     fs.writeFileSync(path.join(S.repo, "README.md"), "# mgru-s\n");
     execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: S.repo });
     const db = new Db(); dbs.push(db);

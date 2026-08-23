@@ -38,6 +38,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -122,6 +123,7 @@ try {
   // ============================ (2) IMPURE resolvePlatformLeadResumeDocPath =========================
   const home2 = path.join(os.tmpdir(), `loom-lead-resumedoc-home2-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home2, { recursive: true });
+  registerForCleanup(home2); // never rmSync'd anywhere else in this file
   const basePath2 = platformLeadBaseResumeDocPath(home2);
 
   const p1 = resolvePlatformLeadResumeDocPath(db, home2, "lineageA");
@@ -153,6 +155,7 @@ try {
   db.deleteMeta(PRIMARY_LINEAGE_META_KEY);
   const home3 = path.join(os.tmpdir(), `loom-lead-resumedoc-home3-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home3, { recursive: true });
+  registerForCleanup(home3); // never rmSync'd anywhere else in this file
   const q1 = resolvePlatformLeadResumeDocPath(db, home3, "onlyLineage"); // claims primary (base) — no file needed to exist
   check("(2) with an empty home, the first lineage still resolves to the base path", q1 === platformLeadBaseResumeDocPath(home3));
   const q2 = resolvePlatformLeadResumeDocPath(db, home3, "secondLineageNoBase");
@@ -192,6 +195,7 @@ try {
   // ==================== (4) composeResumeDocOperationalNotes — size + staleness warnings ====================
   const home4 = path.join(os.tmpdir(), `loom-lead-resumedoc-home4-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home4, { recursive: true });
+  registerForCleanup(home4); // never rmSync'd anywhere else in this file
   const doc4 = platformLeadBaseResumeDocPath(home4);
 
   // No doc on disk yet, no siblings — nothing to flag.

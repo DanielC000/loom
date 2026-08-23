@@ -45,6 +45,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Poll instead of a blind fixed sleep — mirrors merge-gate-single-file-retry.mjs's own `waitUntil`
 // verbatim (same reasoning: a blind sleep is the wall-clock-coincidence flake this suite's own DoD
@@ -94,6 +95,7 @@ function seed(db, p, gateCommand) {
 
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgr\n");
   execSync(`git init -q && git config user.email mgr@loom && git config user.name mgr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
@@ -443,6 +445,7 @@ try {
       "process.exit(1);",
     ].join("\n");
     fs.mkdirSync(E.repo, { recursive: true });
+    registerForCleanup(E.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
     fs.writeFileSync(path.join(E.repo, "README.md"), "# mgr\n");
     fs.writeFileSync(path.join(E.repo, "run-tests.mjs"), RUN_TESTS_SCRIPT);
     execSync(`git init -q && git config user.email mgr@loom && git config user.name mgr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: E.repo });
