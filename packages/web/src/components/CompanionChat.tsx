@@ -8,7 +8,7 @@ import {
   type ChatConnState, type ChatMessage, type InboundMedia, type TimelineItem,
 } from "../lib/companionChat";
 import { channelBadgeLabel } from "../lib/companion";
-import { api } from "../lib/api";
+import { api, getLoopbackToken } from "../lib/api";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
 import { color, font, radius } from "../theme";
 
@@ -143,7 +143,14 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     const connect = () => {
       if (disposed) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${proto}//${location.host}/ws/companion/${sessionId}`);
+      // Card 351e89af: /ws/companion now requires the SAME loopback guard secret as /ws/term
+      // (Terminal.tsx's own fix, card 9ccedbee) — a WebSocket handshake can't carry a custom header, so
+      // this reuses the identical `?token=` query-param fallback via the SAME getLoopbackToken() helper.
+      // No token captured yet (guard inert, or a pre-tokenized-URL page) → the param is simply omitted,
+      // matching Terminal.tsx's fallback exactly.
+      const loopbackToken = getLoopbackToken();
+      const wsUrl = `${proto}//${location.host}/ws/companion/${sessionId}${loopbackToken ? `?token=${encodeURIComponent(loopbackToken)}` : ""}`;
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {

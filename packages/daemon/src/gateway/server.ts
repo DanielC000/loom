@@ -516,16 +516,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // UNCONDITIONALLY (registered regardless of isTrustTierHookActive — it must hold on the default
   // daemon, which is precisely the case the wall above ships inert for):
   //   - Scope: every non-GET/HEAD `/api/*` route (no Tier distinction — see above), PLUS the `/ws/term`
-  //     upgrade (both viewing AND the `stdin` write capability — gating the whole socket is simpler than
-  //     per-message auth and reuses the SAME subprotocol/query-token extraction the remote tier already
-  //     established, and it is the stronger posture: an agent shouldn't be able to snoop another
-  //     session's terminal output any more than write to it). `/mcp/:sessionId` (every agent's real,
-  //     legitimate tool surface), `/internal/*` (loomctl lifecycle: shutdown/update), `/hooks/*` (Tier-2
-  //     signature-gated webhook ingress), `/oauth/callback`, and the other two WS routes (`/ws/fleet` —
-  //     read-only event bookkeeping; `/ws/companion` — a SEPARATE known gap this card does NOT close, see
-  //     the card's own notes) are untouched — an agent's MCP tool calls are byte-identical before/after.
-  //     A GET read is a materially different risk from a WRITE; closing GET-level disclosure is a
-  //     separate concern this hook does not attempt.
+  //     upgrade AND the `/ws/companion` upgrade (both viewing AND the write capability — gating the whole
+  //     socket is simpler than per-message auth and reuses the SAME subprotocol/query-token extraction the
+  //     remote tier already established, and it is the stronger posture: an agent shouldn't be able to
+  //     snoop another session's terminal/chat output any more than write to it). `/ws/companion` was
+  //     originally a SEPARATE known gap this card deliberately left open (v1/v2's own notes said so) —
+  //     closed by card 351e89af, which reuses this exact hook + mechanism rather than inventing a second
+  //     scheme; see that route's own doc comment below for the predicate this closes. `/mcp/:sessionId`
+  //     (every agent's real, legitimate tool surface), `/internal/*` (loomctl lifecycle: shutdown/update),
+  //     `/hooks/*` (Tier-2 signature-gated webhook ingress), `/oauth/callback`, and the one remaining WS
+  //     route (`/ws/fleet` — read-only event bookkeeping) are untouched — an agent's MCP tool calls are
+  //     byte-identical before/after. A GET read is a materially different risk from a WRITE; closing
+  //     GET-level disclosure is a separate concern this hook does not attempt.
   //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` (constant-time compared);
   //     for `/ws/term`'s upgrade, the SAME secret via the remote tier's own established mechanism —
   //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` (preferred) or a `?token=` query-param
@@ -538,9 +540,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     helper does NOT default it the way plain `.inject()` does (light-my-request quirk, confirmed via
   //     debug instrumentation while building this: a bare `injectWS(url, {headers})` call yields an EMPTY
   //     `remoteAddress`, which is NOT in the `LOOPBACK` set — the hook then silently no-ops instead of
-  //     rejecting). Any test exercising this hook's `/ws/term` path MUST pass an explicit `socket: {
-  //     remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS tests already pass
-  //     `socket: remoteSocket` for the remote-peer case. See test/loopback-write-guard.mjs.
+  //     rejecting). Any test exercising this hook's `/ws/term` or `/ws/companion` path MUST pass an
+  //     explicit `socket: { remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS
+  //     tests already pass `socket: remoteSocket` for the remote-peer case. See test/loopback-write-guard.mjs.
   if (deps.loopbackSecret !== undefined) {
     const loopbackSecret = deps.loopbackSecret;
     app.addHook("onRequest", async (req, reply) => {
@@ -548,7 +550,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (routePattern === undefined) return;
       const isGuardedApiWrite = req.method !== "GET" && req.method !== "HEAD" && routePattern.startsWith("/api/");
       const isTermSocket = routePattern === "/ws/term/:sessionId";
-      if (!isGuardedApiWrite && !isTermSocket) return;
+      // Card 351e89af: the identical predicate as isTermSocket above, applied to the Companion's OWN
+      // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
+      // already proves the loopback secret, exactly like /ws/term.
+      const isCompanionSocket = routePattern === "/ws/companion/:sessionId";
+      if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket) return;
       // A non-loopback caller reaching here either already passed the trust-tier wall above (a valid
       // remote gateway token on a Tier-1 route — unaffected by this hook, which only ever ACTS on
       // loopback callers) or already failed it (Tier 0 ⇒ 403 before this hook ever runs) or there is no
@@ -557,7 +563,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const ip = req.socket?.remoteAddress ?? "";
       if (!LOOPBACK.has(ip)) return;
       let presented: string | undefined;
-      if (isTermSocket) {
+      if (isTermSocket || isCompanionSocket) {
         const proto = req.headers["sec-websocket-protocol"];
         const resolved = resolveWsSubprotocolToken(typeof proto === "string" ? proto : undefined);
         if (resolved.outcome === "rejected") {
@@ -5411,13 +5417,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Live IN-APP companion chat: attach/detach (JSON chat + audio frames only) ---
   // The DEFAULT companion transport. DELIBERATELY SEPARATE from /ws/term above (which streams raw pty bytes):
   // a distinct route + a distinct JSON message channel, so the in-app chat multiplexes cleanly ALONGSIDE
-  // terminal-attach on the SAME session with no collision (the chat WS never touches the pty stream). The
-  // loopback cockpit IS the authenticated local user — NO bot token, NO pairing, NO external authz. INBOUND
-  // (a message typed in the cockpit) routes through the SAME bindings-authoritative gateway
-  // (companion.handleInAppInbound → gateway.handleInbound); a session with no in-app binding is rejected
-  // there (this carries traffic only for an already-provisioned in-app companion — it creates nothing).
-  // OUTBOUND companion replies arrive via the in-app hub (deps.inApp) pushing a { type:"chat" } frame here.
-  // ADDITIVE: with no in-app companion, attach is a no-op and inbound is rejected — every session unaffected.
+  // terminal-attach on the SAME session with no collision (the chat WS never touches the pty stream).
+  // SECURITY (card 351e89af, closing a gap card 9ccedbee deliberately left open): this route's doc comment
+  // used to claim "the loopback cockpit IS the authenticated local user — NO bot token, NO pairing, NO
+  // external authz". That conflated "safe for an authenticated REMOTE human" (trust-tier.ts's predicate)
+  // with "safe from an unauthenticated CO-RESIDENT agent" (the loopback human-only-write guard's own
+  // predicate, above) — on the default loopback-only daemon ANY co-resident process that can open a TCP
+  // connection, including an agent session's own Bash tool, could open this socket and inject a `{type:
+  // "chat"}` frame straight into the owner-role Companion slot, with no manager involved at all (unlike the
+  // alert-text path card 018ce1db fixes). The loopback human-only-write guard above now gates THIS upgrade
+  // exactly like `/ws/term`'s (same mechanism, same secret, reused verbatim — not a second scheme): reaching
+  // this handler at all already means the caller held the loopback secret, or the connection arrived on a
+  // non-loopback bind and already passed the remote tier's own token check. CEILING (inherited, not
+  // re-litigated): under same-OS-user co-residency with no sandbox, an agent that specifically goes looking
+  // for and reads the loopback secret file still gets a valid credential — this closes the casual/incidental
+  // bypass, not that stronger threat. INBOUND (a message typed in the cockpit) routes through the SAME
+  // bindings-authoritative gateway (companion.handleInAppInbound → gateway.handleInbound); a session with no
+  // in-app binding is rejected there (this carries traffic only for an already-provisioned in-app companion
+  // — it creates nothing). OUTBOUND companion replies arrive via the in-app hub (deps.inApp) pushing a
+  // { type:"chat" } frame here. ADDITIVE: with no in-app companion, attach is a no-op and inbound is
+  // rejected — every session unaffected.
   //
   // VOICE (Companion Voice epic, VOICE-P4 inbound): a { type:"audio", data, mimeType } frame carries a
   // web-mic recording as base64 — untrusted bytes, decoded here (decodeInAppAudioToTempFile) into a

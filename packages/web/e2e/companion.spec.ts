@@ -63,6 +63,28 @@ test("shows the seeded companion (not the empty create-box) with Chat + Manage t
   ).toBeVisible();
 });
 
+test("card 351e89af: the Chat WS still connects through the loopback guard, and a real browser can send", async ({ page, loomDaemon }) => {
+  // DoD guard: "do not break the owner's own cockpit" — /ws/companion now requires the SAME loopback
+  // secret /ws/term already required (card 9ccedbee); the daemon here boots via the real index.js path
+  // (loopbackSecret always wired, exactly like production) and the fixture's addInitScript seeds
+  // localStorage BEFORE navigation, so this exercises the actual client code path (CompanionChat.tsx's
+  // getLoopbackToken() → `?token=` query param), not a synthetic WS client. A WS rejection here is
+  // SILENT to the naive eye (no thrown error banner) — the observable proof is the "connected" status
+  // pill (ChatHeader renders it only once `ws.onopen` fires) AND that Send actually appends a bubble
+  // (CompanionChat.tsx's send() no-ops unless `ws.readyState === ws.OPEN`, so a rejected/never-opened
+  // socket would leave the draft untouched and no bubble would ever appear).
+  await loomDaemon.seedCompanion();
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  const chat = page.locator("#companion-panel-chat");
+  await expect(chat.getByText("connected", { exact: true })).toBeVisible();
+
+  const box = page.getByRole("textbox", { name: "Message" });
+  await box.fill("hello from a real browser session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(chat.getByText("hello from a real browser session")).toBeVisible();
+});
+
 test("Manage tab surfaces config (masked), memory, reminders, persona, and proactive-home", async ({ page, loomDaemon }) => {
   const companion = await loomDaemon.seedCompanion();
   await page.goto(`${loomDaemon.baseURL}/companion`);

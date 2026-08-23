@@ -29,6 +29,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       SAME mechanism trust-tier.mjs already proves for the remote case) — with `loopbackSecret` wired.
 //   (G) structural: the guard's route-matching no longer references routeTier at all (v2 gates
 //       unconditionally) — confirmed by reading the compiled hook body.
+//
+// v3 (card 351e89af — SECURITY): /ws/companion's inbound message path carried the identical assumption
+// v1/v2 deliberately left open — "the loopback cockpit IS the authenticated human, so no auth at all" —
+// documented as a known gap in this hook's own v2 doc comment. Unlike the alert-text path (018ce1db), an
+// agent with Bash could inject straight into the owner-role Companion slot with NO manager involved at
+// all. v3 gates `/ws/companion/:sessionId` by the EXACT same mechanism as /ws/term (no second scheme):
+//   (I) a loopback upgrade to /ws/companion with NO credential is REJECTED before the 101 response; a
+//       WRONG bearer subprotocol is also rejected; a VALID [generic, bearer] offer OR a valid `?token=`
+//       fallback is ACCEPTED — mirroring (H) exactly, proving the SAME mechanism was reused, not a
+//       parallel one. (loopbackSecret omitted ⇒ inert, proven alongside (A).)
 import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -89,6 +99,9 @@ try {
   const unguardedSocket = await appNoSecret.injectWS("/ws/term/sess1", { headers: H, socket: LOOPBACK_SOCKET });
   check("(A) loopbackSecret omitted → /ws/term upgrade with NO credential still succeeds (unaffected)", !!unguardedSocket);
   unguardedSocket.close();
+  const unguardedCompanionSocket = await appNoSecret.injectWS("/ws/companion/sess1", { headers: H, socket: LOOPBACK_SOCKET });
+  check("(A) loopbackSecret omitted → /ws/companion upgrade with NO credential still succeeds (unaffected)", !!unguardedCompanionSocket);
+  unguardedCompanionSocket.close();
 
   // ===================== (B)-(H) the real guard, wired =====================
   const SECRET = "test-loopback-secret-0123456789abcdef";
@@ -157,6 +170,27 @@ try {
   check("(H) POSITIVE CONTROL: /ws/term upgrade with a VALID ?token= query fallback → ACCEPTED", !!wsOkQuery);
   wsOkQuery.close();
 
+  // ===================== (I) /ws/companion: the SAME gap, closed by card 351e89af =====================
+  const wsCompanionNoAuth = await (async () => {
+    try { const ws = await appWithSecret.injectWS("/ws/companion/csess1", { headers: H, socket: LOOPBACK_SOCKET }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(I) THE GAP IS CLOSED: /ws/companion upgrade with NO credential → REJECTED before the 101 response (was ACCEPTED pre-fix)", wsCompanionNoAuth);
+
+  const wsCompanionWrongAuth = await (async () => {
+    try { const ws = await appWithSecret.injectWS("/ws/companion/csess1", { headers: { ...H, "sec-websocket-protocol": bearerProto("wrong-token") }, socket: LOOPBACK_SOCKET }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(I) /ws/companion upgrade with a WRONG bearer subprotocol → REJECTED", wsCompanionWrongAuth);
+
+  const wsCompanionOkProto = await appWithSecret.injectWS("/ws/companion/csess2", { headers: { ...H, "sec-websocket-protocol": bearerProto(SECRET) }, socket: LOOPBACK_SOCKET });
+  check("(I) POSITIVE CONTROL: /ws/companion upgrade with a VALID [generic, bearer] subprotocol offer → ACCEPTED (proves the mechanism, not just the rejection)", !!wsCompanionOkProto);
+  wsCompanionOkProto.close();
+
+  const wsCompanionOkQuery = await appWithSecret.injectWS(`/ws/companion/csess3?token=${SECRET}`, { headers: H, socket: LOOPBACK_SOCKET });
+  check("(I) POSITIVE CONTROL: /ws/companion upgrade with a VALID ?token= query fallback → ACCEPTED", !!wsCompanionOkQuery);
+  wsCompanionOkQuery.close();
+
   // (G) structural: v2 no longer consults routeTier at all in the guard (it gates unconditionally) —
   // confirmed by reading the compiled source, mirroring gateway-token.mjs's own (F) pattern.
   {
@@ -169,6 +203,8 @@ try {
       !/routeTier\(req\.method, routePattern\)/.test(guardSlice.slice(guardSlice.indexOf("app.addHook"))));
     check("(G) the guard also matches the /ws/term upgrade route by pattern",
       /routePattern === ["']\/ws\/term\/:sessionId["']/.test(guardSlice));
+    check("(G) v3: the guard also matches the /ws/companion upgrade route by pattern (card 351e89af)",
+      /routePattern === ["']\/ws\/companion\/:sessionId["']/.test(guardSlice));
   }
 } finally {
   try { await appNoSecret?.close(); } catch { /* ignore */ }
@@ -177,6 +213,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the loopback human-only-write guard (v2) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write AND the /ws/term stdin socket — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
+  ? "\n✅ ALL PASS — the loopback human-only-write guard (v3) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, AND the /ws/companion inbound chat socket (card 351e89af) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
