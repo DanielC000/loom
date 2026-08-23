@@ -28,10 +28,19 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
    - **The local merge/self-host gate is NOT sufficient proof `main` is releasable.** It runs on the
      Windows self-host, *with* an ambient git identity and whatever else the host happens to have, so it
      can't catch Linux/POSIX-specific failures (path case-sensitivity, separators, permissions) or a test
-     that implicitly depends on ambient host state a clean machine won't have. **Before cutting, confirm the
-     latest `main` run of the Linux gate (`.github/workflows/ci.yml`) is GREEN** — e.g.
-     `gh run list --workflow=ci.yml --branch main --limit 1`. The manager can't run the Linux gate locally,
-     so treat that CI run as the authoritative "is `main` releasable" signal.
+     that implicitly depends on ambient host state a clean machine won't have. **"Green on the gate" means
+     green on Windows** — for this class of failure it is structurally not a general correctness
+     guarantee (card `4e762baf`; the specimens are `d88b8523` and `f33830d1`, the latter a 12-day /
+     ~271-commit red-`main` episode nobody read for days). The manager can't run the Linux gate locally,
+     so the latest `main` run of the Linux gate (`.github/workflows/ci.yml`) is the authoritative "is
+     `main` releasable" signal instead.
+   - **This is now enforced, not just advised:** step 3's `npm version` runs a `preversion` hook
+     (`scripts/check-main-ci.mjs`) that queries the latest completed `ci.yml` run on `main` via the
+     GitHub API and **refuses to bump the version** if it isn't green — so a red or unreadable CI status
+     blocks the release at the exact command that starts one, instead of relying on someone remembering
+     to check first. To check by hand anyway (or if the automated check can't reach GitHub):
+     `gh run list --workflow=ci.yml --branch main --limit 1`. `LOOM_SKIP_CI_CHECK=1` bypasses the hook
+     for a genuine emergency — it prints a loud warning when used; don't reach for it as a habit.
    - **Bundled-skill currency check.** If anything in this release added, renamed, or removed an MCP tool,
      skill, or capability, update the bundled doctrine skill(s) that teach it (`packages/daemon/assets/skills/**`)
      — and confirm no shipped skill now names a tool that doesn't exist. A wrong or stale tool **name** is
@@ -43,7 +52,7 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
    ```sh
    npm version <major|minor|patch>     # e.g. `npm version minor` → 0.1.0 → 0.2.0
    ```
-   `npm version` edits the root `package.json` `version`, commits it, and creates an annotated **`vX.Y.Z` git tag** in one step. (Use `--no-git-tag-version` only if you need to stage the CHANGELOG edit into the same commit, then tag manually with `git tag -a vX.Y.Z`.) **The tag version must match `package.json`** — the release workflow fails fast if they diverge.
+   `npm version` edits the root `package.json` `version`, commits it, and creates an annotated **`vX.Y.Z` git tag** in one step. (Use `--no-git-tag-version` only if you need to stage the CHANGELOG edit into the same commit, then tag manually with `git tag -a vX.Y.Z`.) **The tag version must match `package.json`** — the release workflow fails fast if they diverge. **This command itself runs the main-CI-green check** (its `preversion` hook — see step 1 above); it refuses to bump the version if `ci.yml` on `main` isn't green. **The manual `git tag -a` step in the `--no-git-tag-version` path is a raw git command, outside npm's lifecycle hooks — it is not covered by that check.** If you take that path, re-run the check by hand right before tagging: `node scripts/check-main-ci.mjs`.
    - For a **prerelease**, tag `vX.Y.Z-beta.N` (the version carries the `-beta.N`): CI publishes it
      to the **`beta`** npm dist-tag and marks the GitHub Release as a prerelease.
 4. **Push** the commit and the tag — this **triggers the release workflow**:

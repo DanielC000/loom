@@ -19,7 +19,8 @@
     "daemon:stable:stop": "node scripts/daemon-supervisor-stop.mjs",
     "web": "pnpm --filter @loom/web dev",
     "pack:npm": "node scripts/build-npm-package.mjs",
-    "manifests": "node scripts/generate-manifests.mjs"
+    "manifests": "node scripts/generate-manifests.mjs",
+    "preversion": "node scripts/check-main-ci.mjs"
   },
   "devDependencies": {
     "turbo": "^2.4.0",
