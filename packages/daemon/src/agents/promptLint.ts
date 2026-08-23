@@ -83,7 +83,8 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "question_cancel", "question_pull", "question_resolve", "recycle_me", "requests_list",
   "schedule_create", "schedule_update", "served_status", "worker_flush", "worker_list", "worker_merge",
   "worker_merge_confirm", "worker_message", "worker_reap", "worker_recycle", "worker_redirect",
-  "worker_relink", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop", "worker_transcript",
+  "worker_relink", "worker_report_get", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop",
+  "worker_transcript",
 ];
 // The worker's tested depth-1 surface (orchestration.ts's own comment: "EXACTLY { directive_status,
 // gate_queue, gate_status, my_context, run_gate, worker_report }" — pinned by hermetic tests there.

@@ -26,9 +26,9 @@ there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md
 ## Transport
 
 The `loom-orchestration` MCP surface — no human relay:
-`worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_message`, `worker_redirect`,
-`worker_flush`, `worker_stop`, `worker_recycle`, `worker_reap`, and the two-step `worker_merge` →
-`worker_merge_confirm`.
+`worker_spawn`, `worker_list`, `worker_status`, `worker_transcript`, `worker_report_get`, `worker_message`,
+`worker_redirect`, `worker_flush`, `worker_stop`, `worker_recycle`, `worker_reap`, and the two-step
+`worker_merge` → `worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
 while you're mid-turn is held in your inbox and otherwise drains ONE-per-turn as a separate (often
 already-handled) turn — call **`inbox_pull`** to return AND clear your whole queued inbox in one shot.
@@ -65,7 +65,7 @@ so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, 
 round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
 orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
 first bare call lands:
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__deploy,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask,mcp__loom-orchestration__question_cancel,mcp__loom-orchestration__question_resolve`
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_report_get,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__deploy,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask,mcp__loom-orchestration__question_cancel,mcp__loom-orchestration__question_resolve`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -413,7 +413,7 @@ means this attempt didn't land, not that nothing can be done.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 
-**`staleReport` (on `worker_list`/`worker_status`) is the reverse-direction signal — about YOUR OWN session, not the worker's.** It fires once you've kept taking turns since a worker's report landed without ever resolving it, which can mean the report never actually surfaced in your own context even though it was durably recorded — don't assume you already handled it just because turns have passed since. Pull `worker_transcript(lastN:2)` to read it in full before deciding there's nothing to act on.
+**`staleReport` (on `worker_list`/`worker_status`) is the reverse-direction signal — about YOUR OWN session, not the worker's.** It fires once you've kept taking turns since a worker's report landed without ever resolving it, which can mean the report never actually surfaced in your own context even though it was durably recorded — don't assume you already handled it just because turns have passed since. Pull `worker_report_get(workerSessionId)` to read it in full before deciding there's nothing to act on — it reads the report straight from durable event storage, not a rendered transcript, so it can't lose anything to a truncated tool-call argument or a rotated engine session id (card 68d85015). `worker_transcript(lastN:2)` is still fine for general "what has this worker been doing" context, but is no longer the documented recovery path for a specific missed report.
 
 **Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
 proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if

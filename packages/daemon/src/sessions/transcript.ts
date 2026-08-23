@@ -210,7 +210,12 @@ function extractText(content: unknown): string {
   // markup ASCII removes that hazard from the part of the transcript Loom controls.
   for (const c of content as Array<Record<string, unknown>>) {
     if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
-    else if (c.type === "tool_use") parts.push(`[tool]${shortToolTag(c.id)} ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {}).slice(0, 200)})`);
+    // NOT truncated (card 68d85015 — previously a fixed 200-char slice, which silently ate a large
+    // tool-call argument such as a worker_report body). A fixed cap here has no size that's ever right —
+    // spill, don't widen: the full argument becomes part of this turn's `text`, so it's bounded the SAME
+    // way the rest of the turn is — pageTranscript's per-page char budget, then spillableTurnsResponse's
+    // overflow-to-scratch-file for a turn too large to inline — never truncated at the source.
+    else if (c.type === "tool_use") parts.push(`[tool]${shortToolTag(c.id)} ${String(c.name ?? "")}(${JSON.stringify(c.input ?? {})})`);
     // A pasted screenshot with no caption text is a content array of ONLY an "image" block — without
     // this, the whole turn produces no text and parseTranscriptFile's `text.trim()` check drops it
     // silently (no placeholder at all, unlike the tool_result case right below), so an auditor can't
