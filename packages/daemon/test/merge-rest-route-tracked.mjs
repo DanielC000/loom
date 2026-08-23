@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -59,6 +60,7 @@ function makeRepo(repo) {
 }
 
 async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProcessState = "live" } = {}) {
+  registerForCleanup(reposDir);
   const db = new Db();
   dbs.push(db);
   const mgrId = `mrt-mgr-${sfx}`, projId = `mrt-p-${sfx}`, taskId = `mrt-t-${sfx}`, workerId = `mrt-w-${sfx}`;

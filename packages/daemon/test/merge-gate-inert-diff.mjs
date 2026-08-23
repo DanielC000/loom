@@ -49,6 +49,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgid-home-${Date.now()}-${process.pid}`);
@@ -106,6 +107,7 @@ function seed(db, p, gateCommand) {
 
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgid\n");
   execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
@@ -440,6 +442,7 @@ try {
   {
     const I = mk("i");
     fs.mkdirSync(I.repo, { recursive: true });
+    registerForCleanup(I.repo);
     mkdirp(path.join(I.repo, "docs"));
     fs.writeFileSync(path.join(I.repo, "docs", "note.md"), "shared line\n");
     execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });

@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gcr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -66,6 +67,7 @@ try {
   {
     const sfx = `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gcr-d-${sfx}`);
+    registerForCleanup(reposDir);
     const db = new Db();
     dbs.push(db);
     db.setPlatformConfig({ maxConcurrentGates: 1 }); // forces the target's self-check to genuinely QUEUE
@@ -203,6 +205,7 @@ try {
   {
     const repo = path.join(os.tmpdir(), `loom-gcr-d2-repo-${Date.now()}-${process.pid}`);
     makeRepo(repo);
+    registerForCleanup(repo);
 
     const db = new Db();
     dbs.push(db);

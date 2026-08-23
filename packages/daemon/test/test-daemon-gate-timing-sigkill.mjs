@@ -27,6 +27,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { neverCompletedFiles } from "../scripts/test-daemon.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DAEMON_SCRIPT = path.join(__dirname, "..", "scripts", "test-daemon.mjs");
@@ -81,6 +82,7 @@ const SLOW = "merge-repo-mutex"; // TEST_TIMEOUT_OVERRIDES-listed real-git test 
 
 async function runSigkillScenario() {
   const scratchHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-td-sigkill-"));
+  registerForCleanup(scratchHome);
   const ndjsonPath = path.join(scratchHome, "gate-timing", "daemon-per-file-timing.ndjson");
 
   const child = spawn(process.execPath, [TEST_DAEMON_SCRIPT, `--only=${FAST},${SLOW}`, "--concurrency=1"], {
@@ -110,6 +112,7 @@ async function runSigkillScenario() {
 // too, for the wrong reason (see this project's own control-polarity doctrine).
 async function runCleanScenario() {
   const scratchHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-td-sigkill-clean-"));
+  registerForCleanup(scratchHome);
   const ndjsonPath = path.join(scratchHome, "gate-timing", "daemon-per-file-timing.ndjson");
 
   const exitCode = await new Promise((resolve, reject) => {

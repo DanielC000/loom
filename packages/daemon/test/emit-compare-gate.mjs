@@ -36,6 +36,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,6 +77,7 @@ const mkdirp = (p) => fs.mkdirSync(p, { recursive: true });
 // emitDecoratorMetadata) — pass an override to construct the (G) violation fixture below.
 function makeRepoWithBaseSrcFile(p, srcContent, packageTsconfigOpts = { outDir: "dist", rootDir: "src", types: ["node"] }) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# ecg\n");
   // A minimal tsconfig.base.json AND packages/daemon/tsconfig.json, both with no emitDecoratorMetadata:
   // emitCompareSoundnessOk reads BOTH from the WORKTREE (not the real Loom repo, mirroring the real
@@ -190,6 +192,7 @@ try {
       "",
     ].join("\n");
     fs.mkdirSync(D.repo, { recursive: true });
+    registerForCleanup(D.repo);
     fs.writeFileSync(path.join(D.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(D.repo, "packages", "daemon", "test"));
     fs.writeFileSync(path.join(D.repo, "packages", "daemon", "test", "placeholder.mjs"), BASE_TEST);
@@ -315,6 +318,7 @@ try {
     const H = mk("h");
     const BASE_TEST = ["// placeholder", "console.log(\"PASS  placeholder\");", "process.exit(0);", ""].join("\n");
     fs.mkdirSync(H.repo, { recursive: true });
+    registerForCleanup(H.repo);
     fs.writeFileSync(path.join(H.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(H.repo, "packages", "daemon", "test"));
     // A semicolon is a valid NTFS/POSIX filename character but a shell metacharacter — exactly the case
@@ -342,6 +346,7 @@ try {
   {
     const I = mk("i");
     fs.mkdirSync(I.repo, { recursive: true });
+    registerForCleanup(I.repo);
     fs.writeFileSync(path.join(I.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(I.repo, "packages", "daemon", "test", "fixtures"));
     mkdirp(path.join(I.repo, "packages", "daemon", "scripts"));
@@ -376,6 +381,7 @@ try {
     const J = mk("j");
     const BASE_TEST = ["// a hermetic test file backed by a fixture", "console.log(\"PASS  placeholder\");", "process.exit(0);", ""].join("\n");
     fs.mkdirSync(J.repo, { recursive: true });
+    registerForCleanup(J.repo);
     fs.writeFileSync(path.join(J.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(J.repo, "packages", "daemon", "test", "fixtures"));
     mkdirp(path.join(J.repo, "packages", "daemon", "scripts"));
@@ -412,6 +418,7 @@ try {
       `console.log("PASS  ${name}");`, "process.exit(0);", "",
     ].join("\n");
     fs.mkdirSync(K.repo, { recursive: true });
+    registerForCleanup(K.repo);
     fs.writeFileSync(path.join(K.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(K.repo, "packages", "daemon", "test", "fixtures"));
     mkdirp(path.join(K.repo, "packages", "daemon", "scripts"));
@@ -456,6 +463,7 @@ try {
     // L1: a plain cap-slot occupant, deliberately unrelated to emit-compare mechanics — any path outside
     // both scoped prefixes forces a real (never-reduced) gate, which is all this arm needs from it.
     fs.mkdirSync(L1.repo, { recursive: true });
+    registerForCleanup(L1.repo);
     fs.writeFileSync(path.join(L1.repo, "README.md"), "# ecg\n");
     execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: L1.repo });
 

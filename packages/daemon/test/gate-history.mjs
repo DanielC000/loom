@@ -41,6 +41,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { waitUntil } from "./_wait.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -402,6 +403,7 @@ function seed(db) {
     const P = `gh-realpath-${Date.now()}`;
     const repo = path.join(os.tmpdir(), `${P}-repo`);
     makeRepo(repo);
+    registerForCleanup(repo);
     const db = new Db();
     dbs.push(db);
     db.insertProject({ id: P, name: "GH-REALPATH", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
@@ -459,6 +461,7 @@ function seed(db) {
     const P = `gh-realcancel-${Date.now()}`;
     const repo = path.join(os.tmpdir(), `${P}-repo`);
     makeRepo(repo);
+    registerForCleanup(repo);
     const db = new Db();
     dbs.push(db);
     db.insertProject({ id: P, name: "GH-REALCANCEL", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });

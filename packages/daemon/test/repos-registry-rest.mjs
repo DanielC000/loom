@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -204,6 +205,7 @@ try {
 
       // (A9) an entry path ALIASING the project's own vaultPath is REJECTED.
       const vaultOnlyVault = mkRepo("vault-for-alias"); // a distinct real repo used ONLY as vaultPath here
+      registerForCleanup(vaultOnlyVault); // not in the finally-block's [tmpHome, primary, svcA, svcB, nonRepo] drain
       const badAliasVault = await app.inject({
         method: "POST", url: "/api/projects",
         payload: { name: "BadAliasVault", repoPath: primary, vaultPath: vaultOnlyVault, repos: [{ key: "alias2", path: vaultOnlyVault }] },

@@ -21,9 +21,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcvc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+registerForCleanup(process.env.LOOM_HOME);
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -47,6 +49,7 @@ function headSha(cwd) {
 }
 
 async function setupWorkerProject(sfx, reposDir) {
+  registerForCleanup(reposDir);
   const db = new Db();
   const mgrId = `mcvc-mgr-${sfx}`, projId = `mcvc-p-${sfx}`, taskId = `mcvc-t-${sfx}`, workerId = `mcvc-w-${sfx}`;
   const repo = path.join(reposDir, "repo");

@@ -45,6 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Poll instead of a blind fixed sleep — mirrors gate-cancel.mjs's own `waitUntil` verbatim (same
 // reasoning: a blind sleep is the wall-clock-coincidence flake this suite's own DoD rejects). Bounded
@@ -85,6 +86,7 @@ function seed(db, p, gateCommand) {
 
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# sfr\n");
   execSync(`git init -q && git config user.email sfr@loom && git config user.name sfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }

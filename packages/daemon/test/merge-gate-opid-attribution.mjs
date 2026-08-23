@@ -31,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-opid-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -50,6 +51,7 @@ const now = new Date().toISOString();
 
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# opid\n");
   execSync(`git init -q && git config user.email opid@loom && git config user.name opid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 }

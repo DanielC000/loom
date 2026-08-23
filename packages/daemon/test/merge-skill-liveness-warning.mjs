@@ -29,6 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mslw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -58,6 +59,7 @@ function seed(db, p, gateCommand) {
 
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mslw\n");
   execSync(`git init -q && git config user.email mslw@loom && git config user.name mslw && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
