@@ -9,6 +9,13 @@
 // which helper launched the server; see PORT DETECTION below for why the mechanism differs.
 //
 // Usage:
+//   <dir> MUST be an absolute path in every invocation (start AND stop) — never a relative one. A
+//   relative <dir> resolves against THIS PROCESS's own cwd, which can silently differ between calls and
+//   key the same logical directory under two different tracking files (or the reverse: the same tracking
+//   file used by two different directories); see requireAbsoluteDir's own comment for the failure modes.
+//   `start`/`stop` both refuse (nonzero exit, no tracking file touched) rather than resolve a relative
+//   <dir> against cwd.
+//
 //   node dev-server.mjs start <dir> -- <command> [args...]
 //     Spawns <command> with cwd=<dir>, detached from THIS process so it outlives it, and prints:
 //       Started "<command...>" in <dir> (pid <pid>)
@@ -105,6 +112,25 @@ function usageAndExit() {
 // later removed.
 function pathHash(absDir) {
   return crypto.createHash("sha256").update(absDir).digest("hex").slice(0, 16);
+}
+
+// `start`/`stop` MUST be called with an already-absolute <dir> — never a relative one. `path.resolve`
+// on a RELATIVE input fills in the gap from `process.cwd()`, so the SAME relative string (e.g. ".",
+// "web") keys a DIFFERENT tracking file depending on whatever directory the invoking process happens to
+// be sitting in at that moment — silently, with no error. Two callers that both believe they mean "the
+// same worktree" can end up on two different tracking files (one records, the other finds nothing and
+// wrongly concludes no server is running), or the SAME caller can lose its own record if its shell cwd
+// drifts between `start` and a later `stop` (see the worker doctrine's own "a Bash cd leaks into every
+// later call" warning — this is exactly that footgun, applied to this helper). `path.resolve` on an
+// ALREADY-ABSOLUTE input is a pure normalization (collapses ".."/trailing slashes) and does not depend
+// on cwd, so requiring an absolute <dir> up front — refusing loudly rather than silently keying off cwd
+// — closes the ambiguity by construction instead of trying to reconcile it after the fact.
+function requireAbsoluteDir(dir) {
+  if (!path.isAbsolute(dir)) {
+    console.error(`${SELF}: <dir> must be an absolute path (got "${dir}") — a relative path resolves against this process's own cwd, which can silently differ between callers and key the same logical directory under two different tracking files. Pass an absolute path (e.g. your worktree's own absolute directory).`);
+    process.exit(1);
+  }
+  return path.resolve(dir);
 }
 
 function trackingFilePath(absDir) {
@@ -263,7 +289,7 @@ function killTracked(pid) {
 }
 
 async function start(dir, cmdArgs) {
-  const absDir = path.resolve(dir);
+  const absDir = requireAbsoluteDir(dir);
   if (!fs.existsSync(absDir) || !fs.statSync(absDir).isDirectory()) {
     console.error(`start: not a directory: ${absDir}`);
     process.exit(1);
@@ -342,7 +368,7 @@ async function start(dir, cmdArgs) {
 }
 
 function stop(dir) {
-  const absDir = path.resolve(dir);
+  const absDir = requireAbsoluteDir(dir);
   const tracked = readTracked(absDir);
   if (!tracked) {
     console.log(`stop: no tracked dev-server for ${absDir} (nothing to do)`);

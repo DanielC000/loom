@@ -29,8 +29,12 @@ kill scoped to anything but the worktree path — name, port, session id, or pro
 process you never spawned — another dev server, an unrelated project, or even the self-hosting daemon.
 An id looks precise, which is exactly why it's the dangerous one: it matches every worktree that id
 has ever touched, not just the one you mean. Launch it through the **bundled** helper instead — it
-records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search):
-`node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
+records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search).
+**`<worktree-dir>` must be an ABSOLUTE path in every call (start AND stop)** — a relative one resolves
+against the helper's own process cwd, which can silently drift between your `start` and a later `stop`
+and key the same worktree under two different tracking files; the helper refuses a relative `<dir>`
+outright rather than guess. `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir>
+-- <command...>` prints
 the pid, then waits briefly for the command's own startup banner (e.g. Vite's `Local:
 http://localhost:5173/`) to appear in its captured log and prints the **actual bound URL** — built from
 the host the command's own banner reported, not a guessed one, and the port it really bound, not

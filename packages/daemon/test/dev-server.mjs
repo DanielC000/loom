@@ -552,7 +552,80 @@ try {
   if (staleRaceTrackedPid != null && isAlive(staleRaceTrackedPid)) { try { process.kill(staleRaceTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
 }
 
+// (k) card eb503d1f — cwd-relative keying. `dir` used to be resolved via a bare `path.resolve(dir)`,
+// which for a RELATIVE <dir> depends on THIS PROCESS's own cwd at call time — invisible to a reader of
+// the command and easy to get wrong when a session's shell cwd drifts between a `start` and a later
+// `stop` for what the caller still believes is "the same worktree" (the worker doctrine's own "a Bash cd
+// leaks into every later call" warning, applied to this helper). Pre-fix this let `start .` (cwd at the
+// worktree root) succeed and track a real pid, then a LATER `stop .` issued after the cwd drifted to a
+// subdirectory resolve to a DIFFERENT tracking file, report "nothing to do", and leave the real tracked
+// process ORPHANED. The fix requires an absolute <dir> and refuses a relative one loudly, in BOTH start
+// and stop, so the ambiguity can never silently arise.
+//
+// RED-PROOF (run manually to confirm this section fails against the pre-fix helper; not part of this
+// file's own execution — same convention as clock-path-regression-guard.mjs's own manual positive
+// control):
+//   1. git diff -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs > /tmp/eb503d1f.patch
+//   2. git checkout HEAD -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs
+//   3. node packages/daemon/test/dev-server.mjs → section (k)'s refusal checks FAIL: `start .` (cwd at
+//      the worktree root) exits 0 and tracks a real pid instead of refusing; a later `stop .` (cwd at a
+//      drifted subdirectory) exits 0 reporting "nothing to do" instead of refusing, and the real tracked
+//      process is left alive.
+//   4. git apply /tmp/eb503d1f.patch (restores the fix) → section (k) PASSES again.
+const cwdBugWorktree = mkdtempManaged("loom-dev-server-cwdbug-");
+const cwdBugSubdir = path.join(cwdBugWorktree, "subdir");
+fs.mkdirSync(cwdBugSubdir);
+const cwdBugHeartbeatOut = path.join(cwdBugWorktree, "hb.txt");
+const cwdBugTrackFile = path.join(os.tmpdir(), `loom-dev-server-${pathHashForTest(path.resolve(cwdBugWorktree))}.json`);
+let cwdBugAbsTrackedPid = null;
+
+try {
+  // `start`, invoked with the process cwd AT the worktree root and a RELATIVE "." — a plausible, natural
+  // way to invoke this (cd into the worktree, then pass ".").
+  const relStart = spawnSync(
+    process.execPath,
+    [HELPER, "start", ".", "--", process.execPath, heartbeatScript, cwdBugHeartbeatOut],
+    { encoding: "utf8", timeout: 10_000, cwd: cwdBugWorktree, env: FAST_PORT_TIMEOUT_ENV },
+  );
+  check("(k) start refuses a relative <dir> (nonzero exit) — the ambiguity is foreclosed before any tracking file is written", relStart.status !== 0);
+  check("(k) start's refusal names the problem, not a silent no-op", /must be an absolute path/.test(relStart.stderr || ""));
+  check("(k) a refused start wrote no tracking file at all", !fs.existsSync(cwdBugTrackFile));
+
+  // stop is refused the same way, from a DIFFERENT cwd (the subdir) — the drifted-cwd half of the same
+  // scenario, proving the guard isn't order- or cwd-dependent.
+  const relStop = spawnSync(process.execPath, [HELPER, "stop", "."], { encoding: "utf8", timeout: 10_000, cwd: cwdBugSubdir });
+  check("(k) stop ALSO refuses a relative <dir>, from a different (drifted) cwd (nonzero exit)", relStop.status !== 0);
+  check("(k) stop's refusal names the problem too", /must be an absolute path/.test(relStop.stderr || ""));
+
+  // The sanctioned calling convention (absolute <dir>) is unaffected by the invoking process's own cwd:
+  // start from one cwd, stop from a DIFFERENT cwd again, both using the SAME absolute <dir> — must find
+  // and stop the SAME tracked process. This is the "one file, two cwds" positive proof DoD-5 asks for,
+  // cashed out against the design this fix chose (require absolute, don't invent a stable anchor).
+  const absStart = spawnSync(
+    process.execPath,
+    [HELPER, "start", cwdBugWorktree, "--", process.execPath, heartbeatScript, cwdBugHeartbeatOut],
+    { encoding: "utf8", timeout: 10_000, cwd: cwdBugSubdir, env: FAST_PORT_TIMEOUT_ENV }, // deliberately NOT cwdBugWorktree
+  );
+  check("(k) start with an ABSOLUTE <dir> succeeds regardless of the invoking process's own cwd", absStart.status === 0);
+  const absStartMatch = /\(pid (\d+)\)/.exec(absStart.stdout || "");
+  cwdBugAbsTrackedPid = absStartMatch ? Number(absStartMatch[1]) : null;
+  check("(k) tracked pid is alive", cwdBugAbsTrackedPid != null && isAlive(cwdBugAbsTrackedPid));
+
+  const absStop = spawnSync(process.execPath, [HELPER, "stop", cwdBugWorktree], { encoding: "utf8", timeout: 10_000, cwd: os.tmpdir() }); // yet ANOTHER cwd
+  check(
+    "(k) stop with the SAME absolute <dir>, from a THIRD different cwd, finds and reports the same tracked pid",
+    cwdBugAbsTrackedPid != null && absStop.stdout.includes(String(cwdBugAbsTrackedPid)),
+  );
+  const absGone = cwdBugAbsTrackedPid != null && await waitUntil(() => !isAlive(cwdBugAbsTrackedPid), 5000);
+  check("(k) the absolute-<dir> tracked process is actually stopped", absGone);
+} catch (e) {
+  console.log(`FAIL  unexpected error (cwd-relative keying guard): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (cwdBugAbsTrackedPid != null && isAlive(cwdBugAbsTrackedPid)) { try { process.kill(cwdBugAbsTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), and that recorded url connects on a real single-stack server where a naively-rebuilt one refuses."
+  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, and requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
