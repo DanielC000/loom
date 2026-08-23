@@ -386,8 +386,14 @@ try {
   // ===== 6b. NEGATIVE CONTROL — the real-loss shape MUST be preserved: a recognized replay with NO
   // possible-duplicate wrapper on the current generation's own intended text (so `wrapperDeficit` is
   // structurally null — `detectPossibleDuplicateWrapperDeficit` returns null immediately when `intended`
-  // carries no tag to strip) must still read as ESTABLISHED loss. Mirrors the Platform Lead's own live
-  // incident (gen=10: written 1402, reported 479, Δ=-923, verbatim replay, no wrapper, never re-minted). =====
+  // carries no tag to strip) must still read as a REPLAY naming the "did not reach you" half. Mirrors the
+  // Platform Lead's own live incident (gen=10: written 1402, reported 479, Δ=-923, verbatim replay, no
+  // wrapper, never re-minted). Card b7158b99 (CORRECTION): this branch no longer asserts an ESTABLISHED
+  // loss — a real specimen (a manager's own session, gen=8/9/10) showed a pure single-entry replay's own
+  // "lost" content fully recovered by the NEXT generation's confirmed fusion, so whether THIS content is
+  // gone is genuinely unknowable at the moment this notice fires; see host.ts's own lossClause doc for the
+  // full reasoning. This scenario is unaffected in substance — the "did not reach you"/no-wrapper-deficit
+  // half still holds — only the certainty claim changed. =====
   {
     const sid = newSession("RealLossNoWrapper"); SIDS.push(sid);
     const genAText = "[loom:worker-report] worker AAAA — generation A's own real report (gen=6b stand-in)";
@@ -404,8 +410,8 @@ try {
     check("6b: the notice enqueues", enqueued);
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const noticeText = fake.writes.slice(writesBefore).join("");
-    check("6b: NEGATIVE CONTROL — an unwrapped verbatim replay still reads as ESTABLISHED loss (the real-loss case is NOT reassured by this fix)",
-      /ESTABLISHED/.test(noticeText) && /did not reach you/.test(noticeText));
+    check("6b: NEGATIVE CONTROL — an unwrapped verbatim replay still names the deferred/lost ambiguity, never claims ESTABLISHED loss (card b7158b99)",
+      /NOT an established loss/.test(noticeText) && /did not reach you/.test(noticeText) && !/ESTABLISHED/.test(noticeText));
     check("6b: it does NOT say NOT A LOSS (that wording is reserved for a genuine wrapper deficit)", !/NOT A LOSS/.test(noticeText));
   }
 } finally {

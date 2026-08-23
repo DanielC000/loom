@@ -65,6 +65,14 @@ const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
 // Whether ANY pending entry for `sid` is the prompt-mismatch notice — reads PtyHost's own queue state
 // directly (host.getPendingEntries), not an indirect symptom like pty writes.
 const hasPendingMismatchNotice = (sid) => host.getPendingEntries(sid).some((e) => e.text.includes("[loom:prompt-mismatch]"));
+// Card b7158b99 — a long notice (card 68459420's replay branch is now considerably longer than a single
+// PTY_WRITE_CHUNK_UNITS chunk, host.ts) is written in PACED CHUNKS (host.ts's writeChunked, host.ts) with a
+// real setTimeout between them — reading `fake.writes` synchronously right after the Stop hook that
+// drains it can capture only the FIRST chunk, silently truncating mid-word. Wait for the closing
+// bracketed-paste escape (BRACKET_PASTE_END in host.ts) to actually land before trusting the joined text
+// is complete — a real, observed completion signal, not a guessed duration.
+const BRACKET_PASTE_END_MARKER = "\x1b[201~";
+const waitForChunkedWriteDone = (writesArr, fromIndex) => waitUntil(() => writesArr.slice(fromIndex).join("").includes(BRACKET_PASTE_END_MARKER));
 
 function newSession(name) {
   const sid = `sess-${name}`;
@@ -389,16 +397,24 @@ try {
     check("7: the deferred notice does not write DURING the mismatched turn itself (queued, not appended to it)",
       fake.writes.length === writesBeforeMismatch);
     host.deliverHook(sid, { hook_event_name: "Stop" }); // completes the mismatched (genA-content) turn, drains the queued notice as its OWN new turn
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch); // card b7158b99: this notice now spans >1 chunk — wait for it to land in full
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
     check("7: a mismatch now produces a corrective turn on the pty (previously LOG-ONLY, card 201d0d95 Q1)",
       noticeWrite.includes("[loom:prompt-mismatch]"));
-    check("7: the notice names the LOSS half, ESTABLISHED (not merely possible) since this IS a recognized replay",
-      /did not reach you/.test(noticeWrite) && /ESTABLISHED/.test(noticeWrite));
-    // Card 68459420 DoD-2: the RECIPIENT cannot verify the loss half itself — only the SENDER can. The
-    // notice must say so explicitly rather than asking the recipient to check something it structurally
-    // cannot check.
-    check("7: the notice tells the RECIPIENT it cannot verify this loss itself, and names the SENDER as the party who can",
-      /cannot verify that yourself/.test(noticeWrite) && /SENDER/.test(noticeWrite));
+    // Card b7158b99 — CORRECTION: a pure single-entry replay, on its OWN, must NOT assert an ESTABLISHED
+    // loss. Whether gen=2's content is genuinely gone is unknowable at THIS point — a LATER generation's
+    // own fusion could still recover it (see the 7f scenario below, which reproduces exactly that). The
+    // notice must say the "did not reach you" half plainly (still a true, present-tense fact — the engine's
+    // report for gen=2 IS gen=1's text, not gen=2's own) but must NOT claim certainty about whether it is
+    // lost for good, and must NOT tell the reader to get a re-send yet.
+    check("7: the notice names the deferred/lost ambiguity but never asserts an ESTABLISHED loss (card b7158b99)",
+      /did not reach you/.test(noticeWrite) && /NOT an established loss/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
+    check("7: RED-PROOF anchor — the OLD overclaiming phrase is gone entirely",
+      !/an ESTABLISHED loss, not a possible one/.test(noticeWrite));
+    check("7: the notice tells the RECIPIENT it cannot verify this itself, and does NOT instruct an immediate re-send",
+      /cannot verify this yourself/.test(noticeWrite)
+      && !/only the SENDER can confirm it and re-send/.test(noticeWrite)
+      && /wait one generation and re-check/.test(noticeWrite));
     check("7: the notice names the DUPLICATE half AND identifies the specific earlier generation replayed",
       /DUPLICATE/.test(noticeWrite) && /gen=1\b/.test(noticeWrite));
     check("7: the notice reports OBSERVED FIELDS (both hashes present) and asserts no CLI-internal cause",
@@ -548,6 +564,89 @@ try {
     }
   }
 
+  // ===== 7g. Card b7158b99 — POSITIVE CONTROL, THE FULL REPLAY-THEN-FUSION-RECOVERY SEQUENCE. Reproduces
+  // the shape of the measured specimen that motivated this card (a manager's own session: a REPLAY
+  // generation's own content — hedged as uncertain when its notice fired — was fully recovered by a
+  // LATER generation's CONFIRMED accumulation, `spanGens` naming every generation involved including the
+  // replay itself). Proves the wording actually TRACKS the real outcome in both directions: the gen=2
+  // notice (drained and inspected below) correctly declines to claim certainty at the moment it fires —
+  // the SAME branch scenario 7 above already proves in isolation, re-checked here so this scenario stands
+  // on its own — and the LATER fusion notice correctly asserts recovery once it actually happens, naming
+  // gen=2 among the recovered generations. (The fusion span here also happens to include gen=2's own
+  // hedge notice as an intervening generation — its own real submission, drained before the final write —
+  // which is honest, not suppressed: recovery still reaches gen=2's content regardless.) =====
+  {
+    const sid = newSession("ReplayThenFusionRecovery"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const gen1Text = "[loom:worker-report] worker JJJJ — generation 1's own real report";
+    const gen2Text = "[loom:worker-report] worker KKKK — generation 2's own real report, the one that goes missing";
+    const finalText = "[loom:merge-done] worker LLLL merged — the final generation's own short content";
+
+    // Generation 1: ordinary, cleanly-confirmed.
+    host.enqueueStdin(sid, gen1Text);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text }); // byteIdentical=true, gen=1
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // Generation 2: Loom writes gen2Text, but the engine replays gen1Text verbatim — triggers the hedged
+    // notice under test.
+    host.enqueueStdin(sid, gen2Text); // gen=2
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text }); // byteIdentical=false, pure replay
+    check("7g: getLastMismatchReplay records the still-unresolved gen=2 replay",
+      host.getLastMismatchReplay(sid)?.gen === 2 && host.getLastMismatchReplay(sid)?.replayedGen === 1);
+    check("7g: getLastMismatchFusion has NOT fired yet — recovery hasn't happened at this point",
+      host.getLastMismatchFusion(sid) === null);
+
+    // Drain gen=2's turn — its own hedge notice becomes the NEXT real generation (exactly like scenario
+    // 7's identical drain above). Wait for the FULL chunked write before reading it (this notice spans
+    // more than one pty.write chunk).
+    const writesBeforeNotice = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeNotice);
+    const gen2NoticeJoined = fake.writes.slice(writesBeforeNotice).join("");
+    check("7g: re-confirms the gen=2 notice hedges — no ESTABLISHED loss claim, no immediate re-send instruction",
+      /NOT an established loss/.test(gen2NoticeJoined) && !/ESTABLISHED/.test(gen2NoticeJoined)
+      && !/only the SENDER can confirm it and re-send/.test(gen2NoticeJoined));
+    // Strip the bracketed-paste wrapper (BRACKET_PASTE_START/END, host.ts — 6 bytes each) to recover the
+    // EXACT text Loom wrote for this notice generation, needed below to construct the next generation's
+    // "the composer never cleared" fused report byte-for-byte.
+    const gen2NoticeEndIdx = gen2NoticeJoined.indexOf(BRACKET_PASTE_END_MARKER);
+    const gen2NoticeText = gen2NoticeJoined.slice(6, gen2NoticeEndIdx);
+    check("7g: the notice text was actually recovered whole (non-empty, ends before the closing bracket)",
+      gen2NoticeEndIdx > 6 && gen2NoticeText.length > 0);
+
+    // The notice's OWN submission (drained above) is now gen=3, OUTSTANDING (awaiting its own
+    // confirmation) — it is Loom's own text, so the engine echoes it back byte-identical; this is NOT
+    // itself a mismatch under test. Confirm it cleanly and let its turn end, so the FINAL generation
+    // below is a genuinely fresh submission rather than being mistaken for gen=3's own confirmation.
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen2NoticeText }); // byteIdentical=true, gen=3
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeGen = 3; // deterministic given the controlled sequence above: gen1=1, gen2=2, the notice's own submission=3
+
+    // Final generation (gen=4): Loom writes finalText, and the engine reports the FULL concatenation of
+    // every generation written so far (gen=1, gen=2, and gen=2's own notice, gen=3) — the composer never
+    // actually cleared, so gen=2's own "lost" text was there all along and is now recovered whole, exactly
+    // like the real specimen (whose own spanGens covered every generation the composer had accumulated).
+    host.enqueueStdin(sid, finalText); // gen=4
+    const fusedReported = gen1Text + gen2Text + gen2NoticeText + finalText;
+    const writesBeforeFinal = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: fusedReported }); // byteIdentical=false, CONFIRMED fusion
+    const fusion = host.getLastMismatchFusion(sid);
+    check("7g: getLastMismatchFusion CONFIRMS the 4-generation span, recovering gen=2's own content",
+      fusion !== null && JSON.stringify(fusion.spanGens) === JSON.stringify([1, 2, noticeGen, 4]));
+    const enqueuedFinal = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7g: the recovery notice enqueues", enqueuedFinal);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeFinal);
+    const finalNoticeWrite = fake.writes.slice(writesBeforeFinal).join("");
+    const earlierGensList = fusion.spanGens.slice(0, -1).join(", ");
+    check("7g: the recovery notice asserts the recovery is now ESTABLISHED and names gen=2 among the earlier generations",
+      /ESTABLISHED/.test(finalNoticeWrite) && /nothing was lost/.test(finalNoticeWrite)
+      && finalNoticeWrite.includes(`generation(s) ${earlierGensList}`));
+    // The hedge at gen=2 turned out to be the RIGHT call: it declined to claim the content was gone, and it
+    // wasn't. This confirms the wording change doesn't just read better in isolation — it tracks the real
+    // outcome across the two notices this ONE underlying event actually produced.
+  }
+
   // ===== 7f. Card f5f6515a (manager msg 71e5f76d, Code Reviewer-confirmed action item) — THE GEN=1 GUARD.
   // DoD, verbatim from the manager: a test that FAILS on 33768e3a (i.e. proves the guard is real, not just
   // present), plus the regression half proving the honest multi-generation unmatched wording (7b) survives
@@ -659,6 +758,7 @@ try {
     const enqueued7c = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("7c: the deferred notice actually enqueues (a real observed event, not assumed)", enqueued7c);
     host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch); // card b7158b99: wait for the full (now longer) notice, not just its first chunk
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
     check("7c: findLast picks the MOST RECENT match (gen=3), not the oldest (gen=1)", /gen=3\b/.test(noticeWrite));
     check("7c: correctly takes the IMMEDIATELY PRECEDING branch, not the misleading 'unusual shape' one",

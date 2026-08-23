@@ -2559,14 +2559,20 @@ interface Live {
   mcpSeenWaiters: Array<(seen: boolean) => void>;
   // Card 68459420 (sender-directed arm for [loom:prompt-mismatch]): set the instant a mismatch is
   // identified as a REPLAY of a prior generation — `reported` matched an entry in `recentWrittenTurns`
-  // byte-for-byte, the shape the notice's own replayNote already asserts as a loss, not a mere
-  // possibility. A recipient can never verify this half itself (it only ever sees what arrived, not what
+  // byte-for-byte. A recipient can never verify this half itself (it only ever sees what arrived, not what
   // was intended for it) — this is a PULL surface (see getLastMismatchReplay) for the party who CAN act,
   // read at the point it already looks (worker_list/worker_status), rather than a longer session-facing
   // notice: a precondition at the point of use beats an advisory in the attention path (see pinned
   // memory `shipping-a-detector-is-not-someone-reading-it`). Deliberately never cleared once set — a
   // manager that hasn't yet looked should still see it on a LATER read; this is a discovery aid, not a
   // live/transient flag, and overwritten (not accumulated) on a subsequent occurrence.
+  // Card b7158b99 — CORRECTION: this field does NOT establish a loss, and never did reliably — a replay
+  // at this generation is compatible with the composer still holding this generation's own intended text,
+  // which a LATER generation's own submission can fuse back in whole (see `lastMismatchFusion` below,
+  // which would then name THIS generation in its own `spanGens`); whether that happens is unknowable until
+  // that later generation, if any, actually occurs (see `detectComposerAccumulation`'s own coverage-limit
+  // doc, this file). Read as "a replay was detected, possibly recoverable by a later fusion", never as "an
+  // established loss" — the session-facing notice's own wording carries the same correction.
   lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card f5f6515a DoD-4: the SENDER-directed arm for a FUSED match — `lastMismatchReplay` above only ever
   // fires on a byte-for-byte match against ONE single prior generation's own write; it stays null for a
@@ -5192,13 +5198,35 @@ export class PtyHost {
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
                 // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
-                // own live specimen) — kept unchanged. What changes is the loss claim: when `replayedEntry`
-                // is found, state the loss as ESTABLISHED (not "possible") and say plainly the recipient
-                // cannot confirm it themselves; otherwise keep the more cautious "possible" framing, since
-                // an unmatched mismatch (see the uncharacterized-population tag above) is not yet a
-                // confirmed replay the way a recognized one is.
+                // own live specimen) — kept unchanged.
+                //
+                // Card b7158b99 — CORRECTION: the `replayedEntry !== undefined` branch below used to state
+                // the loss as ESTABLISHED here, at THIS generation's own detection time. That is FALSE in
+                // general and was measured false on a real specimen (a manager's own session, gen=8/9/10):
+                // `reported` at gen=9 was a verbatim replay of gen=8 (exactly what this branch detects), but
+                // gen=9's own 5313-char intended text was never actually gone — it was still sitting in the
+                // composer, uncleared, and gen=10's own submission fused it back in whole
+                // (`detectComposerAccumulation` CONFIRMED spanGens=[8,9,10], sum 1083+5313+579=6975 matching
+                // the engine's own reported length and hash exactly). The `confirmedFusion` branch below
+                // fires ITS OWN "ESTABLISHED — nothing was lost" notice for gen=10 when that happens — so by
+                // the time this generation's OWN notice fires, whether ITS content will be recovered by a
+                // later fusion is not a knowable fact yet, it is a FUTURE EVENT that has not happened. This
+                // is not merely unmeasured — `detectComposerAccumulation`'s own doc (this file, ~line 152)
+                // states the coverage limit structurally: recovery is detectable ONLY at the NEXT write on
+                // this session, and is "structurally invisible" if no next write ever comes. So the honest
+                // framing at THIS point in time is "cannot yet be established either way" — never "possible"
+                // (that undersells a real, measured recurring shape) and never "ESTABLISHED loss" (that
+                // overclaims a fact the code cannot know yet). The prescribed action changes to match: do
+                // NOT tell the reader to get a re-send now — a re-send composed on top of a later fusion
+                // recovery would hand the recipient the same content twice. Tell them to wait one generation
+                // and re-check (a `[loom:prompt-mismatch]` fusion notice, or `lastMismatchFusion` naming this
+                // generation in its own `spanGens`, means it was recovered) before asking anyone to re-send.
+                // The unmatched-mismatch branch below is UNCHANGED — it already used the cautious "possible
+                // LOSS" framing pre-existing this card, which this reasoning does not contradict (an
+                // unmatched mismatch has no known prior entry to ever be fused back from, so there is no
+                // pending-recovery half to name for it the way there is for a recognized replay).
                 const lossClause = replayedEntry !== undefined
-                  ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you: an ESTABLISHED loss, not a possible one. You cannot verify that yourself: you only ever see what arrived, never what was intended for you — only the SENDER can confirm it and re-send. If you are a Loom-driven session, say so in your next report up.`
+                  ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you as its own turn. This is NOT an established loss: the composer may still hold it, and a LATER generation's own submission may fuse it back in whole (if that happens you will see a SEPARATE, later notice saying plainly that nothing was lost) — whether that happens is unknowable until that later generation, if any, actually occurs. You cannot verify this yourself either way: you only ever see what arrived, never what was intended for you. Do not ask anyone to re-send yet — wait one generation and re-check before treating this as a confirmed loss. If you are a Loom-driven session, say so in your next report up.`
                   : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
                 // Card f5f6515a DoD-4 (manager review 5eef504d): a confirmed fusion gets its OWN complete
                 // notice text rather than a patched `lossClause`/`replayNote` — those two are built around a
