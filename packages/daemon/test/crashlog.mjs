@@ -179,6 +179,34 @@ if (scenario) {
       check("cycle: prior crash preserved as crash.log.prev", prev?.error?.message === "child uncaught boom");
       check("cycle: current crash.log still present after rotation", current?.json?.kind === "uncaughtException");
     }
+
+    // ── I: hadCrashLogAtBoot() — the env-transport handoff (Code Review finding #2 on card 2f146782) ────
+    // Verifies the boot-time signal the crash-recovered nudge relies on: fs.existsSync alone (the
+    // unsupervised/packaged path) AND the LOOM_PRIOR_CRASHLOG env override (the supervised daemon:stable
+    // path, where scripts/daemon-supervisor.mjs's OWN rotation already moved crash.log away before THIS
+    // process could ever see it — see hadCrashLogAtBoot's own doc for why fs.existsSync alone is silently
+    // always-false there). This is the case that got through un-tested the first time: the OLD test only
+    // ever asserted the NUDGE WORDING given an already-supplied boolean; it could not see where that
+    // boolean came from.
+    {
+      const { hadCrashLogAtBoot, CRASHLOG_PATH } = await import("../dist/crashlog.js");
+      fs.rmSync(CRASHLOG_PATH, { force: true }); // start from a clean "no crash.log" state
+
+      check("hadCrashLogAtBoot: no file, no env override → false", hadCrashLogAtBoot({}) === false);
+      check("hadCrashLogAtBoot: no file, LOOM_PRIOR_CRASHLOG unset/other value → false", hadCrashLogAtBoot({ LOOM_PRIOR_CRASHLOG: "0" }) === false);
+
+      // THE FIX: a supervised boot following a real crash — the supervisor already rotated the file away
+      // (fs.existsSync(CRASHLOG_PATH) is false), but LOOM_PRIOR_CRASHLOG="1" (set only when a real
+      // rotation happened) must still yield true.
+      check("hadCrashLogAtBoot: no file present BUT LOOM_PRIOR_CRASHLOG=1 (the supervisor-rotated case) → true", hadCrashLogAtBoot({ LOOM_PRIOR_CRASHLOG: "1" }) === true);
+
+      // The unsupervised/packaged path — the file itself is still present at the check point — is
+      // unaffected (a regression guard for the pre-existing behavior, independent of the env var).
+      fs.mkdirSync(path.dirname(CRASHLOG_PATH), { recursive: true });
+      fs.writeFileSync(CRASHLOG_PATH, "SOME-CRASH");
+      check("hadCrashLogAtBoot: file present, no env override → true (unsupervised path, unchanged)", hadCrashLogAtBoot({}) === true);
+      fs.rmSync(CRASHLOG_PATH, { force: true }); // leave clean for anything added after this section
+    }
   }
   // per-tag homes' own trailing cleanup loop removed here: freshHome now creates via mkdtempManaged,
   // which already registered each one for guaranteed cleanup (card 995be21f).

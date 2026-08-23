@@ -4440,13 +4440,22 @@ export class SessionService {
    * actually broke. Every `[loom:crash-recovered]` nudge below is swapped for a `[loom:daemon-restarted]`
    * clean-stop nudge in that case; `shutdownMarker` null (no marker, or the caller determined this boot
    * really is unclassified) leaves the original crash phrasing untouched.
+   *
+   * `opts.hadCrashLogAtBoot` (card 2f146782): whether `crash.log` already existed the moment this boot
+   * started, captured by the caller BEFORE `installCrashHandlers()` rotates it away — i.e. whether the
+   * PRECEDING run actually wrote a JS-level fatal record. When `shutdownMarker` is absent (not a clean
+   * stop) and this is `false`, the preceding process was killed from outside mid-execution with no chance
+   * to run any handler (an OS-level kill, a host sleep/reboot, a crashed hosting terminal) — the
+   * `[loom:crash-recovered]` nudge says so instead of claiming a JS "crash" that never happened. Omitted
+   * (defaults to `true`) preserves the original "crashed" phrasing for every caller that doesn't pass it.
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
-    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null } = {},
+    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null; hadCrashLogAtBoot?: boolean } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[] } {
     const now = opts.now ?? new Date();
     const cleanStop = !!opts.shutdownMarker; // fresh marker present ⇒ the preceding stop was NOT a crash
+    const hadCrashLog = opts.hadCrashLogAtBoot ?? true; // undecided ⇒ keep the original "crashed" phrasing
     // Default resumeOne LOGS the real thrown reason (dead transcript / gone worktree / recycled/…) on
     // failure instead of silently collapsing it to a bare boolean — a resume that doesn't happen must
     // never be a silent no-op (board evidence: a session was "marked dead-and-skipped" with nothing in
@@ -4511,7 +4520,7 @@ export class SessionService {
                 ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — your worktree ` +
                   `WIP is intact. Continue your assigned task from where you left off. If you had already ` +
                   `finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL
-                : `[loom:crash-recovered] The daemon crashed and Loom auto-resumed you on relaunch — your ` +
+                : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — your ` +
                   `worktree WIP is intact. Continue your assigned task from where you left off. If you had ` +
                   `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
             );
@@ -4539,7 +4548,9 @@ export class SessionService {
       const tag = cleanStop ? "[loom:daemon-restarted]" : "[loom:crash-recovered]";
       const lead = cleanStop
         ? "The daemon was stopped and restarted (not a crash) and Loom resumed"
-        : "The daemon crashed and Loom auto-resumed";
+        : hadCrashLog
+          ? "The daemon crashed and Loom auto-resumed"
+          : "The daemon was killed from outside (no crash record was written) and Loom auto-resumed";
       const isPlatform = managerRole === "platform";
       // A solo manager (no candidate workers at all) gets a plain heads-up instead of the "0 of your 0
       // in-flight worker(s)" phrasing the per-worker summary below would otherwise produce.

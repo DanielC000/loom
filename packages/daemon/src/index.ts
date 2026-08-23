@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePollerSuppressed } from "./paths.js";
-import { installCrashHandlers } from "./crashlog.js";
+import { installCrashHandlers, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
 import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
@@ -65,6 +65,17 @@ import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 
 async function main(): Promise<void> {
+  // Card 2f146782: capture whether the PRECEDING run actually wrote a JS-level fatal crash record BEFORE
+  // installCrashHandlers() rotates crash.log to .prev below — this is the only point in boot where
+  // that's still checkable directly. See crashlog.ts's hadCrashLogAtBoot for why this also needs
+  // LOOM_PRIOR_CRASHLOG (Code Review finding #2: under `daemon:stable`, the supervisor's OWN rotation
+  // already ran before this process ever started, so a plain fs.existsSync here is silently always false
+  // on that path — the env var carries the answer across that gap). Threaded into
+  // recoverCrashOrphanedWorkers so the crash-recovered nudge can tell "the prior process wrote a JS-level
+  // fatal record" (a real crash) apart from "it was killed from outside mid-execution with no chance to
+  // run any handler" (an OS-level kill / sleep / reboot / a crashed hosting terminal) — the missing
+  // shutdown marker in EITHER case is already correct behavior; only the wording changes.
+  const hadCrashLogAtBoot = computeHadCrashLogAtBoot();
   // Top-level fatal-exit crash handler FIRST — so an uncaught exception / unhandled rejection / stray
   // non-zero exit at any point past here leaves a diagnosable crashlog under .loom (a real crash once
   // left no log signature at all). Idempotent + fail-safe; never throws.
@@ -1212,7 +1223,7 @@ async function main(): Promise<void> {
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
     const { resumed, skippedParked, failed, managersFailed } =
-      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers, shutdownMarker });
+      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot });
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +

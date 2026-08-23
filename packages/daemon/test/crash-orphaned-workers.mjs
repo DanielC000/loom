@@ -562,6 +562,23 @@ try {
   check("(10d) with NO shutdown marker, the worker still gets the original [loom:crash-recovered] nudge",
     pty.getPending(id10d.wkr).some((m) => m.includes("[loom:crash-recovered]") && /The daemon crashed/i.test(m)));
 
+  // (10e) card 2f146782: no shutdownMarker AND hadCrashLogAtBoot:false (the preceding process was killed
+  // from outside mid-execution, with no chance to write a JS-level fatal record) — the nudge still uses
+  // the [loom:crash-recovered] tag (this is still an unplanned resume, not a restart) but says "killed
+  // from outside" instead of claiming a "crash" that never happened, on BOTH the worker nudge and the
+  // manager summary nudge.
+  const id10e = { mgr: `cow-mgr10e-${sfx}`, wkr: `cow-wkr10e-${sfx}` };
+  const t10e = mkTask(`cow-t10e-${sfx}`, P.proj);
+  mkSession({ id: id10e.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id10e.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10e.mgr, taskId: t10e, processState: "live" });
+  const derived10e = deriveCrashOrphanedWorkers(db, [db.getSession(id10e.mgr), db.getSession(id10e.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived10e, { resumeOne: () => true, shutdownMarker: null, hadCrashLogAtBoot: false });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
+  check("(10e) hadCrashLogAtBoot:false — worker nudge says 'killed from outside', never 'crashed'",
+    pty.getPending(id10e.wkr).some((m) => m.includes("[loom:crash-recovered]") && /killed from outside/i.test(m) && !/\bcrashed\b/i.test(m)));
+  check("(10e) hadCrashLogAtBoot:false — manager summary nudge says 'killed from outside', never 'crashed'",
+    pty.getPending(id10e.mgr).some((m) => m.includes("[loom:crash-recovered]") && /killed from outside/i.test(m) && !/\bcrashed\b/i.test(m)));
+
   // ============================ (11) STAKE-AWARE SILENCING (card c9e51581) ============================
   // The full silent-vs-full matrix on a DEDICATED, clean project (no incidental backlog from the shared
   // P.proj above) — mirrors restart-wake-classification.mjs's Path-A matrix, extended to Path B.

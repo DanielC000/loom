@@ -18,6 +18,25 @@ export const CRASHLOG_PATH = path.join(LOOM_HOME, "crash.log");
 /** The rotated previous-crash slot. Kept alongside {@link CRASHLOG_PATH}; holds the last-but-one crash. */
 export const CRASHLOG_PREV_PATH = `${CRASHLOG_PATH}.prev`;
 
+/**
+ * Whether the PRECEDING run actually wrote a JS-level fatal crash record — card 2f146782's boot-time
+ * signal for the `[loom:crash-recovered]` nudge (SessionService.recoverCrashOrphanedWorkers), so it can
+ * say "was killed from outside" instead of a "crashed" that never happened when no such record exists.
+ * Must be called BEFORE {@link installCrashHandlers} rotates {@link CRASHLOG_PATH} away — that's the only
+ * point in boot where `fs.existsSync(CRASHLOG_PATH)` is still meaningful on the UNSUPERVISED (shipped,
+ * supervisor-less) path, where THIS boot's own rotation is the only thing that will ever move it.
+ *
+ * `env.LOOM_PRIOR_CRASHLOG` (Code Review finding #2 on card 2f146782) covers the SUPERVISED path
+ * (`daemon:stable`), where `fs.existsSync` alone is NOT enough: scripts/daemon-supervisor.mjs's own
+ * `rotateCrashlog()` already rotates crash.log→.prev immediately before EVERY daemon launch — so by the
+ * time this process could check, a real prior crash's record is already gone regardless of whether this
+ * boot is a crash-recovery boot at all. The supervisor sets this env var ONLY when its own rotation
+ * genuinely moved a file, so on that path it is the sole source of truth — never asserted speculatively.
+ */
+export function hadCrashLogAtBoot(env: NodeJS.ProcessEnv = process.env): boolean {
+  return fs.existsSync(CRASHLOG_PATH) || env.LOOM_PRIOR_CRASHLOG === "1";
+}
+
 // Must match RESTART_EXIT_CODE in orchestration/restart.ts (and scripts/daemon-supervisor.mjs): the
 // daemon exits 75 to ASK the supervisor for a restart. That is an intentional, healthy exit — NOT a
 // crash — so the exit-hook backstop below must never mistake it for one and write a spurious crashlog.

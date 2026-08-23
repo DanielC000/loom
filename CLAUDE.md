@@ -51,6 +51,35 @@ platform-audit skills — is gated behind `LOOM_DEV=1` (default OFF) and does **
 End users install globally — `npm i -g loomctl` (command stays `loom`) — and the `loom` bin is a management CLI: `loom start/stop/status/restart/open` (`--detach`, PID file under `LOOM_HOME`) + graceful loopback `POST /internal/shutdown`; cross-OS autostart via `loom service install/uninstall/status` (systemd `--user` / launchd / Task Scheduler); and `loom update [--channel stable|beta]` (channel persisted) backed by a packaged-only loopback `POST /internal/update` + a UI "update available" banner. **The end-user daemon runs NO supervisor** — `daemon-supervisor.mjs` is dev/self-host-only and not in the npm `files` set; the OS service manager owns keep-alive (it runs `loom start --no-open` foreground). `/internal/shutdown` and `/internal/update` are **loopback-only, human-only, NOT agent MCP tools** (same trust posture as the human-only REST vault/git writers below — the one agent-facing exception there is the `LOOM_DEV` Platform Lead surface, which `/internal/*` has no equivalent of). loomctl@0.3.0 is published via npm **trusted publishing** (OIDC, no `NPM_TOKEN`, auto-provenance — see `docs/releasing.md`).
 
 **Self-hosting (orchestrating Loom WITH Loom):** use `pnpm daemon:stable`, not `pnpm daemon`. The dev daemon runs under `tsx watch`, so any worker merge that lands a change under `packages/daemon/src/**` (or `shared/dist`) restarts it mid-orchestration and kills the live manager/worker PTYs (the watch-restart-kills-PTYs gotcha — it caused an overnight cascade on 2026-06-03). `daemon:stable` runs the **supervisor** (`scripts/daemon-supervisor.mjs`): it builds once and runs the daemon from `dist/` with **no watcher**, so source merges don't restart the running daemon. The supervisor relaunches **only** on the explicit restart sentinel (exit `75`); any other exit (incl. a crash) stops the loop, so a broken daemon stays visibly down instead of crash-looping. A crash (no `restart-intent.json`, unlike a `daemon_restart`) still needs a **human** to notice and re-run `pnpm daemon:stable` — but on THAT relaunch, boot-reconcile now recovers a manager's in-flight WORKERS too, not just the standing sessions: it derives crash-orphaned workers (exited + resumable + parented to a manager/platform + task still non-terminal) straight from the DB, protects their worktrees from the same boot's GC pass, resumes their manager, then resumes each worker back into `worker_list` with its worktree/branch intact — closing the gap where a crash used to strand in-flight workers as silently-archived orphans until a manager noticed an empty `worker_list` and re-dispatched fresh, losing in-context reasoning.
+- **The hosting terminal is a single point of failure for the WHOLE fleet — prefer `pwsh` (7) and, for
+  anything long-lived, run detached.** `daemon:stable` (foreground) shares fate with whatever shell
+  launched it: a hosting-terminal crash (a `powershell.exe` 5.1 PSReadLine `ReadKey`-thread crash, a
+  sleep/reboot, an unrelated console close) kills the daemon mid-execution with **no chance to run any
+  graceful-shutdown handler** — taking down every project's live managers/workers with it (card 2f146782,
+  filed after two such deaths in one day). `powershell.exe` (Windows PowerShell 5.1) is the more exposed
+  shell for this — its `GB18030BugFixConsolePal` `ReadKey` background thread is a known 5.1-only crash
+  surface that exists only because the shell is interactive; **prefer `pwsh` (PowerShell 7)** for hosting
+  the foreground supervisor, deliberately rather than incidentally. Even under `pwsh`, foreground still
+  shares fate with the console — `pwsh -NoProfile` narrows exposure a little (fewer profile-loaded
+  modules) but does **not** eliminate it. **`pnpm daemon:stable:detach` is the actual fix:** it launches
+  the SAME supervisor as a genuinely detached background process (`detached:true` + `windowsHide:true` +
+  stdio piped to a log file, never inherited from the console — the same shape `bin/loom.mjs`'s
+  `startDetached()` already proves works for the packaged CLI), refuses (with a plain log line, exit 0)
+  if a daemon is already answering on the target port rather than double-starting a second one, and waits
+  up to 240s for the daemon to actually become ready (there's a full build ahead of it) before returning —
+  a build failure minutes later is a printed failure, never a stale "started" message with nothing left
+  to show it. It logs to `<LOOM_HOME>/logs/daemon-supervisor.log` (build output, restart-loop messages
+  ONLY — the detached child's console mirror is off, so this does not also absorb the daemon's own stream)
+  and `<LOOM_HOME>/logs/daemon-output.log`, the bounded/rotating/timestamped copy of the daemon's own
+  output (as before). Tracks its PID (+ port) at `<LOOM_HOME>/daemon-supervisor.pid`, best-effort-removed
+  on its own exit. Stop it with `pnpm daemon:stable:stop` (the same graceful `POST /internal/shutdown`
+  hook the packaged CLI's `loom stop` uses, resolving the port from the SAME pid-file record the launcher
+  wrote rather than re-deriving it from stop's own env — the two can otherwise disagree, e.g. a `LOOM_PORT`
+  set only via `<LOOM_HOME>/.env`; falls back to a hard kill of that captured PID ONLY after confirming its
+  live command line still names `daemon-supervisor.mjs` — REFUSES rather than signalling an unverified pid
+  a dead supervisor's slot could have been reused by — never by name/port alone). **Bare `pnpm
+  daemon:stable` (no flag) is unchanged** — still the foreground, watch-it-live workflow; detaching is
+  opt-in.
 - **Manager/Platform-Lead self-restart:** under the supervisor, a manager (or, since card 39fcaad3, the
   `LOOM_DEV`-gated Platform Lead on its own platform MCP surface — the Lead's cross-project restart responsibility named in `/platform-lead` doctrine no longer needs relaying through a project manager) that has merged daemon-`src` can make that code go live itself via the `daemon_restart` tool — it rebuilds first (a failed build aborts the restart and leaves the daemon up), then exits `75`, dropping **every live session across ALL projects** (not just its own subtree); the supervisor relaunches and boot re-resumes the whole fleet (via `~/.loom/restart-intent.json`) with the requester getting a "code is live" note. Outside the supervisor the tool refuses (nothing would relaunch the daemon).
 - **Manager orchestration around a restart:** after **any** daemon restart — *especially one you did
