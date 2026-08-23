@@ -50,6 +50,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (N) POST /internal/hook is proven to stay UNGATED even with loopbackSecret wired — a deliberate
 //       exclusion (see server.ts's own comment at that route for why, and for the honest accounting of
 //       what staying ungated does and doesn't defend against), not an oversight.
+//
+// v5 (card 214caa53, SECURITY follow-up — GAP 1): pre-v5, an UNDETERMINABLE `req.socket.remoteAddress`
+// (empty string — Node clears it once the underlying handle is destroyed; see server.ts's own comment for
+// the RST-race hypothesis this closes defense-in-depth against, tested and NOT reproduced, per that card)
+// fell through `!LOOPBACK.has("")` (true) to a bare `return` — the hook silently NO-OP'd, permitting the
+// request with NO credential check at all. v5 fails CLOSED instead: an undeterminable address is REJECTED
+// outright on a guarded route, unconditionally (not rescued by a valid credential).
+//   (P) a bare `injectWS` call with no `socket:` override (yielding an empty `remoteAddress` — see the
+//       TEST NOTE above) on /ws/term now REJECTS with no credential (was silently ACCEPTED pre-fix) and
+//       REJECTS even with a valid bearer credential (fail-closed is unconditional on the address, not
+//       credential-gated); with `loopbackSecret` UNSET the same call still succeeds (inertness preserved).
 import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -268,6 +279,47 @@ try {
   check("(N) POST /internal/hook with NO auth header still succeeds (deliberately excluded from the guard)",
     hookNoAuth.statusCode === 200);
 
+  // ===================== (P) GAP 1 fail-closed: an UNDETERMINABLE peer address (card 214caa53) =====================
+  // Pre-fix, `req.socket?.remoteAddress ?? ""` on an empty address fell through `!LOOPBACK.has("")` (true)
+  // straight to `return` — the hook silently no-op'd and the request proceeded with NO credential check
+  // at all (the fail-OPEN gap this card's DoD-2 closes). `.inject()`'s own `remoteAddress` option cannot
+  // simulate this for a plain `/api/*` write — light-my-request falls back to `'127.0.0.1'` via
+  // `options.remoteAddress || '127.0.0.1'`, so an explicit `""` is silently discarded (confirmed by
+  // reading node_modules/light-my-request/lib/request.js — `this.socket = new MockSocket(options.
+  // remoteAddress || '127.0.0.1')`). `injectWS`, by contrast, does NOT default it at all (see this hook's
+  // own "TEST NOTE" doc comment) — a bare call with no `socket:` override yields a genuinely empty
+  // `remoteAddress`, exercising the EXACT SAME `ip === ""` code line the REST-write path shares (one
+  // unified check after the route-pattern gate) — so this is a faithful proof of the shared logic, not a
+  // WS-only claim. RED-PROVEN: reverting just this file's GAP-1 fix (restoring the bare `if
+  // (!LOOPBACK.has(ip)) return;`) and re-running this file fails exactly these two checks (the upgrade
+  // succeeds with no credential, where it must now be rejected) — everything else in this file stays
+  // green, isolating the regression to this exact change.
+  const wsUndeterminedNoAuth = await (async () => {
+    try { const ws = await appWithSecret.injectWS("/ws/term/sess-undetermined", { headers: H }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(P) GAP 1 FIXED: /ws/term upgrade with an UNDETERMINABLE peer address (no socket override, no credential) → REJECTED (was silently ACCEPTED pre-fix)",
+    wsUndeterminedNoAuth);
+
+  // Fail-closed is unconditional on the ADDRESS, not rescued by a valid credential — the whole point is
+  // we cannot confirm this connection is even the loopback caller the credential is scoped to trust.
+  const wsUndeterminedValidAuth = await (async () => {
+    try { const ws = await appWithSecret.injectWS("/ws/term/sess-undetermined2", { headers: { ...H, "sec-websocket-protocol": bearerProto(SECRET) } }); ws.close(); return false; }
+    catch { return true; }
+  })();
+  check("(P) an undeterminable peer address is REJECTED even WITH a valid bearer credential (unconditional on the address)",
+    wsUndeterminedValidAuth);
+
+  // DoD-3: the `loopbackSecret === undefined` inertness this card was told to leave alone must still make
+  // the WHOLE hook (this new ip==="" branch included) a no-op — re-confirms (A)'s inertness proof on this
+  // specific new code path, since DoD-2 asked to verify the fix doesn't reach partial-stub tests.
+  const unguardedUndetermined = await (async () => {
+    try { const ws = await appNoSecret.injectWS("/ws/term/sess-undetermined3", { headers: H }); ws.close(); return true; }
+    catch { return false; }
+  })();
+  check("(P) DoD-3: with loopbackSecret UNSET, an undeterminable-address /ws/term upgrade still succeeds (inertness preserved)",
+    unguardedUndetermined);
+
   // (G) structural: v2 no longer consults routeTier at all in the guard (it gates unconditionally) —
   // confirmed by reading the compiled source, mirroring gateway-token.mjs's own (F) pattern.
   {
@@ -275,21 +327,44 @@ try {
     const src = fs.readFileSync(serverPath, "utf8");
     const guardIdx = src.indexOf("Loopback human-only-write guard");
     check("(G) the guard block exists in compiled output", guardIdx !== -1);
-    // 10000 (was 7000): card 93249b52's own doc comments on the guard hook pushed the isGuardedInternalWrite
-    // check + its /internal/shutdown /internal/update literals past the old 7000-char window — widened so
-    // the (G) structural checks below actually see them rather than silently falling off the slice.
-    const guardSlice = src.slice(guardIdx, guardIdx + 10000);
+    // 18000 (was 13000, was 10000, was 7000): wide enough to comfortably reach past the WHOLE hook — doc
+    // comment AND code, measured end-to-end at ~14346 chars as of this card's fix — with real headroom,
+    // not a tight fit. Code Review finding (card 214caa53 review): a window sized to just barely fit the
+    // last literal (13000 landed mid-token, clipping the LOOPBACK.has(ip) check entirely) is exactly the
+    // brittleness that kept forcing this number up one clipped-literal at a time; codeSlice below is what
+    // actually makes the checks comment-immune, this number just needs to not truncate the real code.
+    const guardSlice = src.slice(guardIdx, guardIdx + 18000);
+    // CODE-ONLY slice, from `app.addHook` onward — every (G) check below matches against THIS, never the
+    // raw guardSlice. Code Review MAJOR finding (card 214caa53 review): a literal-text regex run over
+    // guardSlice matches the ~10KB LEADING COMMENT BLOCK too, and prose in that block can echo the exact
+    // code shape it's describing (this hook's own TEST-NOTE comment contains the literal text `` `ip ===
+    // ""` check `` inside backticks — backticks aren't part of any of these regexes, so the prose matched
+    // and the GAP-1 check below was a FALSE GREEN, proven by the reviewer deleting the real fix from dist
+    // and re-running: the behavioral (P) checks went RED, this (G) check stayed GREEN). Slicing to
+    // code-only makes every check here immune to comment growth — it ALSO retires the 7000→10000→13000
+    // widening treadmill, since a comment addition can no longer push a matched literal near a boundary
+    // that matters (the window above just needs to comfortably reach the code, not track every literal).
+    const codeSlice = guardSlice.slice(guardSlice.indexOf("app.addHook"));
     check("(G) v2 gates every /api/* write unconditionally — no routeTier check inside the guard hook",
-      !/routeTier\(req\.method, routePattern\)/.test(guardSlice.slice(guardSlice.indexOf("app.addHook"))));
+      !/routeTier\(req\.method, routePattern\)/.test(codeSlice));
     check("(G) the guard also matches the /ws/term upgrade route by pattern",
-      /routePattern === ["']\/ws\/term\/:sessionId["']/.test(guardSlice));
+      /routePattern === ["']\/ws\/term\/:sessionId["']/.test(codeSlice));
     check("(G) v3: the guard also matches the /ws/companion upgrade route by pattern (card 351e89af)",
-      /routePattern === ["']\/ws\/companion\/:sessionId["']/.test(guardSlice));
+      /routePattern === ["']\/ws\/companion\/:sessionId["']/.test(codeSlice));
     // (G) card 93249b52: the guard's route-matching literally names /internal/shutdown + /internal/update,
     // and does NOT name /internal/hook — corroborates the behavioral (L)/(M)/(N) proof above structurally.
-    check("(G) the guard matches /internal/shutdown by pattern", /["']\/internal\/shutdown["']/.test(guardSlice));
-    check("(G) the guard matches /internal/update by pattern", /["']\/internal\/update["']/.test(guardSlice));
-    check("(G) the guard does NOT match /internal/hook by pattern", !/["']\/internal\/hook["']/.test(guardSlice));
+    check("(G) the guard matches /internal/shutdown by pattern", /["']\/internal\/shutdown["']/.test(codeSlice));
+    check("(G) the guard matches /internal/update by pattern", /["']\/internal\/update["']/.test(codeSlice));
+    check("(G) the guard does NOT match /internal/hook by pattern", !/["']\/internal\/hook["']/.test(codeSlice));
+    // (G) card 214caa53: GAP 1's empty-address check — both PRESENCE and ORDERING. This check's whole job
+    // is an ordering claim (the empty-address reject must run BEFORE the LOOPBACK-set membership check,
+    // not be folded into or come after it — see server.ts's own comment for why), so verify the ordering
+    // directly rather than mere presence, which proves nothing about precedence.
+    const emptyAddrCheckIdx = codeSlice.search(/ip\s*===\s*["']["']/);
+    const loopbackMembershipIdx = codeSlice.indexOf("LOOPBACK.has(ip)");
+    check("(G) GAP 1: the guard checks for an empty/undeterminable peer address (ip === \"\")", emptyAddrCheckIdx !== -1);
+    check("(G) GAP 1: the empty-address check runs BEFORE the LOOPBACK.has(ip) membership check (ordering, not just presence)",
+      loopbackMembershipIdx !== -1 && emptyAddrCheckIdx !== -1 && emptyAddrCheckIdx < loopbackMembershipIdx);
   }
 } finally {
   try { await appNoSecret?.close(); } catch { /* ignore */ }
@@ -298,6 +373,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the loopback human-only-write guard (v4) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, the /ws/companion inbound chat socket (card 351e89af), AND POST /internal/shutdown + POST /internal/update (card 93249b52 — the loomctl lifecycle writers, one of which fetches+installs code) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, proves POST /internal/hook stays deliberately ungated, and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
+  ? "\n✅ ALL PASS — the loopback human-only-write guard (v5) closes the unauthenticated same-host bypass on EVERY non-GET /api/* write, the /ws/term stdin socket, the /ws/companion inbound chat socket (card 351e89af), AND POST /internal/shutdown + POST /internal/update (card 93249b52 — the loomctl lifecycle writers, one of which fetches+installs code) — including the Tier-1 human-authority routes v1 left open (session input's ownerText source, questions/answer) — proven both failing-without and succeeding-with the correct secret, leaves reads unaffected, proves POST /internal/hook stays deliberately ungated, fails CLOSED on an undeterminable peer address unconditionally (card 214caa53, GAP 1), and stays inert (byte-identical) for every existing partial-stub test that doesn't wire it."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

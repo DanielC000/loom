@@ -533,6 +533,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     route (`/ws/fleet` — read-only event bookkeeping) are untouched — an agent's MCP tool calls are
   //     byte-identical before/after. A GET read is a materially different risk from a WRITE; closing
   //     GET-level disclosure is a separate concern this hook does not attempt.
+  //     SETTLED POLICY (card 214caa53, GAP 2 — won't-do, reasoning recorded here rather than left open):
+  //     surveyed every `/api/*` GET route's handler. The routes that hold genuine plaintext secrets
+  //     (project API keys, gateway remote-access tokens, OAuth2/connection credentials) already mask them
+  //     at the GET layer regardless of this hook — see each store's own "PUBLIC metadata only (no
+  //     secret/hash)" / "tokens are NEVER returned by any REST read" comments (api-keys, gateway-tokens,
+  //     connections). Everything else a GET route can return is backed by the same shared SQLite DB and
+  //     vault files a co-resident agent's Bash tool can already read directly off disk under `LOOM_HOME`
+  //     — including other projects' boards/vaults/config, since none of this hook's routes are scoped to
+  //     the caller's own project the way `/mcp/:sessionId` is server-side. So blanket-gating GET adds no
+  //     material barrier beyond what filesystem access already grants, at real cost (breaking the web
+  //     UI's own read path, `loom status`, and health probes). Not gated.
   //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and `/internal/shutdown` /
   //     `/internal/update` (constant-time compared); for `/ws/term`'s and `/ws/companion`'s upgrades, the
   //     SAME secret via the remote tier's own established mechanism — `Sec-WebSocket-Protocol: loom.v1,
@@ -545,10 +556,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   //     loopback-vs-remote off — a real TCP connection always populates it, but Fastify's `injectWS` test
   //     helper does NOT default it the way plain `.inject()` does (light-my-request quirk, confirmed via
   //     debug instrumentation while building this: a bare `injectWS(url, {headers})` call yields an EMPTY
-  //     `remoteAddress`, which is NOT in the `LOOPBACK` set — the hook then silently no-ops instead of
-  //     rejecting). Any test exercising this hook's `/ws/term` or `/ws/companion` path MUST pass an
-  //     explicit `socket: { remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS
-  //     tests already pass `socket: remoteSocket` for the remote-peer case. See test/loopback-write-guard.mjs.
+  //     `remoteAddress`). Since card 214caa53's GAP 1 fix, an empty `remoteAddress` on a guarded route is
+  //     REJECTED (401) rather than silently no-op'd — so a bare `injectWS` call now proves the fail-closed
+  //     path (see test/loopback-write-guard.mjs's (P) checks), and any test that wants to exercise the
+  //     ACCEPT path for `/ws/term` or `/ws/companion` MUST pass an explicit
+  //     `socket: { remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS tests
+  //     already pass `socket: remoteSocket` for the remote-peer case. `.inject()`'s own `remoteAddress`
+  //     option cannot simulate an empty address for a plain `/api/*` write (light-my-request falls back
+  //     to `'127.0.0.1'` via `options.remoteAddress || '127.0.0.1'` — an empty string is falsy) — the
+  //     `ip === ""` check is exercised via the WS routes instead, which share this exact same code path.
   if (deps.loopbackSecret !== undefined) {
     const loopbackSecret = deps.loopbackSecret;
     app.addHook("onRequest", async (req, reply) => {
@@ -586,7 +602,31 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // loopback callers) or already failed it (Tier 0 ⇒ 403 before this hook ever runs) or there is no
       // non-loopback bind open at all (the OS refuses the connection) — so this check is what actually
       // scopes the hook to loopback, not a defensive no-op.
+      //
+      // GAP 1 hardening (card 214caa53, follow-up to this card): an EMPTY/undeterminable
+      // `remoteAddress` must NOT be treated as "confirmed non-loopback, not our concern" — that used to
+      // fall through `!LOOPBACK.has("")` (true) straight to `return`, silently PERMITTING the request
+      // with no credential check at all. Node clears `socket.remoteAddress` once the underlying handle is
+      // destroyed, so the card raised (as an untested hypothesis) a client that completes its request and
+      // then immediately RSTs the connection racing this read to empty. TESTED (a throwaway raw-socket
+      // probe, not part of this test corpus — flush a full HTTP request to the OS, then `resetAndDestroy`
+      // immediately after): did NOT reproduce in 500 trials on Windows/Node 22/loopback — an immediate
+      // RST tore the connection down so completely that the request was never even parsed (0/500 reached
+      // any handler at all, despite 500/500 TCP connections accepted and writes flushed), so the specific
+      // "processed with an empty address" shape this hook would need to worry about never occurred. The
+      // fix stands anyway, on defense-in-depth grounds per the card. Fail CLOSED: an undeterminable
+      // address is REJECTED outright on a guarded route, unconditionally — a valid bearer credential does
+      // not rescue it, since the whole point is we cannot confirm this is the loopback caller the
+      // credential is scoped to trust. A genuinely non-loopback address (a real remote IP, not empty)
+      // is UNCHANGED — that case still falls through to the trust-tier wall's own decision, already made
+      // above.
       const ip = req.socket?.remoteAddress ?? "";
+      if (ip === "") {
+        // Distinct body from the credential-rejection cases below (Code Review nitpick, card 214caa53):
+        // this reject is unconditional on the address — no credential can rescue it — so telling the
+        // caller to go fetch one via `loom open` would point at the one thing that will NOT help here.
+        return reply.code(401).send({ error: "unauthorized — peer address undeterminable" });
+      }
       if (!LOOPBACK.has(ip)) return;
       let presented: string | undefined;
       if (isTermSocket || isCompanionSocket) {
