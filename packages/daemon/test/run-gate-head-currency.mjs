@@ -44,6 +44,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rghc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -81,6 +82,7 @@ async function seedWorkerInDb(db, sfx) {
   // `sfx` values, so a suffix that only varies cross-process (pid) can't discriminate two same-process
   // calls landing in the same millisecond — only an OS-atomic unique dir does (card 11a25f10).
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `loom-rghc-repo-${sfx}-`));
+  registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# rghc\n");
   execSync(`git init -q && git config user.email rghc@loom && git config user.name rghc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 

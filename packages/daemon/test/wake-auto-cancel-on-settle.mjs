@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -136,6 +137,7 @@ const svc = new SessionService(db, host, new OrchestrationControl(), { runGate: 
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-wacs-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo); // this file's own cleanup only rmSync's tmpHome, never this separate repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# wacs\n");
   execSync(`git init -q && git config user.email wacs@loom && git config user.name wacs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;

@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -79,6 +80,7 @@ const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttac
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-mst-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo); // removeWorktree(repo, wt) below only removes the WORKTREE, never this bare repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# mst\n");
   // Configure a REPO-LOCAL git identity (not just inline `-c` on our own commits): the daemon's own
   // squash-merge commit runs a PLAIN `git commit` with no `-c` overrides (see the repo's git-commit-identity

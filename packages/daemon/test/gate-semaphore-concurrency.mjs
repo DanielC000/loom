@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -962,6 +963,7 @@ try {
   {
     const sfx = `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gs-repos-a-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId, workers } = await seedTwoWorkers(sfx, reposDir);
 
     // (A) deliberately keeps a plain fixed sleep — do NOT replace it with (B)'s rendezvous barrier.
@@ -997,6 +999,7 @@ try {
   {
     const sfx = `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gs-repos-b-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId, workers } = await seedTwoWorkers(sfx, reposDir);
     db.setPlatformConfig({ maxConcurrentGates: 2 });
 

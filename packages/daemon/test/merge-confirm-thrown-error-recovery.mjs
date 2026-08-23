@@ -34,9 +34,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mtr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+registerForCleanup(process.env.LOOM_HOME); // this file has NO finally/cleanup block at all — nothing else removes this
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -70,6 +72,7 @@ function makePtyStub() {
 
 async function setup(sfx, { preLand } = {}) {
   const reposDir = path.join(os.tmpdir(), `loom-mtr-repo-${sfx}`);
+  registerForCleanup(reposDir); // this file has NO finally/cleanup block at all — nothing else removes this
   const repo = path.join(reposDir, "repo");
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mtr\n");

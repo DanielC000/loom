@@ -53,6 +53,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 // Both read LIVE (per-call, via resolveConfig) — not module-load-time constants — so setting them here
 // affects every scenario in this file uniformly; harmless for (1)-(5), which never reach a timeout-kill
@@ -161,6 +162,7 @@ const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncA
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-mcn-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo); // the finally block's removeWorktree(repo, wt) only removes the WORKTREE, never this bare repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# mcn\n");
   execSync(`git init -q && git config user.email mcn@loom && git config user.name mcn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;

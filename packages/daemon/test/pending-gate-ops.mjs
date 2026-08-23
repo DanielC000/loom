@@ -50,6 +50,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import Database from "better-sqlite3";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -542,6 +543,7 @@ try {
   const P = "pgo-e2e";
   const repo = path.join(os.tmpdir(), `loom-pgo-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   fs.mkdirSync(repo, { recursive: true });
+  registerForCleanup(repo); // this file's finally block only rmSync's tmpHome, never this separate repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# pgo\n");
   execSync(`git init -q && git config user.email pgo@loom && git config user.name pgo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   const { worktreePath, branch } = await createWorktree(repo, P, "t1");

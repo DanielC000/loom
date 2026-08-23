@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -48,6 +49,7 @@ try {
   {
     const sfx = `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-a-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-a-proj-${sfx}`, agentId = `gtb-a-agent-${sfx}`, mgrId = `gtb-a-mgr-${sfx}`, workerId = `gtb-a-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -89,6 +91,7 @@ try {
   {
     const sfx = `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-b-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-b-proj-${sfx}`, agentId = `gtb-b-agent-${sfx}`, taskId = `gtb-b-task-${sfx}`, mgrId = `gtb-b-mgr-${sfx}`, workerId = `gtb-b-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -125,6 +128,7 @@ try {
   {
     const sfx = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-c-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-c-proj-${sfx}`, agentId = `gtb-c-agent-${sfx}`, taskId = `gtb-c-task-${sfx}`, mgrId = `gtb-c-mgr-${sfx}`, workerId = `gtb-c-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -163,6 +167,7 @@ try {
   {
     const sfx = `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-d-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-d-proj-${sfx}`, agentId = `gtb-d-agent-${sfx}`, mgrId = `gtb-d-mgr-${sfx}`, workerId = `gtb-d-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -209,6 +214,7 @@ try {
   {
     const sfx = `e-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-e-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-e-proj-${sfx}`, agentId = `gtb-e-agent-${sfx}`, taskId = `gtb-e-task-${sfx}`, mgrId = `gtb-e-mgr-${sfx}`, workerId = `gtb-e-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -264,6 +270,7 @@ try {
   {
     const sfx = `g-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-g-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-g-proj-${sfx}`, agentId = `gtb-g-agent-${sfx}`, mgrId = `gtb-g-mgr-${sfx}`, workerId = `gtb-g-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");
@@ -311,6 +318,7 @@ try {
   {
     const sfx = `h-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-gtb-repos-h-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const db = new Db(); dbs.push(db);
     const projId = `gtb-h-proj-${sfx}`, agentId = `gtb-h-agent-${sfx}`, taskId = `gtb-h-task-${sfx}`, mgrId = `gtb-h-mgr-${sfx}`, workerId = `gtb-h-wkr-${sfx}`;
     const repo = path.join(reposDir, "repo");

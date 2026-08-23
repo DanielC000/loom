@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -213,6 +214,7 @@ function makeRepo(repo) {
 {
   const sfx = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-repos-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
   db.setPlatformConfig({ maxConcurrentGates: 1 }); // saturate with an unrelated op so the self-check queues
@@ -306,6 +308,7 @@ function makeRepo(repo) {
 {
   const sfx = `refuse-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-refuse-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
 
@@ -373,6 +376,7 @@ function makeRepo(repo) {
 {
   const sfx = `b2-1-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-b21-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
   db.setPlatformConfig({ maxConcurrentGates: 1 });
@@ -458,6 +462,7 @@ function makeRepo(repo) {
 {
   const sfx = `wording-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-wording-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
   db.setPlatformConfig({ maxConcurrentGates: 1 });
@@ -543,6 +548,7 @@ function makeRepo(repo) {
 {
   const sfx = `b2-2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-b22-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
   db.setPlatformConfig({ maxConcurrentGates: 1 });
@@ -645,6 +651,7 @@ function makeRepo(repo) {
 {
   const sfx = `running-refused-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-run-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
 
@@ -709,6 +716,7 @@ function makeRepo(repo) {
 {
   const sfx = `hang-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-hang-${sfx}`);
+  registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
   const db = new Db();
   dbs.push(db);
 
@@ -838,6 +846,7 @@ function makeRepo(repo) {
 {
   const sfx = `rgo-b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const repo = path.join(os.tmpdir(), `loom-gc-rgo-b-${sfx}`);
+  registerForCleanup(repo); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repo dir
   makeRepo(repo);
   const db = new Db(); dbs.push(db);
   const P1 = `gc-rgo-b-proj-${sfx}`;

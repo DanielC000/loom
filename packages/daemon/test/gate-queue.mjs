@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -73,6 +74,7 @@ async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+registerForCleanup(process.env.LOOM_HOME); // this file's own cleanup below only rmSync's the worktrees array, never this home dir
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -102,6 +104,8 @@ function makeRepo(repo) {
     const repo1 = path.join(os.tmpdir(), `${P1}-repo`), repo2 = path.join(os.tmpdir(), `${P2}-repo`);
     makeRepo(repo1);
     makeRepo(repo2);
+    registerForCleanup(repo1); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never these repo dirs
+    registerForCleanup(repo2);
     db.insertProject({ id: P1, name: "Own Project", repoPath: repo1, vaultPath: repo1, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
     db.insertProject({ id: P2, name: "Foreign Project", repoPath: repo2, vaultPath: repo2, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "a1", projectId: P1, name: "dev-1", startupPrompt: "", position: 0 });
@@ -184,6 +188,8 @@ function makeRepo(repo) {
     const repo1 = path.join(os.tmpdir(), `${P1}-repo`), repo2 = path.join(os.tmpdir(), `${P2}-repo`);
     makeRepo(repo1);
     makeRepo(repo2);
+    registerForCleanup(repo1); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never these repo dirs
+    registerForCleanup(repo2);
     const db = new Db();
     dbs.push(db);
     db.insertProject({ id: P1, name: "MCP Own", repoPath: repo1, vaultPath: repo1, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
@@ -305,6 +311,7 @@ function makeRepo(repo) {
     const P = `gq-streak-${Date.now()}`;
     const repo = path.join(os.tmpdir(), `${P}-repo`);
     makeRepo(repo);
+    registerForCleanup(repo); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repo dir
     db.insertProject({ id: P, name: "Streak Project", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "sa1", projectId: P, name: "dev-1", startupPrompt: "", position: 0 });
     const taskId = `${P}-task`;

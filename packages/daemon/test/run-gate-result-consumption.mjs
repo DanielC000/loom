@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rgc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -60,6 +61,7 @@ try {
   // ── (A) settle-grace re-call returns the SAME settled result, with NO second gate run ────────────────
   {
     const repo = path.join(os.tmpdir(), `loom-rgc-repo-a-${Date.now()}-${process.pid}`);
+    registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
     execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
@@ -93,6 +95,7 @@ try {
   // ── (B) mid-flight re-call: attachedToInFlight + staleAgainstWorktree after an edit ────────────────────
   {
     const repo = path.join(os.tmpdir(), `loom-rgc-repo-b-${Date.now()}-${process.pid}`);
+    registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
     execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
@@ -213,6 +216,7 @@ try {
   //     proves reuses a result for must instead mint a genuinely fresh gate run ─────────────────────────
   {
     const repo = path.join(os.tmpdir(), `loom-rgc-repo-c-${Date.now()}-${process.pid}`);
+    registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
     execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });

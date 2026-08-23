@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -156,6 +157,7 @@ try {
   {
     const sfx = `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-a-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId, mergeWorkerId, gateWorkerId } = await seedWorkers(sfx, reposDir);
 
     let active = 0, maxActive = 0, calls = 0;
@@ -207,6 +209,7 @@ try {
   {
     const sfx = `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-b-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId, mergeWorkerId, gateWorkerId } = await seedWorkers(sfx, reposDir);
     db.setPlatformConfig({ maxConcurrentGates: 2 });
 
@@ -254,6 +257,7 @@ try {
   {
     const sfx = `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-d-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const fastGate = async () => ({ passed: true });
     const { stub } = ptyStub();
@@ -279,6 +283,7 @@ try {
   {
     const sfx = `d2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-d2-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     let capturedEnvOverride;
     const capturingGate = async (_gate, _worktreePath, _timeoutMs, _onOutput, envOverride) => {
@@ -324,6 +329,7 @@ try {
   {
     const sfx = `f-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-f-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     // Blank out gateCommand for the gate-only worker's own project.
     const gateWorkerProjId = db.getSession(gateWorkerId).projectId;
@@ -342,6 +348,7 @@ try {
   {
     const sfx = `g-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-g-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     let callNum = 0;
     const crashThenRecover = async () => {
@@ -387,6 +394,7 @@ try {
   {
     const sfx = `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-i-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const failingGate = async () => ({
       passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false,
@@ -434,6 +442,7 @@ try {
   {
     const sfx = `j-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-j-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId, mergeWorkerId, gateWorkerId: gateWorkerId1 } = await seedWorkers(sfx, reposDir);
     // Platform config is GLOBAL and persists across test blocks sharing this file's one LOOM_HOME db (test
     // (B) above raises it to 2) — pin it back to the default 1 explicitly so this test's cap=1 assumption
@@ -488,6 +497,7 @@ try {
   {
     const sfx = `h-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-h-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, mgrId } = await seedWorkers(sfx, reposDir);
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: async () => ({ passed: true }) });
@@ -507,6 +517,7 @@ try {
   {
     const sfx = `k-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-k-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const failingAsyncGate = async () => {
       await sleep(350); // past this instance's 150ms syncAttachBudgetMs — forces the pending→settle→nudge path
@@ -565,6 +576,7 @@ try {
   {
     const sfx = `l-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const SLEEP_MS = 100; // wide margin — see TIMING NOTE above
     const SLACK_MS = 50; // explicit, generous jitter budget (half of SLEEP_MS) — see TIMING NOTE above
@@ -582,6 +594,7 @@ try {
   {
     const sfx = `l2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l2-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const SLEEP_MS = 100; // see (L)'s own TIMING NOTE above
     const SLACK_MS = 50;
