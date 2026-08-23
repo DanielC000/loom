@@ -111,14 +111,14 @@ try {
   // 7) writeSessionSettings wires the PostToolUse Write|Edit entry pointing at the shipped script.
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
-  const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-on", perm, VAULT), "utf8"));
+  const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-on", perm, "test-hook-token", VAULT), "utf8"));
   const ptu = withVault.hooks.PostToolUse;
   check("writeSessionSettings(vaultPath): PostToolUse matcher = Write|Edit", Array.isArray(ptu) && ptu[0].matcher === "Write|Edit");
   check("writeSessionSettings(vaultPath): command points at vault-lint.mjs + the vault path",
     ptu[0].hooks[0].command.includes("vault-lint.mjs") && ptu[0].hooks[0].command.includes(VAULT));
   check("writeSessionSettings(vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
     withVault.includeCoAuthoredBy === false);
-  const noVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-off", perm), "utf8"));
+  const noVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-off", perm, "test-hook-token"), "utf8"));
   check("writeSessionSettings(no vaultPath / docLint off): NO PostToolUse entry", noVault.hooks.PostToolUse === undefined);
   check("writeSessionSettings(no vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
     noVault.includeCoAuthoredBy === false);

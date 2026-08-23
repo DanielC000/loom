@@ -25,7 +25,7 @@ const { writeSessionSettings } = await import("../dist/pty/claude-settings.js");
 try {
   const perm = { mode: "acceptEdits", allow: ["mcp__loom-tasks"], deny: [], startupModeCycles: 2 };
 
-  const plain = JSON.parse(fs.readFileSync(writeSessionSettings("sam-plain", perm), "utf8"));
+  const plain = JSON.parse(fs.readFileSync(writeSessionSettings("sam-plain", perm, "test-hook-token"), "utf8"));
   check("skipAutoPermissionPrompt:true is present on a plain (no vault) session",
     plain.skipAutoPermissionPrompt === true);
   check("it did NOT displace any existing field — permissions.defaultMode still wired",
@@ -34,12 +34,12 @@ try {
   check("includeCoAuthoredBy is unaffected (still false)", plain.includeCoAuthoredBy === false);
 
   // Additive regardless of the vault-lint option too — same key, same value, every path.
-  const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("sam-vault", perm, os.tmpdir()), "utf8"));
+  const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("sam-vault", perm, "test-hook-token", os.tmpdir()), "utf8"));
   check("skipAutoPermissionPrompt:true is present alongside a vaultPath (docLint) session too",
     withVault.skipAutoPermissionPrompt === true);
 
   const bypass = JSON.parse(fs.readFileSync(
-    writeSessionSettings("sam-plan", { ...perm, mode: "plan" }), "utf8"));
+    writeSessionSettings("sam-plan", { ...perm, mode: "plan" }, "test-hook-token"), "utf8"));
   check("skipAutoPermissionPrompt:true is present regardless of the configured permission mode",
     bypass.skipAutoPermissionPrompt === true);
 } finally {

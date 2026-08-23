@@ -2674,30 +2674,40 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
-  // --- Hook relay target (loopback only). DELIBERATELY left OFF the loopback-secret bearer guard (card
-  // 93249b52 considered and rejected extending it here, alongside gating /internal/shutdown +
-  // /internal/update): this is the SessionStart hook relay (assets/hook-relay.mjs), invoked by a child of
-  // the vendor CLI on EVERY session start/resume — high-frequency, not human-driven, and with no
-  // credential to attach even if it wanted to (the relay is a child of the vendor CLI, not something this
-  // project controls the invocation of). Gating it wrong breaks every spawn on the daemon — that alone is
-  // the reason it's excluded here.
+  // --- Hook relay target (loopback only). DELIBERATELY excluded from the loopback-secret bearer guard
+  // above (card 93249b52 considered and rejected extending `isGuardedInternalWrite` here, alongside
+  // gating /internal/shutdown + /internal/update): this is the SessionStart hook relay
+  // (assets/hook-relay.mjs), invoked by a child of the vendor CLI on EVERY session start/resume —
+  // high-frequency, not human-driven, and the relay has no straightforward way to hold or present a
+  // SHARED secret the way a human-driven `loom stop`/browser caller can (it's a child of the vendor CLI,
+  // not something this project controls the invocation of). Gating it wrong breaks every spawn on the
+  // daemon — that alone is the reason it's excluded from THAT specific guard.
   //
-  // ⛔ THIS IS NOT A "SAFE AS-IS" CLAIM — a known, OPEN gap, deliberately left out of THIS card's scope
-  // (manager review on 93249b52 caught an earlier draft of this comment overclaiming the opposite; see
-  // that card's history). `body.sessionId` below is CALLER-SUPPLIED, not derived from the connection —
-  // `deliverHook` (pty/host.ts) early-returns only on an unknown id or a non-"claude" kind, so it accepts
-  // a forged hook for ANY live claude session, not just one the caller owns. Session ids are discoverable
-  // too: 9ccedbee gates only non-GET `/api/*`, so `GET /api/sessions` and friends stay open even from
-  // loopback. An unauthenticated co-resident caller can therefore POST a forged hook naming an arbitrary
-  // live session and drive its SessionStart engine-id capture, its busy/readiness state machine, the
-  // usage-limit detect, and the prompt-mismatch detector — a real capability, not a hypothetical one. A
-  // separate card tracks closing this; it is out of scope here only because gating this specific route
-  // needs its own credential mechanism the vendor-CLI-invoked relay doesn't have yet, not because the gap
-  // is small. ---
+  // Card a2407ed4: that exclusion left `body.sessionId` below CALLER-SUPPLIED with NO requirement at
+  // all — `deliverHook` (pty/host.ts) early-returns only on an unknown id or a non-"claude" kind, so ANY
+  // co-resident caller (loopback + a guessable/enumerable sessionId — 9ccedbee gates only non-GET
+  // `/api/*`, so `GET /api/sessions` stays open) could forge a hook against ANY live session it had no
+  // relationship to. `verifyHookToken` closes that ZERO-EFFORT path with a DIFFERENT mechanism than the
+  // bearer guard above: a per-session token minted at spawn (see Live.hookToken's doc), baked into the
+  // relay's own command line alongside the sessionId/port already there — so the relay never needs to
+  // hold or read a SHARED secret, only present the value it was already invoked with.
+  //
+  // ⛔ THIS IS NOT "HOOKS ARE NOW AUTHENTICATED" and does NOT achieve isolation — under same-OS-user
+  // co-residency with no sandbox, a caller that deliberately reads the TARGET session's own settings.json
+  // (where the token rides) can still extract it; that ceiling is inherited from 93249b52, not closed.
+  // What changed: targeting a session now requires a deliberate, per-target read instead of a bare guess,
+  // and a leaked token is scoped to the one session it belongs to — never a fleet-wide bypass.
   app.post("/internal/hook", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
-    const body = req.body as { sessionId?: string; hook?: Record<string, unknown> };
-    if (body?.sessionId && body.hook) deps.pty.deliverHook(body.sessionId, body.hook);
+    const body = req.body as { sessionId?: string; hook?: Record<string, unknown>; token?: string };
+    if (body?.sessionId && body.hook) {
+      if (!deps.pty.verifyHookToken(body.sessionId, body.token)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[hook] rejected a hook POST for ${body.sessionId} — missing/mismatched token (card a2407ed4); NEVER logging the presented token itself`);
+        return reply.code(403).send("forbidden");
+      }
+      deps.pty.deliverHook(body.sessionId, body.hook);
+    }
     return reply.send({ ok: true });
   });
 
@@ -2714,9 +2724,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // the onRequest hook above — this route's own `!LOOPBACK` check stays as the fail-closed backstop for a
   // non-loopback caller and for the (test-only) case where `deps.loopbackSecret` is unset. `bin/loom.mjs`
   // (`loom stop`) reads the SAME secret file the browser reads (`readLoopbackSecret`) and sends it as
-  // `Authorization: Bearer <secret>` — see that file's `postShutdown`. We ack 202 first and defer the exit
-  // one tick so the response flushes before the process dies (the CLI reads the ack, then polls the port
-  // until it stops answering).
+  // `Authorization: Bearer <secret>` — see that file's `postShutdown`.
+  //
+  // This is a DIFFERENT mechanism than /internal/hook's (card a2407ed4): that route is gated by a
+  // per-session token instead of this shared bearer secret, because its caller (a child of the vendor
+  // CLI, invoked on every hook of every session) has no straightforward way to hold or present a shared
+  // secret the way this human-driven (`loom stop`) / browser caller can — see that route's own comment
+  // for why. Neither implies the other; each caller shape got the mechanism that actually fits it.
+  //
+  // We ack 202 first and defer the exit one tick so the response flushes before the process dies (the
+  // CLI reads the ack, then polls the port until it stops answering).
   app.post("/internal/shutdown", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     setTimeout(() => deps.requestShutdown(), 50);

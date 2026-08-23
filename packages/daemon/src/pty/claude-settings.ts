@@ -57,14 +57,22 @@ const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as c
  *
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
+ *
+ * `hookToken` (card a2407ed4) rides as a 4th argv on the relay command, alongside the sessionId/port
+ * already there — `hook-relay.mjs` forwards it in the POST body, and `/internal/hook` requires it to
+ * match the target session's own `Live.hookToken` before a hook is processed. It is REQUIRED (not
+ * optional) so a caller can never accidentally omit it and silently reopen the zero-token gap; see
+ * `PtyHost.verifyHookToken`'s doc for exactly what this does and does not close. Placed BEFORE the
+ * optional `vaultPath` — TypeScript disallows a required param after an optional one.
  */
 export function writeSessionSettings(
   sessionId: string,
   permission: PermissionPolicy,
+  hookToken: string,
   vaultPath?: string,
 ): string {
   const hookCmd = {
-    hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT}` }],
+    hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT} ${hookToken}` }],
   };
   const hooks: Record<string, unknown> = {
     SessionStart: [hookCmd],
@@ -93,8 +101,14 @@ export function writeSessionSettings(
   };
   const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2));
+  // 0600 at create, mirroring writeSessionMcpConfig's own discipline now that this file carries a
+  // credential (the hook token, baked into the relay command above) — best-effort on win32 (a no-op;
+  // NTFS ACLs are out of scope), so this buys something against a different-user co-resident on POSIX
+  // and nothing on this daemon's own self-hosting Windows box. Not mitigation for the stated ceiling
+  // (same-OS-user co-residency can already read this file regardless) — land it anyway, for parity.
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, 0o600); } catch { /* best-effort on win32 */ }
   return file;
 }
 

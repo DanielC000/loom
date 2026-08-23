@@ -2112,6 +2112,19 @@ interface Live {
   command?: string;   // shell only: the executable spawned (for GET /api/terminals)
   label?: string;     // shell only: human label for the tile
   geometry: PtyGeometry; // claude: the pinned grid (info only, never resized). shell: current size, resizable.
+  // Card a2407ed4: a random per-session credential, minted fresh in `spawn()` on EVERY (re)spawn — fresh,
+  // resume, fork, recycle all go through that ONE chokepoint, so this is never stale relative to the
+  // settings.json baked at the same call. `/internal/hook` requires the caller to present this exact value
+  // before a hook is allowed to touch this session (`verifyHookToken`) — closing the ZERO-EFFORT path
+  // (guess an enumerable sessionId, POST) that let any co-resident caller forge a hook against ANY live
+  // session with no further requirement. It does NOT authenticate the caller and does NOT achieve isolation
+  // — under same-OS-user co-residency with no sandbox, a caller that deliberately reads THIS session's own
+  // settings.json (where the token also rides, alongside the sessionId/port already there) can still
+  // extract it; that ceiling is inherited, not closed. What this buys: targeting a DIFFERENT session now
+  // requires reading THAT session's own secret, not a bare guess — and a leaked token is scoped to the one
+  // session it belongs to, never a fleet-wide bypass. Empty string for shell/canned kinds (never checked —
+  // verifyHookToken/deliverHook both gate on kind==="claude" first).
+  hookToken: string;
   engineSessionId: string | null;
   ring: { chunks: Buffer[]; bytes: number };
   subscribers: Set<Subscriber>;
@@ -3993,11 +4006,18 @@ export class PtyHost {
     // to close, since the handle now exists on Live. Clear it before the overwrite.
     const outgoing = this.live.get(opts.sessionId);
     if (outgoing?.readyFallbackTimer) clearTimeout(outgoing.readyFallbackTimer);
-    const pty = this.createPty(opts);
+    // Card a2407ed4: minted HERE, before createPty — createPty is what actually calls
+    // writeSessionSettings (it builds the settings.json the fresh pty boots from), so the token baked
+    // into that file and the token stored on `Live` below must be the SAME value, not two independent
+    // randoms. Fresh every spawn/resume/fork/recycle (this whole method runs on every one of those) — see
+    // Live.hookToken's own doc for what it does and does not close.
+    const hookToken = randomUUID();
+    const pty = this.createPty(opts, hookToken);
     const live: Live = {
       pty, pid: pty.pid, cwd: opts.cwd,
       kind: "claude",
       geometry: opts.geometry,
+      hookToken,
       // A fork carries its PRE-ASSIGNED engine id (forkSessionId); a plain resume reuses resumeId;
       // a brand-new session has none yet (captured on SessionStart).
       engineSessionId: opts.forkSessionId ?? opts.resumeId ?? null,
@@ -4205,6 +4225,7 @@ export class PtyHost {
       pty, pid: pty.pid, cwd: opts.cwd,
       kind: "shell", command: opts.command, label: opts.label,
       geometry: opts.geometry,
+      hookToken: "", // a shell has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -4287,6 +4308,7 @@ export class PtyHost {
       pty: stub, pid: stub.pid, cwd: opts.cwd,
       kind: "canned", geometry: opts.geometry,
       role: null, // a canned entry has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
+      hookToken: "", // a canned entry has no hook relay; unreachable anyway (deliverHook/verifyHookToken gate on kind==="claude")
       engineSessionId: null,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
@@ -4391,7 +4413,13 @@ export class PtyHost {
    * this to return a FAKE pty — exercising the M1/M2 state machine with no real claude and no
    * ~/.claude.json trust writes. Production NEVER overrides it; the recipe below is the only real one.
    */
-  protected createPty(opts: SpawnOpts): IPty {
+  // `hookToken` is OPTIONAL here (not on `spawn()`, which always mints and passes one) SOLELY so the
+  // large existing test population that overrides `createPty(opts) { ...; return super.createPty(opts); }`
+  // (a 1-arg override, predating card a2407ed4) keeps compiling and calling the real settings-writing path
+  // unchanged — those tests exercise other behavior and don't care about the token's value. Defaults to
+  // "" (an inert placeholder in settings.json — no real relay process ever presents an empty token, so
+  // verifyHookToken's `token.length > 0` guard rejects it same as a missing one).
+  protected createPty(opts: SpawnOpts, hookToken?: string): IPty {
     const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
     // Pre-accept the workspace-trust dialog so warmup never blocks. SYNCHRONOUS on the hot path BY
     // DESIGN — the trust flags MUST be persisted to ~/.claude.json before the pty spawns, else the
@@ -4482,7 +4510,7 @@ export class PtyHost {
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, hookToken ?? "", opts.vaultPath);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
@@ -4568,6 +4596,25 @@ export class PtyHost {
       useConptyDll: isPtyUseConptyDllEnabled(),
     });
     return pty;
+  }
+
+  /**
+   * Card a2407ed4: called by `/internal/hook` BEFORE `deliverHook`, to check a caller-presented token
+   * against the target session's own `Live.hookToken` (see that field's doc for what this does and does
+   * NOT close). FAIL-CLOSED by construction: no live session, a non-"claude" kind (shell/canned never had
+   * a relay to begin with), or a missing/empty/mismatched token all return false — there is no branch that
+   * lets a hook through without an exact match. This is deliberately safe against a daemon restart: EVERY
+   * automatic resume path (resumeFleetOnBoot -> SessionService.resume -> this.spawn, and fresh/fork/recycle
+   * identically) re-enters `spawn()` — the ONE site that mints a fresh token — before the resumed process's
+   * own hook-relay can present anything, and a `Live` entry is NEVER mutated in place without going back
+   * through `spawn()` (see that field's own "never a reused Live object" invariant, `reconcile()` only
+   * touches busy/queue state). So there is no live "claude" session whose token can go stale out from under
+   * a still-running relay — a mismatch here only ever means a genuinely wrong/forged/absent token.
+   */
+  verifyHookToken(sessionId: string, token: string | undefined): boolean {
+    const live = this.live.get(sessionId);
+    if (!live || live.kind !== "claude") return false;
+    return typeof token === "string" && token.length > 0 && token === live.hookToken;
   }
 
   /** Called by the hook endpoint when a relayed hook arrives. Routes the busy state machine. */
