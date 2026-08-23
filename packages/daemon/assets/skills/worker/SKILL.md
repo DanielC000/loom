@@ -248,7 +248,17 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    instance of the same app renders identically — nothing on screen distinguishes "my fixture" from "a
    sibling's fixture" — so an unverified port yields a plausible, screenshot-able, completely wrong
    result:** a worker has been caught one step from driving another worker's dev server and reporting that
-   app's data as its own corpus. Even the
+   app's data as its own corpus. **The same identity discipline applies to a dev server's LOG, not just
+   its port.** If you need your own dev server's captured output, read it via the tracking file's
+   `logFile` field (or the helper's own printed log path) — never grep every `loom-dev-server-*.log` on
+   the host and pick whichever one's CONTENTS match what you expected to find. A stale log from a
+   different worktree, written hours earlier, is indistinguishable from confirmation once you've selected
+   it that way: the sweep can only return an artifact that agrees with the hypothesis you scoped it with,
+   so nothing about picking a match ever feels wrong. The same trap catches any search you narrow by what
+   you already expect — a log sweep, a board/column filter, a grep pattern scoped to your hypothesis —
+   none of them can surface disconfirming evidence, so a clean or matching result proves nothing on its
+   own. Identify an artifact by an id you were GIVEN (a tracking file, a pid you recorded, a path you were
+   assigned) — never by sweeping the host and matching content. Even the
    right port isn't proof of the right data — a server can fall back onto another live default and serve
    someone else's data with everything still rendering correctly, so **assert the fixture's identity** (a
    count, sentinel, or id) rather than just that the page looks right. **Pick the control by the POLARITY

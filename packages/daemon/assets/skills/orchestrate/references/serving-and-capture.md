@@ -60,7 +60,13 @@ guess: the same port can be reachable at one loopback address and refuse the oth
 server, so a guessed host can fail with a connection error that reads as "the server didn't start" against
 a server that's fine. If an older tracking file has no `url` (written before this helper recorded one),
 `stop` the tracked server and `start` it again for a fresh tracking file that includes one, or read the
-helper's own printed log directly for the server's startup banner in the meantime. Then
+helper's own printed log directly for the server's startup banner in the meantime. **Read that log via the
+tracking file's `logFile` field (or the helper's own printed path) — never by grepping every
+`loom-dev-server-*.log` under the OS temp dir and picking whichever one's CONTENTS match what you
+expected:** a stale log from a different, unrelated worktree is indistinguishable from confirmation once
+selected that way, because a sweep scoped by your own hypothesis can only return an artifact that agrees
+with it. The same trap catches any search narrowed by what you already expect — a log sweep, a
+board/column filter, a grep scoped to a guess — none of them can surface disconfirming evidence. Then
 `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
 merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
 `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by

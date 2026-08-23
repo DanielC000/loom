@@ -767,6 +767,18 @@ what you checked. Found none? Treat it as live.
    caught one step from driving another worker's dev server and reporting that app's data as its own
    corpus. Hold all three when you review a browser-capable worker's "verified live."
 
+   **The same identity discipline applies to the dev server's LOG, not just its port — hold a worker to it
+   too.** Diagnosing captured output means reading the tracking file's `logFile` field (or the helper's
+   own printed log path) for the pid the worker holds — never grepping every `loom-dev-server-*.log` on
+   the host and picking whichever one's CONTENTS match what was expected. A stale log from an unrelated
+   worktree, written hours earlier, is indistinguishable from confirmation once selected that way: the
+   sweep can only return an artifact that agrees with the hypothesis it was scoped with, so nothing about
+   a matching result feels wrong. The same trap catches any search narrowed by what you already expect —
+   a log sweep, a board/column filter, a grep pattern scoped to a hypothesis — none of them can surface
+   disconfirming evidence, so a clean or matching result proves nothing on its own. Identify an artifact
+   by an id you were GIVEN (a tracking file, a recorded pid, an assigned path), never by sweeping the host
+   and matching content.
+
    **Even the right bound URL isn't proof of the right data** — a dev server can silently fall back onto
    a different live default and serve another instance's data while everything still renders looking
    correct. **Assert the fixture's identity** (a count, a sentinel string, an id — something that fails
