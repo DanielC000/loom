@@ -22,6 +22,15 @@
  *   the agent expects a bare `<status>killed</status>` on its next poll and re-launches what it still needs
  *   instead of spending a turn diagnosing it as a fresh failure.
  *
+ *   CORRECTED (card 0edda303, 2026-08-24): the tail used to claim "any background shells" without
+ *   qualification. That is FALSE for a DELIBERATELY DETACHED child (e.g. one started via the tracked
+ *   dev-server helper, `.claude/skills/orchestrate/scripts/dev-server.mjs`) — its whole design is to
+ *   outlive the launching pty, so it is NOT part of the process tree torn down above and can survive the
+ *   restart. A worker that trusted the old unqualified claim proceeded as if no dev server were running and
+ *   hit an `EPERM` reinstalling over files the still-live server held open. The tail now scopes the kill
+ *   claim to shells tied to the old pty and tells the agent to check a detached process before relying on
+ *   it being gone, instead of asserting a state the daemon never verified for that case.
+ *
  * BARE-CONTINUE DISCLAIMER REMOVED (card 5d8dea5f): the tail used to ALSO carry a paragraph disclaiming the
  * engine's bare "Continue from where you left off." auto-submit (an empty artifact `claude --resume` emits
  * before this nudge for an interrupted transcript). That disclaimer is gone: the daemon contributes EXACTLY
@@ -32,9 +41,9 @@
  */
 export const RESUME_NUDGE_TAIL =
   ' (Note: this restart reset your file-read tracking — Read a file again before you Edit it, or the edit ' +
-  'is rejected as "not read yet". It also killed any background shells you had running — a status check on ' +
-  'one now returns <status>killed</status>; that\'s expected, not a new failure, so just re-launch what you ' +
-  'still need.)';
+  'is rejected as "not read yet". It also killed terminal-tied background shells (a status check now reads ' +
+  '<status>killed</status>, expected) — but not a DETACHED process such as a tracked dev-server helper; ' +
+  'check before any install step.)';
 
 /**
  * CONDITIONAL companion to RESUME_NUDGE_TAIL — appended only for a session whose raw-terminal composer
