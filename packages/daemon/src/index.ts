@@ -47,6 +47,7 @@ import { resolveScopedConnectionSecret } from "./connections/store.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
+import { WorktreeVanishedWatcher } from "./orchestration/worktree-vanished-watcher.js";
 import { ResumeDocWatcher } from "./orchestration/resume-doc-watcher.js";
 import { CrashRecoveryWatcher, recordUnexpectedExit } from "./orchestration/crash-recovery-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
@@ -1099,6 +1100,16 @@ async function main(): Promise<void> {
   busyWorkerWatcher.start();
   console.log(`[boot] busy-worker stuck watchdog on (tick ${idleWatchMs}ms)`);
 
+  // Worktree-vanished watchdog (card 652d312f) — detect-and-surface only: a LIVE worker whose
+  // worktreePath has gone missing/broken (fs checks only, no git subprocess — see the watcher's own
+  // doc) gets ONE `worktree_vanished` event + a nudge to itself ("stop, report blocked") and its
+  // OWNING MANAGER ("check worker_status, recycle or re-dispatch"). Never auto-recovered. Shares the
+  // idle-watch cadence (sibling watchdog); no dedicated config knob — the check is fs-only and cheap
+  // enough not to need one.
+  const worktreeVanishedWatcher = new WorktreeVanishedWatcher({ db, pty, control, intervalMs: idleWatchMs });
+  worktreeVanishedWatcher.start();
+  console.log(`[boot] worktree-vanished watchdog on (tick ${idleWatchMs}ms)`);
+
   // Resume-doc-size watcher (card 809cc4b5) — the mid-session proactive half of the resume-doc
   // size-budget nudge: `composeManagerStartupPrompt` only warns at spawn/recycle time, which is too
   // late for a manager that stays live and keeps growing its doc without ever recycling. Shares the
@@ -1323,7 +1334,7 @@ async function main(): Promise<void> {
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };

@@ -907,6 +907,14 @@ export type OrchestrationEventKind =
   // manager decides whether to check on it. Emitted ONCE per episode (re-arms when the worker makes
   // progress, i.e. lastActivity advances).
   | "worker_stuck"
+  // Worktree-vanished advisory (WorktreeVanishedWatcher, card 652d312f): a LIVE worker's own
+  // `worktreePath` was found gone or git-broken (fs checks only — no git subprocess; see the watcher's
+  // own doc for the three detected states and the one deliberately NOT detected). Filed under the
+  // OWNING MANAGER (managerSessionId) with workerSessionId/taskId set; `detail` carries
+  // { reason, worktreePath }. DETECT-AND-SURFACE ONLY — never auto-recovered; the manager decides
+  // (worker_status, then worker_recycle or re-dispatch). Emitted AT MOST ONCE per live session id (no
+  // episode reset — a vanished worktree doesn't self-heal the way a long turn resolves).
+  | "worktree_vanished"
   // A manager self-service management action (assign profile / update agent / update or archive a
   // project / create or update a schedule). `detail.action` discriminates; audit trail for the
   // trust-boundary surface (managers ASSIGN existing capability sets + edit structure, never MINT).
@@ -1279,6 +1287,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, worker_stuck: true,
+  worktree_vanished: true,
   manager_manage: true, session_message: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
   session_died: true, session_resume_attempt: true, session_recovered: true,
@@ -2445,7 +2454,7 @@ export interface PollJob {
  */
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
-  "worker_stuck", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
+  "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
   "question_asked",
   "idle_escalated", "idle_report",
   "context_escalated",
