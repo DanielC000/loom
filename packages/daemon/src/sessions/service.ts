@@ -4081,6 +4081,36 @@ export class SessionService {
   }
 
   /**
+   * Card 597903fc: durable counterpart to {@link enqueueNudge}, for a boot-time notice that must not be
+   * silently dropped if its in-session give-up budget exhausts. `enqueueNudge`'s dispatch (bare
+   * `pty.enqueueStdin`, no `onGiveUpExhausted`) drops a message with nothing surviving but a console line
+   * once its ONE give-up requeue is exhausted (host.ts's `submit()`: "non-durable entry, nothing further
+   * to preserve") — exactly the asymmetry a card audit found between `[loom:crash-recovered]` (was routed
+   * through `enqueueNudge`) and its sibling `[loom:merge-orphaned]` (already routed through
+   * `enqueueDurableMessage`, below). This closes that gap the same way: on give-up exhaustion,
+   * `enqueueDurableMessage`'s wired `onGiveUpExhausted` hook (`handleGiveUpExhausted`) re-mints the
+   * dispatch (self-healing under exactly the contention a whole-fleet boot resume creates) and, if truly
+   * exhausted past `GIVE_UP_REMINT_LIMIT`, appends a durable `session_message_gave_up` (outcome:"parked")
+   * audit event UNCONDITIONALLY — never a silent loss, matching the bar every other daemon-originated
+   * settle nudge already meets. Mirrors `enqueueNudge`'s own role-gated defer (`waitForMcpSeen` for a role
+   * that mounts loom-orchestration) so the same resume race guard applies; dispatches immediately for
+   * every other role. `sender: "system"` (a daemon-generated notice, no originating session) — safe by
+   * the same reasoning `enqueueDurableMessage`'s own doc gives for every other sentinel-sender call site:
+   * `db.getSession("system")` returns undefined, so `handleGiveUpExhausted`'s sender-facing PARKED notice
+   * is skipped, never thrown.
+   */
+  private enqueueDurableNudge(id: string, role: SessionRole | null, text: string, taskId: string | null = null): void {
+    const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind: "warning", taskId }); };
+    if (this.usesOrchestrationMcp(role)) {
+      void this.pty.waitForMcpSeen(id).then(dispatch).catch((e: unknown) => {
+        console.warn(`[crash-recovery] deferred durable nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
+      });
+    } else {
+      dispatch();
+    }
+  }
+
+  /**
    * Boot-time fleet resume (the resume half of P1 17df54c5) — re-spawn the WHOLE captured fleet after a
    * `daemon_restart`, injecting NOTHING into the resume itself (the resume-injects-nothing invariant;
    * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
@@ -4540,14 +4570,16 @@ export class SessionService {
         if (w.reportedDone) {
           awaitingReviewCount++;
         } else {
-          // Card df5e37e7: deferred (this.enqueueNudge — worker role always mounts loom-orchestration),
-          // same race guard as resumeFleetOnBoot's worker nudge. Wrapped in try/catch defensively:
-          // enqueueNudge's own synchronous branch (the non-deferred immediate-enqueue path for a
-          // non-orchestration role) never applies here, but the deferred branch's promise chain already
-          // has its own internal .catch — this try/catch is belt-and-suspenders against a synchronous
-          // throw from the call itself.
+          // Card 597903fc: durable (this.enqueueDurableNudge — see its own doc), NOT the plain
+          // enqueueNudge this used to call — a `[loom:crash-recovered]`/`[loom:daemon-restarted]` notice
+          // whose give-up budget exhausts during a whole-fleet boot resume (exactly the contended moment
+          // this is most likely) must not vanish with nothing but a console line. Wrapped in try/catch
+          // defensively: enqueueDurableNudge's own synchronous branch (the non-deferred immediate-dispatch
+          // path for a non-orchestration role) never applies here, but the deferred branch's promise chain
+          // already has its own internal .catch — this try/catch is belt-and-suspenders against a
+          // synchronous throw from the call itself.
           try {
-            this.enqueueNudge(
+            this.enqueueDurableNudge(
               w.workerSessionId, "worker",
               cleanStop
                 ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — re-check your ` +
@@ -4556,6 +4588,7 @@ export class SessionService {
                 : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — re-check your ` +
                   `worktree's state, then continue your assigned task from where you left off. If you had ` +
                   `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
+              this.db.getSession(w.workerSessionId)?.taskId ?? null,
             );
           } catch { /* not ready yet — the resume stands */ }
         }
@@ -4605,10 +4638,12 @@ export class SessionService {
               `continue your platform work.` + RESUME_NUDGE_TAIL
             : `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
         })();
-      // Card df5e37e7: deferred for a manager (mounts loom-orchestration); a platform manager's role
-      // (managerRole === "platform") routes through enqueueNudge's non-deferred branch, unchanged.
+      // Card 597903fc: durable (see enqueueDurableNudge's own doc) — same reasoning as the worker nudge
+      // above, applied to the manager/platform summary nudge. Deferred for a manager (mounts
+      // loom-orchestration); a platform manager's role (managerRole === "platform") routes through
+      // enqueueDurableNudge's non-deferred branch, unchanged.
       try {
-        this.enqueueNudge(managerId, managerRole, note);
+        this.enqueueDurableNudge(managerId, managerRole, note);
       } catch { /* not ready yet — the resume stands */ }
     }
     return { resumed, skippedParked, failed, managersFailed };

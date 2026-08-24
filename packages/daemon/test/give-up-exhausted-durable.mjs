@@ -45,6 +45,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (6) THE DISCRIMINATING CONTROL: a HEALTHY delivery (drained normally, no give-up) NEVER produces a
 //       `session_message_gave_up` event and NEVER re-mints — proving the fix doesn't just make every
 //       message duplicate, only ones that actually gave up.
+//   (10) Card 597903fc: `[loom:crash-recovered]` (SessionService.recoverCrashOrphanedWorkers) — found to
+//       ride the SAME zero-durability bare-enqueueStdin shape population B used to (an asymmetry against
+//       its sibling `[loom:merge-orphaned]`, which was already durable) — is now dispatched via a new
+//       `enqueueDurableNudge` helper and covered by this SAME give-up/re-mint/park mechanism.
 //
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/give-up-exhausted-durable.mjs
 import fs from "node:fs";
@@ -80,6 +84,10 @@ const PARK_SUBMIT_CYCLES = (GIVE_UP_REQUEUE_LIMIT + 1) * PARK_MESSAGE_OBJECTS;
 const PARK_ENTER_WRITES = PARK_SUBMIT_CYCLES * SUBMIT_MAX_ATTEMPTS;
 const PARK_HOLDS = GIVE_UP_REQUEUE_LIMIT * PARK_MESSAGE_OBJECTS;
 const PARK_MIN_HOLD_SECONDS = Math.round((PARK_HOLDS * GIVE_UP_HOLD_MS) / 1000);
+// Card 597903fc: enqueueDurableNudge (sessions/service.ts) defers its dispatch behind
+// PtyHost.waitForMcpSeen for a role that mounts loom-orchestration (worker/manager) — a real async hop
+// off an already-resolved promise, mirroring crash-orphaned-workers.mjs's own `flush` helper.
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 // Contract-faithful PtyStub (mirrors queued-message-durability.mjs's own), extended with `giveUpOn`: pops
 // the FIFO head and fires BOTH callbacks in the SAME order the real host does — `onDeliver` first (the
@@ -479,6 +487,55 @@ try {
       db.listEventsForWorker(wkr2).length === eventsBefore2);
     check("(9) NEGATIVE CONTROL: no notice sent either — an ordinary mid-chain confirmation is not news",
       pty.sent.filter((s) => s.id === mgr2).length === mgr2SentBefore);
+  }
+
+  // ===== (10) Card 597903fc: `[loom:crash-recovered]` (SessionService.recoverCrashOrphanedWorkers) now =====
+  // ===== dispatches through the SAME durable mechanism as every other settle nudge, via the new =====
+  // ===== `enqueueDurableNudge` helper — a give-up-exhausted crash-recovery notice is RE-MINTED (or =====
+  // ===== PARKED with a durable audit trail), never silently dropped. BEFORE this fix, both of =====
+  // ===== `recoverCrashOrphanedWorkers`'s notices (the worker's "continue your task" nudge AND the =====
+  // ===== manager's summary nudge) dispatched via the plain (non-durable) `enqueueNudge`/`deferredNudge` =====
+  // ===== -> bare `pty.enqueueStdin` with NO `onGiveUpExhausted` wired — an exhausted give-up dropped the =====
+  // ===== message with nothing but a console line (host.ts's "non-durable entry, nothing further to =====
+  // ===== preserve" log) and ZERO session_message_gave_up event: a true silent loss, exactly the =====
+  // ===== asymmetry the card found against this file's own population B (merge-orphaned's sibling). =====
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `gue-crash-mgr-${sfx}`, wkr = `gue-crash-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr);
+    // Both busy → BOTH the worker's continue-nudge and the manager's summary nudge are HELD (durable),
+    // never a bare immediate push — the precondition for onGiveUpExhausted to ever matter.
+    pty.setBusy(wkr); pty.setBusy(mgr);
+
+    const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedDone: false }];
+    const result = sessions.recoverCrashOrphanedWorkers(candidates, { resumeOne: () => true });
+    check("(10) setup: recoverCrashOrphanedWorkers resumed both", result.resumed.includes(wkr));
+    await flush(); // enqueueDurableNudge defers behind waitForMcpSeen for worker/manager roles
+
+    const workerRec = db.listUndeliveredQueuedMessages().find((e) => e.workerSessionId === wkr && (e.detail?.text ?? "").includes("[loom:crash-recovered]"));
+    const mgrRec = db.listUndeliveredQueuedMessages().find((e) => e.workerSessionId === mgr && (e.detail?.text ?? "").includes("[loom:crash-recovered]"));
+    check("(10) THE FIX: the worker's [loom:crash-recovered] nudge is a genuine DURABLE record (was a bare, unrecorded enqueueStdin before card 597903fc)", !!workerRec);
+    check("(10) THE FIX: the manager's [loom:crash-recovered] summary nudge is ALSO a genuine durable record (same shared helper, same fix)", !!mgrRec);
+
+    // Give up on the WORKER's nudge — before the fix this would drop it with NO session_message_gave_up
+    // event and nothing left pending (a true silent loss). After the fix it must RE-MINT, exactly like
+    // population B's settle-nudge shape above.
+    pty.giveUpOn(wkr);
+    check("(10) THE FIX: the crash-recovered nudge SURVIVES a give-up-exhausted cycle — still pending, never silently dropped",
+      pty.getPending(wkr).some((t) => t.includes("[loom:crash-recovered]")));
+    check("(10) THE FIX: a session_message_gave_up event was recorded for it (outcome: reminted) — a durable trace, where none existed before",
+      gaveUpEventsFor(wkr, workerRec?.detail?.msgId).some((e) => e.detail?.outcome === "reminted"));
+
+    // Exhaust the re-mint budget entirely — must PARK with a durable audit event, never loop forever and
+    // never vanish silently either (DoD-3: a silent drop must not survive, whichever fix is chosen).
+    for (let i = 1; i <= REMINT_LIMIT; i++) pty.giveUpOn(wkr);
+    check("(10) BOUNDED: after exhausting the re-mint budget, the crash-recovered chain PARKS (durable outcome, not an infinite loop)",
+      gaveUpEventsFor(wkr).some((e) => e.detail?.outcome === "parked"));
+    check("(10) BOUNDED: once parked, it stops dispatching (no longer sitting in the pending FIFO)",
+      pty.getPending(wkr).length === 0);
   }
 
   db.close();
