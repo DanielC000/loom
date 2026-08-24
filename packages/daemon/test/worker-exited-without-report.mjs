@@ -206,6 +206,19 @@ function cleanup(e) {
 // authoritative direction about to land as its very next turn. Guard: a worker with a non-empty pending
 // FIFO is not stranded — skip the [loom:worker-idle] nudge. A genuinely stranded worker (no pending) must
 // still nudge.
+// DISCRIMINATOR NOTE (card 67af4bf0): wkr-f1/wkr-f2 below are both TASKED (real taskId + a seeded
+// in_progress task), so `notifyManagerOfIdleWorker` routes them through `classifyIdleWorker`'s
+// board-column-dependent branches, NEVER the taskless branch card 6651bf24 added discriminators A/B to —
+// that branch is gated on `!w.taskId` and returns early for a tasked worker (service.ts ~9438-9495) before
+// A/B are ever reached. wkr-f2's "genuine strand" fallthrough (`{kind:"stranded"}`) DOES embed
+// `turnSeq=${w.turnSeq ?? 0}` in its message, but only as an observed, always-included field — there is no
+// turnSeq===0 branch in `classifyIdleWorker` the way there is in the taskless path, so this section's
+// coverage did not quietly change target the way the card's originating write-up describes for the
+// role-less-taskless-idle-worker.mjs case. Verified by reading `classifyIdleWorker` in full
+// (service.ts:9230-9394) and confirming `git show --stat 0e97a2fd` (card 6651bf24's merge) touched only
+// service.ts and worker-spawn-broken-taskless.mjs — this file was untouched by that change. No fix needed
+// here; both checks below already assert only the shared `worker-idle` tag, which is the whole of what
+// this section means to pin.
 {
   const e = makeEnv();
   seedSession(e, "mgr-f1", { role: "manager", processState: "live" });

@@ -124,18 +124,34 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============ (3) notifyManagerOfIdleWorker — role-less + taskless, DID start a turn, NEVER reported ============
+// ============ (3) notifyManagerOfIdleWorker — role-less + taskless, GENUINELY COMPLETED a turn, NEVER reported ============
 // This is the exact scenario in the bug report: a role-less, taskless consultation session that finished
 // its turn but never called worker_report used to get NO nudge at all (blocked by the top-level role
 // gate before ever reaching the taskless branch's broken-spawn-only check).
+// DISCRIMINATOR NOTE (card 67af4bf0, re: card 6651bf24's later taskless discriminators A/B in
+// notifyManagerOfIdleWorker): this case means to exercise the GENUINELY-COMPLETED path — the original
+// silentFinishMsg, unchanged by 6651bf24 — not discriminator B (turnSeq===0, "started but never
+// completed"). `insertSession` never seeds `turn_seq` from the object literal (a silent no-op — see
+// worker-spawn-broken-taskless.mjs's own note on this), so this case landed in discriminator B by
+// ACCIDENT once 6651bf24 shipped: it kept passing, but only because both messages share the
+// "worker-idle" tag and the substring "never called worker_report", not because it was re-verified
+// against the branch it actually now hits. Bump turnSeq to 1 so this stays pinned to the genuinely-
+// completed path it was written for.
 {
   const e = makeEnv();
   seedManager(e, "mgr-3");
   seedRoleLessWorker(e, "rl-3", "mgr-3", { taskId: null, busy: false, engineSessionId: "eng-rl-3" });
+  e.db.incrementTurnSeq("rl-3"); // turnSeq: 0 -> 1 — genuinely completed one turn (see DISCRIMINATOR NOTE)
   e.sessions.notifyManagerOfIdleWorker("rl-3");
   const nudge = e.enqueued.find((x) => x.id === "mgr-3" && /worker-idle/.test(x.text));
   check("(3) a role-less, taskless, engaged-but-unreported session now DOES get a [loom:worker-idle] nudge", !!nudge);
   check("(3) the nudge says it never called worker_report", !!nudge && /never called worker_report/.test(nudge.text));
+  // Wording-specific pin, not just the shared substring above: "finished a turn" only appears in the
+  // genuinely-completed silentFinishMsg — discriminator B's buildNeverCompletedTurnMsg never says it
+  // (it explicitly says "has NOT completed one" instead). This is what actually distinguishes the two
+  // branches; the checks above alone cannot.
+  check("(3) the nudge is the genuinely-completed silent-finish wording, not discriminator B's never-completed wording",
+    !!nudge && /finished a turn and is idle but has never called worker_report/.test(nudge.text));
   cleanup(e);
 }
 
