@@ -255,16 +255,23 @@ function persistDeferredStateBestEffort(
  *
  * IDEMPOTENT across repeated defer/release cycles: strips any PRIOR "Previously deferred" paragraph
  * before appending the new one, so a card that defers and releases many times over its life keeps only
- * the LATEST release's reasoning in its body, never a growing pile of stale ones. `reason` is flattened
- * to a single line first (multi-paragraph reasons are not expected — the field is documented as "a short
- * string" — but flattening guarantees the note stays exactly one paragraph, which is what makes the
- * strip-before-append idempotent on a LATER fold).
+ * the LATEST release's reasoning in its body, never a growing pile of stale ones. `reason` has its
+ * BLANK-LINE (paragraph) breaks collapsed to a single newline first — in practice `deferredReason` is
+ * often multi-KB structured markdown (headings, lists), not the "short string" the field is documented
+ * as, so collapsing to a SPACE ran every section together into one unreadable blob with headings
+ * surviving as literal inline `## text` (card 595fe28f). Collapsing to a single `\n` instead keeps every
+ * line/heading/section on its own physical line — this repo's own board (Board.tsx's TaskDrawer /
+ * SessionTaskCard's ReadOnlyTaskDrawer) renders `body` as plain pre-wrap text with no markdown engine
+ * involved, so a real line break is the entire readability fix; no heading-escaping trick is needed on
+ * top of it. Never collapse to `\n\n` (2+) — that is exactly what the strip-before-append split below
+ * keys off of, and reintroducing it here would fragment this note into multiple paragraphs on a LATER
+ * fold and break idempotence, which is the one non-negotiable constraint on this function.
  */
 export const DEFERRED_RELEASE_NOTE_PREFIX = "**Previously deferred:**";
 
 export function foldReleasedDeferralIntoBody(body: string, reason: string, releasedAt: string): string {
-  const safeReason = reason.replace(/\s*\n{2,}\s*/g, " ").trim();
-  const note = `${DEFERRED_RELEASE_NOTE_PREFIX} ${safeReason} _(cleared ${releasedAt})_`;
+  const safeReason = reason.replace(/\s*\n{2,}\s*/g, "\n").trim();
+  const note = `${DEFERRED_RELEASE_NOTE_PREFIX}\n${safeReason}\n_(cleared ${releasedAt})_`;
   const paragraphs = body.split(/\n\n+/).filter((p) => !p.trim().startsWith(DEFERRED_RELEASE_NOTE_PREFIX));
   paragraphs.push(note);
   return paragraphs.join("\n\n").trim();

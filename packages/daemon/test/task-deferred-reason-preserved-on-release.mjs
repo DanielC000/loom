@@ -31,10 +31,28 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (6) the fold preserves whatever else was already in the body (an unrelated paragraph survives,
 //       untouched, alongside the new fold paragraph).
 //
+// Card 595fe28f — the fold FLATTENED a structured reason (headings, blank-line paragraphs) into one
+// unreadable run-on blob, with `## heading` markers surviving as literal INLINE text. Fix: blank-line
+// (paragraph) breaks inside the reason collapse to a single NEWLINE now, never a space, so every
+// line/heading/section keeps its own physical line — this repo's own board renders `body` as plain
+// pre-wrap TEXT (Board.tsx TaskDrawer / SessionTaskCard's ReadOnlyTaskDrawer), no markdown engine
+// involved, so a real line break is the entire readability fix. This file adds:
+//   (7) unit-level: a blank-line-separated heading is no longer glued inline to the prior sentence, and
+//       NO blank line (`\n\n`) survives anywhere inside the folded note (the idempotence invariant this
+//       function's whole design rests on — see its own doc comment).
+//   (8) a REAL, multi-KB, structured reason (the literal `deferredReason` of live board card `66649a90`,
+//       copied verbatim into fixtures/real-deferred-reason-specimen.txt) positive-controls the rendering
+//       improvement, THEN re-verifies (5)'s idempotence claim with THIS multi-KB structured fold as the
+//       PRIOR note being stripped on a second cycle — not just a short synthetic string — including a
+//       fenced code block in the second reason, to check that formatting choice against a code fence too.
+//   (9) DoD-5: this formatting change is character-count-NEUTRAL vs. the pre-fix (space-joined) fold —
+//       it swaps space-separators for newline-separators 1-for-1, contributing zero net body growth.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/task-deferred-reason-preserved-on-release.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 let failures = 0;
@@ -143,6 +161,72 @@ try {
   check("(5) the surviving fold carries the SECOND (latest) reason", raw5Second.body.includes("second parking reason, different from the first"));
   check("(5) the FIRST reason is gone from the surviving fold (replaced, not appended)", !raw5Second.body.includes("first parking reason"));
   check("(5) original card body content still present", raw5Second.body.includes("Card 5 description."));
+
+  // ===== (7) unit-level: blank-line breaks become a single newline, never a space; no \n\n survives =====
+  const structuredReason = "Intro paragraph.\n\n## A Heading\nBody line under the heading.\n\n## Another Heading\nMore body.";
+  const noteOnly = foldReleasedDeferralIntoBody("", structuredReason, "2026-01-01T00:00:00.000Z");
+  check("(7) a blank-line-separated heading is on its OWN line, not glued inline to the prior sentence", /\n## A Heading/.test(noteOnly));
+  check("(7) the second heading is likewise on its own line", /\n## Another Heading/.test(noteOnly));
+  check("(7) the old bug shape (heading glued after a single space) is gone", !noteOnly.includes(". ## A Heading") && !noteOnly.includes(". ## Another Heading"));
+  check("(7) NO blank line (\\n\\n) survives anywhere inside the folded note — the idempotence invariant", !/\n\n/.test(noteOnly));
+
+  // ===== (8) REAL, multi-KB, structured reason: positive control + idempotence with a MULTI-KB prior fold =====
+  const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+  const realReason1 = fs.readFileSync(path.join(fixturesDir, "real-deferred-reason-specimen.txt"), "utf8");
+  check("(8) setup: the real specimen is genuinely multi-KB and structured (sanity on the fixture itself)", realReason1.length > 2000 && (realReason1.match(/^## /gm) || []).length >= 3);
+
+  const c8 = createProjectTask(db, "pRepo", { title: "real multi-KB structured deferral", body: "Card 8 description." });
+  await updateProjectTask(db, "pRepo", c8.id, { deferred: true, deferredReason: realReason1 });
+  await updateProjectTask(db, "pRepo", c8.id, { deferred: false });
+  const raw8First = db.getTask(c8.id);
+  check("(8) first cycle: real specimen's headings survive on their own line, not run into the prior line", /\n## 🎯 THE RELEASE CONDITION/.test(raw8First.body) && /\n## 🔴 READ §COLD-START/.test(raw8First.body));
+  const note8First = raw8First.body.slice(raw8First.body.indexOf(DEFERRED_RELEASE_NOTE_PREFIX));
+  check("(8) first cycle: no blank line survives inside the multi-KB folded note", !/\n\n/.test(note8First));
+
+  // Re-defer with a DIFFERENT structured reason — deliberately including a FENCED CODE BLOCK, per the
+  // kickoff's specific instruction to check what this formatting choice does to one — then release again.
+  // What matters for DoD-3 is that the PRIOR fold being stripped here is the multi-KB real specimen above,
+  // not a short string: that's the case the existing (pre-595fe28f) test never exercised.
+  const reason2Lines = [
+    "Second parking reason, different from the first, with a fenced code block.",
+    "",
+    "## A Section With Code",
+    "Some explanation text before the block.",
+    "",
+    "```",
+    "line one -> value",
+    "line two -> other value",
+    "```",
+    "",
+    "Text after the code block, on its own paragraph.",
+    "",
+    "## Another Section",
+    "Final notes here explaining the second pass.",
+  ];
+  const reason2 = reason2Lines.join("\n");
+  await updateProjectTask(db, "pRepo", c8.id, { deferred: true, deferredReason: reason2 });
+  await updateProjectTask(db, "pRepo", c8.id, { deferred: false });
+  const raw8Second = db.getTask(c8.id);
+  check("(8) after a SECOND cycle whose PRIOR fold was multi-KB and structured, exactly ONE fold paragraph survives (no pile-up)", countFoldParagraphs(raw8Second.body) === 1);
+  check("(8) the surviving fold carries the SECOND (latest) reason's headings, each on its own line", /\n## A Section With Code/.test(raw8Second.body) && /\n## Another Section/.test(raw8Second.body));
+  check("(8) the FIRST (multi-KB) reason's content is gone from the surviving fold (replaced, not appended)", !raw8Second.body.includes("THE RELEASE CONDITION") && !raw8Second.body.includes("READ §COLD-START"));
+  check("(8) the fenced code block survives intact, bounded by single newlines, not globbed into one run-on line", raw8Second.body.includes("```\nline one -> value\nline two -> other value\n```"));
+  const note8Second = raw8Second.body.slice(raw8Second.body.indexOf(DEFERRED_RELEASE_NOTE_PREFIX));
+  check("(8) second cycle: no blank line survives inside the new folded note either", !/\n\n/.test(note8Second));
+  check("(8) original card body content still present", raw8Second.body.includes("Card 8 description."));
+
+  // ===== (9) DoD-5: this formatting change is character-count-NEUTRAL vs. the pre-fix (space-joined) fold =====
+  // The pre-fix formula joined the note's 3 segments (prefix / reason / cleared-suffix) with a single
+  // SPACE, and collapsed each blank-line run inside the reason to a single SPACE too. This fix swaps
+  // every one of those space-separators for a single NEWLINE — same separator COUNT, same 1-char width —
+  // so the folded note's total character count is unchanged. Concrete answer to the card's DoD-5: this
+  // card's own formatting change contributes ZERO net bytes beyond what the existing fold already writes;
+  // whatever body-size growth exists from folding a whole reason into body is 1d27c3cd's own accepted
+  // cost, not something this card adds on top of it.
+  const legacyFold = (reason, releasedAt) => `${DEFERRED_RELEASE_NOTE_PREFIX} ${reason.replace(/\s*\n{2,}\s*/g, " ").trim()} _(cleared ${releasedAt})_`;
+  const legacyNote = legacyFold(realReason1, "2026-01-01T00:00:00.000Z");
+  const newNote = foldReleasedDeferralIntoBody("", realReason1, "2026-01-01T00:00:00.000Z");
+  check("(9) DoD-5: the new (newline) formatting is character-count-NEUTRAL vs. the old (space) formatting — zero net growth added by this card", legacyNote.length === newNote.length);
 
   db.close();
 } finally {

@@ -1,0 +1,17 @@
+✅ **CASE C — blocked on ACCUMULATED FLEET DATA. No object exists; the trigger is a measurement window** (mgr #147, 2026-08-24, working `d6971f75`).
+
+## 🎯 THE RELEASE CONDITION — two things, both concrete, taken from this card's own §BLOCKED
+1. **A deploy carrying the remint instrumentation must be LIVE**, and
+2. **~a day of ORDINARY fleet operation after that deploy**, so the latency distribution reflects real load rather than one session.
+⛔ **Do NOT synthesise load to fill this faster** — a hand-made load profile measures the harness, not the fleet, and the whole point of this card is that the delay must be sized from real observations.
+
+## ⭐ WHY THERE IS NOTHING TO PAIR IT TO
+The blocker is **elapsed operating time under real conditions**. That is not a card and not a request — no `deferredUntilTaskId` can represent it, and no owner can answer it. **This is the honest Case-C shape: a reason plus a trigger is all the board can carry.**
+
+## 🔴 READ §COLD-START BEFORE DESIGNING THE RULE — the prescribed shape has a DEMONSTRATED failure mode
+The card recommends deriving the wait from something the same run measures (the peer's `max(8000, 2.5 × elapsedMs)` is the reference). ⚠️ **Their multiplier consumes only a fully-COMPLETED unit's duration** — a correct guard against the self-reinforcing-wait trap — **but their failing run had `completedFileCount: 0`.** At `concurrency:1` over two files, no completed duration exists until the first finishes ⇒ no multiplier input ⇒ **the bare floor.**
+⇒ ⭐ **Guarding the self-reinforcing-wait trap produces its CONVERSE, and the converse is unhandled.** ⛔ **Both "collapse" and "null-input fallback" are recorded DEAD on the peer's card — neither project re-proposes them.**
+✅ **Prefer the SELF-elapsed input.** If a cross-item/EWMA input is used instead, **state what it yields on the very first dispatch after a daemon start, and test that case explicitly.**
+
+## 📌 CORROBORATION ALREADY IN OUR OWN HISTORY
+Widening `SUBMIT_VERIFY_TIMEOUT_MS` was tried and **reverted TWICE** (`595aad10`, `fea23514`). **Two reverts plus the peer's arithmetic converge: on this path, a bigger constant is not the fix.** ⇒ The elastic shape is the only survivor — which is exactly why it must not be sized by guess.
