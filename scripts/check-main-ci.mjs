@@ -18,6 +18,10 @@
 //
 // Escape hatch: LOOM_SKIP_CI_CHECK=1 skips this check entirely (loudly). For a genuine emergency or
 // when GitHub is unreachable — never as a routine habit; a skipped check defeats the point of it existing.
+//
+// --sha <sha> (testing only, card 06b23a41): overrides which commit gets checked, so the refusal
+// branches below can be driven through THIS file directly instead of a copy. No args (the real release
+// path, docs/releasing.md step 3) is unaffected — it still resolves `git rev-parse HEAD`.
 import { execFileSync } from "node:child_process";
 
 const WORKFLOW_FILE = "ci.yml";
@@ -53,6 +57,34 @@ function refuse(reason, detail) {
   process.exit(1);
 }
 
+function parseArgs(argv) {
+  let sha; // undefined = flag absent (use HEAD); any string, including "", = flag present
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--sha") {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        refuse("--sha given with no value", "usage: --sha <sha> (or --sha=<sha>)");
+      }
+      sha = value;
+      i++;
+    } else if (arg.startsWith("--sha=")) {
+      sha = arg.slice("--sha=".length);
+    } else {
+      refuse(`unrecognized argument: ${arg}`, "usage: node scripts/check-main-ci.mjs [--sha <sha>]");
+    }
+  }
+  return { sha };
+}
+
+function resolveSha(input) {
+  try {
+    return git(["rev-parse", "--verify", `${input}^{commit}`]);
+  } catch (err) {
+    refuse(`--sha ${JSON.stringify(input)} is not a valid commit`, String(err.message || err));
+  }
+}
+
 let owner, repo;
 try {
   ({ owner, repo } = originOwnerRepo());
@@ -60,7 +92,8 @@ try {
   refuse("could not determine the GitHub repo to check", String(err.message || err));
 }
 
-const headSha = git(["rev-parse", "HEAD"]);
+const { sha: shaArg } = parseArgs(process.argv.slice(2));
+const headSha = shaArg !== undefined ? resolveSha(shaArg) : git(["rev-parse", "HEAD"]);
 
 try {
   git(["fetch", REMOTE, REMOTE_BRANCH, "--quiet"]);
@@ -73,7 +106,7 @@ try {
 
 let unpushedCount;
 try {
-  unpushedCount = Number(git(["rev-list", "--count", `${REMOTE}/${REMOTE_BRANCH}..HEAD`]));
+  unpushedCount = Number(git(["rev-list", "--count", `${REMOTE}/${REMOTE_BRANCH}..${headSha}`]));
 } catch (err) {
   refuse(`could not compare HEAD against ${REMOTE}/${REMOTE_BRANCH}`, String(err.message || err));
 }
