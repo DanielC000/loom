@@ -69,7 +69,13 @@ const RUN_TESTS_SCRIPT = [
   "console.log('running suite...');",
   "console.error('FAIL widget.spec.js > renders correctly');",
   "console.error('AssertionError: expected 2 to equal 3');",
-  "process.exit(1);",
+  // Card cf88f03b: `process.exitCode = 1` + a natural exit, NOT `process.exit(1)` — this script's printed
+  // content IS the data under test (gateDetail.failingTest/stderrTail below assert against it). On POSIX
+  // a pipe-backed stdout write is async and process.exit() doesn't wait for it to drain, so this fixture's
+  // own tail could in principle be discarded before the parent ever sees it (Windows pipe writes are
+  // synchronous, so this host can't exercise the race either way). No pending async work above, so a
+  // natural exit can't hang.
+  "process.exitCode = 1;",
 ].join("\n");
 
 function makeRepo(p) {

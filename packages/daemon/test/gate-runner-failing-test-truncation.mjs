@@ -17,7 +17,14 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, createFailureBlockTracker, identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// `diagnostic` is an OPTIONAL third arg: a () => string called ONLY on failure, printed alongside the
+// FAIL line. Card cf88f03b: the three (A2) content assertions used to report a bare boolean — two full
+// CI runs on Linux told us only "the content isn't there", never WHAT was there instead. Making a failure
+// self-diagnosing from the CI log alone is the fix that keeps paying after this card closes.
+const check = (label, cond, diagnostic) => {
+  console.log(`${cond ? "PASS" : "FAIL"}  ${label}`);
+  if (!cond) { failures++; if (diagnostic) console.log(`  actual: ${diagnostic()}`); }
+};
 
 const dir = mkdtempManaged("loom-gr-trunc-");
 {
@@ -28,7 +35,11 @@ const dir = mkdtempManaged("loom-gr-trunc-");
     "console.error('FAIL widget.spec.js > renders correctly');",
     "console.error('AssertionError: expected 2 to equal 3');",
     "for (let i = 0; i < 2000; i++) console.log('epilogue noise line ' + i + ' padding padding padding');",
-    "process.exit(1);",
+    // Card cf88f03b: same reasoning as the (A2) specimen below — this fixture's printed content is what
+    // (A)/(B)'s assertions check, so a POSIX async-stdout-drop on process.exit() could in principle lose
+    // it too; a clean run history under sampled load isn't evidence against a load-sensitive race. No
+    // pending async work above, so a natural exit can't hang.
+    "process.exitCode = 1;",
   ].join("\n");
   fs.writeFileSync(path.join(dir, "fail-then-flood.mjs"), SCRIPT);
 
@@ -55,7 +66,9 @@ const dir = mkdtempManaged("loom-gr-trunc-");
 
   // A run with NO recognizable failing-test marker at all (a genuinely unattributable failure) must
   // report `failingTest: undefined` — an honest miss, never a fabricated guess.
-  fs.writeFileSync(path.join(dir, "fail-unrecognizable.mjs"), "console.error('kaboom, no idea why'); process.exit(1);");
+  // Card cf88f03b: `process.exitCode = 1` + natural exit — (C) below asserts this fixture's own printed
+  // content (`outputTail === "kaboom, no idea why"`), the same theoretical exposure as (A2)'s specimen.
+  fs.writeFileSync(path.join(dir, "fail-unrecognizable.mjs"), "console.error('kaboom, no idea why'); process.exitCode = 1;");
   const unrecognizable = await runGateStep("node fail-unrecognizable.mjs", dir, 15_000);
   check("(C) a failure with no recognizable marker reports failingTest:undefined (never a guessed name)",
     unrecognizable.status === 1 && unrecognizable.failingTest === undefined);
@@ -116,7 +129,13 @@ const dir = mkdtempManaged("loom-gr-trunc-");
       // out of a naive trailing-4KB ring.
       "console.log(' ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @loom/daemon@0.0.0 test:daemon: `node scripts/test-daemon.mjs`');",
       "console.log('Exit status 1');",
-      "process.exit(1);",
+      // Card cf88f03b: `process.exitCode = 1` + a natural exit, NOT `process.exit(1)`. On POSIX, a pipe-
+      // backed process.stdout write is ASYNCHRONOUS, and process.exit() does not wait for pending writes to
+      // drain — the specimen's own tail (this script's entire reason for existing) can be discarded before
+      // it ever reaches the parent's pipe. Setting exitCode and falling off the end of the script lets node
+      // drain its stdio queue before the process actually exits. Safe here: nothing above is async (no
+      // timers/handles/pending I/O), so there is no risk of hanging instead of exiting.
+      "process.exitCode = 1;",
     ].join("\n");
     fs.writeFileSync(path.join(dir, "specimen-a2679c1f.mjs"), SPECIMEN_SCRIPT);
 
@@ -126,16 +145,31 @@ const dir = mkdtempManaged("loom-gr-trunc-");
       Array.from({ length: 690 }, (_, i) => `PASS  fixture-test-${i}`).join("\n"), "utf-8",
     );
     const specimen = await runGateStep("node specimen-a2679c1f.mjs", dir, 15_000);
+    // Card cf88f03b diagnostic: bounded (~500 chars) dump of the ACTUAL outputTail, printed only when one
+    // of the three content checks below fails — a bare "isn't there" boolean told us nothing about WHAT
+    // arrived instead (empty ⇒ flush loss; "no failure line matched" ⇒ the stream arrived but the marker
+    // didn't match; a partial block ⇒ a cap/carry bug). Kept as a shared closure so all three failures
+    // report the SAME snapshot rather than re-deriving it.
+    const outputTailDiagnostic = () => {
+      const t = specimen.outputTail;
+      if (typeof t !== "string") return `outputTail is ${JSON.stringify(t)} (not a string)`;
+      return `outputTail length=${t.length}, first 500 chars: ${JSON.stringify(t.slice(0, 500))}`;
+    };
     check("(A2) the specimen's PASS-line flood alone genuinely exceeds the 4096-byte positional tail budget (proves this isn't a short-suite no-op)",
       specimenPassOutputBytes > 4096 && specimen.status === 1);
     check("(A2) the recovered outputTail contains the FAILURES: header",
-      typeof specimen.outputTail === "string" && specimen.outputTail.includes("FAILURES:"));
+      typeof specimen.outputTail === "string" && specimen.outputTail.includes("FAILURES:"), outputTailDiagnostic);
     check("(A2) the recovered outputTail contains the failing file's name + exit code",
-      specimen.outputTail.includes("vault-push-status (exit 1)"));
+      typeof specimen.outputTail === "string" && specimen.outputTail.includes("vault-push-status (exit 1)"), outputTailDiagnostic);
     check("(A2) THE ACCEPTANCE BAR: the recovered outputTail contains the ACTUAL assertion body — the exact content a positional trailing ring pushed out in the real op a2679c1f",
-      specimen.outputTail.includes(REAL_ASSERTION));
-    check("(A2) the recovered outputTail is genuinely front-anchored FROM the marker — none of the 690 preceding PASS lines leaked into it",
-      !specimen.outputTail.includes("fixture-test-"));
+      typeof specimen.outputTail === "string" && specimen.outputTail.includes(REAL_ASSERTION), outputTailDiagnostic);
+    // Card cf88f03b: paired with a non-vacuity precondition (non-empty AND contains the marker) — the
+    // original negation-only form (`!outputTail.includes("fixture-test-")`) ALSO passes on an empty or
+    // marker-free capture, so it could not discriminate "correctly front-anchored" from "captured nothing"
+    // (it passed vacuously in both red CI runs while its three siblings caught the failure loudly).
+    check("(A2) the recovered outputTail is genuinely front-anchored FROM the marker (non-vacuous: outputTail is non-empty AND contains FAILURES:) — none of the 690 preceding PASS lines leaked into it",
+      typeof specimen.outputTail === "string" && specimen.outputTail.length > 0 && specimen.outputTail.includes("FAILURES:") && !specimen.outputTail.includes("fixture-test-"),
+      outputTailDiagnostic);
     check("(A2) HARD SCOPE FENCE: this card never touches verdict — the step still genuinely fails (status 1), unchanged from before this fix",
       specimen.status === 1);
   }
