@@ -2019,7 +2019,15 @@ export class PlatformMcpRouter {
           "your change into the current body (mirrors the in-project tasks_update / memory_write exactly). " +
           "Every other field needs no baseVersion. `version` advances ONLY when title/body actually change — " +
           "a field-only move (columnKey/priority/held/deferred/repoKey) leaves it unchanged. `baseVersion` is " +
-          "meaningless (and ignored) on the `taskIds` batch path, since that path already refuses title/body outright.",
+          "meaningless (and ignored) on the `taskIds` batch path, since that path already refuses title/body outright.\n" +
+          "⚠️ `body` is a FULL REPLACE, not a merge or append — whatever string you pass BECOMES the entire body, " +
+          "with NO undo; read the current body first (project_task_get) and fold your edit into the whole thing " +
+          "if you only mean to change part of it. DESTRUCTIVE-TRUNCATION GUARD (card 09d68835): on the single-" +
+          "`taskId` path, a `body` write that would discard the large majority of an existing SUBSTANTIAL body " +
+          "(≥1024 characters, keeping <25% of it) is REFUSED — {error naming the current/proposed lengths, " +
+          "truncation:true, current, currentLength, proposedLength} — same mechanism as the in-project " +
+          "tasks_update. A short body, or a rewrite that stays a comparable size, is untouched by this. Pass " +
+          "allowTruncate:true to bypass it for a genuinely intentional large discard.",
         inputSchema: strictShape({
           projectId: z.string(),
           taskId: z.string().optional(),
@@ -2034,11 +2042,12 @@ export class PlatformMcpRouter {
           deferredReason: z.string().nullable().optional(),
           repoKey: z.string().nullable().optional(),
           baseVersion: z.number().optional(),
+          allowTruncate: z.boolean().optional(),
         }),
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
-      async ({ projectId, taskId, taskIds, baseVersion, ...patch }) => {
+      async ({ projectId, taskId, taskIds, baseVersion, allowTruncate, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
@@ -2060,7 +2069,7 @@ export class PlatformMcpRouter {
           }));
           return ok(results);
         }
-        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion));
+        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate));
       },
     );
 

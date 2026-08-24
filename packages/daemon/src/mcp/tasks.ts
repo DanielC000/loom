@@ -797,6 +797,38 @@ export interface TaskUpdateConflict {
 }
 
 /**
+ * Card 09d68835 — a first-hand specimen: a manager passed a one-sentence annotation as the FULL
+ * replacement `body` on a ~13,300-character card and silently destroyed it (`body` is documented as a
+ * full replace, no undo, no partial-update mode — that documented behavior is NOT what this guards; see
+ * the DESTRUCTIVE-SIZE guard below). `MIN_SUBSTANTIAL_BODY_CHARS`/`MAX_SURVIVING_FRACTION` are PROPOSALS
+ * (the card's own words), not derived from any measurement — 1 KB is "large enough that losing it is a
+ * real loss", and 25% is "small enough that no genuine rewrite lands there by accident" (project memory
+ * `shipping-a-detector-is-not-someone-reading-it`: a blocking precondition on the ACTION is the only
+ * remedy shown to work here — a louder tool description would sit in the attention path and get read
+ * past, same as it did for the manager who filed this card).
+ */
+export const MIN_SUBSTANTIAL_BODY_CHARS = 1024;
+export const MAX_SURVIVING_FRACTION = 0.25;
+
+/**
+ * {@link updateProjectTask}'s rejection shape for a `body` write that would discard the large majority
+ * of an existing substantial body (card 09d68835) — same "return the current record to reconcile
+ * against" contract as {@link TaskUpdateConflict}, but a DISTINCT discriminant field (`truncation`, not
+ * `conflict`) since the two guards fire for unrelated reasons and a caller may want to tell them apart:
+ * `conflict` means "someone else changed this since you last read it"; `truncation` means "the body YOU
+ * are about to write looks like an accident, regardless of who last touched it". `currentLength`/
+ * `proposedLength` are named in the error text too (the DoD's own requirement) but also broken out here
+ * so a caller doesn't have to re-measure `current.body`/re-parse the message to get them.
+ */
+export interface TaskUpdateTruncationGuard {
+  error: string;
+  truncation: true;
+  current: Task;
+  currentLength: number;
+  proposedLength: number;
+}
+
+/**
  * The calling agent session's identity, threaded through {@link updateProjectTask} to (a) stamp the
  * `task_held_cleared` audit event's `managerSessionId` (card 9b0373c0), and (b) — since the repoKey
  * authority fix below — gate a `repoKey` write to a manager/platform actor. `role` was NOT used for
@@ -824,7 +856,14 @@ export async function updateProjectTask(
    * field-only patches (see the gate below). Mirrors `memory_write`'s `baseVersion` exactly.
    */
   baseVersion?: number,
-): Promise<Task | TaskUpdateAck | { error: string } | TaskUpdateConflict> {
+  /**
+   * Card 09d68835 — the explicit, named override for the destructive-body-truncation guard below,
+   * mirroring `tasks_create`'s `allowDuplicate`: "a refusal you cannot satisfy is worse than a notice
+   * you ignore" (the card's own words) — so the guard must always be escapable, but only by a
+   * DELIBERATE flag, never inferable from anything else in the patch.
+   */
+  allowTruncate?: boolean,
+): Promise<Task | TaskUpdateAck | { error: string } | TaskUpdateConflict | TaskUpdateTruncationGuard> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
@@ -976,6 +1015,38 @@ export async function updateProjectTask(
   // into `patch` itself, so it can never leak into the caller-echoed `changed` list (mirrors heldByPatch's
   // own exclusion from `patch` for the same reason).
   const dbPatch = deferredAtPatch !== undefined ? { ...dbPatch0, deferredAt: deferredAtPatch } : dbPatch0;
+  // Destructive-body-truncation guard (card 09d68835, whole-patch-reject like every guard above): `body`
+  // is a FULL REPLACE with no undo (see the tool description) — that is CORRECT, field-level PATCH
+  // semantics are not what's wrong here. What's missing is friction in front of the one catastrophic
+  // shape: a substantial existing body reduced to a sliver in one silent, successful write (the
+  // specimen: ~13,300 chars replaced by one sentence, recovered only because a scratch copy happened to
+  // exist). Fires ONLY when (a) the CURRENT body is substantial (≥MIN_SUBSTANTIAL_BODY_CHARS — a short
+  // body has little to lose) AND (b) the PROPOSED body keeps less than MAX_SURVIVING_FRACTION of it (a
+  // genuine rewrite that merely trims some prose stays well above this) AND (c) the caller hasn't passed
+  // the explicit `allowTruncate:true` override. Checked against `owned.body` — the body as read FRESH at
+  // the top of this call, i.e. what's actually on disk right now — never against some caller-supplied
+  // "previous" value, so it can't be fooled by a stale belief about the current body. Runs BEFORE the
+  // baseVersion/write gate below: a truncating write gets the truncation error even when its baseVersion
+  // is otherwise valid, since "this body is about to become mostly-empty" is the more actionable thing to
+  // tell the caller. `current`/`currentLength`/`proposedLength` mirror the baseVersion conflict path's own
+  // "return the current record so the caller can reconcile" contract (card's own DoD-3) — that's what made
+  // the original manager's recovery possible, and it costs nothing to reuse here.
+  if (patch.body !== undefined && !allowTruncate) {
+    const currentLength = owned.body.length;
+    const proposedLength = patch.body.length;
+    if (currentLength >= MIN_SUBSTANTIAL_BODY_CHARS && proposedLength < currentLength * MAX_SURVIVING_FRACTION) {
+      return {
+        error: `this write would replace a ${currentLength}-character body with a ${proposedLength}-character one — ` +
+          `that discards the large majority of it, which is usually a mistake (a one-line note pasted into ` +
+          `\`body\` instead of \`title\`, or a partial edit meant to be additive). \`body\` is a full replace with ` +
+          `no undo. If this is genuinely intentional, retry with allowTruncate:true.`,
+        truncation: true,
+        current: owned,
+        currentLength,
+        proposedLength,
+      };
+    }
+  }
   // Optimistic-concurrency gate (card d0978321): a title/body write is the ONLY thing gated — a
   // column/priority/held/deferred/repoKey/deferredUntilTaskId-only patch (the common board-repair case)
   // still needs no baseVersion at all, unaffected by anything below. `patch` (not `dbPatch`) is checked:
