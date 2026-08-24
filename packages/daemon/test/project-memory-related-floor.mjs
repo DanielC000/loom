@@ -119,8 +119,13 @@ try {
   {
     const sorted = byRecency(pinnedCorpus);
     const reference = referencePinnedPack(sorted, BUDGET_TOKENS);
+    // Card 6def8bf4 DoD-5 — every note in `pinnedCorpus` (mkEntry's default) has `lastRetrievedAt: null`,
+    // so under the real function's marker (summarizeDroppedRestKeys) EVERY dropped key here is a
+    // first-ever drop and is marked "(never delivered)" inline. The independent reference must reproduce
+    // that same marker to stay a faithful byte-for-byte comparison — it is NOT reverting the marker
+    // feature, only reflecting it in the hand-rolled expectation.
     const expectedDigest = reference.droppedKeys.length > 0
-      ? [reference.section, `⚠️ ${reference.droppedKeys.length} pinned note(s) dropped for budget: ${reference.droppedKeys.join(", ")}`].join("\n\n")
+      ? [reference.section, `⚠️ ${reference.droppedKeys.length} pinned note(s) dropped for budget: ${reference.droppedKeys.map((k) => `${k} (never delivered)`).join(", ")}`].join("\n\n")
       : reference.section;
     const { digest, droppedRestKeys } = composeProjectMemoryDigest(pinnedCorpus, [], BUDGET_TOKENS);
     check("(empty-related) sanity: this reference/corpus combination genuinely drops some pinned notes (a non-vacuous check)",

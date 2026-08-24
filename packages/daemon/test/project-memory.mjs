@@ -714,6 +714,13 @@ try {
       restKeys.push(key);
       writeProjectMemory(db, logRestProj, { key, text: "y".repeat(200), pinned: true });
     }
+    // Card 6def8bf4 — snapshot BEFORE calling retrieveProjectMemoryForKickoff, not after: that call now
+    // (post-fix) mutates lastRetrievedAt in the DB for whatever it includes (db.touchProjectMemoryRetrieved),
+    // and lastRetrievedAt is now part of the pinned sort key (sortPinnedByRecency). Re-fetching AFTER the
+    // call would hand the direct compose() cross-check a DIFFERENT, already-rotated input than what the log
+    // line was actually generated from, making the two diverge on WHICH keys dropped even though both are
+    // individually correct for their own (different) input snapshot.
+    const pinnedBeforeRest = db.listPinnedProjectMemory(logRestProj);
     const { warnCalls: restWarnCalls, errorCalls: restErrorCalls } = captureConsole(
       () => retrieveProjectMemoryForKickoff(db, logRestProj, ""),
     );
@@ -722,8 +729,7 @@ try {
     // Cross-check against the pure compose function directly, so completeness doesn't depend on guessing
     // which (if any) of the 45 fit under the tight budget — compose is the authority on what was dropped.
     {
-      const pinnedNow = db.listPinnedProjectMemory(logRestProj);
-      const { droppedRestKeys, includedIds } = composeProjectMemoryDigest(pinnedNow, [], 100);
+      const { droppedRestKeys, includedIds } = composeProjectMemoryDigest(pinnedBeforeRest, [], 100);
       check("(at-scale log-rest) forces 30+ real drops (cross-checked against compose directly)", droppedRestKeys.length >= 30);
       check("(at-scale log-rest) the log line names EVERY key compose reports dropped",
         droppedRestKeys.every((k) => restWarnCalls[0]?.includes(k)));
@@ -748,13 +754,14 @@ try {
       floorKeys.push(key);
       writeProjectMemory(db, logFloorProj, { key, text: "y".repeat(200), pinned: true, tags: [NEVER_DROP_TAG] });
     }
+    // Card 6def8bf4 — same before-the-mutating-call snapshot discipline as the rest-tier block above.
+    const pinnedBeforeFloor = db.listPinnedProjectMemory(logFloorProj);
     const { warnCalls: floorWarnCalls, errorCalls: floorErrorCalls } = captureConsole(
       () => retrieveProjectMemoryForKickoff(db, logFloorProj, ""),
     );
     check("(at-scale log-floor) exactly one console.error ALARM line emitted", floorErrorCalls.length === 1);
     {
-      const pinnedNow = db.listPinnedProjectMemory(logFloorProj);
-      const { droppedFloorKeys, includedIds } = composeProjectMemoryDigest(pinnedNow, [], 100);
+      const { droppedFloorKeys, includedIds } = composeProjectMemoryDigest(pinnedBeforeFloor, [], 100);
       check("(at-scale log-floor) forces 30+ real ALARM drops (cross-checked against compose directly)", droppedFloorKeys.length >= 30);
       check("(at-scale log-floor) the ALARM log line names EVERY key compose reports dropped",
         droppedFloorKeys.every((k) => floorErrorCalls[0]?.includes(k)));

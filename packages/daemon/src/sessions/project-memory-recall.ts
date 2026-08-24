@@ -67,6 +67,19 @@ function summarizeDroppedKeys(keys: string[]): string {
   return keys.join(", ");
 }
 
+/** Card 6def8bf4 DoD-5 — marks which dropped REST keys have NEVER been delivered even once
+ *  (`lastRetrievedAt === null` at read time), distinct inline from a key that's been delivered before
+ *  and is merely dropped again this round. Under the `lastRetrievedAt`-fairness sort ({@link
+ *  sortPinnedByRecency}), a never-delivered note has TOP packing priority — so a never-delivered key
+ *  still showing up here is a materially stronger signal ("first drop, despite top priority") than an
+ *  ordinary repeat drop, worth distinguishing inline even though it stays the SAME routine ⚠️ severity as
+ *  every other REST overflow (the louder 🚨 ALARM stays reserved for the never-drop tier's distinct,
+ *  stronger promise — this is not that). `neverDelivered` is a `Set<string>` of keys, not a boolean per
+ *  entry, so this stays a pure string-formatting helper with no `ProjectMemoryEntry` dependency. */
+function summarizeDroppedRestKeys(keys: string[], neverDelivered: Set<string>): string {
+  return keys.map((k) => (neverDelivered.has(k) ? `${k} (never delivered)` : k)).join(", ");
+}
+
 const SECTION_SEP = "\n\n";
 
 /** Cheap token estimate — no tokenizer, no API call (the v1 "zero metered tokens" constraint applies to
@@ -162,17 +175,38 @@ export function computeFloorTierStatus(
  *  exactly as before; this reserve narrows only the ordinary pinned-REST sub-tier's own ceiling. */
 const RELATED_RESERVE_FRACTION = 0.3;
 
-/** Card 15503722 — the pinned tier's delivery-order signal: newest `updatedAt` first, `key` ascending as
- *  a deterministic tiebreak (fixtures — and real notes bulk-written in the same instant — often share one
- *  timestamp). Chosen over `retrievalCount` (self-reinforcing: a note the OLD key-alphabetical bug was
- *  already dropping has `retrievalCount:0` and would stay 0 forever, so ranking by it would permanently
- *  entrench exactly the notes the bug already favoured) and over raw key order (arbitrary — spelling and
- *  note size, not importance, decided who survived). Known, NOT solved, limitations: an old-but-important
- *  note nobody has touched recently still ranks low (see NEVER_DROP_TAG for the escape hatch), and editing
- *  ANY note's text bumps `updatedAt` and can leapfrog it ahead of an untouched, more important note — a
- *  trivial wording fix can outrank real value. This is a heuristic with known edges, not a settled policy. */
+/** Card 6def8bf4 — the pinned tier's delivery-order signal: LEAST-RECENTLY-DELIVERED first
+ *  (`lastRetrievedAt` ascending, `null` — never once delivered — sorting AHEAD of every real timestamp),
+ *  `updatedAt` descending as a secondary tiebreak, `key` ascending as the final deterministic tiebreak.
+ *  Replaces card 15503722's pure `updatedAt DESC` sort, which fixed the ORIGINAL key-alphabetical
+ *  starvation but introduced a NEW one: a pinned note that is never edited after creation keeps the exact
+ *  same `updatedAt`, so its sort position never changes between kickoffs — once the budget is tight, that
+ *  note loses to the same higher-ranked notes on EVERY kickoff, forever (measured live on this project:
+ *  4 pinned notes dark for 19 days). `retrievalCount` alone was rejected then for being self-reinforcing
+ *  (a note the old bug already starved has `retrievalCount:0` and stays there); `lastRetrievedAt` doesn't
+ *  have that problem — it's a TIMESTAMP a delivery updates (`db.touchProjectMemoryRetrieved`, called for
+ *  every note `composeProjectMemoryDigest` actually includes), so ranking by it directly INVERTS
+ *  starvation instead of entrenching it: a never-delivered note (`null`) gets top priority; the instant it
+ *  IS delivered, its stamp becomes the newest in the corpus and it rotates to the back until every other
+ *  note has had a turn. This converges to full coverage within a bounded number of kickoffs for any note
+ *  that can individually fit the budget at all — a note that can't (a single oversized note exceeding
+ *  `budgetTokens` on its own) is the pre-existing, separately-tracked size/budget case (see
+ *  NEVER_DROP_TAG's own doc comment and card 0186576f), not something ordering can fix. `updatedAt` stays
+ *  the secondary tiebreak deliberately: among notes tied on `lastRetrievedAt` (most commonly a bulk of
+ *  never-delivered notes, all `null`), a freshly-edited note plausibly matters more RIGHT NOW than a
+ *  stale one that's equally never-been-seen — preserving the useful half of card 15503722's original
+ *  reasoning underneath the new fairness key. Backward-compatible with any all-null-`lastRetrievedAt`
+ *  corpus (e.g. every existing test fixture, and any project's first-ever kickoff): every entry ties on
+ *  the primary key, so the sort degrades EXACTLY to the pre-this-card `updatedAt DESC, key ASC` order. */
 function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[] {
-  return [...entries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+  return [...entries].sort((a, b) => {
+    if (a.lastRetrievedAt !== b.lastRetrievedAt) {
+      if (a.lastRetrievedAt === null) return -1;
+      if (b.lastRetrievedAt === null) return 1;
+      return a.lastRetrievedAt.localeCompare(b.lastRetrievedAt);
+    }
+    return b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key);
+  });
 }
 
 /** Card 738568b6 — greedy PREFIX pack of the RELATED tier (rank order, `break`s at the first overflow)
@@ -286,6 +320,10 @@ export function composeProjectMemoryDigest(
   let pinnedSection: string | null = null;
   const droppedFloorKeys: string[] = [];
   const droppedRestKeys: string[] = [];
+  // Card 6def8bf4 DoD-5 — tracked ALONGSIDE droppedRestKeys, never folded into it: the return contract
+  // (and every existing caller/test) treats droppedRestKeys as a plain string[] of keys, so this stays a
+  // side-channel used only to format the routine overflow line's text below.
+  const droppedRestNeverDelivered = new Set<string>();
   // Card 738568b6 — REST's own ceiling is REDUCED by ONLY what RELATED actually needs (`relatedNeed`, from
   // the probe above), never by the raw nominal reserve. FLOOR is untouched and still packs against the
   // full `budgetTokens` (unchanged from before this fix — absolute priority preserved).
@@ -303,7 +341,12 @@ export function composeProjectMemoryDigest(
       const cap = isNeverDrop(m) ? budgetTokens : restCap;
       if (estimateTokens(candidate) > cap) {
         // pack maximally: skip an oversized note, keep trying the rest of THIS note's own sub-tier
-        (isNeverDrop(m) ? droppedFloorKeys : droppedRestKeys).push(m.key);
+        if (isNeverDrop(m)) {
+          droppedFloorKeys.push(m.key);
+        } else {
+          droppedRestKeys.push(m.key);
+          if (m.lastRetrievedAt === null) droppedRestNeverDelivered.add(m.key);
+        }
         continue;
       }
       blocks.push(block);
@@ -339,7 +382,7 @@ export function composeProjectMemoryDigest(
         : ["## Pinned project memory (always included)", alarmLine].join(SECTION_SEP);
     }
     if (droppedRestKeys.length > 0) {
-      const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedKeys(droppedRestKeys)}`;
+      const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedRestKeys(droppedRestKeys, droppedRestNeverDelivered)}`;
       pinnedSection = pinnedSection
         ? [pinnedSection, overflowLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", overflowLine].join(SECTION_SEP);
