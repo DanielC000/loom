@@ -3,6 +3,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
 import { getLoopbackToken } from "../lib/api";
+import { useIsCompanionSession } from "../lib/companionGuard";
 import "@xterm/xterm/css/xterm.css";
 import "./Terminal.css";
 
@@ -25,8 +26,22 @@ import "./Terminal.css";
  * sends a stdin frame. Used by the Companion "Terminal" view, where the companion is driven through its
  * chat surface, not raw stdin — so the terminal is purely an observation window. Copy (select + Ctrl-C)
  * still works; only writing to the session is suppressed.
+ *
+ * A COMPANION session is watch-only whether or not the caller passes `readOnly` — resolved from the
+ * session store inside the component (card 5c87f4b6), so no call site can render a writable terminal for
+ * one by forgetting a prop. See the guard comment on the component itself.
  */
-export function TerminalPane({ sessionId, resizable = false, readOnly = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
+export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
+  // COMPANION GUARD (card 5c87f4b6) — the structural half of the "a companion is driven ONLY through its
+  // chat surface" invariant, placed HERE because this is the real transport chokepoint: `disableStdin`
+  // and the `ws.send({type:"stdin"})` below both live in this component, and anything that renders a
+  // TerminalPane directly (a TerminalCard `renderBody`, a future call site) bypasses every guard placed
+  // further up. Resolved from the session store, never from a caller-supplied prop, so there is no field
+  // a caller can omit to fail open — see lib/companionGuard.ts. Additive with the explicit `readOnly`
+  // prop (the Companion page's own watch-only window still passes it), never subtractive: a shell, a
+  // worker and a manager are all byte-identical to before.
+  const isCompanion = useIsCompanionSession(sessionId);
+  const readOnly = readOnlyProp || isCompanion;
   const ref = useRef<HTMLDivElement>(null);
   // Kept in a ref so a budget change is picked up on the next resize WITHOUT re-running the effect
   // (which would tear down + re-attach the websocket). It's constant per page in practice.

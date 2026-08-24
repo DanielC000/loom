@@ -14,6 +14,7 @@ import { LogoMark } from "./Logo";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
+import { isCompanionSession } from "../lib/sessions";
 import { useDismissable } from "../lib/useDismissable";
 import { color, font, radius } from "../theme";
 
@@ -51,7 +52,7 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
   const liveByProject = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of sessionsQ.data ?? []) {
-      if (s.role === "assistant") continue;
+      if (isCompanionSession(s)) continue;
       if (s.processState !== "live" && s.processState !== "starting") continue;
       m.set(s.projectId, (m.get(s.projectId) ?? 0) + 1);
     }

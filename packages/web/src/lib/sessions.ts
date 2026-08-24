@@ -137,7 +137,7 @@ export type SessionRowGroup<T> = { key: string; kind: "manager" | "orphans" | "s
  * feed this a companion and it still emits no row for it.
  */
 export function groupSessionRows<T extends SessionRowMember>(sessions: readonly T[]): SessionRowGroup<T>[] {
-  const shown = sessions.filter((s) => s.role !== "assistant").slice().sort(byManagerThenCreated);
+  const shown = sessions.filter((s) => !isCompanionSession(s)).slice().sort(byManagerThenCreated);
   const managers = shown.filter((s) => s.role === "manager");
   const managerIds = new Set(managers.map((m) => m.id));
   const workersByParent = new Map<string, T[]>();
@@ -160,4 +160,30 @@ export function groupSessionRows<T extends SessionRowMember>(sessions: readonly 
   if (orphans.length) trailing.push({ key: "__orphans", kind: "orphans", list: orphans.slice().sort(byCreatedStable) });
   if (standalone.length) trailing.push({ key: "__standalone", kind: "standalone", list: standalone.slice().sort(byCreatedStable) });
   return [...managerRows, ...trailing];
+}
+
+/**
+ * The COMPANION role. A companion (assistant-role) session is driven ONLY through its chat surface
+ * (/companion) — never a raw pty tile + STDIN Composer. See groupSessionRows above, which drops them at
+ * the Terminals grouping source, and the two client layers that enforce it on a rendered terminal
+ * (TerminalPane's `disableStdin`/stdin-frame suppression, TerminalCard withholding the Composer).
+ */
+export const COMPANION_ROLE = "assistant";
+
+/**
+ * THE single companion test — every surface that must treat a companion differently reads it from here
+ * rather than hand-rolling `role === "assistant"`, so the four historical spellings of this check can't
+ * drift apart (card 5c87f4b6).
+ *
+ * FAIL-SAFE SHAPE — read this before "fixing" it: the argument is deliberately wide (an optional session,
+ * an optional role) and an UNKNOWN role answers **false** (not a companion). That is correct, not an
+ * oversight: a raw SHELL terminal is not a DB Session at all and legitimately has no role (Terminals.tsx
+ * `ShellTile` passes a bare `{ id }`), and a shell MUST keep taking keystrokes. Answering `true` for an
+ * absent role would make every shell — and any caller that simply hasn't got the field — read-only, which
+ * is the over-broad failure this card's DoD explicitly guards against. Callers that need fail-CLOSED
+ * behaviour for a real session get it by resolving the role from the session store instead of trusting a
+ * caller-supplied prop (see lib/companionGuard.ts), which is a lookup no caller can omit.
+ */
+export function isCompanionSession(s: { role?: SessionRole | null } | null | undefined): boolean {
+  return s?.role === COMPANION_ROLE;
 }

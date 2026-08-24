@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, ShellTerminal } from "@loom/shared";
 import { api } from "../lib/api";
-import { byManagerThenCreated, groupSessionRows, type SessionRowGroup } from "../lib/sessions";
+import { byManagerThenCreated, groupSessionRows, isCompanionSession, type SessionRowGroup } from "../lib/sessions";
 import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
@@ -34,7 +34,7 @@ export default function Terminals() {
   // Composer. Filtering at `live` keeps them out of every downstream view — the project dropdown, the
   // counts, `shown`, and all grouping sub-lists (managers/orphans/standalone) — so a companion can
   // never leak a raw-STDIN path onto this page.
-  const live = (sessions.data ?? []).filter((s) => s.processState === "live" && s.role !== "assistant");
+  const live = (sessions.data ?? []).filter((s) => s.processState === "live" && !isCompanionSession(s));
   const projectNames = useMemo(() => [...new Set(live.map((s) => s.projectName))].sort(), [live]);
   // Tile order: the STABLE shared key (lib/sessions.ts byManagerThenCreated) — managers first, then
   // createdAt DESC (newest first), tiebreak by id within each bucket. A session keeps its slot whether

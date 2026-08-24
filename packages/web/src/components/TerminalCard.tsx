@@ -2,6 +2,8 @@ import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef,
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, Wake } from "@loom/shared";
 import { api, type QueuedMessage } from "../lib/api";
+import { useIsCompanionSession } from "../lib/companionGuard";
+import { isCompanionSession } from "../lib/sessions";
 import { TerminalPane } from "./Terminal";
 import { TranscriptPane } from "./TranscriptPane";
 import { Composer } from "./Composer";
@@ -165,6 +167,15 @@ export function TerminalCard({
   actionsExtra?: ReactNode;
 }) {
   void statusMode; // only "busy" is wired; non-busy variants carry a "title" override pill (see header note).
+  // COMPANION GUARD (card 5c87f4b6) — the SURFACE half. TerminalPane self-guards its own stdin transport,
+  // but the turn-Composer is a SEPARATE inbound surface (it POSTs /api/sessions/:id/input rather than
+  // riding the terminal ws), so withholding it is this component's own job — exactly as Companion.tsx has
+  // always done explicitly via `readOnly`. Read BOTH ways round on purpose: the store lookup is the
+  // fail-closed one (no prop to omit), and the prop-role check answers instantly for the callers that do
+  // pass a full session, without waiting on a poll. Neither can fire for a raw shell (no role, no store
+  // row), so ShellTile stays writable.
+  const isCompanionFromStore = useIsCompanionSession(session.id);
+  const watchOnly = readOnly || isCompanionFromStore || isCompanionSession(session);
   const [maximized, setMaximized] = useState(false);
 
   // HUG (numeric height) vs FILL (string height, e.g. "76vh"). HUG cards hug their content up to a MAX cap
@@ -276,7 +287,7 @@ export function TerminalCard({
     const ro = new ResizeObserver(measure);
     if (belowRef.current) ro.observe(belowRef.current);
     return () => ro.disconnect();
-  }, [hug, maximized, height, activeTab, !!task, readOnly, !!tabs,
+  }, [hug, maximized, height, activeTab, !!task, watchOnly, !!tabs,
       subPanels?.queue, subPanels?.wakes, subPanels?.taskCard]);
 
   const lifecycleButton = lifecycle === "kill"
@@ -326,7 +337,7 @@ export function TerminalCard({
           via its own .xterm-viewport. */}
       {(!tabs || activeTab === "terminal") && (
         <div ref={paneWrapRef} style={{ ...(hugMode ? null : { flex: 1 }), minHeight: 0, overflow: "hidden" }}>
-          <TerminalPane sessionId={session.id} readOnly={readOnly} resizable={resizable} heightBudget={heightBudget} />
+          <TerminalPane sessionId={session.id} readOnly={watchOnly} resizable={resizable} heightBudget={heightBudget} />
         </div>
       )}
       {tabs && activeTab === "transcript" && (
@@ -353,7 +364,7 @@ export function TerminalCard({
             <SessionQueue sessionId={session.id} pending={subPanels.queueData} onMutated={subPanels.onQueueMutated} />
           </div>
         )}
-        {!readOnly && <Composer sessionId={session.id} />}
+        {!watchOnly && <Composer sessionId={session.id} />}
       </div>
     </>
   );
