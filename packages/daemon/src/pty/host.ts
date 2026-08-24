@@ -2647,6 +2647,26 @@ interface Live {
   // session learning about ITSELF. Same PULL-surface posture as `lastMismatchReplay` otherwise — never
   // cleared once set, overwritten (not accumulated) by a later occurrence.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // Card 59757189 DoD-1/3 — the UNMATCHABLE counterpart to `lastMismatchReplay`/`lastMismatchFusion` above:
+  // set the instant a mismatch matches NONE of the recognized/confirmed shapes above (not a single-entry
+  // replay, not a confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip
+  // benign shape) — the exact population `3ff61275` left unaddressed (that card shipped only DoD-7's
+  // WHICH-payload identity floor, never the content itself). CAPTURED AT THE MOMENT OF DETECTION,
+  // directly from `intended` (the local in this same synchronous block) — deliberately NOT a later lookup
+  // into `recentWrittenTurns` (this file, `COMPOSER_ACCUM_WINDOW`=8 above): that ring is a BOUNDED,
+  // oldest-first window that will have rotated past this generation by the time any reader asks (the
+  // reporter's own correction on the predecessor card: "the content was in hand at detection time and
+  // discarded milliseconds later"). Stored IN FULL, no head-bounding — mirrors `recentWrittenTurns`'s own
+  // existing precedent of retaining full per-generation text with no length cap, rather than inventing an
+  // unmotivated new size bound here.
+  // DoD-3 (decidability): `null` (the field's own type) combined with `getLastMismatchUnmatched`'s own
+  // `undefined` for an unknown/not-live session are the ONLY "not captured" states. An unmatchable
+  // mismatch, once it fires, ALWAYS populates a real object here — so a reader can never confuse
+  // "captured, here it is" (a non-null object — even one whose `intendedText` happens to be the empty
+  // string) with "nothing was ever captured" (`null`/`undefined`). Never cleared once set (same posture as
+  // `lastMismatchReplay`/`lastMismatchFusion`); overwritten — not accumulated — by a later unmatchable
+  // occurrence, so this always reflects the MOST RECENT one.
+  lastMismatchUnmatched: { gen: number; intendedLen: number; intendedText: string; detectedAt: number } | null;
   /**
    * Card c0323f8a — the SIGNATURE of the last `[loom:prompt-mismatch]` session-facing notice actually
    * enqueued (see the `setTimeout(() => this.enqueueStdin(...))` call site below). Unlike
@@ -4119,7 +4139,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -4288,7 +4308,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -4369,7 +4389,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -5305,6 +5325,24 @@ export class PtyHost {
                 // comment), a confirmed fusion can legitimately cover 3+ generations, and naming only the
                 // first would silently under-report which turns may have been acted on twice.
                 const earlierFusedGens = confirmedFusion ? confirmedFusion.spanGens.slice(0, -1) : [];
+                // Card 59757189 DoD-1/3 — CAPTURE AT DETECTION, for the UNMATCHABLE case only: none of the
+                // confirmed/recognized shapes above claimed this mismatch (not a single-entry replay, not a
+                // confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip benign
+                // shape) — this is exactly the generic fallback branch further below (the final arm of the
+                // `mismatchText` ternary). `3ff61275` (predecessor, DoD-7) deliberately left this population
+                // unaddressed, shipping only the WHICH-payload identity clause. `recentWrittenTurns` (this
+                // file, `COMPOSER_ACCUM_WINDOW`=8 above) is NOT a substitute for capturing HERE: it is a
+                // bounded, oldest-first ring that a later reader (via `getLastMismatchUnmatched`) may find
+                // has already rotated past this generation — `intended`, still in scope in this exact
+                // synchronous block, is the only place this content still exists once detection has passed
+                // (the reporter's own correction on the predecessor card: "the content was in hand at
+                // detection time and discarded milliseconds later"). See `Live.lastMismatchUnmatched`'s own
+                // doc for the storage/decidability contract (stored in full, no head-bounding; `null`/
+                // `undefined` are the only "not captured" states).
+                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit;
+                if (isUnmatchableMismatch) {
+                  live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
+                }
                 // Card 3ff61275 DoD-7 (MINIMUM VIABLE FIX — scoped floor beneath DoD-1's still-pending
                 // content-retention question, request 0eb43216): every branch below narrates THIS turn's
                 // own write (gen=${live.submitGeneration}) but, until now, identified it by that bare gen
@@ -8859,6 +8897,19 @@ export class PtyHost {
    *  overwritten (not accumulated) by a later occurrence. */
   getLastMismatchFusion(sessionId: string): Live["lastMismatchFusion"] | undefined {
     return this.live.get(sessionId)?.lastMismatchFusion;
+  }
+
+  /** Card 59757189 DoD-1/3: the UNMATCHABLE counterpart to `getLastMismatchReplay`/`getLastMismatchFusion`
+   *  above — see `Live.lastMismatchUnmatched`'s own doc for what it fires on (a mismatch that matched NONE
+   *  of the recognized/confirmed shapes) and why it captures `intended` directly rather than relying on
+   *  `recentWrittenTurns` (a bounded ring that rotates). Same PULL-surface mechanics otherwise: `null` =
+   *  no unmatchable mismatch has fired yet since this session went live, `undefined` = session not live in
+   *  this process, never cleared once set, overwritten (not accumulated) by a later occurrence. This is a
+   *  DELIBERATE pull-only surface — nothing in this codebase currently pushes its content anywhere (a
+   *  parent/manager delivery path is a separate, still-undecided question — see card 59757189's own
+   *  DoD-2 note); reading it never has side effects. */
+  getLastMismatchUnmatched(sessionId: string): Live["lastMismatchUnmatched"] | undefined {
+    return this.live.get(sessionId)?.lastMismatchUnmatched;
   }
 
   /** Card c0323f8a — the durable PULL surface for `Live.lastMismatchNoticeSuppressed`: how many times, and

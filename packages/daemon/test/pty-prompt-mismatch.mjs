@@ -1162,6 +1162,144 @@ try {
     check("18: DECIDABILITY (bonus) — an absent wall-clock write time is ALSO stated explicitly, never blank",
       /written at an unrecorded time/.test(noticeWrite));
   }
+
+  // ===== 19. Card 59757189 DoD-1/3 — RED-PROOF: on this file's own genuinely-unmatchable shape (7b's own
+  // pattern — a real prior generation exists, but the reported content matches none of this session's
+  // recorded writes), the intended text for the mismatched generation must be CAPTURED into
+  // `Live.lastMismatchUnmatched` AT THE MOMENT OF DETECTION, readable via `getLastMismatchUnmatched` —
+  // never a later lookup. Also proves DECIDABILITY (DoD-3): `undefined` for a session id that was never
+  // live, `null` for a live session with no unmatchable mismatch yet, a real object once one fires — and
+  // NEGATIVE CONTROLS that a RECOGNIZED shape (a confirmed fusion) and an ordinary matching turn do NOT
+  // set this field, proving it is scoped to the genuinely-unmatchable population only. =====
+  {
+    const sid = newSession("UnmatchedCapture"); SIDS.push(sid);
+    check("19: DECIDABILITY — an unknown/never-live session id returns undefined, not null",
+      host.getLastMismatchUnmatched("sess-does-not-exist-59757189") === undefined);
+    check("19: DECIDABILITY — a live session with no unmatchable mismatch yet returns null, not undefined",
+      host.getLastMismatchUnmatched(sid) === null);
+
+    const earlierGenText = "[loom:worker-report] worker HHHH — an earlier, real prior generation";
+    const genText = "[loom:from-manager] the real content this generation actually intended to submit, captured";
+    const unrelatedReported = "content that never came from anything this session itself wrote";
+    host.enqueueStdin(sid, earlierGenText); // gen=1 — a real prior write, so this is NOT the fresh-process/DoD-6 shape (scenario 21)
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, genText); // gen=2
+    const beforeDetect = Date.now();
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedReported }); // byteIdentical=false, matches no recent write — unmatchable
+    const afterDetect = Date.now();
+    const captured = host.getLastMismatchUnmatched(sid);
+    check("19: RED-PROOF — an unmatchable mismatch captures a real record (not null/undefined)",
+      captured !== null && captured !== undefined);
+    check("19: RED-PROOF — the captured record names THIS generation (gen=2)", captured?.gen === 2);
+    check("19: RED-PROOF — the captured text is EXACTLY what Loom intended for this generation, byte-for-byte — not the stranded/reported text, not truncated",
+      captured?.intendedText === genText && captured?.intendedLen === genText.length);
+    check("19: detectedAt is a real wall-clock timestamp taken AT DETECTION (bounded by the call that triggered it)",
+      typeof captured?.detectedAt === "number" && captured.detectedAt >= beforeDetect && captured.detectedAt <= afterDetect);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // NEGATIVE CONTROL — a RECOGNIZED shape (a confirmed fusion) must NOT set this field: it is scoped to
+    // the genuinely-unmatchable population, never to every mismatch.
+    {
+      const sidFusion = newSession("UnmatchedCaptureFusionControl"); SIDS.push(sidFusion);
+      const genNMinus1Text = "[loom:worker-report] worker IIII — generation N-1's own real report";
+      const genNText = "[loom:merge-done] worker JJJJ merged — generation N's own real, much shorter content";
+      host.enqueueStdin(sidFusion, genNMinus1Text);
+      host.deliverHook(sidFusion, { hook_event_name: "UserPromptSubmit", prompt: genNMinus1Text });
+      host.deliverHook(sidFusion, { hook_event_name: "Stop" });
+      host.enqueueStdin(sidFusion, genNText); // gen=2
+      host.deliverHook(sidFusion, { hook_event_name: "UserPromptSubmit", prompt: genNMinus1Text + genNText }); // confirmed fusion, not unmatchable
+      check("19: sanity — the fusion control actually fired its OWN (different) pull surface, proving this session's mismatch was real",
+        host.getLastMismatchFusion(sidFusion) !== null);
+      check("19: NEGATIVE CONTROL — a confirmed fusion (a RECOGNIZED shape) does NOT set getLastMismatchUnmatched",
+        host.getLastMismatchUnmatched(sidFusion) === null);
+      host.deliverHook(sidFusion, { hook_event_name: "Stop" });
+    }
+
+    // NEGATIVE CONTROL — an ordinary, byteIdentical=true turn never sets this field either.
+    {
+      const sidClean = newSession("UnmatchedCaptureCleanControl"); SIDS.push(sidClean);
+      const cleanText = "[loom:idle] an entirely ordinary, correctly-delivered turn";
+      host.enqueueStdin(sidClean, cleanText);
+      host.deliverHook(sidClean, { hook_event_name: "UserPromptSubmit", prompt: cleanText }); // byteIdentical=true
+      check("19: NEGATIVE CONTROL — an ordinary matching turn never sets getLastMismatchUnmatched",
+        host.getLastMismatchUnmatched(sidClean) === null);
+      host.deliverHook(sidClean, { hook_event_name: "Stop" });
+    }
+  }
+
+  // ===== 20. Card 59757189 DoD-5 — REGRESSION: the captured intended text for an unmatchable mismatch's
+  // own generation must remain readable via getLastMismatchUnmatched even after >=8 SUBSEQUENT writes on
+  // this session — i.e. after `recentWrittenTurns` (COMPOSER_ACCUM_WINDOW=8, host.ts) has PROVABLY
+  // rotated past the captured generation. This is the exact gap DoD-1 exists to close: a LATER lookup into
+  // that ring (rather than a capture AT DETECTION TIME) would return nothing once this many writes have
+  // occurred — proving the captured record is genuinely independent of the ring's own retention window,
+  // not merely a thin wrapper around it. =====
+  {
+    const sid = newSession("UnmatchedSurvivesRotation"); SIDS.push(sid);
+    const earlierGenText = "[loom:worker-report] worker KKKK — an earlier, real prior generation";
+    const genText = "[loom:project-memory] the real content this generation actually intended to submit and must survive ring rotation";
+    const unrelatedReported = "content that never came from anything this session itself wrote, at all";
+    host.enqueueStdin(sid, earlierGenText); // gen=1
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, genText); // gen=2 — this is the generation whose intended text must survive rotation
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: unrelatedReported }); // unmatchable
+    const capturedAtDetection = host.getLastMismatchUnmatched(sid);
+    check("20: sanity — the mismatch captures gen=2's own intended text at detection, before any rotation",
+      capturedAtDetection?.gen === 2 && capturedAtDetection?.intendedText === genText);
+    // Drain the pending notice as its own new turn (advances the generation by one — see scenario 14b's own
+    // comment above) — this is itself a real write and counts toward the rotation below.
+    await waitUntil(() => hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    // The drain above left the NOTICE itself as a new outstanding turn (busy=true, live.lastPrompt = the
+    // notice's own text) — it must be explicitly CONFIRMED as a clean, matching turn before the rotation
+    // loop below runs, or every subsequent enqueueStdin call in that loop queues behind it instead of
+    // writing immediately, and the loop's own UserPromptSubmit hooks end up confirming the WRONG
+    // generation's content — an off-by-one that manufactures a fresh unmatchable mismatch on nearly every
+    // rotation turn, each one overwriting `lastMismatchUnmatched` and defeating this test's own purpose
+    // (caught empirically: an earlier version of this test, without this confirm, failed this way).
+    // Reads `live.lastPrompt` directly (the exact text Loom just wrote for this turn — see this file's own
+    // established use of that field, e.g. kickoff-real-spawn.mjs) rather than re-parsing the raw pty bytes.
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: host.live.get(sid).lastPrompt });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    // 8 MORE ordinary, cleanly-matching turns — deliberately plain (byteIdentical=true), so none of them is
+    // itself an unmatchable mismatch that would overwrite the captured record with a NEWER one, which would
+    // defeat this test's own purpose.
+    for (let i = 0; i < 8; i++) {
+      const text = `[loom:idle] rotation turn #${i} — ordinary, correctly-delivered, matches byte-for-byte`;
+      host.enqueueStdin(sid, text);
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: text });
+      host.deliverHook(sid, { hook_event_name: "Stop" });
+    }
+    check("20: RED-PROOF — after >=8 subsequent writes, recentWrittenTurns has PROVABLY rotated past gen=2 (no longer present in the ring at all)",
+      host.live.get(sid).recentWrittenTurns.every((e) => e.gen !== 2));
+    const capturedAfterRotation = host.getLastMismatchUnmatched(sid);
+    check("20: RED-PROOF — getLastMismatchUnmatched STILL exposes gen=2's own intended text after the ring has rotated past it",
+      capturedAfterRotation?.gen === 2 && capturedAfterRotation?.intendedText === genText && capturedAfterRotation?.intendedLen === genText.length);
+  }
+
+  // ===== 21. Card 59757189 DoD-6 — the RESUME/RECYCLE-BOUNDARY sub-shape: the ring is empty because this
+  // is a FRESHLY-SPAWNED session's FIRST-EVER submission (submitGeneration=1, no prior write recorded at
+  // all), not because entries aged out under rotation (scenario 20, above — a DIFFERENT reason for an
+  // empty/thin ring). Second real field instance (card 9a336a59: gen 31744->31745, unmatched, intended
+  // text demonstrably in hand at detection) hit exactly this shape. Scenario 20's own test does NOT
+  // exercise it (it always seeds a real gen=1 first) — this is its own, independent proof. =====
+  {
+    const sid = newSession("UnmatchedFreshProcess"); SIDS.push(sid);
+    const stranded = "leftover content from somewhere else entirely, unrelated to this fresh session";
+    const genText = "[loom:from-manager] the very first message this freshly-spawned session ever intended to submit";
+    check("21: sanity — this really is a fresh process with no prior recorded write at all",
+      host.live.get(sid).recentWrittenTurns.length === 0);
+    host.enqueueStdin(sid, genText); // gen=1 — the session's FIRST-EVER submission
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + genText }); // unmatchable — no prior write to match against
+    const captured = host.getLastMismatchUnmatched(sid);
+    check("21: RED-PROOF — capture still fires on a session's own FIRST-EVER submission (ring empty because fresh, not because rotated)",
+      captured !== null && captured !== undefined);
+    check("21: RED-PROOF — the captured record names gen=1 and carries this generation's own exact intended text",
+      captured?.gen === 1 && captured?.intendedText === genText && captured?.intendedLen === genText.length);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }
