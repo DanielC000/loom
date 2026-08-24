@@ -75,12 +75,12 @@ function describe(value) {
  * @param {{ timeoutMs?: number, intervalMs?: number, label?: string }} [opts]
  */
 export async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 10, label = "condition" } = {}) {
-  const t0 = Date.now();
+  const t0 = performance.now();
   let last;
   for (;;) {
     last = await predicate();
     if (last) return last;
-    if (Date.now() - t0 > timeoutMs) break;
+    if (performance.now() - t0 > timeoutMs) break;
     await sleep(intervalMs);
   }
 
@@ -88,18 +88,18 @@ export async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 10, 
   // to see whether the event arrives late or never arrives at all — diagnostic only, see doc above.
   const graceMs = Math.min(timeoutMs * 4, 120_000);
   const graceDeadline = t0 + timeoutMs + graceMs;
-  while (Date.now() < graceDeadline) {
+  while (performance.now() < graceDeadline) {
     await sleep(intervalMs);
     last = await predicate();
     if (last) {
-      const elapsed = Date.now() - t0;
+      const elapsed = Math.round(performance.now() - t0);
       const overshoot = (elapsed / timeoutMs).toFixed(1);
       const outcome = `[waitUntil-outcome] ARRIVED LATE at ${elapsed}ms (budget ${timeoutMs}ms, overshoot ${overshoot}x) for ${label}`;
       console.error(outcome);
       throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome}`);
     }
   }
-  const elapsed = Date.now() - t0;
+  const elapsed = Math.round(performance.now() - t0);
   const overshoot = (elapsed / timeoutMs).toFixed(1);
   const outcome = `[waitUntil-outcome] ABSENT through ${elapsed}ms (${overshoot}x budget) for ${label}`;
   console.error(outcome);
