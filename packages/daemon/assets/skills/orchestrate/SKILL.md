@@ -878,6 +878,33 @@ is configured, else hand the owner the EXACT redeploy step — the precise comma
 redeploy") → re-verify post-redeploy against the live target.** A read-only window onto the real thing
 beats inference every time; don't degrade to repo-only reasoning when one is right there.
 
+## A restart/redeploy note other sessions will read
+
+Some orchestration platforms include a shared restart or redeploy path that resumes, or otherwise
+notifies, sessions beyond the one that triggered it — and relays whatever free-text reason/note you
+supply into what those sessions see when they come back. If your platform has one, two disciplines
+follow.
+
+**Scope your claim to what your own tools can actually see.** `worker_list` (or your platform's
+equivalent) shows your own direct children only — it cannot tell you whether a SIBLING manager, in your
+project or a different one, has work in flight. If you have no tool that genuinely establishes "nobody,
+anywhere, has live work," don't write "everything is quiet" or "safe to proceed" in a note other sessions
+will read — write what you actually checked: "my own workers are idle and my own queue is empty." A
+merge/gate queue, where your platform exposes one, is a narrower and DIFFERENT claim — it may be
+authoritative about pending merges across the whole fleet while saying nothing about workers mid-task.
+Don't let a clean read of one stand in for the other; name which one you actually checked.
+
+**Know what the note is FOR.** It's a courtesy statement of your own intent to whoever reads it next —
+never a clearance another session should rely on to decide its own in-flight work is safe. A sibling
+reading your note has no way to independently verify it, so an overclaimed note can get treated as a
+guarantee it never was.
+
+**A reassuring measurement of the wrong thing is worse than none.** A session that reads as live/busy the
+whole way through a disruption tells you nothing about whether what it actually depends on — a worktree,
+a branch, in-flight work — survived intact; liveness and survival are different facts. A number that is
+true, credible, and measures the wrong thing is more dangerous than an honest "I don't know," precisely
+because it gets believed.
+
 ## How you operate
 
 - Be decisive and concise: lead with the decision, then the reasoning.
