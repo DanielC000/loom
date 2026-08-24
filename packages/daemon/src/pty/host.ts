@@ -387,6 +387,35 @@ function detectPossibleDuplicateWrapperDeficit(reported: string, intended: strin
 }
 
 /**
+ * Card a640c110: a sibling to {@link detectPossibleDuplicateWrapperDeficit} — a DIFFERENT benign
+ * byte-pattern that otherwise presents as an ordinary mismatch. Measured specimen (worker
+ * `671766c9…`, gen=3, from `daemon-output.log`): `reportedLen=4106 intendedLen=4115 lenDelta=-9
+ * divergesAtChar=897`, and `intended` carried EXACTLY two ANSI/CSI escape sequences at that point
+ * (`\x1b[31m` = 5 chars, `\x1b[0m` = 4 chars) — `5 + 4 = 9`, matching `lenDelta` exactly, and
+ * `divergesAtChar` lands precisely where the first sequence starts. The engine's own echo had
+ * stripped both sequences and reproduced everything else byte-for-byte: NOT corruption, NOT content
+ * loss — an attribution/rendering artifact, same posture as the wrapper-deficit shape above.
+ *
+ * Precise and non-heuristic, mirroring `detectPossibleDuplicateWrapperDeficit`'s own
+ * exact-strip-and-compare discipline: reuses the EXISTING `ANSI_CSI` regex (this file, below —
+ * the same one `collapseBoot` already strips with), no new matcher. Fires ONLY when stripping
+ * EVERY ANSI/CSI escape sequence from `intended` produces `reported` EXACTLY, byte-for-byte — never
+ * a fuzzy/near match, and never a one-sided/partial strip (a payload where ANSI is present but the
+ * REMAINING content also genuinely diverges fails the `stripped !== reported` check below and is
+ * correctly left unclassified, same as a payload with no ANSI at all).
+ *
+ * ⛔ n=1 (one specimen, one shape) — this classifies THIS byte-pattern only; it is not license for
+ * any broader claim that mismatches are generally benign. See memory
+ * `the-qualifier-dies-in-the-summary-label`.
+ */
+function detectAnsiEscapeStripDeficit(reported: string, intended: string): { strippedAnsiLen: number } | null {
+  const stripped = intended.replace(ANSI_CSI, "");
+  if (stripped === intended) return null; // no ANSI/CSI escape sequence was present to strip
+  if (stripped !== reported) return null;
+  return { strippedAnsiLen: intended.length - stripped.length };
+}
+
+/**
  * Card 4af5aefa: a real, live false positive showed a paste-recovery notice minted CORRECTLY (its
  * resent content genuinely was the most recent inbound at the moment of detection) but delivered
  * ~293s and TWO genuine intervening turns later — by which point a newer message had already arrived
@@ -4993,6 +5022,15 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-wrapper-deficit] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedTagLen=${wrapperDeficit.strippedTag.length} strippedTag=${JSON.stringify(wrapperDeficit.strippedTag)} — the engine's report matches EXACTLY this generation's own intended text with a possible-duplicate tag stripped (byte-for-byte). Card 854d1632 (measured, not a guess): best explained as a STALE, out-of-order confirmation of an EARLIER bare write, compared against an already-advanced (wrapped) generation — NOT corruption, NOT content loss.`);
               }
+              // Card a640c110 — sibling diagnostic to the wrapper-deficit one just above: see
+              // detectAnsiEscapeStripDeficit's own doc. Logged unconditionally here (independent signal),
+              // same posture as every other diagnostic in this block; the SESSION-facing notice's own
+              // priority (below) still defers to a stronger exact match when one also applies.
+              const ansiStripDeficit = detectAnsiEscapeStripDeficit(reported, intended);
+              if (ansiStripDeficit) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-ansi-strip] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedAnsiLen=${ansiStripDeficit.strippedAnsiLen} — the engine's report matches EXACTLY this generation's own intended text with all ANSI/CSI escape sequences stripped (byte-for-byte). Card a640c110 (measured, not a guess): the engine's own echo strips ANSI/CSI styling — NOT corruption, NOT content loss.`);
+              }
               // Card 201d0d95 Q1: SURFACE the mismatch to the session itself — until now every branch above
               // was LOG-ONLY (daemon-output.log), and the shipped doctrine (orchestrate/SKILL.md) only ever
               // documented the byteIdentical=true happy path, so a manager had no way to learn a submission
@@ -5211,6 +5249,16 @@ export class PtyHost {
                 // `detectPossibleDuplicateWrapperDeficit` returns null immediately when `intended` carries no
                 // possible-duplicate tag to strip, regardless of `replayedEntry` — see its own doc.
                 const confirmedWrapperDeficit = (!confirmedFusion && !confirmedDivergedPrior && wrapperDeficit) ? wrapperDeficit : null;
+                // Card a640c110 — same precedence posture as `confirmedWrapperDeficit` just above (a
+                // stronger exact match, were one to also apply, wins) — reuses `ansiStripDeficit`, already
+                // computed above alongside its own diagnostic log. Also deliberately does NOT require
+                // `replayedEntry === undefined` (mirrors `confirmedWrapperDeficit`'s own reasoning): an
+                // exact ANSI-stripped match is strictly MORE informative than the ambiguous replay framing
+                // the fallback below would otherwise give it, so it should win precedence whenever it fires,
+                // regardless of whether `reported` also happens to coincide with some earlier recorded
+                // write. Guarded against `confirmedWrapperDeficit` too so the two exact-strip shapes stay
+                // mutually exclusive in the vanishingly-unlikely case both matched.
+                const confirmedAnsiStripDeficit = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && ansiStripDeficit) ? ansiStripDeficit : null;
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
                 // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
@@ -5287,6 +5335,16 @@ export class PtyHost {
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like a STALE, out-of-order confirmation: the engine's report matches this turn's own intended text with a possible-duplicate tag ("${confirmedWrapperDeficit.strippedTag.trim()}") stripped, byte-for-byte — best explained as confirmation of an EARLIER, unwrapped write arriving after Loom had already moved on to this later, wrapped generation, not as anything failing to reach you. Every byte of that earlier content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if that earlier write's own turn already ran, this stale confirmation may be describing IT, not this generation — check your own artifacts for whether you've now acted on the same underlying content twice.`
+                  // Card a640c110 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
+                  // own branch just above (never patched onto `lossClause`/`replayNote`, never worded as a
+                  // possible LOSS): a DIFFERENT benign shape (the engine's own echo stripping ANSI/CSI
+                  // styling out of this generation's own intended text), not the wrapper-deficit shape's
+                  // stale-confirmation-of-an-earlier-write mechanism — so worded on its own terms, not
+                  // borrowed from that branch's "EARLIER write" framing.
+                  : confirmedAnsiStripDeficit
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
+                      `What YOU can check yourself: nothing — this shape has no duplicate-check or re-send action to take; the content for this turn is confirmed complete.`
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;

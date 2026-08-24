@@ -414,12 +414,147 @@ try {
       /NOT an established loss/.test(noticeText) && /did not reach you/.test(noticeText) && !/ESTABLISHED/.test(noticeText));
     check("6b: it does NOT say NOT A LOSS (that wording is reserved for a genuine wrapper deficit)", !/NOT A LOSS/.test(noticeText));
   }
+
+  // ===== 7. Card a640c110 — a SIBLING benign shape to the wrapper-deficit one above: the engine's own
+  // echo strips ANSI/CSI escape sequences out of this generation's own intended text. Real specimen (mgr
+  // #142, worker 671766c9, gen=3): reportedLen=4106 intendedLen=4115 lenDelta=-9, and `intended` carried
+  // exactly `\x1b[31m` (5 chars) + `\x1b[0m` (4 chars) — 5+4=9, matching lenDelta exactly. =====
+  {
+    const sid = newSession("AnsiStrip"); SIDS.push(sid);
+    const prefix = "``\nrunning suite...\n";
+    const coloredFail = "\x1b[31mFAIL widget.spec.js > renders correctly\x1b[0m";
+    const plainFail = "FAIL widget.spec.js > renders correctly";
+    const intended = `${prefix}${coloredFail}\n`;
+    const reported = `${prefix}${plainFail}\n`;
+    check("SETUP: the specimen's own arithmetic closes exactly (5+4=9=lenDelta)", intended.length - reported.length === 9);
+    host.enqueueStdin(sid, intended);
+    const fake = fakesById.get(sid);
+    const writesBefore = fake.writes.length;
+    const capturedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string") capturedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported }); // ANSI stripped, exactly
+    } finally {
+      console.log = origLog;
+    }
+    const ansiLines = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-ansi-strip] "));
+    check("7: POSITIVE CONTROL — [prompt-mismatch-ansi-strip] fires on the real ANSI-stripped specimen", ansiLines.length === 1);
+    check("7: it names the exact stripped length (9, matching the live specimen's own lenDelta)", /strippedAnsiLen=9\b/.test(ansiLines[0] ?? ""));
+    check("7: neither accumulation detector confirms this shape (it's a DEFICIT, not a fusion — those are always longer)",
+      !capturedLines.some((l) => (l.startsWith("[composer-accumulation] ") || l.startsWith("[composer-accumulation-diverged-prior] ")) && l.includes("CONFIRMED")));
+
+    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7: the notice enqueues (not suppressed)", enqueued);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeText = fake.writes.slice(writesBefore).join("");
+    check("7: REQUIRED — the notice explicitly says this is NOT a loss", /NOT A LOSS/.test(noticeText));
+    check("7: it names the ANSI/CSI mechanism (distinct wording from the wrapper-deficit shape)", /stripping ANSI\/CSI escape sequences/.test(noticeText));
+    check("7: it does NOT reuse the wrapper-deficit's own \"STALE, out-of-order confirmation\" wording (a different mechanism)",
+      !/STALE, out-of-order confirmation/.test(noticeText));
+    check("7: it does NOT use the generic \"possible LOSS\" framing", !/possible LOSS/.test(noticeText));
+  }
+
+  // ===== 7b. NEGATIVE CONTROL — ANSI present but content genuinely diverges (the card's own DoD-3 required
+  // case): stripping ANSI from `intended` must NOT reconcile with `reported` here, so this must NOT be
+  // swallowed as benign — it must still classify as an ordinary mismatch. =====
+  {
+    const sid = newSession("AnsiStripGenuineDiverge"); SIDS.push(sid);
+    const intended = "``\nrunning suite...\n\x1b[31mFAIL widget.spec.js > renders correctly\x1b[0m\n";
+    const reported = "totally unrelated content that has nothing to do with the intended text";
+    check("SETUP: stripping ANSI from intended does NOT reconcile with reported (genuinely different content)",
+      intended.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "") !== reported);
+    host.enqueueStdin(sid, intended);
+    const fake = fakesById.get(sid);
+    const writesBefore = fake.writes.length;
+    const capturedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string") capturedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    } finally {
+      console.log = origLog;
+    }
+    const ansiLines = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-ansi-strip] "));
+    check("7b: NEGATIVE CONTROL — [prompt-mismatch-ansi-strip] does NOT fire (ANSI present, but content genuinely differs)", ansiLines.length === 0);
+
+    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7b: the notice enqueues", enqueued);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeText = fake.writes.slice(writesBefore).join("");
+    check("7b: it is NOT swallowed as benign — no \"NOT A LOSS\" ANSI framing appears", !/stripping ANSI\/CSI escape sequences/.test(noticeText));
+  }
+
+  // ===== 7c. NEGATIVE CONTROL — a genuinely spliced payload with NO ANSI/CSI escapes at all still
+  // classifies as an ordinary mismatch (the classifier must not fire when there's nothing to strip). =====
+  {
+    const sid = newSession("AnsiStripNoAnsiSplice"); SIDS.push(sid);
+    const stranded = "leftover text from a prior turn — no ANSI/CSI escapes anywhere here";
+    const intended = "the new message the user actually typed, also with no ANSI/CSI escapes";
+    host.enqueueStdin(sid, intended);
+    const capturedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string") capturedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    } finally {
+      console.log = origLog;
+    }
+    const ansiLines = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-ansi-strip] "));
+    check("7c: NEGATIVE CONTROL — [prompt-mismatch-ansi-strip] does not fire when there's no ANSI/CSI to strip", ansiLines.length === 0);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+  }
+
+  // ===== 7d. NEGATIVE CONTROL — the NEAR-MISS case (manager review, card a640c110): 7b proves the
+  // classifier stays silent on content that's WILDLY different, but that alone can't discriminate a
+  // strict byte-equality implementation from a fuzzy/near-match one — both refuse on input that far
+  // apart. This is the discriminating fixture: the SAME ANSI-carrying `intended` as scenario 7, but
+  // `reported` is the correctly-ANSI-stripped text with EXACTLY ONE character changed (same length, one
+  // position differs) — the shape a genuine splice/truncation at a boundary actually looks like, and
+  // exactly the input a lenient (prefix/near/threshold) matcher would wrongly wave through as "NOT A
+  // LOSS" on real content loss. DoD-1 forbids that relaxation explicitly; this fixture is what would
+  // catch it if the strict `stripped !== reported` check in detectAnsiEscapeStripDeficit were ever
+  // loosened. =====
+  {
+    const sid = newSession("AnsiStripNearMiss"); SIDS.push(sid);
+    const prefix = "``\nrunning suite...\n";
+    const coloredFail = "\x1b[31mFAIL widget.spec.js > renders correctly\x1b[0m";
+    const intended = `${prefix}${coloredFail}\n`;
+    const exactStrip = intended.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ""); // what a CORRECT strip produces
+    // Flip exactly one character (the final "y" in "correctly" -> "x") — same length, one position differs.
+    const flipAt = exactStrip.lastIndexOf("correctly") + "correctly".length - 1;
+    const reported = exactStrip.slice(0, flipAt) + "x" + exactStrip.slice(flipAt + 1);
+    let diffCount = 0;
+    for (let i = 0; i < exactStrip.length; i++) if (exactStrip[i] !== reported[i]) diffCount++;
+    check("SETUP: 7d's reported is the same length as the correct strip", reported.length === exactStrip.length);
+    check("SETUP: 7d's reported differs from the correctly-ANSI-stripped text by EXACTLY ONE character (not zero, not a drifted exact match)", diffCount === 1);
+
+    host.enqueueStdin(sid, intended);
+    const fake = fakesById.get(sid);
+    const writesBefore = fake.writes.length;
+    const capturedLines = [];
+    const origLog = console.log;
+    console.log = (msg) => { if (typeof msg === "string") capturedLines.push(msg); };
+    try {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported }); // one char off the correct strip
+    } finally {
+      console.log = origLog;
+    }
+    const ansiLines = capturedLines.filter((l) => l.startsWith("[prompt-mismatch-ansi-strip] "));
+    check("7d: NEGATIVE CONTROL — [prompt-mismatch-ansi-strip] does NOT fire on a one-character near-miss (byte-equality is the whole test, no fuzzy match)", ansiLines.length === 0);
+
+    const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7d: the notice enqueues", enqueued);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeText = fake.writes.slice(writesBefore).join("");
+    check("7d: it is NOT swallowed as benign — no ANSI-strip \"NOT A LOSS\" framing appears for a one-character-off payload", !/stripping ANSI\/CSI escape sequences/.test(noticeText));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card d005f55b's diverged-prior compounding detector (DoD-2) fires its OWN verdict kind [composer-accumulation-diverged-prior] on the card's own committed gen=10/gen=11 regression fixture (1893/2161, 1126/3287) — a specimen the ORIGINAL written-only detector provably cannot confirm (1893+1126=3019 != 3287) — refuses a same-length wrong-order variant (order-sensitivity proof), stays silent on ordinary clean turns, and correctly ALSO refuses the card's own motivating sandwiched-placeholder specimen (both exact-sum candidates are short by the placeholder's length). For that last, otherwise-unmatched case, DoD-3's substring recognizer finds the earlier generation's write even though it is SANDWICHED in the middle (not at either edge — an edge-only check would have missed it), correctly separates the leading (placeholder) and trailing (current turn's own text) remainders, and the session-facing notice names what was recognized instead of reading as a plain \"matched nothing\". Also confirms the manager-supplied LIVE possible-duplicate-tag DEFICIT specimen (sessions 494db005/f6eeeb52, mechanism corrected by card 854d1632): a precise, non-heuristic detector fires its own tag, the notice explicitly says NOT A LOSS and names the corrected stale-confirmation mechanism (never the earlier, wrong 'did not reach you' framing), and a same-length-delta-but-wrong-pattern negative control refuses."
+  ? "\n✅ ALL PASS — card d005f55b's diverged-prior compounding detector (DoD-2) fires its OWN verdict kind [composer-accumulation-diverged-prior] on the card's own committed gen=10/gen=11 regression fixture (1893/2161, 1126/3287) — a specimen the ORIGINAL written-only detector provably cannot confirm (1893+1126=3019 != 3287) — refuses a same-length wrong-order variant (order-sensitivity proof), stays silent on ordinary clean turns, and correctly ALSO refuses the card's own motivating sandwiched-placeholder specimen (both exact-sum candidates are short by the placeholder's length). For that last, otherwise-unmatched case, DoD-3's substring recognizer finds the earlier generation's write even though it is SANDWICHED in the middle (not at either edge — an edge-only check would have missed it), correctly separates the leading (placeholder) and trailing (current turn's own text) remainders, and the session-facing notice names what was recognized instead of reading as a plain \"matched nothing\". Also confirms the manager-supplied LIVE possible-duplicate-tag DEFICIT specimen (sessions 494db005/f6eeeb52, mechanism corrected by card 854d1632): a precise, non-heuristic detector fires its own tag, the notice explicitly says NOT A LOSS and names the corrected stale-confirmation mechanism (never the earlier, wrong 'did not reach you' framing), and a same-length-delta-but-wrong-pattern negative control refuses. Also confirms card a640c110's sibling ANSI/CSI-strip detector: fires its own [prompt-mismatch-ansi-strip] tag and NOT-A-LOSS notice on the mgr #142 specimen (lenDelta=-9 exactly), and correctly refuses when ANSI is present but content genuinely diverges, and when there's no ANSI to strip at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
