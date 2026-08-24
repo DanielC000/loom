@@ -58,6 +58,11 @@ function makeEnv() {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "orchestrate", position: 0 });
   const enqueued = [];
   const pendingBySession = new Map();
+  // Card 6651bf24: `notifyManagerOfIdleWorker`'s taskless branch now consults `hasFirstTurnStarted`
+  // (mirrors classifyIdleWorker's own stub contract — see kickoff-giveup-exhausted.mjs /
+  // worker-idle-spawn-broken-contradiction.mjs for the same per-session-settable-Set pattern). Default
+  // false (unstarted) unless a test explicitly marks a session id into the Set.
+  const firstTurnStarted = new Set();
   const pty = {
     enqueueStdin: (id, text) => {
       enqueued.push({ id, text });
@@ -65,17 +70,24 @@ function makeEnv() {
       return s?.processState === "live" ? { delivered: true } : { delivered: false, position: 1 };
     },
     getPendingEntries: (id) => pendingBySession.get(id) ?? [],
+    hasFirstTurnStarted: (id) => firstTurnStarted.has(id),
   };
   const sessions = new SessionService(db, pty, new OrchestrationControl());
-  return { dbFile, db, projId, agentId, enqueued, sessions, pendingBySession };
+  return { dbFile, db, projId, agentId, enqueued, sessions, pendingBySession, firstTurnStarted };
 }
-function seedSession(e, id, { role = "worker", processState = "live", parentSessionId = null, taskId = null, branch = null, engineSessionId = "eng-" + id } = {}) {
+function seedSession(e, id, { role = "worker", processState = "live", parentSessionId = null, taskId = null, branch = null, engineSessionId = "eng-" + id, turnSeq = 0 } = {}) {
   e.db.insertSession({
     id, projectId: e.projId, agentId: e.agentId, engineSessionId, title: null, cwd: e.projId,
     processState, resumability: "resumable", busy: false,
     createdAt: NOW.toISOString(), lastActivity: NOW.toISOString(), lastError: null, role,
     parentSessionId, taskId, ctxInputTokens: null, ctxTurns: null, model: null, worktreePath: null, branch,
   });
+  // LOAD-BEARING (card 6651bf24): `insertSession`'s own INSERT statement does NOT list `turn_seq` at all
+  // (db.ts ~4587-4596) — passing `turnSeq` straight into the inserted object is a silent no-op, caught
+  // while writing this fix. `turn_seq` only ever moves via `incrementTurnSeq` (the same method the real
+  // Stop-hook chokepoint calls), so that's what actually seeds a non-zero value here. Do NOT "simplify"
+  // this back to an inline `turnSeq` field on the insert object — it would silently stop doing anything.
+  for (let i = 0; i < turnSeq; i++) e.db.incrementTurnSeq(id);
 }
 function seedTask(e, id, columnKey = "in_progress") {
   e.db.insertTask({ id, projectId: e.projId, title: "T-" + id, body: "", columnKey, position: 0, priority: "p2", createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
@@ -117,17 +129,86 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============ (T2) taskless + engineSessionId SET + NEVER reported → silent-finish nudge (card df48366b) ============
+// ============ (T2) taskless + a GENUINELY COMPLETED turn (turnSeq>=1) + NEVER reported → silent-finish
+// nudge, UNCHANGED (card df48366b's original behavior; card 6651bf24 DoD-6 test 3 — the regression pin
+// for the case that must NOT move when discriminators A/B are added). LOAD-BEARING SEED: both
+// `firstTurnStarted.add(...)` AND `turnSeq: 1` are required here — without EITHER, this specimen falls
+// into the NEW discriminator-A or discriminator-B branch post-fix instead of this one, and this test would
+// silently start measuring a different code path than the one it names. (`turnSeq` defaults to 0 —
+// db.ts:7132 — so leaving it unset here is exactly the trap that made the pre-fix version of this test
+// pass for the wrong reason: it never actually distinguished "genuinely completed" from "never completed".)
 {
   const e = makeEnv();
   seedSession(e, "mgr-t2", { role: "manager" });
-  seedSession(e, "wkr-t2", { taskId: null, parentSessionId: "mgr-t2", branch: "loom/spike-t2", engineSessionId: "eng-wkr-t2" });
+  seedSession(e, "wkr-t2", { taskId: null, parentSessionId: "mgr-t2", branch: "loom/spike-t2", engineSessionId: "eng-wkr-t2", turnSeq: 1 });
+  e.firstTurnStarted.add("wkr-t2");
 
   e.sessions.notifyManagerOfIdleWorker("wkr-t2");
   const idle = e.enqueued.find((x) => x.id === "mgr-t2" && /worker-idle/.test(x.text));
-  check("(T2) taskless + engineSessionId set + never reported → a [loom:worker-idle] silent-finish nudge now fires",
+  check("(T2) taskless + turnSeq>=1 + never reported → a [loom:worker-idle] silent-finish nudge fires",
     !!idle);
-  check("(T2) the nudge says it never called worker_report", !!idle && /never called worker_report/.test(idle.text));
+  // BYTE-IDENTICAL regression pin (not a partial regex) — proves discriminators A/B didn't alter this
+  // branch's wording at all for the case that's supposed to be untouched.
+  const expected = `[loom:worker-idle] worker wkr-t2 finished a turn and is idle but has never called worker_report (taskless — no board card to check). It may be done-but-unreported or stalled — pull it: worker_transcript wkr-t2 to see what it did, then worker_message it or worker_stop it once reviewed.`;
+  check("(T2) the nudge wording is BYTE-IDENTICAL to the pre-fix text (DoD-6 test 3)", !!idle && idle.text === expected);
+  cleanup(e);
+}
+
+// ============ (T5) DoD-6 test 1 (card 6651bf24, SPECIMEN 1 shape): engineSessionId SET but a turn never
+// genuinely started (hasFirstTurnStarted:false, empty transcript, never reported) → DISCRIMINATOR A fires
+// → broken-spawn wording, NEVER "finished a turn". RED-PROOF: pre-fix code had no discriminator-A check at
+// all once engineSessionId was set — it went straight to the plain silentFinishMsg (`finished a turn and
+// is idle`) for this exact state; this is the case that was silently wrong before this card. ============
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-t5", { role: "manager" });
+  seedSession(e, "wkr-t5", { taskId: null, parentSessionId: "mgr-t5", branch: "loom/spike-t5", engineSessionId: "eng-wkr-t5" });
+  // firstTurnStarted left false (default); no worker_report; transcript stays empty (fake cwd, no file).
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-t5");
+  const msgs = e.enqueued.filter((x) => x.id === "mgr-t5");
+  check("(T5) exactly one nudge fires", msgs.length === 1);
+  check("(T5) it is the broken-spawn nudge (discriminator A), not silent-finish", !!msgs[0] && /worker-spawn-broken/.test(msgs[0].text));
+  check("(T5) it never asserts 'finished a turn' (the false claim this card fixes)", !!msgs[0] && !/finished a turn/.test(msgs[0].text));
+  cleanup(e);
+}
+
+// ============ (T6) DoD-6 test 2 (card 6651bf24, SPECIMEN 2's actual production shape — amended by the
+// manager onto the card: reworded, not suppressed, per DoD-4 "fix the claim, don't silence the nudge"):
+// engineSessionId SET, hasFirstTurnStarted:TRUE (a turn genuinely started — proven this can coexist with
+// turnSeq:0 by host.ts:4740/4753/5381/8790-8801, all in the SAME UserPromptSubmit hook case), turnSeq:0
+// (never completed), never reported → DISCRIMINATOR B fires → a nudge FIRES but does NOT claim completion.
+// RED-PROOF: pre-fix code (and my FIRST, rejected plan — discriminator A alone) both emit the plain
+// "finished a turn and is idle" wording for this exact state; this is the test that would have caught
+// that gap. ============
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-t6", { role: "manager" });
+  seedSession(e, "wkr-t6", { taskId: null, parentSessionId: "mgr-t6", branch: "loom/spike-t6", engineSessionId: "eng-wkr-t6" });
+  e.firstTurnStarted.add("wkr-t6"); // turn started ... turnSeq stays 0 (default) — never completed
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-t6");
+  const msgs = e.enqueued.filter((x) => x.id === "mgr-t6");
+  check("(T6) a nudge FIRES (reworded, not suppressed — DoD-4)", msgs.length === 1);
+  check("(T6) it does NOT claim 'finished a turn'", !!msgs[0] && !/finished a turn/.test(msgs[0].text));
+  check("(T6) it explicitly states the turn has NOT completed", !!msgs[0] && /has NOT completed one/.test(msgs[0].text));
+  check("(T6) it names turnSeq=0", !!msgs[0] && /turnSeq=0/.test(msgs[0].text));
+  check("(T6) it points at a LIVE re-check (worker_status) before any escalation", !!msgs[0] && /Re-check LIVE first: worker_status/.test(msgs[0].text));
+  check("(T6) worker_stop is demoted behind that re-check confirming it's stuck (mirrors 17732398)", !!msgs[0] && /once that confirms it's genuinely stuck/.test(msgs[0].text));
+  cleanup(e);
+}
+
+// ============ (T7) DoD-6 test 4: a STOPPED (exited) 0-turn taskless session never synthesizes a
+// completion either — same discriminator-A state as T5, with processState varied to rule out a hidden
+// dependency on process state (the function never reads processState at all). ============
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-t7", { role: "manager" });
+  seedSession(e, "wkr-t7", { taskId: null, parentSessionId: "mgr-t7", branch: "loom/spike-t7", engineSessionId: "eng-wkr-t7", processState: "exited" });
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-t7");
+  const msgs = e.enqueued.filter((x) => x.id === "mgr-t7");
+  check("(T7) a stopped 0-turn session still does not synthesize 'finished a turn'", msgs.every((m) => !/finished a turn/.test(m.text)));
   cleanup(e);
 }
 

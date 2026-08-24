@@ -1055,6 +1055,31 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
 }
 
 /**
+ * Card 6651bf24 SPECIMEN 2: a taskless worker whose FIRST turn genuinely started (SessionStart fired, a
+ * real UserPromptSubmit hook confirmed it — `hasFirstTurnStarted:true`) but has not yet COMPLETED one
+ * (`turnSeq` — incremented ONLY at the genuine Stop-hook chokepoint, host.ts's `onTurnCompleted` — is
+ * still 0, the same `neverCompletedTurn` field `worker_status`/`mcp/orchestration.ts` already expose).
+ * `hasFirstTurnStarted` answers "did anything begin", never "did it finish" — it flips true on the FIRST
+ * `UserPromptSubmit` hook, i.e. turn START (host.ts:4740/8790-8801), so a live, actively-producing,
+ * `busy:true` session mid its first turn is `turnSeq:0` by construction. The taskless branch used to fall
+ * through past this state straight into the plain "finished a turn and is idle" wording below — FALSE for
+ * this case (measured: Specimen 2, a healthy Code Reviewer ~90s into its first turn, got that exact false
+ * claim plus a `worker_stop` recommendation — see the card).
+ *
+ * Reworded, NOT silenced (card 6651bf24 DoD-4: "fix the claim it makes", not "silence the nudge
+ * generally") — a genuinely wedged first turn is real signal worth surfacing; the fix is to stop asserting
+ * a completion that never happened, not to go quiet. The `busy:false` reading this fires on is a single
+ * point-in-time snapshot that can already be stale by the time it's read (delivery can lag behind
+ * classification — same class of staleness `parked-gate-stale`'s own wording hedges for the tasked path,
+ * above) — an actively-working first turn can dip `busy:false` and recover before the manager ever reads
+ * this, which is exactly why the message below leads with a live re-check rather than an escalation.
+ */
+function buildNeverCompletedTurnMsg(w: Session): string {
+  return `[loom:worker-idle] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} started its first turn but has NOT completed one (turnSeq=0, taskless — no board card to check) and has never called worker_report. Do NOT read this as a completion — it isn't one. This may be a genuinely wedged first turn, or a transient busy(false) reading mid an otherwise-healthy long turn (a single point-in-time snapshot — it can already be stale by the time you see it, the engine may already be back at work). ` +
+    `${confirmationLatencyProportionalityClause()} Re-check LIVE first: worker_status({workerSessionId:"${w.id}"}) for a fresh busy/turnSeq read — free, no risk. Only if it's STILL busy:false with turnSeq:0 after that re-check should you pull worker_transcript ${w.id} to see what it's actually doing, and only worker_message it or worker_stop it once that confirms it's genuinely stuck, not just caught between busy-flag edges.`;
+}
+
+/**
  * Card 738f2109 DoD-1 measurement (worker report, 2026-08-05): `notifyManagerOfIdleWorker` fires on a
  * worker's busy(false) edge with ZERO holdoff (index.ts's `onBusy` hook calls it synchronously right
  * after `db.setBusy`) — so `classifyIdleWorker`'s `broken-spawn` kind used to be eligible on the VERY
@@ -9428,14 +9453,44 @@ export class SessionService {
         }
         return;
       }
-      // It DID start a turn — has it EVER called worker_report? If not, it finished silently with no
-      // board state to reconcile against, so this is the only signal available (no parked-ack/re-ack
-      // nuance — that needs a report to compare against, which by definition doesn't exist yet).
+      // Has it EVER called worker_report? Checked before the DISCRIMINATOR-A read below (cheapest-and-
+      // most-decisive-first, mirrors classifyIdleWorker's own ordering at ~9301-9311) — a worker that has
+      // already reported at least once needs no further classification here regardless of turn state.
       const everReported = this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report");
-      if (!everReported) {
-        const silentFinishMsg = `[loom:worker-idle] worker ${workerSessionId} finished a turn and is idle but has never called worker_report (taskless — no board card to check). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_message it or worker_stop it once reviewed.`;
-        try { this.pty.enqueueStdin(w.parentSessionId, silentFinishMsg); } catch { /* manager not live */ }
+      // DISCRIMINATOR A (card 6651bf24, mirrors classifyIdleWorker's card-2281009d discriminator exactly
+      // — see that classifier's own comment at ~9285-9316): `engineSessionId` being SET only proves the
+      // SessionStart hook fired, NOT that a turn ever ran (card f91c8634's parked-Enter signature can
+      // leave a kickoff sitting unsent in the composer forever) — without this check that state used to
+      // fall straight through into "it DID start a turn" and assert a completion that never happened.
+      // `hasFirstTurnStarted` is seeded `false` for EVERY real Claude live entry `spawn()` creates — fresh,
+      // resume, AND fork alike (host.ts:4072, unconditional, inside the one `spawn()` chokepoint every one
+      // of those paths shares — verified NOT the `firstTurnStarted:true` seeds at host.ts:4250/4331, which
+      // belong to `spawnShell`/`seedCanned`, an unrelated non-Claude `kind:"shell"|"canned"` code path
+      // reachable only from the human-only `POST /api/terminals` REST route and a WS-replay test fixture,
+      // never a real worker's resume/fork) — so a worker that crash-resumed with a genuinely never-started
+      // kickoff still reads `hasFirstTurnStarted:false` here, never a stale `true`.
+      if (
+        !this.pty.hasFirstTurnStarted(workerSessionId) &&
+        !everReported &&
+        readTranscript(w.cwd, w.engineSessionId).length === 0
+      ) {
+        if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) {
+          try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }
+        }
+        return;
       }
+      if (everReported) return; // already reported at least once — nothing to nudge about
+      // DISCRIMINATOR B (card 6651bf24 SPECIMEN 2): discriminator A is false, so a turn genuinely STARTED
+      // — but `turnSeq` (the ONLY thing `onTurnCompleted` increments, and only at the genuine Stop-hook
+      // chokepoint) is still 0, i.e. `neverCompletedTurn`. See buildNeverCompletedTurnMsg's own doc for why
+      // this is reworded rather than folded into the plain "finished a turn" wording below.
+      if ((w.turnSeq ?? 0) === 0) {
+        try { this.pty.enqueueStdin(w.parentSessionId, buildNeverCompletedTurnMsg(w)); } catch { /* manager not live */ }
+        return;
+      }
+      // Genuinely completed >=1 turn and never reported — the ORIGINAL silent-finish signal, unchanged.
+      const silentFinishMsg = `[loom:worker-idle] worker ${workerSessionId} finished a turn and is idle but has never called worker_report (taskless — no board card to check). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_message it or worker_stop it once reviewed.`;
+      try { this.pty.enqueueStdin(w.parentSessionId, silentFinishMsg); } catch { /* manager not live */ }
       return; // nothing else to classify without a task
     }
 
