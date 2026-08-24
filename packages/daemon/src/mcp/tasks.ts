@@ -198,13 +198,76 @@ function persistDeferredStateBestEffort(
 ): void {
   if (!state.autoCleared && !state.stuckChanged) return;
   try {
+    // Card 1d27c3cd Code Review follow-up: `state` was computed by the CALLER (listProjectTasks/
+    // getProjectTask) from a task snapshot read BEFORE it awaited resolveMergedInfo/resolveDeferredEffective
+    // — and that chain does a REAL git-log child process on a cache miss (resolveMergedInfo →
+    // getTaskMergedInfo → getMergedCommitMapCached → getOrStartMergedMapScan), a genuine event-loop yield on
+    // a READ path any board list can trigger. Trusting the caller's stale body/deferredReason across that
+    // gap would let a concurrent tasks_update({body,...}) land in the window and get silently clobbered by
+    // this blind write. Re-fetching HERE, immediately before folding, shrinks the window to a single
+    // synchronous SQLite read-then-write — the SAME guarantee `updateProjectTask`'s own blind writes
+    // (heldByPatch/deferredAtPatch) already rely on, not a new or weaker one.
+    //
+    // CONSEQUENCE, verified against the code (not assumed): this also makes two near-simultaneous
+    // autoCleared reads (A and B, both racing on the SAME still-deferred row) structurally unable to fold
+    // TWICE. Each read's own re-fetch-fold-write is one uninterruptible synchronous JS stretch — whichever
+    // of A/B runs it first clears `deferredReason` to null in the SAME write that applies the fold; the
+    // other's re-fetch then observes `fresh.deferredReason === null` and its `fresh.deferredReason ? … : {}`
+    // guard skips the fold entirely. (The loser still performs a harmless redundant scalar-only rewrite —
+    // deferred/deferredUntilTaskId/deferredStuck/deferredAt/deferredReason all re-written to the SAME
+    // values already on the row, bumping `updatedAt` again but never `version` — it just never touches
+    // `body` a second time.)
+    const fresh = db.getTask(taskId);
+    if (!fresh) return; // deleted concurrently — nothing left to persist
     const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
-      ? { deferred: false, deferredUntilTaskId: null, deferredStuck: false, deferredAt: null, deferredReason: null }
+      ? {
+          deferred: false, deferredUntilTaskId: null, deferredStuck: false, deferredAt: null, deferredReason: null,
+          // Card 1d27c3cd: this auto-release IS the designed, recommended way a deferral ends — which is
+          // exactly why it must not also be the thing that silently destroys the closure record
+          // `deferredReason` held. Fold it into the body before it's lost, same as the manual-clear branch
+          // in updateProjectTask below. Only when there's actually a reason to save.
+          ...(fresh.deferredReason ? { body: foldReleasedDeferralIntoBody(fresh.body, fresh.deferredReason, new Date().toISOString()) } : {}),
+        }
       : { deferredStuck: state.stuck };
-    db.updateTask(taskId, patch);
+    // DELIBERATELY UN-VERSIONED (no baseVersion / optimistic-concurrency check on this body write): the
+    // re-fetch above closes the wide git-scan-shaped window, but a residual, much narrower one remains —
+    // an unrelated tasks_update({body, baseVersion}) landing in the single synchronous gap between the
+    // `db.getTask` read above and this `db.updateTask` write would still lose its edit, since `body` is a
+    // full replace and this write never checks version. Accepted, not fixed: this is a best-effort side
+    // effect of a plain board READ (this function's own doc: "a board read must never fail... because this
+    // persist failed"), so there is no caller-supplied baseVersion to check even in principle — plumbing
+    // one through would mean tasks_list/tasks_get themselves start demanding a version just to read the
+    // board, which is a contract this card must not change. Every other blind writer in this file
+    // (heldByPatch/deferredAtPatch in updateProjectTask) carries the identical residual risk.
+    db.updateTask(fresh.id, patch);
   } catch (e) {
     console.warn(`[mcp/tasks] best-effort deferred/deferredStuck write-through failed for task ${taskId} (read result is unaffected):`, e);
   }
+}
+
+/**
+ * Card 1d27c3cd: `deferredReason` is cleared the moment a deferral ends — both on an explicit manual
+ * `deferred:false` (updateProjectTask below) and on the designed `deferredUntilTaskId` auto-release path
+ * (persistDeferredStateBestEffort above) — and that clear is CORRECT (a stale "blocked on X" left on a
+ * card that's no longer blocked is its own defect). But the REASON itself is a closure record, not
+ * disposable state, so it's folded into the card BODY — the durable surface a future reader already
+ * looks at — as its own paragraph, before the field is nulled.
+ *
+ * IDEMPOTENT across repeated defer/release cycles: strips any PRIOR "Previously deferred" paragraph
+ * before appending the new one, so a card that defers and releases many times over its life keeps only
+ * the LATEST release's reasoning in its body, never a growing pile of stale ones. `reason` is flattened
+ * to a single line first (multi-paragraph reasons are not expected — the field is documented as "a short
+ * string" — but flattening guarantees the note stays exactly one paragraph, which is what makes the
+ * strip-before-append idempotent on a LATER fold).
+ */
+export const DEFERRED_RELEASE_NOTE_PREFIX = "**Previously deferred:**";
+
+export function foldReleasedDeferralIntoBody(body: string, reason: string, releasedAt: string): string {
+  const safeReason = reason.replace(/\s*\n{2,}\s*/g, " ").trim();
+  const note = `${DEFERRED_RELEASE_NOTE_PREFIX} ${safeReason} _(cleared ${releasedAt})_`;
+  const paragraphs = body.split(/\n\n+/).filter((p) => !p.trim().startsWith(DEFERRED_RELEASE_NOTE_PREFIX));
+  paragraphs.push(note);
+  return paragraphs.join("\n\n").trim();
 }
 
 /**
@@ -956,12 +1019,28 @@ export async function updateProjectTask(
     const trimmed = patch.deferredReason == null ? null : patch.deferredReason.trim();
     deferredReasonPatch = trimmed && trimmed.length > 0 ? trimmed : null;
   }
+  // Card 1d27c3cd: captured BEFORE deferredReasonPatch nulls it below — the reason a manual clear is
+  // about to discard, folded into the body as a closure record (see foldReleasedDeferralIntoBody's own
+  // doc). Merged into `dbPatch` (never `patch`) below, mirroring heldByPatch/deferredAtPatch — a
+  // server-computed addition, not caller-supplied content, so it must never trip the title/body
+  // baseVersion gate a caller-supplied `body` would.
+  let bodyFoldPatch: string | undefined;
   if (patch.deferred === false) {
     // Explicit manual clear — reset deferral provenance, mirrors heldBy resetting on a held clear below.
     // Un-deferring never needs a reason of its own — only a write that would LEAVE the card manually
     // deferred does (the guard above never reaches this branch, since `patch.deferred === false` short
     // circuits before it).
     deferredReasonPatch = null;
+    // Code Review follow-up (1d27c3cd): `owned` was read at the TOP of this function, before the one
+    // await this function can take (the repoKey retarget check above, when the SAME patch also touches
+    // repoKey) — folding from `owned.deferredReason`/`owned.body` across that gap could fold a reason a
+    // concurrent write already cleared, or overwrite a concurrent body edit with a stale base. Re-fetch
+    // immediately before folding — same fix, same reasoning, as persistDeferredStateBestEffort below;
+    // this is the ordinary case's zero-await path defensively covering that one narrow combined-patch gap.
+    const freshForFold = db.getTask(owned.id) ?? owned;
+    if (freshForFold.deferredReason) {
+      bodyFoldPatch = foldReleasedDeferralIntoBody(patch.body ?? freshForFold.body, freshForFold.deferredReason, new Date().toISOString());
+    }
   } else if (touchesDeferralFields && isManualDeferral) {
     const resultingReason = deferredReasonPatch !== undefined ? deferredReasonPatch : (owned.deferredReason ?? null);
     if (!resultingReason) {
@@ -1014,7 +1093,19 @@ export async function updateProjectTask(
   // deferredAt is stamped/reset SERVER-SIDE only (computed above) — merged into the DB write here, never
   // into `patch` itself, so it can never leak into the caller-echoed `changed` list (mirrors heldByPatch's
   // own exclusion from `patch` for the same reason).
-  const dbPatch = deferredAtPatch !== undefined ? { ...dbPatch0, deferredAt: deferredAtPatch } : dbPatch0;
+  const dbPatch1 = deferredAtPatch !== undefined ? { ...dbPatch0, deferredAt: deferredAtPatch } : dbPatch0;
+  // Card 1d27c3cd: same exclusion-from-`patch` reasoning as deferredAt/heldBy above — this is a
+  // server-folded addition to body, not the caller's own `body` edit, so it must stay out of `patch`
+  // (which is what the touchesContent/baseVersion gate below and the truncation guard both read).
+  // DELIBERATELY UN-VERSIONED: this write never checks `baseVersion` even though it touches `body` — the
+  // re-fetch-immediately-before-fold above (freshForFold) closes the wide window, but a residual one
+  // remains: an unrelated tasks_update({body, baseVersion}) landing in the single synchronous gap between
+  // that re-fetch and the eventual db.updateTask/updateTaskChecked call below would still lose its edit
+  // (`body` is a full replace, this write applies unconditionally). Accepted, not fixed: requiring
+  // baseVersion here would mean a bare `{deferred:false}` — today's version-free contract — starts
+  // demanding one whenever the card happens to carry a reason, which this card must not change. Same
+  // residual risk persistDeferredStateBestEffort documents for its own fold.
+  const dbPatch = bodyFoldPatch !== undefined ? { ...dbPatch1, body: bodyFoldPatch } : dbPatch1;
   // Destructive-body-truncation guard (card 09d68835, whole-patch-reject like every guard above): `body`
   // is a FULL REPLACE with no undo (see the tool description) — that is CORRECT, field-level PATCH
   // semantics are not what's wrong here. What's missing is friction in front of the one catastrophic

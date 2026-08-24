@@ -2003,6 +2003,10 @@ export class PlatformMcpRouter {
           "always lands on the MANUAL path (this router has no deferredUntilTaskId) — card c90e9525: it REQUIRES " +
           "deferredReason (a short string: why it's parked and what would release it), refused otherwise (whole " +
           "patch rejected, nothing written) so a cross-project deferral can never go byte-identical-to-forgotten. " +
+          "deferred:false CLEARS deferredReason/deferredAt to null (same as the in-project tasks_update) — but " +
+          "card 1d27c3cd: before that clear, a recorded reason is folded into the card's body as its own " +
+          "\"**Previously deferred:**\" paragraph (idempotently replacing any earlier one), so the reasoning " +
+          "survives even though the field is reset. " +
           "repoKey? (multi-repo epic) " +
           "re-targets the card to a different entry in the destination project's `repos` registry, or " +
           "null/\"primary\" to reset it to that project's primary repo — an unknown key is REFUSED (whole patch " +
