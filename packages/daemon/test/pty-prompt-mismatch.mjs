@@ -1095,6 +1095,73 @@ try {
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
     check("16: the notice actually reached the pty", noticeWrite.includes("[loom:prompt-mismatch]"));
   }
+
+  // ===== 17. Card 3ff61275 DoD-7 (MINIMUM VIABLE FIX) — RED-PROOF #1: before this change, every notice
+  // identified the mismatched write by a bare gen number ONLY — nothing else. THE THIRD FIELD INSTANCE
+  // (escalation f1a8dce1) is exactly why that isn't enough: a recipient reading the notice minutes later,
+  // with intervening turns already delivered, has no way to tell "this happened just now" from "this
+  // happened 19 minutes ago" — so it misattributed a gen=1 mismatch to an unrelated gen=3 message and
+  // escalated a false total-data-loss report. This proves the notice NOW carries a real wall-clock anchor
+  // (an ISO-8601 timestamp of the actual write) and the originating message's own id (msgId) — not just
+  // lengths and hashes, which the card explicitly says a recipient has nothing to compare against.
+  // Asserts on the ACTUAL EMITTED notice text (fake.writes), never on host.ts source text (the standing
+  // instruction — a prior card on this exact emitter shipped a false green whose regex matched the
+  // file's own doc comment instead of real output). =====
+  {
+    const sid = newSession("IdentityPresent"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const stranded = "leftover unrelated content from somewhere else entirely";
+    const intended = "[loom:project-memory] the real content this generation actually intended to submit";
+    host.enqueueStdin(sid, intended); // gen=1 — mints a real logicalId (randomUUID), synchronously, at submit() time
+    // Wait for the REAL Enter-write to actually land (host.ts's own async pacing/timer) before delivering
+    // the hook — a synchronous deliverHook right after enqueueStdin (as most scenarios above do, since
+    // they never needed this field) would race live.currentGenFirstWrittenAt and observe it still null,
+    // proving only the DECIDABILITY half (18, below), not that a real timestamp comes through when one
+    // genuinely exists by the time the engine's hook actually arrives.
+    await waitUntil(() => host.live.get(sid)?.currentGenFirstWrittenAt != null);
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended }); // unmatched, no prior write on this fresh session — the generic-fallback shape, the third instance's own shape
+    const enqueued17 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("17: the notice enqueues for this unmatched, generic-fallback mismatch", enqueued17);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("17: RED-PROOF — the notice now carries a real ISO-8601 wall-clock timestamp for the mismatched write (previously: a bare gen number, nothing else)",
+      /written at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(noticeWrite));
+    check("17: RED-PROOF — the notice now carries the originating message's own id (msgId), a real UUID minted at enqueueStdin time",
+      /msgId=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(noticeWrite));
+    check("17: the identity is attached to THIS mismatch's own gen (gen=1), not floating disconnected from it",
+      /gen=1, written at/.test(noticeWrite));
+  }
+
+  // ===== 18. Card 3ff61275 DoD-7's own DoD-2 — RED-PROOF #2, DECIDABILITY: a write with no recorded
+  // msgId must say so EXPLICITLY — never an empty/blank field a reader could misread as "there was no
+  // write". Simulates the one real origin-less submit() caller (`resumeAfterRateLimit`'s "rate-limit-
+  // replay" path — see `Live.giveUpOrigin`'s own doc in host.ts, which names it as the sole caller that
+  // legitimately passes no origin) by clearing `giveUpOrigin` directly on `live` after the write —
+  // reusing this SAME test file's own established pattern for reaching into `live` state (scenario 14's
+  // `enterConfirmed` pokes, above) rather than inventing a new privileged-access mechanism. =====
+  {
+    const sid = newSession("IdentityAbsent"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const stranded = "some other unrelated stray content";
+    const intended = "[loom:from-manager] a real message, this time with no recorded origin";
+    host.enqueueStdin(sid, intended); // gen=1 — mints a real logicalId...
+    host.live.get(sid).giveUpOrigin = null; // ...then simulate the one real caller that legitimately has none
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    const enqueued18 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("18: the notice still enqueues when no origin was recorded", enqueued18);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("18: DECIDABILITY — an absent msgId is stated EXPLICITLY (\"none recorded\"), never a blank/omitted field",
+      /msgId=none recorded\b/.test(noticeWrite));
+    check("18: NEGATIVE CONTROL — no real-looking UUID leaked into the msgId position despite an earlier write on this session having minted one",
+      !/msgId=[0-9a-f]{8}-[0-9a-f]{4}-/.test(noticeWrite));
+    check("18: DECIDABILITY (bonus) — an absent wall-clock write time is ALSO stated explicitly, never blank",
+      /written at an unrecorded time/.test(noticeWrite));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry */ } }

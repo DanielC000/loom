@@ -5305,8 +5305,35 @@ export class PtyHost {
                 // comment), a confirmed fusion can legitimately cover 3+ generations, and naming only the
                 // first would silently under-report which turns may have been acted on twice.
                 const earlierFusedGens = confirmedFusion ? confirmedFusion.spanGens.slice(0, -1) : [];
+                // Card 3ff61275 DoD-7 (MINIMUM VIABLE FIX — scoped floor beneath DoD-1's still-pending
+                // content-retention question, request 0eb43216): every branch below narrates THIS turn's
+                // own write (gen=${live.submitGeneration}) but, until now, identified it by that bare gen
+                // number alone — no wall-clock anchor, no message identity. THE THIRD FIELD INSTANCE
+                // (escalation f1a8dce1) is exactly this gap: a gen=1 mismatch notice, delivered at gen=2,
+                // was read by its recipient ~16 minutes later with an unrelated gen=3 approval already in
+                // hand — nothing in the notice text let it tell "this happened 19 minutes ago" apart from
+                // "this is about what I'm holding right now", so it misattributed the alarm to the wrong
+                // payload and escalated a false total-data-loss report. All FIVE branches below (fusion,
+                // divergedPrior, wrapperDeficit, ansiStripDeficit, and the generic fallback) share this
+                // EXACT lead-in sentence and are equally exposed to the same failure mode regardless of
+                // their own conclusion — an "ESTABLISHED, nothing lost" notice is just as mis-attributable
+                // as a "possible LOSS" one if the recipient can't tell which payload it's about, so the
+                // identity clause is added once here, to the shared lead-in, rather than to only the
+                // fallback branch that happened to be the one hit so far.
+                // `writeWallClockAt`: the SAME field the `[submit] CONFIRMED` log line a few dozen lines
+                // above already reads for this identical generation (`live.currentGenFirstWrittenAt`) — the
+                // real Enter-write timestamp for THIS generation, not a detection-time `Date.now()` that
+                // would silently drift from when the content actually landed.
+                // `writeMsgId`: the SAME `live.giveUpOrigin?.[0]?.logicalId` pattern that same log line
+                // already uses for this identical generation — the originating message's stable id, where
+                // one is recorded.
+                // DoD-2 (decidability): both are rendered as an explicit "unrecorded"/"none recorded" word
+                // when absent — never an empty/blank field a reader could misread as "there was no write".
+                const writeWallClockAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : "an unrecorded time";
+                const writeMsgId = live.giveUpOrigin?.[0]?.logicalId ?? "none recorded";
+                const writeIdentity = `written at ${writeWallClockAt}, msgId=${writeMsgId}`;
                 const mismatchText = confirmedFusion
-                  ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                  ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                     `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ESTABLISHED — nothing was lost: the engine's report is a CONFIRMED accumulation (spanGens=${JSON.stringify(confirmedFusion.spanGens)}) — the text Loom intended for THIS turn is in what arrived, fused together with generation(s) ${earlierFusedGens.join(", ")}'s own text because the composer had not fully cleared since ${earlierFusedGens.length > 1 ? "those earlier writes" : "that earlier write"}. If any of generation(s) ${earlierFusedGens.join(", ")}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that before treating everything in this turn as new. ` +
                     `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on any of this content twice — that duplicate check is yours to make. There is no loss half to verify here: the full text intended for this turn did arrive.`
                   // Card d005f55b DoD-2: its OWN complete notice text, never patched onto `lossClause`/
@@ -5316,7 +5343,7 @@ export class PtyHost {
                   // Loom intended for it, so this turn's exposure is weaker than a clean fusion's, even
                   // though nothing of THIS turn's own text was lost either.
                   : confirmedDivergedPrior
-                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ESTABLISHED, DISTINCT FROM A CLEAN FUSION — nothing of THIS turn's own content was lost: the engine's report is a CONFIRMED accumulation over generation ${confirmedDivergedPrior.priorGen}'s own REPORTED echo, NOT what Loom wrote for that generation — generation ${confirmedDivergedPrior.priorGen}'s own submission had ALREADY diverged from what Loom intended before this turn ever ran (see [composer-accumulation-diverged-prior] above; card d005f55b). If generation ${confirmedDivergedPrior.priorGen}'s own turn already ran, you may be about to act on UNVERIFIED content a second time — that generation's own reported content was never confirmed to be what Loom actually sent it, so treat it with more caution than an ordinary duplicate. ` +
                       `What YOU can check yourself: your own artifacts for whether you've now acted on any of generation ${confirmedDivergedPrior.priorGen}'s own content twice. There is no loss half to verify for THIS turn specifically — this turn's own intended text is in what arrived.`
                   // Card 854d1632 (manager measurement, 2026-08-06, SUPERSEDES an earlier "the tag itself
@@ -5332,7 +5359,7 @@ export class PtyHost {
                   // above). Does not chase the wrapper's actual delivery path — that question is answered
                   // and tracked separately, card 854d1632.
                   : confirmedWrapperDeficit
-                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like a STALE, out-of-order confirmation: the engine's report matches this turn's own intended text with a possible-duplicate tag ("${confirmedWrapperDeficit.strippedTag.trim()}") stripped, byte-for-byte — best explained as confirmation of an EARLIER, unwrapped write arriving after Loom had already moved on to this later, wrapped generation, not as anything failing to reach you. Every byte of that earlier content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if that earlier write's own turn already ran, this stale confirmation may be describing IT, not this generation — check your own artifacts for whether you've now acted on the same underlying content twice.`
                   // Card a640c110 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
@@ -5342,10 +5369,10 @@ export class PtyHost {
                   // stale-confirmation-of-an-earlier-write mechanism — so worded on its own terms, not
                   // borrowed from that branch's "EARLIER write" framing.
                   : confirmedAnsiStripDeficit
-                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
                       `What YOU can check yourself: nothing — this shape has no duplicate-check or re-send action to take; the content for this turn is confirmed complete.`
-                    : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                    : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
                 // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
