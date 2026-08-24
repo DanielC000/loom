@@ -266,6 +266,17 @@ try {
     const r = await sessions.runWorkerGate(gateWorkerId);
     check("(D) a fast gate settles inline (no opId/pending wrapper)", r.settled === true && r.ok === true);
     check("(D) reports ran:true, passed:true", r.value.ran === true && r.value.passed === true);
+
+    // Card 78214063 DoD-3 (PASS path): the durable `worker_gate` event's own detail carries the SAME
+    // opId the caller was returned — the reachability key `findGateOpEventsByOpId`/`gate_history` depend
+    // on. `findGateOpEventsByOpId` is the exact join-key lookup `recoverGateOpVerdict` (card 7d492f8b)
+    // uses — querying BY the returned opId and finding a row back is itself the proof the event's detail
+    // actually carries it (json_extract match), not merely that some `worker_gate` row happens to exist.
+    const passEvents = db.findGateOpEventsByOpId(r.value.opId);
+    const passGateEvent = passEvents.find((e) => e.kind === "worker_gate");
+    check("(D) the durable worker_gate event is reachable BY the caller's own returned opId", !!passGateEvent);
+    check("(D) that event's own detail.opId equals the returned opId (not just query-matched)", passGateEvent?.detail?.opId === r.value.opId);
+    check("(D) §SCOPE-LIMIT: a PASS with no auto-extend records extended:false (never omitted)", passGateEvent?.detail?.extended === false);
   }
 
   // ── (D2) run_gate's spawned child is pinned to LOOM_GATE_TEST_CONCURRENCY=3 (card 68920f5b: matches
@@ -421,6 +432,39 @@ try {
     check("(I) it carries failingTest, extracted from the (newline-collapsed) output tail",
       failEvent?.detail?.failingTest === "FAIL some-test.mjsAssertionError: expected true");
     check("(I) it carries the outputTail too", typeof failEvent?.detail?.outputTail === "string" && failEvent.detail.outputTail.includes("FAIL some-test.mjs"));
+
+    // Card 78214063 DoD-3 (FAIL path): same opId-reachability + extended:false proof as (D)'s PASS case,
+    // through the SAME real production write path (runWorkerGate -> the `evt` closure -> appendEvent).
+    check("(I) the failure event's own opId equals the caller's returned opId", failEvent?.detail?.opId === r.value.opId);
+    const failByOpId = db.findGateOpEventsByOpId(r.value.opId).find((e) => e.kind === "worker_gate");
+    check("(I) the SAME event is reachable BY that opId via findGateOpEventsByOpId (the recoverGateOpVerdict join key)", failByOpId?.id === failEvent?.id);
+    check("(I) §SCOPE-LIMIT: a FAIL with no auto-extend records extended:false (never omitted)", failEvent?.detail?.extended === false);
+  }
+
+  // ── (I2) card 78214063 §SCOPE-LIMIT: when the gate's current step DOES consume its one-time
+  //         auto-extend, the worker_gate event's own `extended` field reads true — proves the field is a
+  //         REAL signal (RED against pre-fix code, which never stamped this key at all), not just a
+  //         constant `false` that (D)/(I) alone couldn't tell apart from "always false" ─────────────────
+  {
+    const sfx = `i2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-i2-${sfx}`);
+    registerForCleanup(reposDir); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never this repos root
+    const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    // Signature mirrors runGateSequential's real one: (gate, worktreePath, timeoutMs, onOutput, envOverride,
+    // _unused, cancelSignal, hooks) — `hooks` is runWorkerGate's own `mirroredHooks` wrapper, so calling
+    // onExtend here exercises the SAME interception confirmWorkerMerge's `anyExtended` already proves safe.
+    const extendingGate = async (_gate, _worktreePath, _timeoutMs, _onOutput, _envOverride, _unused, _cancelSignal, hooks) => {
+      hooks.onExtend();
+      return { passed: true, steps: [] };
+    };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: extendingGate });
+
+    const r = await sessions.runWorkerGate(gateWorkerId);
+    check("(I2) the extending gate still settles inline and passes", r.settled === true && r.ok === true && r.value.passed === true);
+    const extEvent = db.findGateOpEventsByOpId(r.value.opId).find((e) => e.kind === "worker_gate");
+    check("(I2) the durable event exists and carries the same opId", !!extEvent && extEvent.detail?.opId === r.value.opId);
+    check("(I2) §SCOPE-LIMIT, THE ACTUAL SIGNAL: extended reads true when onExtend genuinely fired", extEvent?.detail?.extended === true);
   }
 
   // ── (J) PRIORITY WIRING (card 24642c3d): confirmWorkerMerge ("high") is NOT head-of-line-blocked by

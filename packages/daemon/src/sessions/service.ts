@@ -13988,6 +13988,14 @@ export class SessionService {
           // matters: it's what separates "moved during the queue wait" (the gate's execution still saw a
           // single stable, current tree) from "moved while the gate was actually running" (genuinely racy).
           let admitStamp: WorktreeGateStamp | undefined;
+          // Card 78214063: mirrors confirmWorkerMerge's OWN `anyExtended` local (identical `onExtend`
+          // mirroring technique) — the ONLY way to capture whether this run's current step consumed its
+          // one-time auto-extend, since `hooks`'s live state lives in the GateSemaphore's in-memory
+          // registry (keyed by opId) and is never itself durable. Captured here, at genuinely settle time,
+          // so it can be stamped onto the worker_gate pass/fail event below — unlike the registry entry,
+          // which is evicted and unrecoverable once this op is no longer live (see gate_queue/gate_status's
+          // own `extended` field doc for that in-memory-only lifetime).
+          let workerGateExtended = false;
           try {
             // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
             // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
@@ -14001,7 +14009,12 @@ export class SessionService {
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, hooks);
+                // Card 78214063: mirror onExtend into `workerGateExtended`, never a REPLACEMENT for the
+                // semaphore's own live-registry tracking (confirmWorkerMerge's identical `mirroredHooks`
+                // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
+                // keep reading the SAME live signal they always have.
+                const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks);
               },
               "low",
             );
@@ -14098,7 +14111,10 @@ export class SessionService {
           }
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
-            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+            // `extended` (card 78214063): stamped alongside `opId` (the `evt` closure adds that
+            // unconditionally) — same "answer the threading question for both fields at once" DoD this
+            // card's own scope-limit section asks for. See `workerGateExtended`'s own doc above.
+            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, extended: workerGateExtended });
             // Card 4c5bf820: same INJECTION HYGIENE as the failure path below — strip C0 control chars
             // before this raw process output can reach a `[loom:gate-done]` pty text or the durable
             // verdict tombstone. `steps`/a sanitized `outputTail` are forwarded on the GREEN path too —
@@ -14140,6 +14156,8 @@ export class SessionService {
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
             durationMs: failDurationMs, headCurrent: headCurrency.headCurrent,
             gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+            // `extended` (card 78214063): same rationale as the passing path's own `evt` call above.
+            extended: workerGateExtended,
             ...(outputTail ? { outputTail } : {}),
           });
           return {

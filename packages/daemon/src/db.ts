@@ -7279,15 +7279,20 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   }
   const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
   const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
-  // Card 3aec1df6 — the reachability key: `worker_gate` detail_json still never carries an opId (nothing
-  // needed one — its own failure detail is already inline, see `failingTest` above; adding it there is
-  // card 78214063's separate scope, not this one's). `deploy` detail_json USED to be in the same
-  // never-carries-one bucket, but card 720bb7ad changed that: `deployOwnProject` now mints an opId and
-  // stamps it on its own `deploy` audit event (previously deploy had no correlating id anywhere at all),
-  // so a `deploy`-kind row is resolvable here too now. `build_gate`/`build_gate_retry` stamp `opId`
-  // explicitly (service.ts's two `evt("build_gate"...)` call sites) so a null-`failingTest` merge row can
-  // still be resolved to its full diagnostic via `gate_status(opId)`. `null` for any row recorded before
-  // its own kind's field shipped, or for a kind that never stamps it (currently: `worker_gate` only).
+  // Card 3aec1df6 — the reachability key: at the time this comment was first written, `worker_gate`
+  // detail_json never carried an opId, and adding it there was named as card 78214063's separate scope.
+  // CORRECTED (card 78214063, 2026-08-24): that gap is now closed — card 7d492f8b's `evt` closure in
+  // `runWorkerGate` (service.ts) merges `opId` into EVERY `worker_gate` detail unconditionally, landing
+  // ~1hr after this file's own `gate_history`-pivot commit, so this comment went stale the same day it
+  // was written. This read is kind-agnostic (`typeof detail.opId === "string"`, no `kind` branch) and
+  // already picked up `worker_gate` rows correctly the whole time — only this comment was wrong. `deploy`
+  // detail_json USED to be in the same never-carries-one bucket too, but card 720bb7ad changed that:
+  // `deployOwnProject` now mints an opId and stamps it on its own `deploy` audit event (previously deploy
+  // had no correlating id anywhere at all), so a `deploy`-kind row is resolvable here too now.
+  // `build_gate`/`build_gate_retry` stamp `opId` explicitly (service.ts's two `evt("build_gate"...)` call
+  // sites) so a null-`failingTest` merge row can still be resolved to its full diagnostic via
+  // `gate_status(opId)`. `null` only for a row recorded before its own kind's field shipped — every
+  // `GATE_HISTORY_KINDS` member now stamps `opId` unconditionally going forward.
   const opId = typeof detail.opId === "string" ? detail.opId : null;
   const outcome = gateOutcomeFromDetail(detail);
   const gateCap = typeof detail.gateCap === "number" ? detail.gateCap : null;
