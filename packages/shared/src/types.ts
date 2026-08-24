@@ -1263,6 +1263,40 @@ export type OrchestrationEventKind =
   // give-up that used to terminate in a bare console.warn with no queryable record at all.
   | "paste_tripwire_give_up";
 
+/**
+ * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
+ * (mcp/platform.ts) accepted an arbitrary string as `kind` and silently returned `[]` on a typo/unknown
+ * value (card 39f79291). Deliberately NOT hand-copied: `ORCHESTRATION_EVENT_KIND_MEMBERSHIP`'s
+ * `Record<OrchestrationEventKind, true>` annotation forces every member of the union above to appear as
+ * a key, and forbids any key that ISN'T a member — so an edit to the union that omits or misnames an
+ * entry here fails the build instead of silently drifting the runtime list out of sync with the type.
+ */
+const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> = {
+  spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
+  redirect_worker: true, recycle_begin: true, recycle_complete: true, merge_request: true,
+  merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
+  kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
+  build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
+  worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
+  idle_report: true, idle_escalated: true, context_escalated: true, worker_stuck: true,
+  manager_manage: true, session_message: true, platform_escalate: true, escalation_triaged: true,
+  cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
+  session_died: true, session_resume_attempt: true, session_recovered: true,
+  session_recovery_abandoned: true, worker_report_undelivered: true, worker_exited_without_report: true,
+  manager_exited_with_live_workers: true, session_message_queued: true, session_message_delivered: true,
+  session_message_gave_up: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
+  companion_reminder_fired: true, companion_reminder_deferred: true, set_worker_mode: true,
+  flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
+  poll_id_guard_tripped: true, event_trigger_fired: true, event_trigger_throttled: true,
+  end_me_refused: true, end_me_complete: true, question_asked: true, task_held_cleared: true,
+  session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
+  rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
+  worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
+  deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
+  paste_tripwire_give_up: true,
+};
+export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
+
 export interface OrchestrationEvent {
   id: string;
   ts: string;

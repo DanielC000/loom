@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig, ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
@@ -39,6 +39,16 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
  *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
  *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
 export const DEFAULT_EVENTS_SEARCH_CAP = 50;
+
+/** Card 39f79291: `events_search`'s `kind` filter used to accept ANY string and silently match zero rows
+ *  on a typo/unknown value — a false-negative generator on a forensics surface (a caller investigating
+ *  precisely BECAUSE they don't know what happened reads a silent `[]` as "this never occurred"). Both
+ *  the validation Set and the description string below are derived from the SAME canonical
+ *  `ALL_ORCHESTRATION_EVENT_KINDS` (itself compiler-checked against the `OrchestrationEventKind` union in
+ *  shared/types.ts), so an unrecognized-kind rejection and the tool's own advertised valid-kinds list can
+ *  never drift apart from each other or from the real type. */
+const EVENT_SEARCH_VALID_KINDS_SET = new Set<string>(ALL_ORCHESTRATION_EVENT_KINDS);
+const EVENT_SEARCH_VALID_KINDS_LIST = [...ALL_ORCHESTRATION_EVENT_KINDS].sort().join(", ");
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, type TaskWithMerged, type TaskCounts } from "./tasks.js";
@@ -1220,7 +1230,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "events_search",
       {
-        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds (an OrchestrationEventKind value each, e.g. \"kill_switch\") — omitted, returns every kind. `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, sessionId, projectId, projectName, agentName, branch} — detail is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null.",
+        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-empty result would misread as \"this never occurred\" rather than \"you asked a question this tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, sessionId, projectId, projectName, agentName, branch} — detail is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           projectId: z.string().optional(),
@@ -1231,6 +1241,12 @@ export class PlatformMcpRouter {
         }),
       },
       async ({ kind, projectId, sessionId, taskId, limit, offset }) => {
+        if (kind && kind.length > 0) {
+          const unrecognized = kind.filter((k) => !EVENT_SEARCH_VALID_KINDS_SET.has(k));
+          if (unrecognized.length > 0) {
+            return ok({ error: `unrecognized kind(s): ${unrecognized.join(", ")} — valid kinds are: ${EVENT_SEARCH_VALID_KINDS_LIST}` });
+          }
+        }
         let resolvedProjectId: string | null = null;
         if (projectId !== undefined) {
           const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");

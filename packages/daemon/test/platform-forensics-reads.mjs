@@ -11,9 +11,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       surface: `integrations` (codescape path) dropped entirely, `remoteAccess.tls.{certPath,keyPath}`
 //       collapsed to {configured:true}; plain operational fields pass through unredacted.
 //   (2) events_search is a bounded, kind/project/session/task-filterable page over orchestration_events,
-//       NOT limited to gate-run kinds; kind values are bound as query params (an unrecognized kind is
-//       zero rows, never an error/injection); pagination envelope is always returned; its `limit` clamp
-//       (card 07ce7c0c) defaults to DEFAULT_EVENTS_SEARCH_CAP and never exceeds MAX_EVENTS_SEARCH_PAGE.
+//       NOT limited to gate-run kinds; kind values are validated against the real OrchestrationEventKind
+//       set — an UNRECOGNIZED kind is an EXPLICIT ERROR naming the valid kinds (card 39f79291; never a
+//       silent []), while a recognized kind is still bound as a query param, never interpolated
+//       (injection-safe); pagination envelope is always returned; its `limit` clamp (card 07ce7c0c)
+//       defaults to DEFAULT_EVENTS_SEARCH_CAP and never exceeds MAX_EVENTS_SEARCH_PAGE.
 //   (3) agent_prompt_search is a case-insensitive cross-project substring search over every agent's
 //       startupPrompt, bounded/capped with a snippet (not the full prompt) per hit; its `limit` clamp
 //       (card 07ce7c0c) defaults to DEFAULT_PROMPT_SEARCH_CAP and never exceeds MAX_PROMPT_SEARCH_CAP.
@@ -173,12 +175,24 @@ try {
   check("(2) envelope shape is always {events,total,returned,offset,nextOffset} — never a bare array",
     !Array.isArray(allEvents) && typeof allEvents.total === "number" && "nextOffset" in allEvents);
 
+  // Card 39f79291 DoD-4 — POSITIVE control (a known-good kind with known-present events returns them)
+  // run in the SAME test as the NEGATIVE case right below it: a caller who only ever sees the negative
+  // case can't tell "no such event" from "broken filter" — pairing them here proves the query mechanism
+  // itself works before trusting either result.
   const killOnly = await call("events_search", { kind: ["kill_switch"] });
-  check("(2) kind filter narrows to exactly the matching kind", killOnly.events.length === 1 && killOnly.events[0].id === "ev-kill");
+  check("(2) POSITIVE control: a known-good kind with a known-present event returns it",
+    killOnly.events.length === 1 && killOnly.events[0].id === "ev-kill");
 
   const noSuchKind = await call("events_search", { kind: ["totally_not_a_real_kind"] });
-  check("(2) an UNRECOGNIZED kind value is zero rows, never an error (parameterized, not interpolated — injection-safe)",
-    noSuchKind.total === 0 && Array.isArray(noSuchKind.events) && noSuchKind.events.length === 0);
+  check("(2) NEGATIVE control: an UNRECOGNIZED kind is an EXPLICIT error (never a silent []), naming the bad value",
+    typeof noSuchKind.error === "string" && noSuchKind.error.includes("totally_not_a_real_kind") &&
+    noSuchKind.events === undefined && noSuchKind.total === undefined);
+  check("(2) the rejection names actual valid kinds so a caller can pick without guessing (DoD-2)",
+    noSuchKind.error.includes("kill_switch") && noSuchKind.error.includes("worker_gate"));
+
+  const mixedKinds = await call("events_search", { kind: ["kill_switch", "totally_not_a_real_kind"] });
+  check("(2) a MIX of one valid + one invalid kind is still rejected wholesale (never silently drops the bad one)",
+    typeof mixedKinds.error === "string" && mixedKinds.error.includes("totally_not_a_real_kind"));
 
   const byProject = await call("events_search", { projectId: "pTarget" });
   check("(2) projectId filter (pTarget) includes worker-keyed events and the manager-keyed kill event",
@@ -211,23 +225,26 @@ try {
   // Db.listOrchestrationEventsBounded, previously untested. Seed well past both the default cap (50) and
   // the hard ceiling (MAX_EVENTS_SEARCH_PAGE=200) under one dedicated kind, so counts are exact regardless
   // of the other events already seeded above.
+  // Card 39f79291: the clamp tests need a REAL OrchestrationEventKind now that events_search validates
+  // `kind` against the closed set — "idle_report" is a real kind unused elsewhere in this file, standing
+  // in for the old made-up "clamp_test_kind" sentinel.
   const CLAMP_TOTAL = MAX_EVENTS_SEARCH_PAGE + 10;
-  for (let i = 0; i < CLAMP_TOTAL; i++) mkEvt(`ev-clamp-${i}`, "clamp_test_kind", {});
+  for (let i = 0; i < CLAMP_TOTAL; i++) mkEvt(`ev-clamp-${i}`, "idle_report", {});
 
-  const clampDefault = await call("events_search", { kind: ["clamp_test_kind"] });
+  const clampDefault = await call("events_search", { kind: ["idle_report"] });
   check(`(2) clamp: omitted limit defaults to DEFAULT_EVENTS_SEARCH_CAP (${DEFAULT_EVENTS_SEARCH_CAP})`,
     clampDefault.returned === DEFAULT_EVENTS_SEARCH_CAP && clampDefault.events.length === DEFAULT_EVENTS_SEARCH_CAP &&
     clampDefault.total === CLAMP_TOTAL && clampDefault.nextOffset === DEFAULT_EVENTS_SEARCH_CAP);
 
-  const clampOverMax = await call("events_search", { kind: ["clamp_test_kind"], limit: 999999 });
+  const clampOverMax = await call("events_search", { kind: ["idle_report"], limit: 999999 });
   check(`(2) clamp: a limit far past the ceiling clamps to MAX_EVENTS_SEARCH_PAGE (${MAX_EVENTS_SEARCH_PAGE}), never returns unbounded rows`,
     clampOverMax.returned === MAX_EVENTS_SEARCH_PAGE && clampOverMax.events.length === MAX_EVENTS_SEARCH_PAGE &&
     clampOverMax.nextOffset === MAX_EVENTS_SEARCH_PAGE);
 
-  const clampAtMax = await call("events_search", { kind: ["clamp_test_kind"], limit: MAX_EVENTS_SEARCH_PAGE });
+  const clampAtMax = await call("events_search", { kind: ["idle_report"], limit: MAX_EVENTS_SEARCH_PAGE });
   check("(2) clamp: a limit exactly at the ceiling is honored unclamped", clampAtMax.returned === MAX_EVENTS_SEARCH_PAGE);
 
-  const clampUnderCap = await call("events_search", { kind: ["clamp_test_kind"], limit: 5 });
+  const clampUnderCap = await call("events_search", { kind: ["idle_report"], limit: 5 });
   check("(2) clamp: a limit well under both caps is honored exactly (not silently bumped)", clampUnderCap.returned === 5);
 
   // ===================== (3) agent_prompt_search — cross-project, bounded, snippeted =====================
@@ -305,6 +322,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform surface's three forensics reads (platform_config_get, events_search, agent_prompt_search) close the raw-sqlite-forensics gap: platform_config_get redacts codescape/TLS-key-path secret-shaped fields while passing operational tuning through; events_search is a bounded, kind/project/session/task-filterable page not limited to gate-run kinds (unrecognized kinds are zero rows, parameterized — injection-safe); agent_prompt_search is a bounded, snippeted, cross-project substring search. All three are PRESENT only on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface."
+  ? "\n✅ ALL PASS — the platform surface's three forensics reads (platform_config_get, events_search, agent_prompt_search) close the raw-sqlite-forensics gap: platform_config_get redacts codescape/TLS-key-path secret-shaped fields while passing operational tuning through; events_search is a bounded, kind/project/session/task-filterable page not limited to gate-run kinds (an unrecognized kind is an EXPLICIT error naming the valid kinds, never a silent [] — card 39f79291 — while a recognized kind is still bound as a query param, never interpolated — injection-safe); agent_prompt_search is a bounded, snippeted, cross-project substring search. All three are PRESENT only on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

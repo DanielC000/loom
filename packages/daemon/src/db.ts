@@ -5248,9 +5248,13 @@ export class Db {
    *
    * `kind` here is CALLER-supplied (an agent/Lead argument), unlike `GATE_HISTORY_KINDS` (a trusted
    * internal constant) — so unlike that call site's plain string interpolation, every kind value is bound
-   * as a query PARAMETER (`?` placeholders), never interpolated into the SQL text. An unrecognized kind
-   * therefore just matches zero rows; it can never reach the query as raw text, so it is not an injection
-   * vector no matter what a caller passes.
+   * as a query PARAMETER (`?` placeholders), never interpolated into the SQL text. AT THIS LAYER an
+   * unrecognized kind still just matches zero rows (it can never reach the query as raw text, so it is
+   * not an injection vector no matter what a caller passes) — but the `events_search` MCP tool
+   * (mcp/platform.ts, card 39f79291) validates `kind` against the real `OrchestrationEventKind` set
+   * BEFORE it ever reaches this function, rejecting an unrecognized value with an explicit error instead
+   * of letting it fall through to a silent empty page. Don't read this function's own zero-rows behavior
+   * as "events_search returns [] on a bad kind" — that gap is closed one layer up, here.
    */
   listOrchestrationEventsBounded(opts: {
     kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
