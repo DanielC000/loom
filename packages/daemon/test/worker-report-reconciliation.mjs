@@ -259,7 +259,145 @@ for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force:
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile2 + ext, { force: true }); } catch { /* ignore */ } }
 }
 
+// ============================ FALSE-POSITIVE SUPPRESSION (card 456bf38a) ============================
+// staleReport must return null while THIS worker has a live (queued OR running) pendingMerge — firing a
+// merge IS the resolution of a `done` report; the merge simply hasn't reached `merge_done` (and therefore
+// REPORT_RESOLVED_EVENT_KINDS) yet. Must still FIRE for the cases it exists for: no merge fired at all
+// (covered above by case (a), reproduced fresh here as the required DoD-3 positive control under the SAME
+// peekPendingMerge stub the suppression cases use), and a report left unresolved after a rejected/cancelled
+// merge (below). Own db/router — the shared one above hard-codes `peekPendingMerge` to always return
+// `undefined`, which cannot express a live pendingMerge at all.
+{
+  const dbFile3 = path.join(os.tmpdir(), `loom-report-reconciliation-pendingmerge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
+  const db3 = new Db(dbFile3);
+  const projId3 = "proj-rr-pm";
+  const agentId3 = "agent-rr-pm";
+  db3.insertProject({ id: projId3, name: "ReportReconciliationPendingMerge", repoPath: projId3, vaultPath: projId3, config: {}, createdAt: now, archivedAt: null });
+  db3.insertAgent({ id: agentId3, projectId: projId3, name: "t", startupPrompt: "orchestrate", position: 0 });
+
+  function seedManager3(id, turnSeq) {
+    db3.insertSession({
+      id, projectId: projId3, agentId: agentId3, engineSessionId: "eng-" + id, title: null, cwd: projId3,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager", ctxInputTokens: null, ctxTurns: null, model: null,
+    });
+    for (let i = 0; i < turnSeq; i++) db3.incrementTurnSeq(id);
+  }
+  function seedWorker3(id, parentId) {
+    db3.insertSession({
+      id, projectId: projId3, agentId: agentId3, engineSessionId: "eng-" + id, title: null, cwd: projId3,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "worker", parentSessionId: parentId, taskId: "tk-" + id, branch: "loom/" + id,
+    });
+  }
+  const ev3 = (workerId, mgrId, kind, ts, detail) => db3.appendEvent({
+    id: randomUUID(), ts, managerSessionId: mgrId, workerSessionId: workerId, taskId: "tk-" + workerId, kind, detail,
+  });
+
+  // POSITIVE CONTROL (DoD-3): identical shape to case (a) above — turnSeq=3, stamp=0, no merge events at
+  // all — reproduced fresh in THIS db/router, under the SAME peekPendingMerge stub the suppression cases
+  // below use, to prove the pre-fix behavior (staleReport fires) BEFORE trusting a null result from that
+  // stub. Without this, a null on "w-merge-running" could mean "correctly suppressed" OR "this fixture
+  // never fires staleReport at all" — indistinguishable without a same-fixture positive control.
+  seedManager3("MGR-pm-control", 3);
+  seedWorker3("w-no-merge", "MGR-pm-control");
+  ev3("w-no-merge", "MGR-pm-control", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+
+  // (running, mid gate-execution): pendingMerge.state:"running", gatePhase:"running" — the actual
+  // incident's shape (card body: workers 51a92d1a / 2dad7234 / 5ad0351b, all gatePhase:"running").
+  seedManager3("MGR-pm-running", 3);
+  seedWorker3("w-merge-running", "MGR-pm-running");
+  ev3("w-merge-running", "MGR-pm-running", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+
+  // (queued behind a same-repo sibling): pendingMerge.state:"running" but gatePhase:"queued" — the card's
+  // own DoD says explicitly BOTH phases are in scope, not just an executing gate.
+  seedManager3("MGR-pm-queued", 3);
+  seedWorker3("w-merge-queued", "MGR-pm-queued");
+  ev3("w-merge-queued", "MGR-pm-queued", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+
+  // (worktree prep, pre gate-admission): pendingMerge.state:"running", gatePhase:null — the op was minted
+  // but hasn't reached the GateSemaphore yet (or has already left it, finalize still running).
+  seedManager3("MGR-pm-prep", 3);
+  seedWorker3("w-merge-prep", "MGR-pm-prep");
+  ev3("w-merge-prep", "MGR-pm-prep", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+
+  // (settled, non-"running" state): pendingMerge sitting in its brief RETAINED terminal view
+  // (state:"done") with no `merge_done` EVENT landed yet (a narrow settle-vs-append race) — must NOT be
+  // treated as suppressing: only state:"running" suppresses, never "done"/"failed".
+  seedManager3("MGR-pm-settled", 3);
+  seedWorker3("w-merge-settled-race", "MGR-pm-settled");
+  ev3("w-merge-settled-race", "MGR-pm-settled", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+
+  // TRUE POSITIVE preserved — re-arm after REJECTED: staleReport must still fire once a `merge_rejected`
+  // has landed (never in REPORT_RESOLVED_EVENT_KINDS) and the pendingMerge op has since settled/evicted
+  // (peekPendingMerge back to undefined) — the case DoD-2 says must NOT be silenced by this fix.
+  seedManager3("MGR-pm-rejected", 4);
+  seedWorker3("w-merge-rejected", "MGR-pm-rejected");
+  ev3("w-merge-rejected", "MGR-pm-rejected", "worker_report", at(10), { status: "done", summary: "shipped", managerTurnSeqAtReport: 0 });
+  ev3("w-merge-rejected", "MGR-pm-rejected", "merge_request", at(20), {});
+  ev3("w-merge-rejected", "MGR-pm-rejected", "merge_rejected", at(30), { reason: "gate_failed" });
+
+  const pendingMergeByWorker = {
+    "w-merge-running": { opId: "op-running", kind: "merge", key: "merge:w-merge-running", managerSessionId: "MGR-pm-running", startedAt: at(20), state: "running" },
+    "w-merge-queued": { opId: "op-queued", kind: "merge", key: "merge:w-merge-queued", managerSessionId: "MGR-pm-queued", startedAt: at(20), state: "running" },
+    "w-merge-prep": { opId: "op-prep", kind: "merge", key: "merge:w-merge-prep", managerSessionId: "MGR-pm-prep", startedAt: at(20), state: "running" },
+    "w-merge-settled-race": { opId: "op-settled", kind: "merge", key: "merge:w-merge-settled-race", managerSessionId: "MGR-pm-settled", startedAt: at(20), state: "done", outcome: "merged" },
+  };
+  const gatePhaseByOpId = { "op-running": "running", "op-queued": "queued", "op-prep": null };
+
+  const router3 = new OrchestrationMcpRouter(db3, /** @type {any} */ ({
+    peekPendingMerge(workerSessionId) { return pendingMergeByWorker[workerSessionId]; },
+    gatePhaseForOpId(opId) { return gatePhaseByOpId[opId] ?? null; },
+    listPendingSpawns() { return []; },
+    listCapQueuedSpawns() { return []; },
+    isArchivedWithoutReport() { return false; },
+    async getDanglingWorkers() { return []; },
+  }));
+
+  const managers3 = ["MGR-pm-control", "MGR-pm-running", "MGR-pm-queued", "MGR-pm-prep", "MGR-pm-settled", "MGR-pm-rejected"];
+  const clients3 = {};
+  for (const mgrId of managers3) {
+    const server = router3.buildServer(mgrId, "manager");
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: `report-reconciliation-pm-test-${mgrId}`, version: "0" });
+    await client.connect(clientT);
+    clients3[mgrId] = client;
+  }
+  const listFor3 = async (mgrId) => parse(await clients3[mgrId].callTool({ name: "worker_list", arguments: {} }));
+
+  const byIdControl = Object.fromEntries((await listFor3("MGR-pm-control")).map((w) => [w.workerSessionId, w]));
+  check("(pm-control) POSITIVE CONTROL: same shape as case (a), no pendingMerge at all → staleReport FIRES (proves this fixture/stub can fire before trusting a null result from it)",
+    byIdControl["w-no-merge"]?.awaitingReview === true && byIdControl["w-no-merge"]?.staleReport?.managerTurnsSinceReport === 3);
+
+  const byIdRunning = Object.fromEntries((await listFor3("MGR-pm-running")).map((w) => [w.workerSessionId, w]));
+  check("(pm-running) SUPPRESSED: pendingMerge running + gatePhase running (the actual incident's shape) → staleReport null, still awaitingReview",
+    byIdRunning["w-merge-running"]?.awaitingReview === true && byIdRunning["w-merge-running"]?.staleReport === null);
+
+  const byIdQueued = Object.fromEntries((await listFor3("MGR-pm-queued")).map((w) => [w.workerSessionId, w]));
+  check("(pm-queued) SUPPRESSED: pendingMerge running but gatePhase queued (behind a same-repo sibling) → staleReport null",
+    byIdQueued["w-merge-queued"]?.awaitingReview === true && byIdQueued["w-merge-queued"]?.staleReport === null);
+
+  const byIdPrep = Object.fromEntries((await listFor3("MGR-pm-prep")).map((w) => [w.workerSessionId, w]));
+  check("(pm-prep) SUPPRESSED: pendingMerge running, gatePhase null (worktree prep, pre gate-admission) → staleReport null",
+    byIdPrep["w-merge-prep"]?.awaitingReview === true && byIdPrep["w-merge-prep"]?.staleReport === null);
+
+  const byIdSettled = Object.fromEntries((await listFor3("MGR-pm-settled")).map((w) => [w.workerSessionId, w]));
+  check("(pm-settled) NOT suppressed: pendingMerge state:\"done\" (retained terminal view, no merge_done EVENT landed yet) is not \"running\" → staleReport still fires",
+    byIdSettled["w-merge-settled-race"]?.staleReport !== null && byIdSettled["w-merge-settled-race"]?.staleReport?.managerTurnsSinceReport === 3);
+
+  const byIdRejected = Object.fromEntries((await listFor3("MGR-pm-rejected")).map((w) => [w.workerSessionId, w]));
+  check("(pm-rejected) TRUE POSITIVE preserved: merge_rejected landed (not merge_done) and pendingMerge has since settled/evicted → staleReport still FIRES (re-arms)",
+    byIdRejected["w-merge-rejected"]?.awaitingReview === true
+    && byIdRejected["w-merge-rejected"]?.staleReport !== null
+    && byIdRejected["w-merge-rejected"]?.staleReport?.managerTurnsSinceReport === 4);
+
+  for (const mgrId of managers3) await clients3[mgrId].close();
+  try { db3.close(); } catch { /* ignore */ }
+  for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile3 + ext, { force: true }); } catch { /* ignore */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — staleReport (card 4491bd3b, DoD-1) fires only once a worker's report has sat awaitingReview:true while the MANAGER's own turnSeq has advanced past STALE_REPORT_TURN_THRESHOLD since the report was recorded — proof the manager's session kept cycling turns while this specific report went unresolved, asserted without any claim about mechanism. It does NOT fire on a single long manager turn, a normally-reviewed-and-merged report (however many turns later), a never-reported worker, a non-terminal progress checkpoint, or a pre-card legacy row missing the new stamp — the positive control holds in BOTH directions."
+  ? "\n✅ ALL PASS — staleReport (card 4491bd3b, DoD-1) fires only once a worker's report has sat awaitingReview:true while the MANAGER's own turnSeq has advanced past STALE_REPORT_TURN_THRESHOLD since the report was recorded — proof the manager's session kept cycling turns while this specific report went unresolved, asserted without any claim about mechanism. It does NOT fire on a single long manager turn, a normally-reviewed-and-merged report (however many turns later), a never-reported worker, a non-terminal progress checkpoint, or a pre-card legacy row missing the new stamp — the positive control holds in BOTH directions. It also does NOT fire while this same worker's merge is actively queued or running (card 456bf38a), and still correctly re-arms once a merge is rejected/cancelled rather than merged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

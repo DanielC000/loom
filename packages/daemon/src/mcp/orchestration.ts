@@ -1896,7 +1896,24 @@ export class OrchestrationMcpRouter {
     // pre-existing event (persisted before this card's stamp landed) has no `managerTurnSeqAtReport` key
     // at all — reads as `undefined`, so `staleReport` stays `null` for it exactly as it did before this
     // card, rather than misreading a missing stamp as turnsSinceReport:0 (falsely "not stale") or NaN.
-    const reportedProjection = (workerSessionId: string): {
+    //
+    // Card 456bf38a (false-positive fix): firing `worker_merge_confirm` IS the resolution of a `done`
+    // report — the most complete response available — but it doesn't append a `merge_done` event (and
+    // therefore doesn't land in REPORT_RESOLVED_EVENT_KINDS above) until the gate actually SETTLES, which
+    // on this project's real gate durations (~14 min) reliably outlasts `STALE_REPORT_TURN_THRESHOLD`
+    // manager turns. That made `staleReport` fire on the maximally-handled path — a merge already fired
+    // and actively running for this exact worker — teaching a reader to discount the one signal meant to
+    // catch a report nobody ever looked at. Fix: suppress (return null) while a `pendingMerge` for this
+    // SAME worker is still IN FLIGHT (`PendingOpView.state === "running"` — covers both a merge admitted
+    // and executing, and one still queued/prepping behind a same-repo sibling; see `withGatePhase`'s own
+    // doc above for why those two both read `state:"running"` at this layer). Deliberately does NOT touch
+    // `turnsSinceReport`'s own accumulation — only the returned `staleReport` is nulled — so once the op
+    // settles (`state` becomes `"done"`/`"failed"`, or the view evicts to `undefined`/`null` outside its
+    // brief retained window), the pre-existing threshold check resumes exactly where it left off: a
+    // successful merge lands `merge_done` and resolves the report for good (unchanged), while a
+    // rejected/cancelled merge lands neither `merge_done` nor any other REPORT_RESOLVED_EVENT_KINDS entry,
+    // so `staleReport` re-arms on the very next read — the true-positive case this must keep catching.
+    const reportedProjection = (workerSessionId: string, pendingMerge: PendingOpView | null): {
       reportedState: "done" | "blocked" | null;
       awaitingReview: boolean;
       staleReport: { reportedAt: string; managerTurnsSinceReport: number } | null;
@@ -1914,7 +1931,7 @@ export class OrchestrationMcpRouter {
       if (resolvedSince) return { reportedState: null, awaitingReview: false, staleReport: null };
       let staleReport: { reportedAt: string; managerTurnsSinceReport: number } | null = null;
       const stampedAt = reportEvent.detail?.managerTurnSeqAtReport as number | undefined;
-      if (stampedAt !== undefined) {
+      if (stampedAt !== undefined && pendingMerge?.state !== "running") {
         const managerNowTurnSeq = db.getSession(managerSessionId)?.turnSeq ?? stampedAt;
         const turnsSinceReport = managerNowTurnSeq - stampedAt;
         if (turnsSinceReport >= STALE_REPORT_TURN_THRESHOLD) {
@@ -2259,31 +2276,34 @@ export class OrchestrationMcpRouter {
     };
 
     const fleetView = async () => {
-      const workers = db.listWorkers(managerSessionId).map((w) => ({
-        workerSessionId: w.id,
-        taskId: w.taskId ?? null,
-        processState: w.processState,
-        busy: w.busy,
-        branch: w.branch ?? null,
-        ctxInputTokens: w.ctxInputTokens ?? null,
-        neverCompletedTurn: (w.turnSeq ?? 0) === 0,
-        model: w.model ?? null,
-        lastActivity: w.lastActivity,
-        lastEngineOutputAt: pty?.getLastOutputAt(w.id) ?? null,
-        composerDirtyLen: pty?.getComposerDirtyLen(w.id) ?? null,
-        composerDirtyLenBelieved: pty?.getComposerDirtyLenBelieved(w.id) ?? null,
-        unconfirmedDeliveryMs: pty?.getPendingConfirmMs(w.id) ?? null,
-        lastMismatchReplay: pty?.getLastMismatchReplay(w.id) ?? null,
-        lastMismatchFusion: pty?.getLastMismatchFusion(w.id) ?? null,
-        lastMismatch: deriveLastMismatch(w.id),
-        lastMismatchNoticeSuppressed: pty?.getLastMismatchNoticeSuppressed(w.id) ?? null,
-        pendingMerge: withGatePhase(sessions.peekPendingMerge(w.id) ?? null),
-        rateLimitedUntil: w.rateLimitedUntil ?? null,
-        rateLimitDeadline: w.rateLimitDeadline ?? null,
-        ...reportedProjection(w.id),
-        ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
-        ...archivedWithoutReport(w.id),
-      }));
+      const workers = db.listWorkers(managerSessionId).map((w) => {
+        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w.id) ?? null);
+        return {
+          workerSessionId: w.id,
+          taskId: w.taskId ?? null,
+          processState: w.processState,
+          busy: w.busy,
+          branch: w.branch ?? null,
+          ctxInputTokens: w.ctxInputTokens ?? null,
+          neverCompletedTurn: (w.turnSeq ?? 0) === 0,
+          model: w.model ?? null,
+          lastActivity: w.lastActivity,
+          lastEngineOutputAt: pty?.getLastOutputAt(w.id) ?? null,
+          composerDirtyLen: pty?.getComposerDirtyLen(w.id) ?? null,
+          composerDirtyLenBelieved: pty?.getComposerDirtyLenBelieved(w.id) ?? null,
+          unconfirmedDeliveryMs: pty?.getPendingConfirmMs(w.id) ?? null,
+          lastMismatchReplay: pty?.getLastMismatchReplay(w.id) ?? null,
+          lastMismatchFusion: pty?.getLastMismatchFusion(w.id) ?? null,
+          lastMismatch: deriveLastMismatch(w.id),
+          lastMismatchNoticeSuppressed: pty?.getLastMismatchNoticeSuppressed(w.id) ?? null,
+          pendingMerge,
+          rateLimitedUntil: w.rateLimitedUntil ?? null,
+          rateLimitDeadline: w.rateLimitDeadline ?? null,
+          ...reportedProjection(w.id, pendingMerge),
+          ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
+          ...archivedWithoutReport(w.id),
+        };
+      });
       const pendingSpawns = sessions.listPendingSpawns(managerSessionId).map((op) => ({
         workerSessionId: null,
         taskId: op.taskId,
@@ -2455,6 +2475,7 @@ export class OrchestrationMcpRouter {
         if (!workerSessionId) return ok(await fleetView());
         const w = selfHealWorkerLink(workerSessionId, "worker_status");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
+        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w.id) ?? null);
         return ok({
           ...w,
           neverCompletedTurn: (w.turnSeq ?? 0) === 0,
@@ -2466,8 +2487,8 @@ export class OrchestrationMcpRouter {
           lastMismatchFusion: pty?.getLastMismatchFusion(w.id) ?? null,
           lastMismatch: deriveLastMismatch(w.id),
           lastMismatchNoticeSuppressed: pty?.getLastMismatchNoticeSuppressed(w.id) ?? null,
-          pendingMerge: withGatePhase(sessions.peekPendingMerge(w.id) ?? null),
-          ...reportedProjection(w.id),
+          pendingMerge,
+          ...reportedProjection(w.id, pendingMerge),
           ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
           ...archivedWithoutReport(w.id),
           ...(msgId ? { queriedDirective: directiveByMsgId(db, w.id, msgId) } : {}),
