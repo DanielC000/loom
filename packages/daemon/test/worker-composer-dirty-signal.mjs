@@ -40,6 +40,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // technique as worker-liveness-signal.mjs. The give-up-driving technique (env-pinned fast timeouts, wait
 // for the observed busy=false transition) is lifted directly from pty-giveup-clear.mjs.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/worker-composer-dirty-signal.mjs
+//
+// EXTENDED for card c148f118: composerDirtyLen alone cannot tell "a defensive clear worked, the repaste
+// after it just hasn't confirmed" from "the clear did nothing" — see pty-composer-dirty-believed.mjs for
+// the host.ts-layer proof of the new composerDirtyLenBelieved (optimistic) counterpart and the genuine
+// divergence case. THIS file's job is narrower but load-bearing on its own: prove the VALUE actually
+// reaches worker_list/worker_status/my_context, not just the PtyHost getter — a router that silently drops
+// the field from its response shape would leave this card's updated tool docs (which now instruct a
+// reader to "read the two together") teaching a comparison the reader cannot perform. Scenarios (1)/(3)/(4)
+// below assert composerDirtyLenBelieved alongside every existing composerDirtyLen assertion; scenario (2)'s
+// give-up never attempts a defensive clear (TEXT is SID's first-ever message), so the two fields track in
+// lockstep there rather than diverging — asserting the exact VALUE anyway is what proves the wiring, not
+// merely that the key exists.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -221,18 +233,25 @@ try {
     // every OTHER signal false-reads as fine.
     host.deliverHook("w-healthy", { hook_event_name: "UserPromptSubmit" });
     check("(1) PtyHost level: getComposerDirtyLen reads exactly 0 on a healthy confirmed turn", host.getComposerDirtyLen("w-healthy") === 0);
+    // Card c148f118: getComposerDirtyLenBelieved (the optimistic counterpart) must track composerDirtyLen
+    // in lockstep here too — a healthy session never had anything to be ambiguous about.
+    check("(1) PtyHost level: getComposerDirtyLenBelieved reads exactly 0 too", host.getComposerDirtyLenBelieved("w-healthy") === 0);
     check("(1) genuinely mid-turn: busy is true (turn ongoing, not idle-because-stuck)", busyLog["w-healthy"]?.at(-1) === true);
 
     const list = await mgrClient.call("worker_list");
     const healthyRow = list.find((w) => w.workerSessionId === "w-healthy");
     check("(1) worker_list: composerDirtyLen is 0 (a NUMBER, not null) on a healthy live session", healthyRow?.composerDirtyLen === 0);
+    check("(1) worker_list: composerDirtyLenBelieved is 0 (a NUMBER, not null) too — card c148f118's wiring",
+      healthyRow?.composerDirtyLenBelieved === 0);
 
     const status = await mgrClient.call("worker_status", { workerSessionId: "w-healthy" });
     check("(1) worker_status: composerDirtyLen is 0 on the same healthy session", status.composerDirtyLen === 0);
+    check("(1) worker_status: composerDirtyLenBelieved is 0 too", status.composerDirtyLenBelieved === 0);
 
     const workerClient = await connectAs("w-healthy", "worker");
     const ctx = await workerClient.call("my_context");
     check("(1) my_context (self-check as w-healthy): composerDirtyLen is 0", ctx.composerDirtyLen === 0);
+    check("(1) my_context (self-check as w-healthy): composerDirtyLenBelieved is 0 too", ctx.composerDirtyLenBelieved === 0);
 
     // End the turn cleanly so it doesn't interfere with later scenarios.
     host.deliverHook("w-healthy", { hook_event_name: "Stop" });
@@ -255,10 +274,21 @@ try {
 
     check("(2) PtyHost level: getComposerDirtyLen is now the exact stranded length, set SYNCHRONOUSLY at give-up (no later write needed)",
       host.getComposerDirtyLen(SID) === TEXT.length);
+    // Card c148f118: THIS give-up never attempted a defensive clear (TEXT is the FIRST message ever sent
+    // to SID, so composerDirtyLen started at 0 and the plain-write branch fired, not the clear branch) —
+    // so composerDirtyLenBelieved tracks composerDirtyLen in lockstep here, NOT diverging. That is itself
+    // a real assertion (the field must equal composerDirtyLen exactly, not merely be non-null) — the
+    // genuine divergence case (a defensive clear attempted, then also unconfirmed) is covered at the
+    // host.ts layer by pty-composer-dirty-believed.mjs's own scenario (3); this file's job is proving the
+    // VALUE — whichever it is — actually reaches the MCP surface, which the assertions below do either way.
+    check("(2) PtyHost level: getComposerDirtyLenBelieved is the exact stranded length too (no clear was attempted here)",
+      host.getComposerDirtyLenBelieved(SID) === TEXT.length);
 
     const list1 = await mgrClient.call("worker_list");
     const row1 = list1.find((w) => w.workerSessionId === SID);
     check("(2) worker_list surfaces the exact stranded length right after give-up", row1?.composerDirtyLen === TEXT.length);
+    check("(2) worker_list surfaces the same value for composerDirtyLenBelieved — card c148f118's wiring, not just the getter",
+      row1?.composerDirtyLenBelieved === TEXT.length);
     check("(2) the session reads busy:false here — this IS the 'idle, no further writes' shape the card is about", row1?.busy === false);
 
     // THE CRITICAL STEP: deliberately never call host.reconcile() and never enqueue anything further for
@@ -281,13 +311,18 @@ try {
     const row2 = list2.find((w) => w.workerSessionId === SID);
     check("(2) worker_list: reads the exact stranded length AFTER the observation window too — the read a manager would make during the stuck window sees a real, persisted value",
       row2?.composerDirtyLen === TEXT.length);
+    check("(2) worker_list: composerDirtyLenBelieved also persists at the same value after the observation window",
+      row2?.composerDirtyLenBelieved === TEXT.length);
 
     const status = await mgrClient.call("worker_status", { workerSessionId: SID });
     check("(2) worker_status: same value", status.composerDirtyLen === TEXT.length);
+    check("(2) worker_status: composerDirtyLenBelieved matches too", status.composerDirtyLenBelieved === TEXT.length);
 
     const workerClient = await connectAs(SID, "worker");
     const ctx = await workerClient.call("my_context");
     check("(2) my_context (self-check as the stuck worker itself): composerDirtyLen is the same value", ctx.composerDirtyLen === TEXT.length);
+    check("(2) my_context: composerDirtyLenBelieved matches too — THE CARD'S ACCEPTANCE TEST, proven at the MCP surface a manager/worker actually reads, not just at the host.ts layer",
+      ctx.composerDirtyLenBelieved === TEXT.length);
   }
 
   // ===================== (3) NULL vs 0: a session not live in THIS PtyHost process =====================
@@ -295,13 +330,18 @@ try {
     const list = await mgrClient.call("worker_list");
     const other = list.find((w) => w.workerSessionId === "w-not-in-pty");
     check("(3) worker_list: a worker never spawned in this process reads composerDirtyLen:null (unknown), never 0", other && other.composerDirtyLen === null);
+    // Card c148f118: the SAME null-vs-0 discipline must hold for composerDirtyLenBelieved — undefined
+    // (not live) collapses to null, exactly like composerDirtyLen, never a measured-clean 0.
+    check("(3) worker_list: composerDirtyLenBelieved is null too (never collapsed to a measured 0)", other && other.composerDirtyLenBelieved === null);
 
     const status = await mgrClient.call("worker_status", { workerSessionId: "w-not-in-pty" });
     check("(3) worker_status: same null (unknown, not a measured-clean 0)", status.composerDirtyLen === null);
+    check("(3) worker_status: composerDirtyLenBelieved is null too", status.composerDirtyLenBelieved === null);
 
     // The manager's own my_context, before the manager itself is ever spawned in this PtyHost.
     const ctx = await mgrClient.call("my_context");
     check("(3) my_context: a caller not live in this process reads composerDirtyLen:null too", ctx.composerDirtyLen === null);
+    check("(3) my_context: composerDirtyLenBelieved is null too", ctx.composerDirtyLenBelieved === null);
   }
 
   // ===================== (4) byte-compat: a router built the OLD way (no pty arg) still works =====================
@@ -315,6 +355,8 @@ try {
     const list = JSON.parse((await client.callTool({ name: "worker_list", arguments: {} })).content[0].text);
     check("(4) a 3-arg (no pty) router still returns worker_list without throwing", Array.isArray(list) && list.length === 3);
     check("(4) every row reads composerDirtyLen:null when no PtyHost was wired", list.every((w) => w.composerDirtyLen === null));
+    check("(4) every row reads composerDirtyLenBelieved:null too — card c148f118's wiring stays byte-compatible with no PtyHost",
+      list.every((w) => w.composerDirtyLenBelieved === null));
   }
 } finally {
   for (const sid of ["w-healthy", "w-give-up"]) {

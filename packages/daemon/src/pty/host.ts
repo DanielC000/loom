@@ -2234,6 +2234,27 @@ interface Live {
   // BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
   // worker_list/worker_status/my_context's own tool descriptions and the `/orchestrate` doctrine.
   composerDirtyLen: number;
+  // Card c148f118: the OPTIMISTIC counterpart to `composerDirtyLen` above — same additive write-side
+  // bookkeeping (every add mirrors a `composerDirtyLen` add, at the SAME sites, same amounts), EXCEPT
+  // that the defensive clear-prefix branch (submit(), the `composerDirtyLen > 0 && composerLen === 0`
+  // case) zeroes THIS field the moment it issues the backspace burst — optimistically ASSUMING that burst
+  // actually empties the composer, rather than leaving the prior total to keep compounding the way
+  // `composerDirtyLen` deliberately does. `composerDirtyLen` never makes that assumption (see its own
+  // doc — always the conservative "what if no clear I've ever attempted actually landed" reading); this
+  // field always does. Read TOGETHER, not as alternatives: `composerDirtyLenBelieved === composerDirtyLen`
+  // means no clear attempt is currently unresolved (either nothing's dirty, or everything has already
+  // been decisively confirmed) — nothing to doubt. `composerDirtyLenBelieved < composerDirtyLen` means a
+  // defensive clear WAS attempted and its outcome is still unverified; the gap between the two is exactly
+  // how many characters are in doubt, bounding the truth between "the clear worked" (this field) and "the
+  // clear did nothing" (`composerDirtyLen`) instead of collapsing both possibilities onto one identical
+  // number the way the pre-c148f118 code did (see the specimen recorded in submit()'s own comment, card
+  // 2960c3bf). Reset to 0 by the SAME three decisive-confirm sites that reset `composerDirtyLen` (the
+  // `composerDirtyLenClearedByGen`-gated UserPromptSubmit/Stop hooks, and `clearComposerDirtyOnConfirm`'s
+  // `composerDirtyMarkedForGen` gate) — a genuine confirmation proves the WHOLE ordered byte stream
+  // landed, so both readings collapse back to the same true zero together. Like `composerDirtyLen`, this
+  // is pure write-side bookkeeping, never a readback of real terminal content — "optimistic" describes
+  // the ASSUMPTION, not a verification.
+  composerDirtyLenBelieved: number;
   // Card 3ce3fa39: the `submitGeneration` whose submit() most recently issued a defensive clear-prefix for
   // `composerDirtyLen` — null when no clear-prefix is currently outstanding. GATES the reset: a confirming
   // hook resets `composerDirtyLen` to 0 ONLY when it fires while `submitGeneration` still equals THIS value
@@ -4092,6 +4113,7 @@ export class PtyHost {
       lastOutputAt: Date.now(),
       composerLen: 0,
       composerDirtyLen: 0,
+      composerDirtyLenBelieved: 0,
       composerDirtyLenClearedByGen: null,
       composerDirtyMarkedForGen: null,
       composerBodyWrittenForGen: null,
@@ -4293,7 +4315,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -4374,7 +4396,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -4807,6 +4829,7 @@ export class PtyHost {
         // and must NOT be read as proof our clear-prefix (which may not even have been attempted yet) landed.
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
+          live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
           live.composerDirtyLenClearedByGen = null;
         }
         // Card 4a0af485: captured BEFORE the purge call below, which can itself delete an entry — if there
@@ -5548,6 +5571,7 @@ export class PtyHost {
         // Card 3ce3fa39: same GATED reset as UserPromptSubmit's — see composerDirtyLenClearedByGen's doc.
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
+          live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
           live.composerDirtyLenClearedByGen = null;
         }
         this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
@@ -6525,6 +6549,7 @@ export class PtyHost {
           // eslint-disable-next-line no-console
           console.log(`[heal] ${sessionId} marking an orphaned give-up injection possibly-dirty (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
           live.composerDirtyLen += live.lastPrompt.length;
+          live.composerDirtyLenBelieved += live.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
           live.composerDirtyMarkedForGen = gen;
         }
         // Card 2c3c4aff: this out-of-band path is exactly a give-up that never reached fireEnterAndVerify's
@@ -6909,6 +6934,20 @@ export class PtyHost {
     // unchanged), and it is bounded by the SAME `GIVE_UP_REQUEUE_LIMIT`/chainDepth cycle count as before —
     // this does not remove the cap, it removes the wasted bytes inside each already-capped cycle.
     //
+    // Card c148f118 (closing the ambiguity ae354916's comment below records): the defensive clear-prefix
+    // below never decremented `composerDirtyLen`, and the additive give-up mark that can follow it fires
+    // UNCONDITIONALLY — so "the clear worked, then the repaste alone failed to confirm" and "the clear
+    // did nothing at all" landed on the EXACT SAME NUMBER, with no way to tell them apart. Fixed by
+    // giving `composerDirtyLen` a single, HONEST job (the CONSERVATIVE upper bound — assume no attempted
+    // clear, ever, has actually landed; unchanged below, byte-identical to before this card whenever no
+    // clear is ever attempted) and adding a second field, `composerDirtyLenBelieved` (see its own doc on
+    // the Live interface), for the OPTIMISTIC read (assume every attempted clear DID land). The two
+    // together bound the truth: equal ⇒ no unresolved clear is in play, nothing to doubt;
+    // `composerDirtyLenBelieved < composerDirtyLen` ⇒ a clear was attempted whose outcome is still
+    // unverified, and the gap between them is exactly how many characters are in doubt. Neither field
+    // alone could ever say that — two honest fields instead of one field doing two jobs, which is why it
+    // could do neither.
+    //
     // Card 2960c3bf (2026-08-05, worker `a9b67b0d`): a SECOND occurrence of exactly the residue
     // 3ce3fa39's comment above predicted ("first-hand confirmed: two specimens' abandoned text
     // survived a backspace-clear... only to resurface — once doubled") — this time via THIS deferred
@@ -6928,7 +6967,15 @@ export class PtyHost {
     // the engine simply stopped consuming stdin after rendering the specimen's first large paste (its
     // raw per-session output log recorded ~0 bytes of further output for the rest of that session's
     // life — consistent with nothing sent afterward, backspaces included, ever being read at all).
-    // A live experiment is needed to discriminate them; this comment records the evidence, not a fix.
+    // A live experiment is needed to discriminate (a)/(b) above; this comment records the evidence, not
+    // a fix for the STRAND — card 17c98df7's own repaint probe (merged a648239) since ran that
+    // experiment and did NOT reproduce the strand in 9 attempts (a small-n null, not a clearance — see
+    // that card). Card c148f118 fixed a DIFFERENT, narrower thing: `88606` above being unable to tell
+    // "the clear worked, the repaste alone didn't confirm" from "the clear did nothing" is now closed by
+    // `composerDirtyLenBelieved` (see its own doc) — for this exact specimen it would have read `44323`
+    // (just the repaste, assuming the clear landed) alongside `composerDirtyLen`'s unchanged `88606`
+    // (assuming it didn't) — an honest range instead of one number silently picking neither story. This
+    // does NOT resolve which of (a)/(b) actually happened; it only stops the number from claiming to.
     const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
     if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery) {
       // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
@@ -6946,6 +6993,15 @@ export class PtyHost {
       // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
       // unrelated hook firing before this generation's own Enter confirms must never reset it.
       live.composerDirtyLenClearedByGen = gen;
+      // Card c148f118: THIS is the optimistic assumption itself — the backspace burst about to be sent
+      // (below) is sized to erase exactly `dirty` chars, so ASSUME it works and zero the believed
+      // reading now, at write time, not deferred to any later confirm. `composerDirtyLen` (conservative)
+      // is deliberately left untouched here — it only ever resets via a decisive confirm (the two gated
+      // sites above) — so the two fields diverge starting HERE if this generation's own write later gives
+      // up unconfirmed: `composerDirtyLenBelieved` will read as just this generation's own fresh write,
+      // `composerDirtyLen` will read as that PLUS the `dirty` this clear was attempting. See the field's
+      // own doc on the Live interface for how to read the gap between them.
+      live.composerDirtyLenBelieved = 0;
       // Card b9b8f8db: THIS generation IS writing a fresh body (the repaste below) — gate composerDirtyLen's
       // additive mark side on this, see `composerBodyWrittenForGen`'s own doc.
       live.composerBodyWrittenForGen = gen;
@@ -7188,6 +7244,7 @@ export class PtyHost {
           // never wrote a fresh body, so there is nothing new here to mark; see that field's own doc.
           if (l.composerLen === 0 && l.lastPrompt && l.composerDirtyMarkedForGen !== gen && l.composerBodyWrittenForGen === gen) {
             l.composerDirtyLen += l.lastPrompt.length;
+            l.composerDirtyLenBelieved += l.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
             l.composerDirtyMarkedForGen = gen;
           }
           return;
@@ -7236,6 +7293,7 @@ export class PtyHost {
           // generation, which is exactly the wasted-byte accounting this card's fix removes.
           if (l2.composerLen === 0 && l2.lastPrompt && l2.composerDirtyMarkedForGen !== gen && l2.composerBodyWrittenForGen === gen) {
             l2.composerDirtyLen += l2.lastPrompt.length;
+            l2.composerDirtyLenBelieved += l2.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
             l2.composerDirtyMarkedForGen = gen;
           }
           this.setBusy(sessionId, false, "give-up-recovery");
@@ -7767,6 +7825,7 @@ export class PtyHost {
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} composerDirtyLen cleared at CONFIRMED (gen=${gen}) — decisive proof this generation's turn actually started, not stranded`);
       live.composerDirtyLen = 0;
+      live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
       live.composerDirtyMarkedForGen = null;
     }
   }
@@ -8834,9 +8893,33 @@ export class PtyHost {
    *  never submitted, and NEITHER path above ever resolves it), the value stays non-zero and readable
    *  indefinitely rather than requiring a later write to become observable. Card dcd8659c: surfaced to
    *  worker_list/worker_status/my_context as a PULL read — this never touches
-   *  `submit()`/`enqueueStdin`/`drainPending`/the pty; it only reads the same in-memory field those write. */
+   *  `submit()`/`enqueueStdin`/`drainPending`/the pty; it only reads the same in-memory field those write.
+   *
+   *  ⚠️ Card c148f118 — READ THIS BEFORE trusting a non-zero value alone: this value is the CONSERVATIVE
+   *  reading only — it NEVER assumes a defensive clear-prefix actually landed, so it stays inflated by
+   *  whatever a still-unresolved clear attempt was trying to erase even if that clear genuinely worked.
+   *  It therefore can NOT by itself distinguish "a clear was attempted and failed" from "a clear was
+   *  attempted and worked, only the fresh write after it hasn't confirmed yet" — those two very different
+   *  situations read as the exact same number here. `getComposerDirtyLenBelieved` is the OPTIMISTIC
+   *  counterpart (assumes every attempted clear worked) — read the two together: equal means nothing to
+   *  doubt, a gap means a clear is unresolved and the gap size is how much is in doubt. */
   getComposerDirtyLen(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.composerDirtyLen;
+  }
+
+  /** Card c148f118: the OPTIMISTIC counterpart to `getComposerDirtyLen` above (`Live.composerDirtyLenBelieved`
+   *  — see that field's own doc for the full mechanics). Same undefined-vs-0 discipline: `undefined` means
+   *  the session isn't live in this process, `0` is a genuine measured zero. Read ALONGSIDE
+   *  `getComposerDirtyLen`, never instead of it: equal values mean no defensive-clear attempt is currently
+   *  unresolved (nothing to doubt); a LOWER value here than `getComposerDirtyLen` means a clear WAS
+   *  attempted and its outcome is still unverified — the gap is exactly how many characters are in doubt,
+   *  bounding the truth between "the clear worked" (this getter) and "the clear did nothing"
+   *  (`getComposerDirtyLen`) instead of the single, ambiguity-collapsing number either field gave alone
+   *  before this card. Surfaced on worker_list/worker_status/my_context (mcp/orchestration.ts) alongside
+   *  `getComposerDirtyLen` — that's the reader this getter exists for; see those tools' own descriptions
+   *  for the same reading guide in their terms. */
+  getComposerDirtyLenBelieved(sessionId: string): number | undefined {
+    return this.live.get(sessionId)?.composerDirtyLenBelieved;
   }
 
   /** Card a33a72f7: milliseconds elapsed since the CURRENT generation's first Enter write
