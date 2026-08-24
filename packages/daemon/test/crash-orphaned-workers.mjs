@@ -579,6 +579,23 @@ try {
   check("(10e) hadCrashLogAtBoot:false — manager summary nudge says 'killed from outside', never 'crashed'",
     pty.getPending(id10e.mgr).some((m) => m.includes("[loom:crash-recovered]") && /killed from outside/i.test(m) && !/\bcrashed\b/i.test(m)));
 
+  // (10f) card 547fcaaa: neither worker nudge variant here (clean-stop [loom:daemon-restarted] from (10a),
+  // nor either [loom:crash-recovered] flavor from (10d)/(10e)) asserts an unconditional worktree-integrity
+  // claim any more — "your worktree WIP is intact" was a hardcoded literal nothing here ever checked. The
+  // fix removes the false claim (rather than softening its wording) and points at re-checking instead.
+  check("(10f) the clean-stop worker nudge (10a) does NOT assert worktree integrity",
+    !pty.getPending(id10a.wkr).some((m) => /WIP is intact/i.test(m)));
+  check("(10f) it instead points the worker at re-checking its worktree's state",
+    pty.getPending(id10a.wkr).some((m) => /re-check your worktree's state/i.test(m)));
+  check("(10f) the default crash-recovered worker nudge (10d) does NOT assert worktree integrity",
+    !pty.getPending(id10d.wkr).some((m) => /WIP is intact/i.test(m)));
+  check("(10f) it instead points the worker at re-checking its worktree's state",
+    pty.getPending(id10d.wkr).some((m) => /re-check your worktree's state/i.test(m)));
+  check("(10f) the killed-from-outside crash-recovered worker nudge (10e) does NOT assert worktree integrity",
+    !pty.getPending(id10e.wkr).some((m) => /WIP is intact/i.test(m)));
+  check("(10f) it instead points the worker at re-checking its worktree's state",
+    pty.getPending(id10e.wkr).some((m) => /re-check your worktree's state/i.test(m)));
+
   // ============================ (11) STAKE-AWARE SILENCING (card c9e51581) ============================
   // The full silent-vs-full matrix on a DEDICATED, clean project (no incidental backlog from the shared
   // P.proj above) — mirrors restart-wake-classification.mjs's Path-A matrix, extended to Path B.

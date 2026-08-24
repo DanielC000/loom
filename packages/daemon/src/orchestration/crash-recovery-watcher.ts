@@ -378,9 +378,9 @@ export class CrashRecoveryWatcher {
           // worse, hasPendingBoardWork reads the PROJECT's board regardless of role, so an operator could
           // get a FULL nudge (or stay silent) based on board state it has nothing to do with.
           const note = s.role === "worker"
-            ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
-              `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
-              `worker_report (done/blocked) so your manager isn't left waiting.`
+            ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-check your ` +
+              `worktree's state, then continue your assigned task from where you left off. If you had already ` +
+              `finished, call worker_report (done/blocked) so your manager isn't left waiting.`
             : s.role === "assistant"
               ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
                 `off with the human.`
@@ -424,8 +424,8 @@ export class CrashRecoveryWatcher {
                 ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-orient from ` +
                   `your home board and your living resume doc, then continue your platform work from where you ` +
                   `left off.`
-                : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
-                  `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
+                : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-check your ` +
+                  `workers' state AND worktrees (some may need attention) and continue orchestrating from where ` +
                   `you left off.`;
             try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
           }

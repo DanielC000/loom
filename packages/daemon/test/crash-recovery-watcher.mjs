@@ -404,6 +404,37 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// (11g) card 547fcaaa: neither the worker nor the manager/platform auto-recovered nudge asserts an
+// unconditional worktree-integrity claim any more — "your worktree WIP is intact" / "your worktrees are
+// intact" were hardcoded literals nothing ever checked. The fix removes the false claim (rather than
+// softening its wording) and points at re-checking instead, matching the shape card 40b63f1c landed for
+// the sibling [loom:daemon-restarted] notice in sessions/service.ts.
+{
+  const e = makeEnv();
+  seedSession(e, "s11g-wkr", { role: "worker", parentSessionId: "mgr-11g" });
+  die(e, "s11g-wkr", NOW);
+  e.watcher.tick(at(100));
+  const wnudge = e.enqueued.find((x) => x.id === "s11g-wkr");
+  check("(11g) the worker auto-recovered nudge does NOT assert worktree integrity",
+    !!wnudge && !/your worktree WIP is intact/i.test(wnudge.text));
+  check("(11g) it instead points the worker at re-checking its worktree's state",
+    !!wnudge && /re-check your worktree's state/i.test(wnudge.text));
+
+  // Reuse (11e)'s STRANDED-manager setup to exercise the generic manager/platform branch's copy.
+  seedSession(e, "s11g-mgr", { role: "manager" });
+  seedTask(e, "s11g-mgr-task");
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "s11g-mgr", kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  e.db.setIdleNudgePolicy("s11g-mgr", "suppressed");
+  die(e, "s11g-mgr", NOW);
+  e.watcher.tick(at(200));
+  const mnudge = e.enqueued.find((x) => x.id === "s11g-mgr");
+  check("(11g) the manager/platform auto-recovered nudge does NOT assert worktree integrity",
+    !!mnudge && !/your worktrees are intact/i.test(mnudge.text));
+  check("(11g) it instead tells the manager to re-check workers' state AND worktrees",
+    !!mnudge && /re-check your workers' state AND worktrees/i.test(mnudge.text));
+  cleanup(e);
+}
+
 // ============================ (12) O(N) → O(triggered) CANDIDATE DERIVATION (card bf0b902c) ============
 // The watcher used to iterate db.listResumeCandidates() — EVERY resumable session in the fleet — calling
 // listEventsForWorker (an unindexed full-table SCAN pre-fix) on each just to check whether it ever had a

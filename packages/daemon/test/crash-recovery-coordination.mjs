@@ -135,6 +135,11 @@ function cleanup(e) {
   check("(B) a durable worker_exited_without_report event is still recorded either way", evKinds(e, "wkr-b", "worker_exited_without_report").length === 1);
   check("(B) an ELIGIBLE worker gets NO 'will NOT come back' nudge", !!nudgeB && !/will NOT come back/.test(nudgeB.text));
   check("(B) instead it gets a provisional auto-resume heads-up", !!nudgeB && /auto-resume/.test(nudgeB.text));
+  // card 547fcaaa: the eligible-branch nudge no longer asserts unconditional worktree integrity — "Its
+  // worktree/branch (...) is intact" was a hardcoded literal nothing here ever checked, asserted right
+  // before the boot reconcile that could reap the tree. The sibling "will NOT come back" branch is left
+  // untouched — "Any work it committed is on branch X" is a factual statement, not an integrity claim.
+  check("(B) the ELIGIBLE worker nudge does NOT assert worktree integrity", !!nudgeB && !/is intact/.test(nudgeB.text));
   cleanup(e);
 
   // NOT eligible (crash recovery disabled for the project) → the original definitive nudge still fires.

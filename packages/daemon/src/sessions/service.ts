@@ -4106,7 +4106,8 @@ export class SessionService {
    *     'suppressed'-via-escalation manager OR platform/Lead) still forces the full nudge — a no-op there
    *     would strand the queue. The deploy
    *     REQUESTER is NEVER short-circuited — it always gets the full "code is live — continue/verify" nudge;
-   *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
+   *   - every worker gets the "re-check your worktree's state, continue your task" nudge (card 547fcaaa —
+   *     no longer asserts unconditional worktree integrity, which nothing here ever checked);
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
    *     nudge ONLY if it was BUSY (mid-run) at capture (card b5664b5b Problem B); an already-IDLE reviewer
    *     between scheduled runs resumes SILENTLY (its next due wake/schedule re-engages it via the durable
@@ -4276,8 +4277,8 @@ export class SessionService {
       if (e.role === "worker") {
         this.enqueueNudge(
           e.sessionId, e.role,
-          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
-          `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
+          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
+          `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
           `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
         );
       } else if (e.role === "manager" || e.role === "platform") {
@@ -4455,8 +4456,8 @@ export class SessionService {
    *
    * A worker that had already reported `done` (`reportedDone`) is recovered for VISIBILITY (it reappears
    * in worker_list so the manager notices it's awaiting merge review) but does NOT get the "continue your
-   * task" nudge — it isn't mid-work. Every other recovered worker gets the same "worktree WIP intact,
-   * continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited) manager or worker is resumed live
+   * task" nudge — it isn't mid-work. Every other recovered worker gets the same "re-check your worktree's
+   * state, continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited) manager or worker is resumed live
    * (so the rate-limit watcher can recover it in its own time) but its nudge is WITHHELD — mirrors
    * resumeFleetOnBoot's `isParked`/`skippedParked` handling; a crash must never push a held turn back
    * into a usage-limit cap. Each affected (non-parked) manager gets ONE summary nudge naming how many of
@@ -4549,11 +4550,11 @@ export class SessionService {
             this.enqueueNudge(
               w.workerSessionId, "worker",
               cleanStop
-                ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — your worktree ` +
-                  `WIP is intact. Continue your assigned task from where you left off. If you had already ` +
+                ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — re-check your ` +
+                  `worktree's state, then continue your assigned task from where you left off. If you had already ` +
                   `finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL
-                : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — your ` +
-                  `worktree WIP is intact. Continue your assigned task from where you left off. If you had ` +
+                : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — re-check your ` +
+                  `worktree's state, then continue your assigned task from where you left off. If you had ` +
                   `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
             );
           } catch { /* not ready yet — the resume stands */ }
@@ -9616,7 +9617,7 @@ export class SessionService {
     });
     const eligible = isCrashRecoveryEligible(this.db, this.control, w);
     const msg = eligible
-      ? `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) died unexpectedly — its task is still in_progress. Loom's crash-recovery watchdog will attempt to auto-resume it; no action needed yet. Its worktree/branch (${w.branch ?? "(unknown)"}) is intact — if recovery is later abandoned you'll get a follow-up nudge.`
+      ? `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) died unexpectedly — its task is still in_progress. Loom's crash-recovery watchdog will attempt to auto-resume it; no action needed yet. If recovery is later abandoned you'll get a follow-up nudge.`
       : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or re-dispatch the task.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live — the durable event stands */ }
   }

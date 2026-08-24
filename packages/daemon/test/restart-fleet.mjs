@@ -162,6 +162,12 @@ try {
   check("(2) other manager B gets the neutral 'you were resumed' note", mgrBq.length === 1 && mgrBq[0].includes("Another manager restarted") && !mgrBq[0].includes("now LIVE"));
   check("(2) other project's worker B1 gets the worker task nudge", pty.getPending(id.wkrB1).length === 1 && pty.getPending(id.wkrB1)[0].includes("Continue your assigned task"));
   check("(2) the dead (failed) worker received NO nudge", pty.getPending(deadW).length === 0);
+  // card 547fcaaa: the worker daemon-restarted nudge no longer asserts unconditional worktree integrity —
+  // "your worktree WIP is intact" was a hardcoded literal nothing here ever checked.
+  check("(2) worker B1's nudge does NOT assert worktree integrity",
+    !pty.getPending(id.wkrB1)[0].includes("WIP is intact"));
+  check("(2) it instead points the worker at re-checking its worktree's state",
+    /re-check your worktree's state/i.test(pty.getPending(id.wkrB1)[0]));
 
   // ============================ (3) PROTECTION — full set keeps every project's worktree ===========
   // Two real repos, each with a CLEAN (0-commit, safe-to-discard) worktree of an EXITED worker — i.e.
