@@ -4327,8 +4327,9 @@ export class SessionService {
           ].filter(Boolean).join("; ");
           if (e.role === "platform") {
             // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
-            // "your worktrees are intact / resume orchestrating your workers" phrasing is nonsense it has to
-            // reason away on EVERY restart. A Lead now gets the SAME IdleWatcher coverage a manager does
+            // "resume orchestrating from where you left off / re-check your workers' state and worktrees"
+            // phrasing is nonsense it has to reason away on EVERY restart. A Lead now gets the SAME
+            // IdleWatcher coverage a manager does
             // (card 98b3725c) — `strandedBoardWork` is no longer unconditionally true for platform sessions,
             // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
             // like a manager. Re-orient it from the board + its own living resume doc instead of the
@@ -4343,8 +4344,8 @@ export class SessionService {
             this.enqueueNudge(
               e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
-              `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
-              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
+              `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
+              `state AND worktrees; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           }
         }
@@ -14883,7 +14884,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -14897,6 +14898,7 @@ export class SessionService {
     let worktreesKept = 0;
     let worktreesNeedsHuman = 0;
     let worktreesStaleRepoKey = 0;
+    let worktreesLeftOnDiskSuspectedLive = 0;
     let branchesReclaimed = 0;
     let branchSweepSkippedRepos = 0;
     let branchSweepNoOrigin = 0;
@@ -15042,11 +15044,29 @@ export class SessionService {
     // commits ahead of main AND a clean working tree (see worktreeHasWork, which FAILS SAFE → keep on
     // any timeout/error). Anything still holding work is left on disk for a human/next pass. This holds
     // for ALL sessions in Pass B, not just protected ones.
+    //
+    // Card 40b63f1c: liveness protection must be keyed on the WORKTREE, not the iterated session row. A
+    // `worker_recycle` chain aliases ONE worktreePath across TWO session rows — a dangling predecessor
+    // (exited/dead, NOT in protectedSessionIds) and the live successor (protected-for-resume, or simply
+    // still running). Keying the skip below on `s.id` let the predecessor row slip past every filter and
+    // reap the SAME worktree the successor is actively using — its own protected row never got a say,
+    // because the loop only ever asked "is THIS row protected?", never "does anyone still hold this
+    // worktree?". Build the set of paths held by any protected-for-resume OR currently-live session up
+    // front, ONCE, so whichever row Pass B visits first for a shared path, the decision is identical.
+    const protectedWorktreePaths = new Set<string>();
+    for (const s of all) {
+      if (!s.worktreePath) continue;
+      const isLive = s.processState !== "exited" && s.resumability !== "dead";
+      if (protectedSessionIds.has(s.id) || isLive) protectedWorktreePaths.add(s.worktreePath);
+    }
     for (const s of all) {
       const worktreePath = s.worktreePath;
       if (!worktreePath || handledWorktrees.has(worktreePath)) continue;
-      if (protectedSessionIds.has(s.id)) continue; // restart-intent worker — keep its worktree to resume into
-      if (s.processState !== "exited" && s.resumability !== "dead") continue;
+      // CLAIM the path before continuing — a protected worktree is decided exactly once, so no aliased
+      // dangling row visited later in this same pass can re-decide it (this is what makes the decide-
+      // once contract in `handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide
+      // once` below actually hold for the protected case too).
+      if (protectedWorktreePaths.has(worktreePath)) { handledWorktrees.add(worktreePath); continue; }
       if (!fs.existsSync(worktreePath)) continue;
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
@@ -15119,6 +15139,23 @@ export class SessionService {
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;
+      else if (outcome === "left-on-disk") {
+        // Finding 1 (card 40b63f1c): a failed removal here is NOT routine fs flakiness to log once and
+        // silently retry next boot — the incident's own log line ("could not remove dir ... left on disk
+        // for a later GC") fired BECAUSE the live worker's own process still held this directory as its
+        // cwd, at the exact moment removal ran. The strongest possible liveness signal arrived DURING the
+        // destruction and was previously discarded as routine. Treat it as evidence something still holds
+        // the path: retain it (so it surfaces via getRetainedWorktrees rather than vanishing as an
+        // untracked, silently-retried orphan) and log it distinctly from an ordinary wedge/backlog entry.
+        worktreesLeftOnDiskSuspectedLive++;
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] worktree ${worktreePath} could not be fully removed — treating as POSSIBLY STILL LIVE rather than routine GC backlog (Pass B); retained for a human/next pass to investigate`);
+        this.retainedWorktreeRecords.push({
+          worktreePath, branch: s.branch ?? null, sessionId: s.id, taskId: s.taskId ?? null,
+          lastActivityAt: s.lastActivity, repoPath,
+          projectId: project.id, projectName: project.name,
+        });
+      }
     }
 
     // C. Reclaim merged `loom/*` branch refs (card 09f268a5). Pass B (above) intentionally never deletes
@@ -15265,10 +15302,17 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${worktreesStaleRepoKey} worktree(s) skipped this boot — their session's stamped repoKey no longer names a registered repo (the registry entry was removed) — retried automatically once a human restores/fixes the registry entry.`);
     }
+    // Card 40b63f1c Finding 1: aggregate visibility for the per-worktree warn logged above — a boot pass
+    // whose ONLY notable activity is a suspected-still-live left-on-disk worktree must not read as "nothing
+    // happened", same reasoning as worktreesStaleRepoKey above.
+    if (worktreesLeftOnDiskSuspectedLive > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${worktreesLeftOnDiskSuspectedLive} worktree(s) could not be fully removed and are being treated as POSSIBLY STILL LIVE rather than routine GC backlog — see the per-worktree warning(s) above for paths.`);
+    }
     if (branchesReclaimed > 0) {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
   }
 
   /**

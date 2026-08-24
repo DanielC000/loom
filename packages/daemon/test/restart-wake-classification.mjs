@@ -252,11 +252,13 @@ try {
   // restart nudge — it still gets the full re-check. This is the safety carve-out that survives the reframing.
   check("(1) a manager suppressed via the idle-watcher's ESCALATION-CAP still gets the FULL re-check (no stranding)",
     q(id.escalatedMgr).length === 1 && /re-check your workers/i.test(q(id.escalatedMgr)[0]) && /board has pending work/i.test(q(id.escalatedMgr)[0]) && !/no action is needed/i.test(q(id.escalatedMgr)[0]));
-  // The manager-shaped "affected" nudge text stays BYTE-IDENTICAL to before the platform split.
-  check("(1) the affected manager nudge is the unchanged manager-shaped text (worktrees/orchestrating/workers)",
-    q(id.escalatedMgr)[0].includes("your worktrees are intact") &&
+  // The manager-shaped "affected" nudge text (card 40b63f1c: no longer asserts unconditional worktree
+  // integrity — "your worktrees are intact" was a hardcoded literal nothing ever checked; the fix removes
+  // the false claim rather than softening its wording, and points the manager at re-checking instead).
+  check("(1) the affected manager nudge is manager-shaped (orchestrating/workers) and does NOT assert worktree integrity",
+    !q(id.escalatedMgr)[0].includes("your worktrees are intact") &&
     q(id.escalatedMgr)[0].includes("Resume orchestrating from where you left off") &&
-    q(id.escalatedMgr)[0].includes("re-check your workers' state; some may have just been resumed too"));
+    q(id.escalatedMgr)[0].includes("re-check your workers' state AND worktrees; some may have just been resumed too"));
   // A manager with ZERO backlog but a genuinely NEW unconsumed ANSWERED question of its own → full re-check
   // even though its board is empty (distinct from generic board content, so board-work silence doesn't apply).
   check("(1) a non-causal manager with an unconsumed ANSWERED question gets the FULL re-check despite an empty board",
