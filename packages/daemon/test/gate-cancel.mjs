@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -38,13 +39,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // wall-clock), and it's genuinely too fragile here: a block running right after a real squash-merge/
 // worktree-removal can see its OWN git subprocess prep take longer than a fixed short sleep under host
 // load. Bounded generously (8s) so a real bug still fails fast rather than hanging.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs/intervalMs defaults,
+// same "return the predicate's own value; one last try, then give up honestly" contract on timeout — only
+// difference is the added [waitUntil-outcome] diagnostic before that fallback try.
 async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = predicate();
-    if (v) return v;
-    if (Date.now() - start > timeoutMs) return predicate(); // one last try, then give up honestly
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "gate-cancel: condition" });
+  } catch {
+    return predicate(); // one last try, then give up honestly
   }
 }
 const GIT_ID = "-c user.email=gc@loom -c user.name=gc";

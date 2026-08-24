@@ -35,16 +35,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs default and same
+// intervalMs (2ms), still throws on timeout; only difference is the added [waitUntil-outcome] diagnostic.
 async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
+  await sharedWaitUntil(predicate, { timeoutMs, intervalMs: 2, label: "pty-giveup-content-match-attribution: condition" });
 }
 
 const submitLog = [];

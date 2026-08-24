@@ -21,17 +21,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs/intervalMs, still
+// returns true/false (no fallback re-check) — only difference is the added [waitUntil-outcome]
+// diagnostic on a timeout. The original loop propagated a throwing predicate immediately (no swallow);
+// only a genuine waitUntil TIMEOUT collapses to `false` here — anything else (a predicate bug) re-throws,
+// so a throw never silently reads as "condition never became true".
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "worker-set-mode: condition" });
+    return true;
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err; // a throwing predicate is a real error, not a timeout
+    return false;
   }
-  return true;
 };
 
 // ═══════════════════════════ Part 1: PtyHost.setPermissionMode (real cycler, fake footer) ═══════════════════════════

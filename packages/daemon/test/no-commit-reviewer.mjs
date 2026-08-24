@@ -37,6 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ncr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -61,13 +62,15 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // ce7d99bb — the same class of tight-margin timing flake as worker-run-gate.mjs's (L)/(J), fixed this
 // session): resolves as soon as the condition is met, so it's fast on a healthy run and only ever
 // slow — never flaky — on a loaded one, up to `timeoutMs`.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42): same timeoutMs/intervalMs defaults,
+// same "one last check, then give up honestly" fallback on timeout — only difference is the added
+// [waitUntil-outcome] diagnostic before that fallback check runs.
 async function waitFor(condFn, { timeoutMs = 5000, intervalMs = 25 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (condFn()) return true;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  try {
+    return await sharedWaitUntil(condFn, { timeoutMs, intervalMs, label: "no-commit-reviewer: condFn" });
+  } catch {
+    return condFn();
   }
-  return condFn();
 }
 const GIT_ID = "-c user.email=ncr@loom -c user.name=ncr";
 const now = new Date().toISOString();
