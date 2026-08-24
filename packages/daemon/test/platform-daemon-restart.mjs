@@ -29,6 +29,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       session id into `RestartIntent.managerSessionId` for a platform caller too (not just proven by
 //       reading the source) — driven via the TEST-ONLY `deps` injection seam (fake instant-green build +
 //       a captured exit) added for exactly this, so no real pnpm/turbo spawn or process.exit occurs.
+//   (N4)/(N5) Card db2179f6: `intent.supervisorChanged:true` makes the requester's "your merged daemon
+//       code is now LIVE" claim conditional — both the manager AND platform-Lead branches must say the
+//       supervisor part is NOT live and name the human `pnpm daemon:stable` step, instead of the
+//       unconditional claim the common (supervisorChanged absent/false) case still makes — see (N1)/(N2)'s
+//       new positive-control checks for that common-case text staying byte-identical.
+//   (N6) Card b2dcf930: the Lead branch's fleet-wide "whole fleet ... was resumed too" claim, RED-proofed
+//       for the platform requester specifically (restart-fleet.mjs's (2) section already covers the
+//       manager branch) — the Lead branch had NO ratio at all before the fix.
 // Run: 1) build daemon, 2) node test/platform-daemon-restart.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -212,6 +220,8 @@ class ControllableMcpPty {
     mgrMsgs.length === 1 && mgrMsgs[0].includes("now LIVE") && mgrMsgs[0].includes("[loom:daemon-restarted]"));
   check("(N1) the manager's nudge uses worker/worktree-shaped phrasing, not the Lead's board/resume-doc framing",
     /of your live/i.test(mgrMsgs[0]) && !/living resume doc/i.test(mgrMsgs[0]));
+  check("(N1) common case (no failed resumes) keeps the unconditional fleet clause unchanged",
+    mgrMsgs[0].includes("the rest of the fleet across all projects was resumed too"));
 
   db.close();
   rmDb(file);
@@ -239,8 +249,94 @@ class ControllableMcpPty {
     /living resume doc/i.test(platMsgs[0]) && /home board/i.test(platMsgs[0]));
   check("(N2) the platform requester's nudge does NOT use the manager's worker/worktree framing",
     !/of your live/i.test(platMsgs[0]));
+  check("(N2) common case (no failed resumes) keeps the Lead's unconditional fleet sentence unchanged",
+    platMsgs[0].includes("The whole fleet across all projects was resumed too."));
   // markMcpSeen was never called for reqPlat in this section — proves delivery did not depend on it.
   check("(N2) delivery happened with zero pending MCP-seen waiters left dangling", pty.waiters.get("reqPlat") === undefined);
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N4) card db2179f6: supervisorChanged:true — a MANAGER requester's "code is live" claim becomes
+// conditional. The supervisor script is NOT re-execed across daemon_restart, so a deploy touching it
+// must say so instead of the unconditional "now LIVE" claim. ---
+{
+  const file = tmpDbFile("nudge-mgr-sc");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npsc", name: "NPSC", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nasc", projectId: "npsc", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqMgrSC", projectId: "npsc", agentId: "nasc", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy touching the supervisor", managerSessionId: "reqMgrSC", requestedAt: now, supervisorChanged: true, resume: [{ sessionId: "reqMgrSC", role: "manager", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  pty.markMcpSeen("reqMgrSC"); // manager requester's nudge is gated behind waitForMcpSeen — see (N1)
+  await flush();
+  const msgs = pty.getPending("reqMgrSC");
+  check("(N4) supervisorChanged:true — the manager requester's nudge says the supervisor part is NOT live and names the human step",
+    msgs.length === 1 && /EXCEPT the supervisor script itself/.test(msgs[0]) && /pnpm daemon:stable/.test(msgs[0]));
+  check("(N4) it drops the unconditional 'now LIVE in the running daemon' claim it makes in the common case",
+    !/now LIVE in the running daemon/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N5) card db2179f6: supervisorChanged:true — the PLATFORM (Lead) requester gets the SAME
+// conditional claim as the manager branch above (both branches share one ternary in service.ts). ---
+{
+  const file = tmpDbFile("nudge-plat-sc");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npsc2", name: "NPSC2", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nasc2", projectId: "npsc2", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqPlatSC", projectId: "npsc2", agentId: "nasc2", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy touching the supervisor", managerSessionId: "reqPlatSC", requestedAt: now, supervisorChanged: true, resume: [{ sessionId: "reqPlatSC", role: "platform", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  await flush();
+  const msgs = pty.getPending("reqPlatSC");
+  check("(N5) supervisorChanged:true — the platform Lead requester's nudge ALSO says the supervisor part is NOT live",
+    msgs.length === 1 && /EXCEPT the supervisor script itself/.test(msgs[0]) && /pnpm daemon:stable/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N6) card b2dcf930: failed.length > 0 for the PLATFORM (Lead) BRANCH specifically — restart-
+// fleet.mjs's (2) section already covers the manager branch; the Lead branch had NO ratio at all before
+// the fix (it unconditionally claimed "The whole fleet across all projects was resumed too."). ---
+{
+  const file = tmpDbFile("nudge-plat-failed");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npf", name: "NPF", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "naf", projectId: "npf", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqPlatFailed", projectId: "npf", agentId: "naf", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = {
+    reason: "deploy", managerSessionId: "reqPlatFailed", requestedAt: now,
+    resume: [
+      { sessionId: "reqPlatFailed", role: "platform", parentSessionId: null },
+      { sessionId: "some-dead-session", role: "worker", parentSessionId: null },
+    ],
+  };
+  const resumeOne = (id) => id !== "some-dead-session";
+  const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
+  await flush();
+  check("(N6) the unresumable session lands in `failed`", result.failed.includes("some-dead-session") && result.failed.length === 1);
+  const msgs = pty.getPending("reqPlatFailed");
+  check("(N6) the Lead's nudge names the failure INSTEAD of the unconditional 'whole fleet was resumed too' claim",
+    msgs.length === 1 && /1 session\(s\) elsewhere in the fleet failed to resume/.test(msgs[0]) && !/The whole fleet across all projects was resumed too/.test(msgs[0]));
 
   db.close();
   rmDb(file);

@@ -332,6 +332,13 @@ function cleanup(e) {
   const nudge = e.enqueued.find((x) => x.id === "s11c");
   check("(11c) a manager resumed via worker_report_undelivered gets the FULL review/merge nudge (queuedIoReplayed stake)",
     !!nudge && /worker_list/.test(nudge.text) && /review/.test(nudge.text));
+  // Card b25ed05a #1: the dropped parenthetical asserted CURRENT board state ("the task is already in
+  // 'review'") from this historical trigger event alone — nothing live gated it, even though a live
+  // db.listWorkers read sits right above it in the same code path. RED-proofed by reverting the fix and
+  // re-running (see worker_report). Bounded even before the fix (the nudge already says "Call
+  // worker_list"), so dropping it only shortens the notice.
+  check("(11c) the nudge does NOT assert current board state from the historical trigger alone",
+    !!nudge && !/task is already in 'review'/.test(nudge.text));
   cleanup(e);
 }
 

@@ -149,6 +149,11 @@ try {
   // Requester managerA: ONE message — its "code is now LIVE" re-prompt.
   const mgrAq = pty.getPending(id.mgrA);
   check("(2) requester gets exactly its 'code is live' re-prompt", mgrAq.length === 1 && mgrAq[0].includes("now LIVE") && mgrAq[0].includes("[loom:daemon-restarted]"));
+  // Card b2dcf930: `deadW` above is unresumable, so `failed.length === 1` by the time this requester
+  // nudge is built. The fleet clause must name that failure instead of unconditionally claiming the
+  // whole fleet was resumed (RED-proofed by reverting this fix and re-running — see worker_report).
+  check("(2) requester's fleet clause reflects the ACTUAL failed count, not an unconditional claim",
+    mgrAq[0].includes("1 session(s) elsewhere in the fleet failed to resume") && !mgrAq[0].includes("the rest of the fleet across all projects was resumed too"));
   // workerA1: pending replayed IN ORDER, THEN the worker continuation nudge.
   const wA1q = pty.getPending(id.wkrA1);
   check("(2) workerA1 pending FIFO replayed in order before the nudge",

@@ -155,6 +155,15 @@ export interface RestartIntent {
    * Keyed by managerSessionId/platformSessionId; absent when nothing was queued for anyone captured.
    */
   capQueued?: Record<string, CapQueuedSpawn[]>;
+  /**
+   * Card db2179f6 — the {@link supervisorScriptChangedSince} result computed at request time, carried
+   * across the restart so resumeFleetOnBoot's requester nudge can say so instead of unconditionally
+   * claiming "your merged daemon code is now LIVE": a deploy touching the supervisor script leaves those
+   * lines inert until a human runs `pnpm daemon:stable` (see SUPERVISOR_CHANGED_WARNING). Absent/false on
+   * the overwhelmingly common case (no supervisor change) and on any OLD on-disk intent pre-dating this
+   * field, which degrades to the old unconditional wording — never a crash.
+   */
+  supervisorChanged?: boolean;
   requestedAt: string;
 }
 

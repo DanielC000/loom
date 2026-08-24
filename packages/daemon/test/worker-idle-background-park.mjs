@@ -168,6 +168,15 @@ function cleanup(e) {
     !!nudge && !/it IS parked awaiting your reply/.test(nudge.text) && !/awaiting your reply/.test(nudge.text));
   check("(3) honestly attributes the park to its OWN backgrounded task, 'no reply owed'",
     !!nudge && /no reply owed/.test(nudge.text) && /OWN backgrounded task/.test(nudge.text));
+  // Card b25ed05a #2: "it will continue on its own" used to be an UNCONDITIONAL assertion resting
+  // entirely on this self-reported flag — worker_report's own tool description says Loom cannot verify
+  // an in-flight background shell, and this was the one branch of the ternary that forgot that (every
+  // sibling branch carries an "Observed"/self-reported stamp; the parked-background-stale sibling exists
+  // precisely because this flag is known untrustworthy). Attribute the claim to its source instead of
+  // asserting the outcome as settled fact. RED-proofed by reverting the fix and re-running (see
+  // worker_report).
+  check("(3) attributes the continuation claim to the worker's OWN self-report, not asserted as settled fact (card b25ed05a #2)",
+    !!nudge && /it flagged that it expects to continue on its own/.test(nudge.text) && !/no reply owed; it will continue on its own/.test(nudge.text));
   cleanup(e);
 }
 

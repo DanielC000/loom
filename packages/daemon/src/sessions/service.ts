@@ -3354,6 +3354,7 @@ export class SessionService {
       ...(Object.keys(pendingHolds).length > 0 ? { pendingHolds } : {}),
       ...(Object.keys(pendingMintedAt).length > 0 ? { pendingMintedAt } : {}),
       ...(Object.keys(capQueuedSnapshot).length > 0 ? { capQueued: capQueuedSnapshot } : {}),
+      ...(supervisorChanged ? { supervisorChanged: true } : {}),
     });
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
@@ -4450,16 +4451,39 @@ export class SessionService {
         // anything falling through both — the OLD-format resumeSetFromIntent path always is one (its
         // synthesized requester entry is always role:"manager", so this default matches it exactly).
         const reqRole = this.db.getSession(reqId)?.role ?? entries.find((e) => e.sessionId === reqId)?.role ?? "manager";
+        // Card b2dcf930: `failed` (populated by the per-entry resume loop above, ~:4298) is the
+        // ready-made falsifier for "the rest of the fleet ... was resumed too" — it used to go
+        // uncomputed-but-unconsulted here, so a resume failure elsewhere in the fleet made this claim
+        // flatly false. Render it from `failed.length` instead: true in the (overwhelmingly common)
+        // zero-failure case, keeping today's wording byte-identical; named otherwise.
+        const fleetOk = failed.length === 0;
+        const fleetParenthetical = fleetOk
+          ? `the rest of the fleet across all projects was resumed too`
+          : `${failed.length} session(s) elsewhere in the fleet failed to resume — check worker_list across projects`;
+        const fleetSentence = fleetOk
+          ? `The whole fleet across all projects was resumed too.`
+          : `${failed.length} session(s) elsewhere in the fleet failed to resume — check worker_list across projects.`;
+        // Card db2179f6: "your merged daemon code is now LIVE" is unconditional today, but false for the
+        // one case this restart path already detects and returns from requestDaemonRestart —
+        // `intent.supervisorChanged` (see its own doc) — a deploy touching the supervisor script leaves
+        // those lines inert until a human runs `pnpm daemon:stable`. Absent/false in the common case,
+        // where the wording is unchanged. (The skill-store adopt half of the same finding is left
+        // out-of-scope here — plumbing `skillStoreStaleness` to this notice-building site was judged not
+        // worth its cost; see the card.)
+        const liveClaim = intent.supervisorChanged
+          ? `your merged daemon code is now live in the running daemon EXCEPT the supervisor script itself ` +
+            `— a human must run \`pnpm daemon:stable\` for those lines to take effect`
+          : `your merged daemon code is now LIVE in the running daemon`;
         const reqText = reqRole === "platform"
           // Lead-appropriate framing (mirrors the non-requester Lead branch above): no worktrees/workers
           // of its own to report a resumed-count for.
-          ? `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-            `running daemon (reason: ${intent.reason}). The whole fleet across all projects was resumed too. ` +
+          ? `[loom:daemon-restarted] Rebuild + restart complete — ${liveClaim} (reason: ${intent.reason}). ` +
+            `${fleetSentence} ` +
             `Re-orient from your home board and your living resume doc, then end-to-end verify the live ` +
             `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote
-          : `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-            `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
-            `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
+          : `[loom:daemon-restarted] Rebuild + restart complete — ${liveClaim} (reason: ${intent.reason}). ` +
+            `${reqWorkersResumed}/${reqWorkers.length} of your live ` +
+            `workers were resumed (${fleetParenthetical}). You can now ` +
             `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
         this.enqueueNudge(reqId, reqRole, reqText);
       }
@@ -9563,7 +9587,7 @@ export class SessionService {
       : cls.kind === "parked-wake"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and is parked on its OWN scheduled wake (self-resumes at ${cls.wakeAt}) — no reply owed; it will continue on its own. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
       : cls.kind === "parked-background"
-      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and flagged it's parked on its OWN backgrounded task (not you) — no reply owed; it will continue on its own once that finishes. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and flagged it's parked on its OWN backgrounded task (not you) — no reply owed; it flagged that it expects to continue on its own once that finishes (self-reported — Loom can't see an in-flight background task). Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
       : cls.kind === "parked-background-stale"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) flagged worker_report(${cls.status}) as parked on its OWN backgrounded task ~${cls.minutesSinceReport} min ago and still hasn't re-engaged — that flag has no expiry of its own and this is now stale, so it may be dead rather than genuinely still running. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the background task is gone.`
       : cls.kind === "parked-ack"

@@ -415,11 +415,16 @@ export class CrashRecoveryWatcher {
           if (!isNoOpManagerWake(impact)) {
             // Tailor the manager nudge to the trigger: a `worker_report_undelivered` wake means a worker's
             // report reached nobody while this manager was stopped — point it straight at the review/merge
-            // it missed (the task is already in `review`), not the generic "died unexpectedly" copy.
+            // it missed, not the generic "died unexpectedly" copy.
+            // Card b25ed05a: the dropped parenthetical asserted CURRENT board state ("the task is already
+            // in 'review'") from a historical event row alone, with a live `db.listWorkers` read three
+            // lines above it never consulted. Bounded even before this fix (the next sentence already
+            // says "Call worker_list"), so dropping it only shortens the notice — the live check that
+            // sentence already asks for is the actual source of truth for board state.
             const note = lastTrigger.event.kind === "worker_report_undelivered"
               ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
                 `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
-                `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`
+                `review. Run the review→gate→merge loop on it, then continue orchestrating.`
               : s.role === "platform"
                 ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-orient from ` +
                   `your home board and your living resume doc, then continue your platform work from where you ` +
