@@ -662,6 +662,92 @@ try {
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11e) a solo manager with an unconsumed ANSWERED question gets the FULL nudge despite an empty board",
     pty.getPending(id11e.mgr).some((m) => m.includes("[loom:crash-recovered]")));
+
+  // ============================ (12) WORKTREE-AT-RISK MEASUREMENT (card ab8b2cc6) ====================
+  // recoveredCount is a SESSION-liveness count — it says nothing about whether the recovered worker's
+  // WORKTREE actually survived. These three cases prove the new classifyWorktreeIntegrity-backed measure
+  // in the manager's summary nudge actually discriminates: intact vs. at-risk (gone) vs. indeterminate
+  // (an unclaimable .git shape) — and that "indeterminate" is NEVER folded into "intact" in the notice.
+  const mkWorktreeFixture = async (label) => {
+    const repo = path.join(os.tmpdir(), `loom-cow-wtrisk-${label}-${sfx}`);
+    repoRoots.push(repo);
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), `# ${label}\n`);
+    execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    const projId = `cow-wtrisk-${label}-proj-${sfx}`;
+    const agentId = `cow-wtrisk-${label}-ag-${sfx}`;
+    mkProject(projId, repo);
+    mkAgent(agentId, projId);
+    const mgrId = `cow-wtrisk-${label}-mgr-${sfx}`;
+    const mgrEng = `eng-${mgrId}`;
+    mkSession({ id: mgrId, projId, agentId, role: "manager", processState: "live", cwd: repo, engineSessionId: mgrEng });
+    transcriptDirs.push(writeTranscript(repo, mgrEng));
+    const taskId = mkTask(`cow-wtrisk-${label}-task-${sfx}`, projId);
+    const wt = await createWorktree(repo, projId, taskId);
+    const wkrId = `cow-wtrisk-${label}-wkr-${sfx}`;
+    const wkrEng = `eng-${wkrId}`;
+    mkSession({ id: wkrId, projId, agentId, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch, cwd: wt.worktreePath, processState: "live", engineSessionId: wkrEng });
+    transcriptDirs.push(writeTranscript(wt.worktreePath, wkrEng));
+    return { mgrId, wkrId, worktreePath: wt.worktreePath };
+  };
+
+  // (12a) INTACT — a real, untouched worktree. The summary must say the check ran and flagged nothing,
+  // NOT silently omit any mention (a reader must be able to tell "checked, clean" from "no check ran").
+  const f12a = await mkWorktreeFixture("intact");
+  const derived12a = deriveCrashOrphanedWorkers(db, [db.getSession(f12a.mgrId), db.getSession(f12a.wkrId)]);
+  sessions.recoverCrashOrphanedWorkers(derived12a, { resumeOne: () => true });
+  await flush();
+  check("(12a) INTACT worktree: the summary nudge reports the check ran and found nothing flagged",
+    pty.getPending(f12a.mgrId).some((m) => m.includes("[loom:crash-recovered]") && /nothing flagged/i.test(m)));
+  check("(12a) INTACT worktree: the summary nudge does NOT claim any worktree could not be confirmed intact",
+    !pty.getPending(f12a.mgrId).some((m) => /could not be confirmed intact/i.test(m)));
+  // The clean reading must be stamped as a POINT-IN-TIME check, never a continuing guarantee — in a
+  // replay of the 08:16Z incident this exact sentence would be emitted seconds before the worktree was
+  // emptied, so an un-stamped "found nothing flagged" would be TRUE/REASSURING/IRRELEVANT, the card's own
+  // condemned shape. Pinned here so a future edit that quietly drops the stamp goes RED.
+  check("(12a) INTACT worktree: the clean reading is stamped 'as of resume' (point-in-time, not a guarantee)",
+    pty.getPending(f12a.mgrId).some((m) => /found nothing flagged.*as of resume|as of resume.*found nothing flagged/i.test(m)));
+  check("(12a) INTACT worktree: the clean reading says a worktree can still be lost AFTER this point",
+    pty.getPending(f12a.mgrId).some((m) => /can still be lost after this point/i.test(m)));
+
+  // (12b) AT-RISK — the worktree directory is deleted BEFORE recoverCrashOrphanedWorkers runs (fs-level
+  // "gone", the same shape detectVanishedWorktree's own "gone" branch and the originating incident share).
+  const f12b = await mkWorktreeFixture("atrisk");
+  fs.rmSync(f12b.worktreePath, { recursive: true, force: true });
+  check("(12b-pre) the worktree really is gone before the recovery call", !fs.existsSync(f12b.worktreePath));
+  const derived12b = deriveCrashOrphanedWorkers(db, [db.getSession(f12b.mgrId), db.getSession(f12b.wkrId)]);
+  sessions.recoverCrashOrphanedWorkers(derived12b, { resumeOne: () => true });
+  await flush();
+  check("(12b) AT-RISK (gone) worktree: the summary nudge names exactly 1 of those as not confirmed intact",
+    pty.getPending(f12b.mgrId).some((m) => m.includes("[loom:crash-recovered]") && /1 of those had a worktree that could not be confirmed intact/i.test(m)));
+  check("(12b) AT-RISK worktree: the notice does NOT claim it prevents loss — only that it's unverified",
+    pty.getPending(f12b.mgrId).some((m) => /check before trusting it/i.test(m)) &&
+    !pty.getPending(f12b.mgrId).some((m) => /prevent(s|ed)? (the )?loss/i.test(m)));
+  check("(12b) AT-RISK worktree: the notice explicitly scopes itself OFF branch state (DoD-3 — no implied branch safety)",
+    pty.getPending(f12b.mgrId).some((m) => /branch state isn.t checked here/i.test(m)));
+  check("(12b) AT-RISK worktree: the flagged reading is stamped 'as of resume' (point-in-time, not a guarantee)",
+    pty.getPending(f12b.mgrId).some((m) => /could not be confirmed intact as of resume/i.test(m)));
+
+  // (12c) INDETERMINATE — `.git` exists but is a real DIRECTORY, not the worktree-pointer FILE every real
+  // `git worktree add` checkout produces (classifyWorktreeIntegrity's own "not-a-worktree-pointer" case).
+  // This is NOT a confirmed-broken worktree, but it is also NOT confirmed-intact — the whole point of (2)
+  // in the design: an indeterminate shape must never be silently reported as "nothing flagged".
+  const f12c = await mkWorktreeFixture("indeterminate");
+  const gitFile = path.join(f12c.worktreePath, ".git");
+  const gitFileContent = fs.readFileSync(gitFile, "utf8");
+  fs.rmSync(gitFile, { force: true });
+  fs.mkdirSync(gitFile);
+  check("(12c-pre) .git is now a real directory, not the worktree-pointer file", fs.statSync(gitFile).isDirectory());
+  const derived12c = deriveCrashOrphanedWorkers(db, [db.getSession(f12c.mgrId), db.getSession(f12c.wkrId)]);
+  sessions.recoverCrashOrphanedWorkers(derived12c, { resumeOne: () => true });
+  await flush();
+  check("(12c) INDETERMINATE worktree: the summary nudge flags it — NEVER silently reported as intact/nothing-flagged",
+    pty.getPending(f12c.mgrId).some((m) => m.includes("[loom:crash-recovered]") && /1 of those had a worktree that could not be confirmed intact/i.test(m)));
+  check("(12c) INDETERMINATE worktree: the notice does NOT say 'nothing flagged' for this manager",
+    !pty.getPending(f12c.mgrId).some((m) => /nothing flagged/i.test(m)));
+  // Restore the pointer file so worktree cleanup (this test's own repoRoots teardown never touches
+  // worktree dirs directly, but leaving a broken .git behind is bad hygiene for a shared tmp root).
+  try { fs.rmSync(gitFile, { recursive: true, force: true }); fs.writeFileSync(gitFile, gitFileContent); } catch { /* best-effort */ }
 } finally {
   console.log = realLog;
   console.warn = realWarn;

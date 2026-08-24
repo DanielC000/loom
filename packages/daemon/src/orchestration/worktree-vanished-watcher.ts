@@ -23,6 +23,50 @@ export interface WorktreeVanishedWatcherDeps {
 export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_missing";
 
 /**
+ * Three-way classification of a worktree's fs-observable state — the discriminating primitive behind
+ * both {@link detectVanishedWorktree} (below, unchanged contract) and any OTHER caller (e.g. a
+ * restart/crash-recovery notice, card ab8b2cc6) that needs to tell "confirmed intact" apart from
+ * "unclaimable shape" instead of collapsing both into the same `null`.
+ *
+ *  - `{ status: "at-risk", reason }`: gone, or structurally broken, per the same three fs checks
+ *    `detectVanishedWorktree` has always run (see its own doc for what each `reason` means).
+ *  - `{ status: "intact" }`: `.git` parses as a real worktree-pointer whose target admin dir exists —
+ *    the ONLY case that actually earns "looks fine."
+ *  - `{ status: "indeterminate", detail }`: `worktreePath` itself is missing/empty, OR `.git` is a real
+ *    directory (not a worktree-pointer shape), OR its content doesn't match the `gitdir:` pattern — none
+ *    of these are a confirmed-broken state, but none of them are confirmed-intact either; a caller that
+ *    folds this into "fine" is making the SAME "TRUE, REASSURING, IRRELEVANT" mistake this whole
+ *    detector exists to avoid (card ab8b2cc6).
+ */
+export type WorktreeIntegrity =
+  | { status: "at-risk"; reason: WorktreeVanishReason }
+  | { status: "intact" }
+  | { status: "indeterminate"; detail: "no-path" | "not-a-worktree-pointer" | "unrecognized-git-content" };
+
+export function classifyWorktreeIntegrity(worktreePath: string | null | undefined): WorktreeIntegrity {
+  if (!worktreePath) return { status: "indeterminate", detail: "no-path" };
+  if (!fs.existsSync(worktreePath)) return { status: "at-risk", reason: "gone" };
+  const gitFile = path.join(worktreePath, ".git");
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(gitFile);
+  } catch {
+    return { status: "at-risk", reason: "git_file_missing" };
+  }
+  if (stat.isDirectory()) return { status: "indeterminate", detail: "not-a-worktree-pointer" };
+  let content: string;
+  try {
+    content = fs.readFileSync(gitFile, "utf8");
+  } catch {
+    return { status: "at-risk", reason: "git_file_missing" };
+  }
+  const m = content.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m) return { status: "indeterminate", detail: "unrecognized-git-content" };
+  const target = path.isAbsolute(m[1]!) ? m[1]! : path.resolve(worktreePath, m[1]!);
+  return fs.existsSync(target) ? { status: "intact" } : { status: "at-risk", reason: "gitdir_target_missing" };
+}
+
+/**
  * Detects whether a worktree at `worktreePath` is gone or structurally broken, using fs calls ONLY — no
  * git subprocess (card 652d312f priced a periodic full `git worktree list`/`git branch --list` sweep
  * over every live worker as real host cost; this needs neither). Three states, in the order checked:
@@ -42,7 +86,10 @@ export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_
  *
  * Returns null when the worktree looks intact, OR when `.git` isn't in the expected worktree-pointer
  * shape (a real directory, or content this can't parse) — deliberately not claiming a state this check
- * can't back (see memory `false-state-claim-guard-is-infeasible-and-why`).
+ * can't back (see memory `false-state-claim-guard-is-infeasible-and-why`). A caller that needs to tell
+ * those two `null` cases apart (confirmed-intact vs. unclaimable) should call
+ * {@link classifyWorktreeIntegrity} directly instead — this function's own null-collapsing return shape
+ * is UNCHANGED (existing callers, incl. {@link WorktreeVanishedWatcher} below, depend on it).
  *
  * NOT covered, by design: a branch deleted while the tree is otherwise intact (state 4 from the card).
  * Reliably telling "deleted" from "packed" needs enumerating loose + packed refs, which is meaningfully
@@ -50,25 +97,8 @@ export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_
  * Named here so the gap travels with the code, not just the card.
  */
 export function detectVanishedWorktree(worktreePath: string): WorktreeVanishReason | null {
-  if (!fs.existsSync(worktreePath)) return "gone";
-  const gitFile = path.join(worktreePath, ".git");
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(gitFile);
-  } catch {
-    return "git_file_missing";
-  }
-  if (stat.isDirectory()) return null; // not a worktree-pointer shape — nothing this check can honestly claim
-  let content: string;
-  try {
-    content = fs.readFileSync(gitFile, "utf8");
-  } catch {
-    return "git_file_missing";
-  }
-  const m = content.match(/^gitdir:\s*(.+?)\s*$/m);
-  if (!m) return null; // unrecognized .git content — don't claim a state we can't back
-  const target = path.isAbsolute(m[1]!) ? m[1]! : path.resolve(worktreePath, m[1]!);
-  return fs.existsSync(target) ? null : "gitdir_target_missing";
+  const c = classifyWorktreeIntegrity(worktreePath);
+  return c.status === "at-risk" ? c.reason : null;
 }
 
 /**

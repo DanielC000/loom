@@ -44,6 +44,7 @@ import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -4585,11 +4586,25 @@ export class SessionService {
       let recoveredCount = 0;
       let awaitingReviewCount = 0;
       let failedCount = 0;
+      // Card ab8b2cc6: THE THING AT RISK, measured — a recovered SESSION says nothing about whether its
+      // WORKTREE survived (the motivating incident: three workers all live/busy throughout a restart,
+      // one of them with its worktree emptied + branch deleted 22s after being resumed — recoveredCount
+      // would have counted all three). classifyWorktreeIntegrity (worktree-vanished-watcher.ts) is the
+      // SAME fs-only detector WorktreeVanishedWatcher's own periodic sweep already trusts, reused here
+      // (not rebuilt) as a one-shot check at notice-construction time. `indeterminate` (an unclaimable
+      // .git shape, or no worktreePath at all) is counted alongside `at-risk` — NOT folded into "fine":
+      // the detector is deliberately honest about not claiming a state it can't back, and an aggregation
+      // that silently treats "unknown" as "intact" would be exactly the TRUE/REASSURING/IRRELEVANT trap
+      // this card exists to close. Scope: worktree EXISTENCE only — branch state is explicitly NOT
+      // covered (see classifyWorktreeIntegrity's own doc); the notice text below says so.
+      let worktreeAtRiskCount = 0;
       for (const w of workers) {
         const workerParked = isParked(w.workerSessionId);
         if (!resumeOne(w.workerSessionId)) { failed.push(w.workerSessionId); failedCount++; continue; }
         resumed.push(w.workerSessionId);
         recoveredCount++;
+        const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
+        if (integrity.status !== "intact") worktreeAtRiskCount++;
         if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
         if (w.reportedDone) {
           awaitingReviewCount++;
@@ -4650,10 +4665,28 @@ export class SessionService {
             `your platform work.` + RESUME_NUDGE_TAIL
           : `${tag} ${lead} you — re-check your state and continue orchestrating.` + RESUME_NUDGE_TAIL
         : (() => {
+          // Card ab8b2cc6: reported ONLY relative to `recoveredCount` (a session that never resumed has
+          // nothing to check) — and worded to make what was actually verified UNAMBIGUOUS either way, so
+          // a reader can tell "checked, none flagged" apart from "no check ran" (never silently absent on
+          // the healthy case, unlike awaitingReviewCount/failedCount above — this is a deliberately
+          // different choice for THIS clause, because the whole point of DoD-1 is that "nothing to
+          // report" must not be confusable with "nothing was checked"). NEVER claims prevention (DoD-3) —
+          // "could not be confirmed intact" is the honest, weaker claim; branch state is explicitly out
+          // of scope and said so, per classifyWorktreeIntegrity's own doc. BOTH clauses are also stamped
+          // "as of resume" — a clean reading here is a POINT-IN-TIME check, not a continuing guarantee: in
+          // a replay of the 08:16Z incident this same clean sentence would be emitted seconds before the
+          // worktree was emptied, and without the temporal stamp it would be TRUE, REASSURING and
+          // IRRELEVANT for exactly the failure this card exists to expose (the standing 5-min
+          // WorktreeVanishedWatcher, not this one-shot check, is what covers a LATER divergence).
+          const worktreeNote = recoveredCount === 0 ? null
+            : worktreeAtRiskCount > 0
+              ? `${worktreeAtRiskCount} of those had a worktree that could not be confirmed intact as of resume (gone, broken, or in a shape this check can't verify — branch state isn't checked here) — check before trusting it`
+              : `a worktree-existence check as of resume found nothing flagged on the recovered ones (branch state not checked; a worktree can still be lost after this point)`;
           const parts = [
             recoveredCount > 0
               ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
               : `none of your ${workers.length} in-flight worker(s) could be recovered`,
+            worktreeNote,
             awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
           ].filter(Boolean).join("; ");
