@@ -5312,6 +5312,19 @@ export class Db {
     ).all(originProjectId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * Every `platform_escalate` event filed AGAINST a given PLATFORM home project, regardless of which
+   * origin project filed it — the cross-project counterpart to {@link listEscalationsForProject} (which
+   * is scoped the other way, by origin). Card 170daebd: this is what lets a live-nudge notice answer
+   * "how many escalations are concurrently outstanding on THIS Platform board", since a single origin
+   * project's own view can't see a sibling project's still-open escalation. Newest first (ts DESC, rowid
+   * DESC breaks same-ts ties).
+   */
+  listEscalationsForPlatform(platformProjectId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE kind = 'platform_escalate' AND json_extract(detail_json, '$.platformProjectId') = ? ORDER BY ts DESC, rowid DESC",
+    ).all(platformProjectId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
    * The latest `escalation_triaged` link recorded for one Platform escalation task (card ba04d607) — the
    * source `escalation_status` derives its `triagedTo`/`resolved` from. `escalationTaskId` is matched
    * against the plain `task_id` column (the link event is written with the ESCALATION's own id as its

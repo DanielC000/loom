@@ -7985,7 +7985,27 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — token(s) already delivered by a deploy restart: ${matchedShas.join(", ")} (task ${taskId} still filed)`);
       } else {
-        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId}: ${input.title} (severity: ${severity})`;
+        // Card 170daebd: a notice's title is frozen at filing and can only ever describe ITSELF (see
+        // `escalationSignature`'s own doc on why re-minting the title would destroy the dedupe signal) —
+        // so a recipient reading one notice in isolation has no way to tell "just this one" from
+        // "several outstanding, and this is only one of them". The observed failure mode: a LATE,
+        // already-resolved-by-the-time-it-arrives notice reads as a pure replay while a DIFFERENT,
+        // genuinely still-open escalation sits unmentioned. We can't rewrite an earlier notice's already-
+        // queued text, but we CAN give every notice an honest count, AS OF ITS OWN FILING, of how many
+        // OTHER escalations against this same Platform home are still open — so whichever one is filed
+        // later (while an earlier one is still outstanding) surfaces that count. This is a count, never a
+        // suppression: the replay/late-arrival itself is legitimate and still lands unchanged.
+        const otherOpenTaskIds = new Set<string>();
+        for (const e of this.db.listEscalationsForPlatform(home.id)) {
+          if (!e.taskId || e.taskId === taskId) continue;
+          const t = this.db.getTask(e.taskId);
+          if (t && this.columnEscalationStatus(home.id, t.columnKey) !== "resolved") otherOpenTaskIds.add(e.taskId);
+        }
+        const otherOpenCount = otherOpenTaskIds.size;
+        const otherSuffix = otherOpenCount > 0
+          ? ` (+${otherOpenCount} other escalation${otherOpenCount === 1 ? "" : "s"} currently open)`
+          : "";
+        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId}: ${input.title} (severity: ${severity})${otherSuffix}`;
         try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
       }
     }
