@@ -4237,6 +4237,59 @@ export class SessionService {
     // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
+    // Card 6d6b1b7b: THE THING AT RISK, measured here too — the same trap ab8b2cc6 closed on the
+    // crash-recovery path (recoverCrashOrphanedWorkers), reopened one function over by the very fix that
+    // closed it there (a manager who learns from the crash-path notice that "the restart notice tells me
+    // about my worktrees" would otherwise carry that expectation to THIS path, where silence would read
+    // as "checked, nothing to report" when nothing was checked at all). classifyWorktreeIntegrity
+    // (worktree-vanished-watcher.ts) is the SAME fs-only detector reused (not rebuilt) — see its own doc.
+    // UNLIKE the sibling's already-manager-grouped loop, this function's main resume loop below is FLAT
+    // across every role (worker/manager/platform/auditor/setup/plain) for the whole captured fleet, in
+    // `entries`' own (unspecified) order — a manager can appear BEFORE its own worker entries in that
+    // order, so building this accumulator incrementally INSIDE the main loop (classify-as-you-go) would
+    // make a manager's notice text depend on iteration order: whether its worker had already been visited
+    // by the time the manager's own entry was reached. Built as its own eager pre-pass here instead, over
+    // the SAME `entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId)` population
+    // `liveWorkerCount` above already reads — so "N of your live workers were resumed" and "of those, K
+    // ..." always describe the identical set, order-independent. (Deliberately NOT gated on the per-entry
+    // resumeOne() outcome computed later in the main loop below: `impact.liveWorkersResumed` itself is
+    // already a raw resume-set count, not filtered by actual resumeOne success either — see its own
+    // definition — so classifying every worker entry here, unconditionally, keeps the same population
+    // `liveWorkerCount` already promises, rather than introducing a second, narrower one that could
+    // undercount relative to the sentence it's supposed to qualify.) Scoped to `e.role === "worker"`
+    // entries only: only workers have worktrees to check, and this is the natural bound on the added
+    // sync-fs cost (the main loop below already calls resumeOne() — a pty spawn — per session, so 2-3
+    // stat-class calls per worker is marginal against work already in that loop).
+    const worktreeCheckedByManager = new Map<string, number>();
+    const worktreeAtRiskByManager = new Map<string, number>();
+    for (const e of entries) {
+      if (e.role !== "worker" || !e.parentSessionId) continue;
+      worktreeCheckedByManager.set(e.parentSessionId, (worktreeCheckedByManager.get(e.parentSessionId) ?? 0) + 1);
+      const integrity = classifyWorktreeIntegrity(this.db.getSession(e.sessionId)?.worktreePath);
+      if (integrity.status !== "intact") {
+        worktreeAtRiskByManager.set(e.parentSessionId, (worktreeAtRiskByManager.get(e.parentSessionId) ?? 0) + 1);
+      }
+    }
+    // Cross-project redaction (DoD-5): scoped PER-MANAGER — each manager's notice reads only its OWN
+    // workers' counts (mirrors ab8b2cc6's own scoping, and this function's existing
+    // liveWorkersResumed/reqWorkersResumed, both already reader-owns-own-data). Deliberately NOT folded
+    // into the pre-existing fleet-wide `fleetSentence`/`fleetParenthetical` below (a different,
+    // pre-existing signal — bare resume-failure counts across every project — whose scope widening this
+    // card never asked for).
+    const worktreeNoteFor = (managerId: string): string | null => {
+      const checked = worktreeCheckedByManager.get(managerId) ?? 0;
+      if (checked === 0) return null;
+      const atRisk = worktreeAtRiskByManager.get(managerId) ?? 0;
+      // Same three properties as ab8b2cc6's own notice text, preserved verbatim in shape: `indeterminate`
+      // counted alongside `at-risk` (classifyWorktreeIntegrity's `status !== "intact"` above already does
+      // this — never folded into "intact"); the honest weaker claim ("could not be confirmed intact"),
+      // never a prevention claim; branch state named out of scope; and the TEMPORAL stamp ("as of resume"
+      // / "can still be lost after this point") — a point-in-time reading that reads as a continuing
+      // guarantee is the exact failure ab8b2cc6 was written to fix, and both branches below carry it.
+      return atRisk > 0
+        ? `${atRisk} of those had a worktree that could not be confirmed intact as of resume (gone, broken, or in a shape this check can't verify — branch state isn't checked here) — check before trusting it`
+        : `a worktree-existence check as of resume found nothing flagged on the resumed ones (branch state not checked; a worktree can still be lost after this point)`;
+    };
     // Per-session restart impact, used by isNoOpManagerWake (restart.ts) to pick the cheap FYI vs the full
     // re-check, AND by the classification clause in the nudge text. The board/answer classification
     // (hasPendingBoardWork/hasUnconsumedAnswer/isEscalatedSuppression/isWatcherActiveForSession/
@@ -4354,6 +4407,7 @@ export class SessionService {
           this.recordDeployShasDelivered(e.sessionId, reasonShas);
           const affected = [
             impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
+            worktreeNoteFor(e.sessionId),
             impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
             impact.hasUnconsumedAnswer ? `you have an answered question awaiting question_pull` : null,
             impact.strandedBoardWork ? `your board has pending work` : null,
@@ -4475,6 +4529,10 @@ export class SessionService {
           ? `your merged daemon code is now live in the running daemon EXCEPT the supervisor script itself ` +
             `— a human must run \`pnpm daemon:stable\` for those lines to take effect`
           : `your merged daemon code is now LIVE in the running daemon`;
+        // Card 6d6b1b7b: same worktreeNoteFor helper as the non-requester manager/platform branch above —
+        // NOT applied to the platform-Lead reqText branch just below, matching its existing "no
+        // worktrees/workers of its own" framing (a Lead's reqWorkers count is never surfaced there either).
+        const reqWorktreeNote = worktreeNoteFor(reqId);
         const reqText = reqRole === "platform"
           // Lead-appropriate framing (mirrors the non-requester Lead branch above): no worktrees/workers
           // of its own to report a resumed-count for.
@@ -4484,7 +4542,7 @@ export class SessionService {
             `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote
           : `[loom:daemon-restarted] Rebuild + restart complete — ${liveClaim} (reason: ${intent.reason}). ` +
             `${reqWorkersResumed}/${reqWorkers.length} of your live ` +
-            `workers were resumed (${fleetParenthetical}). You can now ` +
+            `workers were resumed (${fleetParenthetical}).${reqWorktreeNote ? ` ${reqWorktreeNote}.` : ""} You can now ` +
             `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
         this.enqueueNudge(reqId, reqRole, reqText);
       }

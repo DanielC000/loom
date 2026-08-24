@@ -393,6 +393,142 @@ try {
   const heldMsg = n6(cid.heldMgr);
   check("(6c) a non-requesting manager whose ONLY board card is HELD resumes SILENTLY (held is never pending)",
     heldMsg.length === 0);
+
+  // ============================ (7) WORKTREE-AT-RISK MEASUREMENT (card 6d6b1b7b) ====================
+  // Mirrors ab8b2cc6's own (12a/b/c) crash-path coverage (crash-orphaned-workers.mjs), but RED-PROOFED at
+  // BOTH of THIS path's manager-facing notice construction sites: the non-requester "affected" branch
+  // (service.ts, the manager/platform else-branch) and the requester's own reqText branch — a manager who
+  // learns from ONE site that "the notice tells me about my worktrees" must get the same signal at BOTH.
+  const mkWtFixture = async (label) => {
+    const repo = path.join(os.tmpdir(), `loom-rf-wtrisk-${label}-${sfx}`);
+    repoRoots.push(repo);
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), `# ${label}\n`);
+    execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    const projId = `rf-wtrisk-${label}-proj-${sfx}`;
+    const agentId = `rf-wtrisk-${label}-ag-${sfx}`;
+    mkProject(projId, repo);
+    mkAgent(agentId, projId);
+    const taskId = `rf-wtrisk-${label}-task-${sfx}`;
+    mkTask(taskId, projId);
+    const wt = await createWorktree(repo, projId, taskId);
+    const mgrId = `rf-wtrisk-${label}-mgr-${sfx}`;
+    const wkrId = `rf-wtrisk-${label}-wkr-${sfx}`;
+    mkSession({ id: mgrId, projId, agentId, role: "manager" });
+    mkSession({ id: wkrId, projId, agentId, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch, cwd: wt.worktreePath });
+    return { mgrId, wkrId, worktreePath: wt.worktreePath };
+  };
+
+  // --- NON-REQUESTER site: (7a) INTACT, (7b) AT-RISK (gone), (7c) INDETERMINATE ---
+  const otherReqProj = `rf-wtrisk-otherreq-proj-${sfx}`;
+  const otherReqAgent = `rf-wtrisk-otherreq-ag-${sfx}`;
+  const otherReqMgr = `rf-wtrisk-otherreq-mgr-${sfx}`;
+  mkProject(otherReqProj, "/tmp/rf-wtrisk-otherreq");
+  mkAgent(otherReqAgent, otherReqProj);
+  mkSession({ id: otherReqMgr, projId: otherReqProj, agentId: otherReqAgent, role: "manager" });
+
+  const f7a = await mkWtFixture("intact");
+  const f7b = await mkWtFixture("atrisk");
+  const f7c = await mkWtFixture("indeterminate");
+  fs.rmSync(f7b.worktreePath, { recursive: true, force: true });
+  check("(7b-pre) the worktree really is gone before resume", !fs.existsSync(f7b.worktreePath));
+  const gitFile7c = path.join(f7c.worktreePath, ".git");
+  const gitFileContent7c = fs.readFileSync(gitFile7c, "utf8");
+  fs.rmSync(gitFile7c, { force: true });
+  fs.mkdirSync(gitFile7c);
+  check("(7c-pre) .git is now a real directory, not the worktree-pointer file", fs.statSync(gitFile7c).isDirectory());
+
+  const pty7 = new PtyStub();
+  const sessions7 = new SessionService(db, pty7, new OrchestrationControl());
+  const intent7 = {
+    reason: "deploy", managerSessionId: otherReqMgr, requestedAt: now,
+    resume: [
+      { sessionId: otherReqMgr, role: "manager", parentSessionId: null },
+      { sessionId: f7a.mgrId, role: "manager", parentSessionId: null },
+      { sessionId: f7a.wkrId, role: "worker", parentSessionId: f7a.mgrId },
+      { sessionId: f7b.mgrId, role: "manager", parentSessionId: null },
+      { sessionId: f7b.wkrId, role: "worker", parentSessionId: f7b.mgrId },
+      { sessionId: f7c.mgrId, role: "manager", parentSessionId: null },
+      { sessionId: f7c.wkrId, role: "worker", parentSessionId: f7c.mgrId },
+    ],
+  };
+  sessions7.resumeFleetOnBoot(intent7, { resumeOne: () => true });
+  await flush();
+
+  const n7a = pty7.getPending(f7a.mgrId);
+  check("(7a) INTACT (non-requester 'affected' branch): reports the check ran and found nothing flagged",
+    n7a.length === 1 && /nothing flagged/i.test(n7a[0]));
+  check("(7a) INTACT (non-requester): does NOT claim any worktree could not be confirmed intact",
+    !/could not be confirmed intact/i.test(n7a[0]));
+  check("(7a) INTACT (non-requester): the clean reading is stamped 'as of resume' (point-in-time, not a guarantee)",
+    /found nothing flagged.*as of resume|as of resume.*found nothing flagged/i.test(n7a[0]));
+  check("(7a) INTACT (non-requester): the clean reading says a worktree can still be lost AFTER this point",
+    /can still be lost after this point/i.test(n7a[0]));
+
+  const n7b = pty7.getPending(f7b.mgrId);
+  check("(7b) AT-RISK (non-requester 'affected' branch): names exactly 1 of those as not confirmed intact",
+    n7b.length === 1 && /1 of those had a worktree that could not be confirmed intact/i.test(n7b[0]));
+  check("(7b) AT-RISK (non-requester): does NOT claim it prevents loss — only that it's unverified",
+    /check before trusting it/i.test(n7b[0]) && !/prevent(s|ed)? (the )?loss/i.test(n7b[0]));
+  check("(7b) AT-RISK (non-requester): explicitly scopes itself off branch state (no implied branch safety)",
+    /branch state isn.t checked here/i.test(n7b[0]));
+  check("(7b) AT-RISK (non-requester): the flagged reading is stamped 'as of resume' (point-in-time)",
+    /could not be confirmed intact as of resume/i.test(n7b[0]));
+
+  const n7c = pty7.getPending(f7c.mgrId);
+  check("(7c) INDETERMINATE (non-requester 'affected' branch): flagged — NEVER silently 'nothing flagged'",
+    n7c.length === 1 && /1 of those had a worktree that could not be confirmed intact/i.test(n7c[0]));
+  check("(7c) INDETERMINATE (non-requester): the notice does NOT say 'nothing flagged'",
+    !/nothing flagged/i.test(n7c[0]));
+
+  // restore f7c's .git so its worktree can be cleanly torn down (repoRoots cleanup) at the end
+  try { fs.rmSync(gitFile7c, { recursive: true, force: true }); fs.writeFileSync(gitFile7c, gitFileContent7c); } catch { /* best-effort */ }
+
+  // --- REQUESTER site: (7d) INTACT, (7e) AT-RISK (gone), (7f) INDETERMINATE ---
+  const f7d = await mkWtFixture("req-intact");
+  const f7e = await mkWtFixture("req-atrisk");
+  const f7f = await mkWtFixture("req-indeterminate");
+  fs.rmSync(f7e.worktreePath, { recursive: true, force: true });
+  check("(7e-pre) the worktree really is gone before resume", !fs.existsSync(f7e.worktreePath));
+  const gitFile7f = path.join(f7f.worktreePath, ".git");
+  const gitFileContent7f = fs.readFileSync(gitFile7f, "utf8");
+  fs.rmSync(gitFile7f, { force: true });
+  fs.mkdirSync(gitFile7f);
+  check("(7f-pre) .git is now a real directory, not the worktree-pointer file", fs.statSync(gitFile7f).isDirectory());
+
+  for (const [label, f] of [["7d", f7d], ["7e", f7e], ["7f", f7f]]) {
+    const ptyReq = new PtyStub();
+    const sessionsReq = new SessionService(db, ptyReq, new OrchestrationControl());
+    const intentReq = {
+      reason: "deploy merged code", managerSessionId: f.mgrId, requestedAt: now,
+      resume: [
+        { sessionId: f.mgrId, role: "manager", parentSessionId: null },
+        { sessionId: f.wkrId, role: "worker", parentSessionId: f.mgrId },
+      ],
+    };
+    sessionsReq.resumeFleetOnBoot(intentReq, { resumeOne: () => true });
+    await flush();
+    const reqMsg = ptyReq.getPending(f.mgrId);
+    if (label === "7d") {
+      check("(7d) INTACT (requester's 'code is live' branch): reports the check ran and found nothing flagged",
+        reqMsg.length === 1 && /nothing flagged/i.test(reqMsg[0]));
+      check("(7d) INTACT (requester): does NOT claim any worktree could not be confirmed intact",
+        !/could not be confirmed intact/i.test(reqMsg[0]));
+      check("(7d) INTACT (requester): stamped 'as of resume' AND says a worktree can still be lost after this point",
+        /as of resume/i.test(reqMsg[0]) && /can still be lost after this point/i.test(reqMsg[0]));
+    } else if (label === "7e") {
+      check("(7e) AT-RISK (requester's 'code is live' branch): names exactly 1 of those as not confirmed intact",
+        reqMsg.length === 1 && /1 of those had a worktree that could not be confirmed intact/i.test(reqMsg[0]));
+      check("(7e) AT-RISK (requester): does NOT claim it prevents loss, DOES say check before trusting it",
+        /check before trusting it/i.test(reqMsg[0]) && !/prevent(s|ed)? (the )?loss/i.test(reqMsg[0]));
+      check("(7e) AT-RISK (requester): scopes itself off branch state AND is stamped 'as of resume'",
+        /branch state isn.t checked here/i.test(reqMsg[0]) && /could not be confirmed intact as of resume/i.test(reqMsg[0]));
+    } else {
+      check("(7f) INDETERMINATE (requester's 'code is live' branch): flagged — NEVER silently 'nothing flagged'",
+        reqMsg.length === 1 && /1 of those had a worktree that could not be confirmed intact/i.test(reqMsg[0]) && !/nothing flagged/i.test(reqMsg[0]));
+    }
+  }
+  try { fs.rmSync(gitFile7f, { recursive: true, force: true }); fs.writeFileSync(gitFile7f, gitFileContent7f); } catch { /* best-effort */ }
 } finally {
   db.close();
   for (const repo of repoRoots) {
@@ -405,6 +541,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, affected managers re-checked, busy-at-capture standing reviewers nudged while idle ones + converged 0-worker managers resume SILENTLY, `run` excluded, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, and refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn)."
+  ? "\n✅ ALL PASS — a daemon_restart captures the WHOLE live cross-project fleet, resumes every session (requester re-prompted, affected managers re-checked, busy-at-capture standing reviewers nudged while idle ones + converged 0-worker managers resume SILENTLY, `run` excluded, plain/parked honored, dead skipped), protects every project's worktree, tolerates an old-format intent, refuses a ghost resume whose worktree/cwd was removed (no doomed --resume spawn), and measures worktree-at-risk (intact/at-risk/indeterminate, card 6d6b1b7b) at BOTH manager-facing notice sites — the non-requester 'affected' branch and the requester's own 'code is live' branch."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
