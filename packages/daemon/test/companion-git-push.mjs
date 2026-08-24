@@ -43,7 +43,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { mkdtempManaged, finishAndExit, cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -694,7 +694,7 @@ try {
     db.close();
   }
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
   // fixturesRoot's own manual cleanup line removed here: mkdtempManaged already registered it for
   // guaranteed cleanup at process exit (card 995be21f). tmpHome above is OUT OF SCOPE for this card (a
   // hand-rolled Date.now()/pid dir, not fs.mkdtempSync — Family 2, tracked separately in 09db9357).

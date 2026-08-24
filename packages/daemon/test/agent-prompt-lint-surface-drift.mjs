@@ -29,6 +29,7 @@ const repo = path.join(tmpHome, "repo");
 fs.mkdirSync(repo, { recursive: true });
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -134,5 +135,5 @@ check("TASKS_ASSISTANT_EXCLUDED_TOOLS matches the real assistant carve-out", sam
 
 console.log(failures === 0 ? `\nAll checks passed.` : `\n${failures} check(s) FAILED — update packages/daemon/src/agents/promptLint.ts's tables to match.`);
 db.close();
-for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+cleanupPathSync(tmpHome);
 process.exit(failures === 0 ? 0 : 1);

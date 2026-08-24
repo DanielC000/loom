@@ -184,7 +184,14 @@ class RealFixtureHarness {
   text(sessionId) { return this.buffers.get(sessionId)?.() ?? ""; }
 }
 
-const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+// exitedSessions: populated by the REAL onExit callback (fires once node-pty/ConPTY actually reports the
+// child dead), so cleanup can wait for a genuine signal instead of racing a fire-and-forget stop() — see
+// stopAndAwaitExit below (card a1f72ab8: this was the leading candidate for the 67 EBUSY-failed
+// loom-kickoff-real-* dirs left in `_tmp-fixture.mjs`'s own bounded retry; card 7959b232's investigation
+// had already flagged "a lingering AttachConsole handle, node-pty itself" as an open, uninvestigated
+// suspect for a similarly-unexplained non-exit).
+const exitedSessions = new Set();
+const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit(sessionId) { exitedSessions.add(sessionId); } };
 const host = new PtyHost(events);
 const harness = new RealFixtureHarness(host);
 // Calling host.stop() TWICE on the same already-dead session was found, during this card's own
@@ -193,6 +200,22 @@ const harness = new RealFixtureHarness(host);
 // session must be stopped EXACTLY once. Tracked here so the outer `finally` never re-stops one
 // `verifyRealDelivery` already stopped at its own end.
 const stoppedSessions = new Set();
+
+/**
+ * Hard-stop `sessionId` and wait for the REAL onExit signal (not a guessed delay) before returning, so a
+ * caller that removes tmpHome right after knows the child's OS handles have actually been released —
+ * closing the race that left the child's ConPTY/console teardown still in flight when cleanup ran. Bounded
+ * (5s): a stop that never reports exit is itself an anomaly worth logging, not a reason to hang the suite.
+ */
+async function stopAndAwaitExit(sessionId) {
+  try { host.stop(sessionId, "hard"); } catch { /* best-effort cleanup */ }
+  stoppedSessions.add(sessionId);
+  try {
+    await waitUntil(() => exitedSessions.has(sessionId), { label: `${sessionId} real child process onExit after hard stop`, timeoutMs: 5000 });
+  } catch (err) {
+    console.warn(`[kickoff-real-spawn] ${sessionId} never reported onExit within budget after hard stop — proceeding anyway (a lingering OS handle may cause a transient EBUSY on tmpHome cleanup): ${err.message}`);
+  }
+}
 
 /**
  * Spawn `sessionId` as `role`, deliver `kickoff` through the REAL pipeline, and verify it arrived intact
@@ -278,8 +301,7 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   }
   check(`${label} the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)`, rawMatch);
 
-  try { host.stop(sessionId, "hard"); } catch { /* best-effort cleanup */ }
-  stoppedSessions.add(sessionId);
+  await stopAndAwaitExit(sessionId);
 }
 
 const ROLES = process.env.KICKOFF_TEST_ROLES ? process.env.KICKOFF_TEST_ROLES.split(",") : ["worker", "manager", "platform", "setup", "assistant", "auditor"];
@@ -325,7 +347,7 @@ try {
     const allSessionIds = [...ROLES.map((role) => `real-${role}`), ...[10_000, 40_000].map((n) => `real-large-${n}`), "real-late-ready"];
     for (const sessionId of allSessionIds) {
       if (stoppedSessions.has(sessionId)) continue;
-      try { host.stop(sessionId, "hard"); } catch { /* ignore */ }
+      await stopAndAwaitExit(sessionId);
     }
   }
 } catch (err) {

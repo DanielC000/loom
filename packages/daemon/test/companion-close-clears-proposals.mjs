@@ -58,6 +58,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -215,7 +216,7 @@ try {
   await client.close();
   db.close();
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

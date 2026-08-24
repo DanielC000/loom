@@ -45,6 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "../test/_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
@@ -1285,9 +1286,13 @@ if (isMain) {
     );
 
     // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
-    for (const root of tmpRoots) {
-      for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
-    }
+    // Reuses _tmp-fixture.mjs's proven-correct bounded retry WITH A REAL DELAY between attempts — the
+    // ad hoc version this replaced retried 5x with ZERO delay, which cannot outlast a transient
+    // EBUSY/EPERM handle (5 synchronous attempts complete in microseconds; see _tmp-fixture.mjs's own
+    // CORRECTION 1) and was the single largest contributor to the %TEMP% fixture-dir leak (card a1f72ab8;
+    // ~1,067 loom-td-* dirs/14d, the largest of any family — one per test file per full-suite run, since
+    // this loop's own retry could never actually succeed against a transient lock).
+    for (const root of tmpRoots) cleanupPathSync(root);
 
     // Card b122c7d4 DoD #1: assert the executed PATH SET against the discovered allowlist, by path, never
     // by count — a count (e.g. `results.length === SELECTED.length`) can't distinguish "ran the right

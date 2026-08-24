@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-qwbulk-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(process.env.LOOM_HOME, "logs"), { recursive: true });
@@ -148,7 +149,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   }
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(LOOM, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+cleanupPathSync(LOOM);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — db.listWakesForSessions groups by session and omits sessions with no wakes ({} for empty input, no IN() query), parseIdsParam dedups/trims/drops-blanks, and both bulk endpoints (/sessions/queues, /sessions/wakes) return grouped per-id results and tolerate an unknown/dead id with no 404."

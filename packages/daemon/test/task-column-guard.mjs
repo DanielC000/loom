@@ -38,6 +38,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -118,7 +119,7 @@ try {
   check("(7) the rejected cross-project update left the card put", db.getTask(pcOk.id).columnKey === "todo");
 } finally {
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry WAL handle on Windows */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

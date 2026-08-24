@@ -30,6 +30,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -244,7 +245,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     try { db.close(); } catch { /* ignore */ }
-    for (let i = 0; i < 5; i++) { try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+    cleanupPathSync(process.env.LOOM_HOME);
   }
 }
 

@@ -41,6 +41,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -203,7 +204,7 @@ try {
   check("(4) an unknown id still returns 'project not found', unchanged (setup surface)", setupUnknownPatch.error === "project not found");
 } finally {
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry WAL handle on Windows */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

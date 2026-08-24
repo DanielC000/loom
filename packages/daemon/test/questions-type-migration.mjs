@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -177,7 +178,7 @@ try {
   }
 } finally {
   try { db?.close(); } catch { /* ignore */ }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

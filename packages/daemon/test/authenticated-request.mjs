@@ -24,6 +24,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -268,6 +269,6 @@ try {
     ? "\n✅ ALL PASS — authenticated_request: auth injected server-side (bearer/api-key), caller Authorization rejected, session allowlist + path validation enforced, redirects never auto-followed, echo responses redacted (body+headers, Set-Cookie stripped), response-size cap + rate limiter enforced, and the profile-gating wiring (spawn -> session row -> tools/list) is additive/byte-identical when off."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -423,6 +424,6 @@ try {
     ? "\n✅ ALL PASS — oauth2 connections: REST registration + PKCE consent-initiate + loopback callback exercised end-to-end against a mock token endpoint (independent PKCE S256 re-derivation, one-shot state, clean rejection of a bad code/replayed state/denied consent), no secret ever leaks into a REST response body, no MCP tool (setup/orchestration/platform) exposes any oauth surface, and the token lifecycle (fresh-token use -> lazy refresh-on-use -> concurrent-refresh dedupe -> unrecoverable-failure needs-reauth on a revoked refresh token -> transient-failure (network error / 5xx) leaves needs-reauth untouched) all route through the SAME performAuthenticatedRequest seam the agent tool and PollService share, with the legacy api-key/bearer path untouched."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

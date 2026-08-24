@@ -23,6 +23,7 @@ import { SessionService } from "../dist/sessions/service.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
 import { buildServer } from "../dist/gateway/server.js";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -110,7 +111,7 @@ try {
   check("(sanity) the retired predecessor's question list stays empty throughout", db.listQuestionsForSession(oldMgrId).length === 0);
 } finally {
   try { db.close(); } catch { /* ignore */ }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

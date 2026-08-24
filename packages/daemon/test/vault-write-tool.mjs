@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -272,6 +273,6 @@ try {
     ? "\n✅ ALL PASS — vault_write: OMITTED from tools/list when the profile didn't opt in, PRESENT + writes land under the project vault root when it did, traversal/absolute/backslash paths rejected (inherited confinement), no projectId param exists to address another project, agentProfileKeyError itself rejects vaultWrite:true, BOTH the agent-facing setup and platform profile writers REJECT vaultWrite:true with nothing persisted, and commitVault falls back to a generic Loom git identity with no ambient identity while still preferring a configured one."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

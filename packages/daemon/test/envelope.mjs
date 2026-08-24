@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -116,7 +117,7 @@ try {
   const fresh = await import(`../dist/keys/envelope.js?reload=${Date.now()}`);
   check("(E) a freshly re-imported module decrypts a blob written by the first (key file is the root of trust)", fresh.decryptSecret(blob, keyPath) === secret);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 
 function flipB64(b64) {

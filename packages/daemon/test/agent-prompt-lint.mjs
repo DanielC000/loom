@@ -26,6 +26,7 @@ const repo = path.join(tmpHome, "repo");
 fs.mkdirSync(repo, { recursive: true });
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -188,5 +189,5 @@ check("agent_update (platform): a corrected clean prompt has no promptWarning", 
 
 console.log(failures === 0 ? `\nAll checks passed.` : `\n${failures} check(s) FAILED.`);
 db.close();
-for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+cleanupPathSync(tmpHome);
 process.exit(failures === 0 ? 0 : 1);

@@ -34,6 +34,7 @@ import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
 import { buildServer } from "../dist/gateway/server.js";
 import { IdleWatcher } from "../dist/orchestration/idle-watcher.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -160,7 +161,7 @@ try {
   check("(6) the watchdog never targets the dead predecessor's session id", !watcherEnqueued.some((x) => x.id === oldMgrId));
 } finally {
   try { db.close(); } catch { /* ignore */ }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -117,7 +118,7 @@ try {
   check("(3) curation drops EXACTLY the omitted skills (kept = all − omitted)",
     kept.length === allSkillDirs.length - DEV_ONLY_SKILLS.length);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle on Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

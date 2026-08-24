@@ -32,6 +32,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -105,7 +106,7 @@ try {
     db.getProject("pCfg").config.orchestration.gateCommand === seededConfig.orchestration.gateCommand);
 } finally {
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

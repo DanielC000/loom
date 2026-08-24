@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-mgmt-${Date.now()}-${process.pid}`);
 fs.mkdirSync(tmpHome, { recursive: true });
@@ -213,7 +214,7 @@ try {
   db.close();
   try { fs.rmSync(claudeDir, { recursive: true, force: true }); } catch { /* ignore */ }
   try { fs.rmSync(fakeCwd, { recursive: true, force: true }); } catch { /* ignore */ }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

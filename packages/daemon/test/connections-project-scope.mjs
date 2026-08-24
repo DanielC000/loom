@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -192,6 +193,6 @@ try {
     ? "\n✅ ALL PASS — isConnectionUsableByProject's truth table holds; performAuthenticatedRequest resolves a project-scoped connection ONLY for its own project (fail-closed even when the id is in a cross-project session's own allowlist) while a global connection resolves anywhere; buildMcpServers' P4 capability-grant path (the real resolveScopedConnectionSecret helper index.ts's resolveConnectionSecret calls) injects the secret only on a projectId match and mounts secret-less otherwise; and provisionConnection's optional scoped-rotation extension refuses every cross-scope/cross-project/non-api-key collision while rotating cleanly in place for a same-project same-name api-key row."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

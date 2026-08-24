@@ -35,6 +35,7 @@ process.env.HOME = sandboxHome;
 for (const k of Object.keys(process.env)) if (k.startsWith("LOOM_COMPANION_")) delete process.env[k];
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -420,7 +421,7 @@ try {
   }
 } finally {
   for (const r of rigs) { try { await r.app.close(); } catch { /* ignore */ } try { r.db.close(); } catch { /* ignore */ } }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+  cleanupPathSync(tmpHome);
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 

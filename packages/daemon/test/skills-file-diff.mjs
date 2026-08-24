@@ -39,6 +39,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -243,7 +244,7 @@ try {
     listAfter.statusCode === 200 && listAfter.json().every((s) => !("files" in s)));
   await app.close();
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry: WAL handle on Windows */ } }
+  cleanupPathSync(root);
 }
 
 console.log(failures === 0

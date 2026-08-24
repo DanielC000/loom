@@ -55,6 +55,7 @@ fs.writeFileSync(path.join(fakeDist, "assets", "index-DEADBEEF.css"), "/* fake s
 process.env.LOOM_WEB_DIST = fakeDist;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -178,7 +179,7 @@ try {
   check("(4) LOOM_REPO_ROOT unset ⇒ deployStaleness still present (falls back to the real monorepo root) and never throws", statusNoRepoRoot.deployStaleness !== undefined);
 } finally {
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+  cleanupPathSync(tmpHome);
   try { fs.rmSync(stalenessRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 

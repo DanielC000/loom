@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import ts from "typescript";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 // Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern) —
 // never a fixed character window, which is sensitive to unrelated text growth (e.g. an added comment)
@@ -158,7 +159,7 @@ try {
   await app.close();
   db.close();
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

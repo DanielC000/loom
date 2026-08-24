@@ -32,6 +32,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -155,7 +156,7 @@ const UNKNOWN_SESSION = randomUUID();
 }
 
 db.close();
-for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+cleanupPathSync(tmpHome);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — POST /api/companion/:sessionId/upgrade resolves via CompanionController.upgrade (200/409), gates by sessionId/role (404/400) same as every other companion writer, 503s cleanly with no controller wired, and serializes on the SAME reconcile chain without a rejected upgrade poisoning it — claude-free, network-free."

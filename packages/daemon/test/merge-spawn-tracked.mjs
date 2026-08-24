@@ -33,7 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -244,7 +244,7 @@ try {
     const markerContents = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "";
     check("(merge race) the gate ran EXACTLY ONCE across both concurrent calls (marker has one 'x')", markerContents === "x");
     delete process.env.LOOM_MST_MARKER;
-    try { fs.rmSync(marker, { force: true }); } catch { /* best-effort */ }
+    cleanupPathSync(marker);
   }
 
   // === MERGE (5b): a REJECTED concurrent merge reports a clean, named FAIL — never an uncaught
@@ -333,7 +333,7 @@ try {
     const markerContents = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "";
     check("(merge retain) the gate ran EXACTLY ONCE — the re-confirm did not re-invoke it (nor fall through to any other idempotency path)", markerContents === "x");
     delete process.env.LOOM_MST_MARKER;
-    try { fs.rmSync(marker, { force: true }); } catch { /* best-effort */ }
+    cleanupPathSync(marker);
   }
 
   // === MERGE (8): forceRemoveWorktree:true within the window BYPASSES the cache — CR BLOCKER 1 ===
@@ -394,7 +394,7 @@ try {
     // shell's own `-e "..."` quoting and corrupts the command (a test-authoring bug caught while wiring
     // this up, not a defect in the fix itself).
     const passMarker = path.join(os.tmpdir(), `loom-mst-passmarker9-${Date.now()}-${process.pid}.flag`);
-    try { fs.rmSync(passMarker, { force: true }); } catch { /* best-effort */ }
+    cleanupPathSync(passMarker);
     process.env.LOOM_MST_PASS_MARKER = passMarker;
     seedProject(P, repo, `node -e "process.exit(require('fs').existsSync(process.env.LOOM_MST_PASS_MARKER) ? 0 : 1)"`);
     const workerId = `${P}-wkr`;
@@ -417,12 +417,12 @@ try {
     check("(merge new-commit) it runs a genuinely FRESH gate and MERGES — never serves the stale rejection for a commit that no longer exists", r2.ok && r2.value.merged === true);
     check("(merge new-commit) BOTH commits (the original work and the fix) landed in the single squash merge", git(repo, "show HEAD:feat9.txt") === "work" && git(repo, "show HEAD:feat9-fix.txt") === "the fix");
     delete process.env.LOOM_MST_PASS_MARKER;
-    try { fs.rmSync(passMarker, { force: true }); } catch { /* best-effort */ }
+    cleanupPathSync(passMarker);
   }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
-  try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0

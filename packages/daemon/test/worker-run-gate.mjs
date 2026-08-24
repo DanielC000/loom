@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -614,8 +614,8 @@ try {
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
-  for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
-  try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+  for (const wt of worktrees) cleanupPathSync(wt);
+  cleanupPathSync(process.env.LOOM_HOME);
 }
 
 console.log(failures === 0

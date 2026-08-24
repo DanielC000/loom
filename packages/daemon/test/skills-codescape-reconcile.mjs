@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -100,7 +101,7 @@ try {
   check("idempotent: still bundled:true, customized:false, updateAvailable:false",
     rows2[0]?.bundled === true && rows2[0]?.customized === false && rows2[0]?.updateAvailable === false);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry: WAL handle on Windows */ } }
+  cleanupPathSync(root);
 }
 
 console.log(failures === 0

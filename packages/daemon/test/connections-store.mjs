@@ -31,6 +31,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -249,6 +250,6 @@ try {
     ? "\n✅ ALL PASS — connections: encrypted at rest (envelope, swappable keyPath seam), metadata-only list/get (secret absent from every shape), human-only REST CRUD (secret never in a response body), the agent+human config validators reject an unknown `connections` field, and no MCP router (setup/orchestration manager+worker+assistant/platform) exposes a connection-granting tool (setup/platform's profile_create/update now document REJECTING the P2 `connections` profile field — see authenticated-request.mjs for that surface's own coverage)."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

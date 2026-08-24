@@ -54,6 +54,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -468,12 +469,12 @@ try {
   check("(boarding) the duplicate escalation card actually landed", db.listTasks("pHomeEsc").length === tasksBeforeEsc + 1);
 
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome2, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome2);
 } catch (e) {
   check(`boarding-path regression section threw: ${e.stack}`, false);
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+cleanupPathSync(tmpHome);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — findSuspectedDuplicate flags the real 47340c82/dde0ce24 duplicate pair (shared session id + branch, a STRONG match) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); card b6eab182's redesign is verified directly — weak evidence (code symbols/file:line/naming conventions), however many distinct categories it spans, NEVER qualifies a match alone (regression-tested against the file:line+error-constant shape and against a strong-less weak match directly), which as an ACCEPTED, explicitly-documented cost also means the module's own founding abcf0eba/bc91e86c pair (caught purely via weak evidence) is no longer auto-flagged; a genuine duplicate sharing a real STRONG identifier (session id) is still blocked, naming the counterpart plus the allowDuplicate/supersedes/relatedTo escape hatches (DoD-2/DoD-4); two genuinely-distinct cards sharing only a code landmark + naming convention now create CLEANLY with no refusal (DoD-1/DoD-3); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) remain regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2) is re-tested among strong-qualifying candidates, the rarity-threshold boundary (m5) and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."

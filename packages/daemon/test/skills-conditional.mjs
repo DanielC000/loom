@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -92,7 +93,7 @@ try {
   injectSkills(repoOn, "sess-on", null, null, false);
   check("flip on→off: pickup restored byte-identical to base", injected(repoOn, "loom-pickup") === BASE["loom-pickup"]);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  cleanupPathSync(root);
 }
 
 console.log(failures === 0 ? "\n✅ ALL PASS — Obsidian preflight fragment injects ONLY when enabled, byte-identical when off." : `\n❌ ${failures} FAILURE(S).`);

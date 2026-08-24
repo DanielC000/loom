@@ -26,6 +26,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -173,6 +174,6 @@ try {
     ? "\n✅ ALL PASS — webhook endpoints: encrypted at rest (envelope), a random non-guessable opaque path per endpoint, metadata-only list/get (secret absent from every shape), human-only REST CRUD (secret never in a response body, mode<->target coherence enforced, over-length bounds enforced), and an enable/disable toggle that leaves the endpoint's path/config intact."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
+  cleanupPathSync(tmpHome);
 }
 process.exit(failures === 0 ? 0 : 1);

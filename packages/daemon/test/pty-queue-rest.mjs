@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-queuerest-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(process.env.LOOM_HOME, "logs"), { recursive: true });
@@ -141,7 +142,7 @@ try {
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
   try { await app.close(); } catch { /* ignore */ }
   try { db.close(); } catch { /* ignore */ }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(LOOM, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+  cleanupPathSync(LOOM);
 }
 
 console.log(failures === 0

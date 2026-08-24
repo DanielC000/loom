@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -212,7 +213,7 @@ const mkFleet = (db, label) => {
   db.close();
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+cleanupPathSync(tmpHome);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — upgradeCompanionCapabilities carries logicalId at BOTH call sites; mintedAtWallClock at BOTH; and mintedAtGen SURVIVES at the never-resumed abort path (Site A, no boundary crossed) while it is DELIBERATELY OMITTED at the post-resume() redeliver loop (Site B, a fresh Live's submitGeneration boundary) — the two sites' opposite treatment, both proven against the real PtyHost queue via getPendingEntries/flushPending, not assumed from the call site alone."
