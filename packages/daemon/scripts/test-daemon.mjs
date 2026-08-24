@@ -914,58 +914,127 @@ const TEST_TIMEOUT_OVERRIDES = {
 };
 const tmpRoots = [];
 
-// Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
-// collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
-function runOne(name, lane) {
+// Card e26f3199: on a timeout the harness used to report `status: "timeout"` and DISCARD the child's
+// real exit status — so "the child completed successfully and 'close' merely arrived late" (mechanism A:
+// a grandchild that inherited the stdio pipe kept it open after the child itself was long gone — Node
+// fires 'exit' the moment the process terminates, but 'close' only once every stdio stream referencing
+// that pipe is closed) was indistinguishable from "genuinely wedged, killed, and never exited" (mechanism
+// B). `exitAt`/`timeoutFiredAt` are the discriminator, MEASURED rather than argued: if the child's own
+// 'exit' fired before the timer ever called `child.kill()`, nothing here was actually killed — something
+// downstream just kept the pipe open.
+//
+// Pure classifier so a test can drive every combination directly. Never guesses: `exitAt: null` (the
+// child's own 'exit' was never observed at all, e.g. it's still genuinely running when 'close' somehow
+// fires, or the process truly never exited) is reported as "killed, never exited", not a fabricated exit.
+export function describeTimeoutDetail({ exitAt, exitStatus, exitSignal, timeoutFiredAt }) {
+  if (exitAt !== null && timeoutFiredAt !== null && exitAt <= timeoutFiredAt) {
+    return exitSignal ? `child had already exited via signal ${exitSignal}` : `child had already exited ${exitStatus}`;
+  }
+  if (exitAt !== null) {
+    return exitSignal ? `killed (exited via signal ${exitSignal} after kill)` : `killed (exited ${exitStatus} after kill)`;
+  }
+  return "killed, never exited";
+}
+
+// Card e26f3199: the actual spawn/timeout/exit/close wiring, factored out of `runOne` so a test can drive
+// it directly against a purpose-built fixture without duplicating this logic or spawning the whole gate.
+// Never rejects — a spawn error is captured as a failure, same posture as before this card. `env`
+// defaults to node's own `spawn` default (`process.env`) when omitted, same as passing nothing at all.
+export function spawnWithTimeout(execPath, argv, { timeoutMs, env } = {}) {
   return new Promise((resolve) => {
-    const file = path.join(TEST_DIR, `${name}.mjs`);
-    if (!fs.existsSync(file)) { resolve({ name, ok: true, skipped: true }); return; }
-
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
-    tmpRoots.push(home);
-    // Card fa52f555: this is safe WITHIN one invocation of this script (POOL_SIZE lanes, POOL_SIZE
-    // distinct ports) but NOT across two CONCURRENT invocations — e.g. two merge gates admitted at once
-    // under `maxConcurrentGates` >= 2 — since each independently computes the same `4400 + lane` values.
-    // Checked (census card d39db2db): not currently reachable, because no hermetic test binds a real
-    // listener on this assigned port (all either use in-memory `.inject()` or an unrelated ephemeral
-    // `:0` bind) — but that is a property of today's test files, not a guarantee this scheme provides.
-    const port = 4400 + lane;
-
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    // Card 17069e7e: Date.now() (not performance.now()) to match the existing NDJSON schema's
-    // startTs/endTs, which the standalone investigation script (test/census/lib.mjs's `runOneTimed`)
-    // already stamps this same way.
-    const startTs = Date.now();
-    const child = spawn(process.execPath, [file], {
-      env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
-    });
+    let timeoutFiredAt = null;
+    let exitStatus = null;
+    let exitSignal = null;
+    let exitAt = null;
+
+    const child = spawn(execPath, argv, { env });
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
 
-    const timeoutMs = TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
-    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; timeoutFiredAt = Date.now(); child.kill(); }, timeoutMs);
+
+    // Node fires 'exit' the instant the process itself terminates — always before 'close' — so this is
+    // the child's REAL exit, captured regardless of whether a timeout ever happens.
+    child.on("exit", (status, signal) => {
+      exitStatus = status;
+      exitSignal = signal;
+      exitAt = Date.now();
+    });
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      const endTs = Date.now();
-      resolve({ name, ok: false, status: null, stdout, stderr: `${stderr}\n${err.message}`, lane, startTs, endTs, durationMs: endTs - startTs });
+      resolve({
+        ok: false, status: null, stdout, stderr: `${stderr}\n${err.message}`,
+        timedOut, exitAt, exitStatus, exitSignal, timeoutFiredAt, closeAt: null,
+        exitToCloseGapMs: null, timeoutDetail: null, errored: true,
+      });
     });
     child.on("close", (status) => {
       clearTimeout(timer);
-      const endTs = Date.now();
-      const ok = !timedOut && status === 0;
+      const closeAt = Date.now();
       resolve({
-        name,
-        ok,
+        ok: !timedOut && status === 0,
         status: timedOut ? "timeout" : status,
         stdout, stderr,
-        tail: ok ? undefined : (stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0]),
-        lane, startTs, endTs, durationMs: endTs - startTs,
+        timedOut, exitAt, exitStatus, exitSignal, timeoutFiredAt, closeAt,
+        exitToCloseGapMs: exitAt !== null ? closeAt - exitAt : null,
+        timeoutDetail: timedOut ? describeTimeoutDetail({ exitAt, exitStatus, exitSignal, timeoutFiredAt }) : null,
+        errored: false,
       });
     });
   });
+}
+
+// Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
+// collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
+async function runOne(name, lane) {
+  const file = path.join(TEST_DIR, `${name}.mjs`);
+  if (!fs.existsSync(file)) return { name, ok: true, skipped: true };
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
+  tmpRoots.push(home);
+  // Card fa52f555: this is safe WITHIN one invocation of this script (POOL_SIZE lanes, POOL_SIZE
+  // distinct ports) but NOT across two CONCURRENT invocations — e.g. two merge gates admitted at once
+  // under `maxConcurrentGates` >= 2 — since each independently computes the same `4400 + lane` values.
+  // Checked (census card d39db2db): not currently reachable, because no hermetic test binds a real
+  // listener on this assigned port (all either use in-memory `.inject()` or an unrelated ephemeral
+  // `:0` bind) — but that is a property of today's test files, not a guarantee this scheme provides.
+  const port = 4400 + lane;
+
+  // Card 17069e7e: Date.now() (not performance.now()) to match the existing NDJSON schema's
+  // startTs/endTs, which the standalone investigation script (test/census/lib.mjs's `runOneTimed`)
+  // already stamps this same way.
+  const startTs = Date.now();
+  const timeoutMs = TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
+  const r = await spawnWithTimeout(process.execPath, [file], {
+    timeoutMs,
+    env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
+  });
+  const endTs = Date.now();
+
+  if (r.errored) {
+    // Byte-identical shape to before this card: a spawn error never carried a `tail` or the
+    // exit/close instrumentation fields (they're meaningless when the child never even started).
+    return { name, ok: false, status: r.status, stdout: r.stdout, stderr: r.stderr, lane, startTs, endTs, durationMs: endTs - startTs };
+  }
+  return {
+    name,
+    ok: r.ok,
+    status: r.status,
+    stdout: r.stdout, stderr: r.stderr,
+    tail: r.ok ? undefined : (r.stdout.split("\n").filter(Boolean).slice(-1)[0] || r.stderr.split("\n").filter(Boolean).slice(-1)[0]),
+    lane, startTs, endTs, durationMs: endTs - startTs,
+    // Card e26f3199 DoD-2: exitAt/closeAt/exitToCloseGapMs are recorded for EVERY completed (non-errored)
+    // run — real numbers on a normal pass too, not just a timeout. That's deliberate, not incidental: a
+    // pass's own exit->close gap is a free population baseline for how often a grandchild holds the pipe
+    // open AT ALL, across the whole suite, on every gate run — data neither the card nor a one-off
+    // investigation could otherwise get. `timeoutDetail` alone is genuinely timeout-only (null otherwise —
+    // see the FAILURES: printer below, which only reads it when status is "timeout").
+    exitAt: r.exitAt, closeAt: r.closeAt, exitToCloseGapMs: r.exitToCloseGapMs, timeoutDetail: r.timeoutDetail,
+  };
 }
 
 // A fixed number of lanes each pull the next unclaimed test off a shared cursor — bounded concurrency,
@@ -986,7 +1055,11 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps, ga
     // Card e6e55f7a: this PASS/FAIL line is the observable liveness signal a stall watchdog reads — the
     // same completion event `maxGapMs` measures gaps between. Recorded regardless of pass/fail.
     completionTimestamps.push(performance.now());
-    console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}${result.ok ? "" : `  (exit ${result.status})`}`);
+    // Card e26f3199: the same "exit timeout (<detail>)" wording the FAILURES: block below uses, so a
+    // timeout's real exit status is visible in the live streaming output too, not only the end-of-run
+    // summary.
+    const statusLabel = result.status === "timeout" && result.timeoutDetail ? `timeout (${result.timeoutDetail})` : result.status;
+    console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}${result.ok ? "" : `  (exit ${statusLabel})`}`);
     // Card 05056168: flush THIS file's row the moment it completes, rather than batching every row into a
     // loop that only ran after the whole suite finished (the original defect — a SIGKILLed run never
     // reached that loop, so nothing was written even for files that had already completed). Same row shape
@@ -1006,6 +1079,17 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps, ga
       status: result.status ?? null,
       skipped: !!result.skipped,
       lane: result.lane ?? null,
+      // Card e26f3199 DoD-1/2: exitAt/closeAt/exitToCloseGapMs are recorded for EVERY completed run — real
+      // numbers on a normal PASS too, not just a timeout (that's deliberate: it's a free population
+      // baseline for how often a grandchild holds the pipe open at all, across the whole suite, every gate
+      // run — data this card couldn't otherwise get). `null` (JSON-present, never omitted) only on the
+      // errored path, where the child never even started and there's nothing to measure. `timeoutDetail`
+      // alone is genuinely timeout-only (null otherwise), and it's what keeps the discriminator readable
+      // even past the merge gate's own bounded ~4KB output tail.
+      exitAt: result.exitAt ?? null,
+      closeAt: result.closeAt ?? null,
+      exitToCloseGapMs: result.exitToCloseGapMs ?? null,
+      timeoutDetail: result.timeoutDetail ?? null,
     });
   }
 }
@@ -1377,7 +1461,14 @@ if (isMain) {
     // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
     // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
     for (const f of failed) {
-      console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
+      // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
+      // child's real exit status was discarded, so "completed successfully, 'close' was just late"
+      // printed identically to "genuinely wedged, killed, never exited". They must not print the same.
+      const statusLabel = f.status === "timeout" && f.timeoutDetail ? `timeout (${f.timeoutDetail})` : f.status;
+      console.log(`  - ${f.name} (exit ${statusLabel}): ${f.tail ?? ""}`);
+      if (f.status === "timeout") {
+        console.log(`      exit->close gap: ${f.exitToCloseGapMs != null ? `${f.exitToCloseGapMs}ms` : "n/a (child's own exit was never observed)"}`);
+      }
       if (f.stdout?.trim()) console.log(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
       if (f.stderr?.trim()) console.log(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
     }
