@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Launch a worktree dev-server, track the EXACT child process handle/pid it spawns, and tear it down
 // by that same tracked handle on demand — so eyeballing a worktree's live app never needs a hand-rolled
-// `netstat` + `taskkill` hunt (locale-fragile output parsing, and a name/port-based kill can reach an
+// `netstat` + `taskkill` hunt (a state-word grep silently false-zeros under locale/codepage — a
+// port/PID grep is unaffected — and a name/port-based kill can reach an
 // unrelated process — even the self-hosting daemon itself). Dependency-free: only node:child_process/
 // node:fs/node:os/node:path/node:crypto, so it runs anywhere Node runs, no install step. Mirrors
 // serve-static.mjs in this same scripts/ dir (single-purpose, no deps, tracked-pid start/stop) — both

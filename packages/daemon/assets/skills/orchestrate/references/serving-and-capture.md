@@ -23,9 +23,11 @@ them reinvent an ephemeral server.
 ## Launching a live dev server against a worktree
 
 To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
-artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: that output is
-locale-dependent to parse (a non-English OS locale renders different column headers/states), and a
-kill scoped to anything but the worktree path — name, port, session id, or project id — can reach a
+artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: grepping its output for
+a STATE WORD (e.g. `LISTENING`) silently false-zeros on a non-English OS locale, and even the
+correctly-localized word can still false-zero under an OEM/console codepage mismatch — there is no safe
+text fallback (a port/PID grep is unaffected by either). And a kill scoped to anything but the worktree
+path — name, port, session id, or project id — can reach a
 process you never spawned — another dev server, an unrelated project, or even the self-hosting daemon.
 An id looks precise, which is exactly why it's the dangerous one: it matches every worktree that id
 has ever touched, not just the one you mean. Launch it through the **bundled** helper instead — it
@@ -44,9 +46,12 @@ it was built from) — treat that **recorded URL as the starting point** for eye
 as a given: **the recorded value can itself be wrong.** On a host where OTHER browser-capable workers may
 be running their own dev servers concurrently, confirm the recorded port is actually owned by YOUR tracked
 pid before trusting what you see (the printed startup banner, or the listening socket's owning pid
-confirmed to be a DESCENDANT of the pid your launcher printed — walk the FULL process tree, not one hop;
-an intermediate shim between the launcher and the real listener is common, and a walk that stops early
-lands on the shim and falsely "proves" ownership of the wrong process). **Matching by worktree path is not
+confirmed to trace UPWARD — via each process's parent pid, hop by hop — to the pid your launcher printed;
+do NOT enumerate the launcher's descendants downward instead, since on Windows pid recycling plus a
+parent pid left uncleared when its own parent exits can let a downward closure silently adopt unrelated
+processes that merely reuse that pid number. Don't stop at one hop either: an intermediate shim between
+the launcher and the real listener is common, and a walk that stops early lands on the shim and falsely
+"proves" ownership of the wrong process). **Matching by worktree path is not
 available on every OS — check before relying on it:** Windows exposes no readable
 current-working-directory for a running process (not in the process-listing API, and a launch-time
 working-directory parameter is not a readback of one), so path-matching only works on a platform that

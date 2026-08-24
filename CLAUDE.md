@@ -109,7 +109,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 
 **Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these four footguns:
 - A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
-  fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed.
+  fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed. (This identifies which PID holds the port, not how many listeners are on it — a matching row count is not a listener count.)
 - A helper `.mjs` must **LIVE under `packages/daemon`** for its deps (e.g. `ws`, `better-sqlite3`) to
   resolve — ESM bare-specifier resolution walks up from the **script's own location**, ignoring cwd, so
   running a scratch-dir script "from inside packages/daemon" still hits `ERR_MODULE_NOT_FOUND`.

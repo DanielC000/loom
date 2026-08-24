@@ -751,10 +751,13 @@ what you checked. Found none? Treat it as live.
    "the server never started" against a server that's fine. **The recorded value can itself be wrong —
    when other browser-capable workers may be running their own dev servers on this same host, confirm the
    recorded port is actually owned by YOUR tracked pid before trusting what you see** (the server's own
-   startup banner, or the listening socket's owning pid confirmed to be a DESCENDANT of the pid your
-   launcher printed — walk the FULL process tree, not one hop; an intermediate shim between the launcher
-   and the real listener is common, and a walk that stops early lands on the shim and falsely "proves"
-   ownership of the wrong process). **Matching by worktree path is not available on every OS — check
+   startup banner, or the listening socket's owning pid confirmed to trace UPWARD — via each process's
+   parent pid, hop by hop — to the pid your launcher printed; do NOT enumerate the launcher's descendants
+   downward instead, since on Windows pid recycling plus a parent pid left uncleared when its own parent
+   exits can let a downward closure silently adopt unrelated processes that merely reuse that pid number.
+   Don't stop at one hop either: an intermediate shim between the launcher and the real listener is
+   common, and a walk that stops early lands on the shim and falsely "proves" ownership of the wrong
+   process). **Matching by worktree path is not available on every OS — check
    before relying on it:** Windows exposes no readable current-working-directory for a running process
    (not in the process-listing API, and a launch-time working-directory parameter is not a readback of
    one), so path-matching only works on a platform that exposes it (e.g. Linux's `/proc/<pid>/cwd`). And
