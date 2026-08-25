@@ -778,9 +778,14 @@ export function createRssTracker(readRssBytes = () => process.memoryUsage().rss)
   };
 }
 
-// Max gap between successive entries of a timestamp series (ms, same unit as `performance.now()`) — the
-// same liveness notion `GATE_EXTEND_IDLE_MS` reasons about (a gate that goes quiet past it is refused its
-// extension). Fewer than 2 timestamps means there's no gap to measure yet — 0, not NaN or a thrown error.
+// Max gap between successive entries of a timestamp series (ms, same unit as `performance.now()`) —
+// DESCRIPTIVE ONLY (card b6ab2521, retiring `f1043732`'s original stall-detector framing): a genuinely
+// HUNG long-running unit and a HEALTHY long-running unit produce the IDENTICAL reading, because this
+// measures gaps between COMPLETION events and a hang-in-progress emits none — so this number can never
+// discriminate the failure case from the healthy one, and no threshold derived from it is a stall verdict
+// or a safety margin, however superficially it resembles the liveness notion `GATE_EXTEND_IDLE_MS`
+// reasons about. See `formatMaxGapLine` for the caveat as it must appear IN the output itself, not just
+// here. Fewer than 2 timestamps means there's no gap to measure yet — 0, not NaN or a thrown error.
 export function maxGapMs(timestamps) {
   if (timestamps.length < 2) return 0;
   let max = 0;
@@ -799,6 +804,10 @@ export function maxGapMs(timestamps) {
 // itself died before the run completed normally, so sampling stopped early and the true floor/gap may be
 // higher than what was actually observed. A crash-path number must never read identically to a clean-path
 // one — a lower-confidence max deserves its own, visibly different label, not the same line reused.
+// `formatMaxGapLine` additionally (card b6ab2521) bakes an UNDETERMINED verdict into the line itself — a
+// reader who only sees this one line, with no access to this comment or any doc, must still be told the
+// number cannot support a stall verdict or a margin. "Prefer UNDETERMINED to a wrong reason," implemented
+// in the instrument, not left to a caveat elsewhere that a reader can skip.
 export function formatRssFloorLine(sampleCount, intervalMs, floorBytes, { partial = false } = {}) {
   const mb = floorBytes / (1024 * 1024);
   const partialNote = partial
@@ -813,14 +822,18 @@ export function formatMaxGapLine(gapMs, { partial = false } = {}) {
   const partialNote = partial
     ? " — PARTIAL: the run did not complete normally; a larger gap may have occurred after sampling stopped"
     : "";
-  return `# max inter-event gap (stall watchdog input): ${gapMs}ms${partialNote}`;
+  return `# max inter-event gap — UNDETERMINED, NOT a stall verdict or margin (${gapMs}ms observed between ` +
+    `completions): a HUNG long-running unit and a HEALTHY long-running unit produce this IDENTICAL reading, ` +
+    `so no threshold on this number can tell them apart; descriptive run-shape diagnostic only${partialNote}`;
 }
 
 // Card e6e55f7a (manager follow-up, not the card's literal DoD but its PURPOSE): the harness itself
 // dying mid-run — an uncaught exception, a hang killed externally, anything that aborts before the
 // normal summary prints — is the single most opaque rejection mode this instrument exists to illuminate.
-// GATE_EXTEND_IDLE_MS-style stall detection is exactly the case where the max-gap number matters most, and
-// a DoD that covered every case except that one would be a technicality. So: wrap the actual run body.
+// A crash mid-run is exactly the case where the descriptive RSS-floor/max-gap numbers are most valuable
+// (see card b6ab2521 — the max-gap number is a descriptive diagnostic only, never a stall verdict or a
+// margin), and a DoD that covered every case except that one would be a technicality. So: wrap the actual
+// run body.
 // On success, resolve normally — the CALLER prints the two clean-path lines itself (unlabelled,
 // full-confidence), unchanged from before. On failure, print BOTH lines HERE — labelled `partial: true` —
 // then RETHROW THE SAME ERROR UNCHANGED. Never swallowed (this file IS the merge gate for every project on
@@ -1065,8 +1078,9 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps, ga
     const name = names[idx];
     const result = await runOne(name, lane);
     results[idx] = result;
-    // Card e6e55f7a: this PASS/FAIL line is the observable liveness signal a stall watchdog reads — the
-    // same completion event `maxGapMs` measures gaps between. Recorded regardless of pass/fail.
+    // Card e6e55f7a: this PASS/FAIL line marks a completion event; `completionTimestamps` records it so
+    // the descriptive max-gap line (UNDETERMINED as a stall verdict — see card b6ab2521 and
+    // `formatMaxGapLine`) has data to describe. Recorded regardless of pass/fail.
     completionTimestamps.push(performance.now());
     // Card e26f3199: the same "exit timeout (<detail>)" wording the FAILURES: block below uses, so a
     // timeout's real exit status is visible in the live streaming output too, not only the end-of-run

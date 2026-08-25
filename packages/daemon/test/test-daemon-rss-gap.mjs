@@ -77,7 +77,14 @@ const { createRssTracker, maxGapMs, formatRssFloorLine, formatMaxGapLine, runIns
     !strippedLine.includes("highest OBSERVED, not a proven peak"));
 
   const gapLine = formatMaxGapLine(42434);
-  check("the gap line names the stall-watchdog framing and the value", gapLine.includes("stall watchdog input") && gapLine.includes("42434ms"));
+  check("[positive control] the gap line states UNDETERMINED and disclaims stall-verdict/margin readings",
+    gapLine.includes("UNDETERMINED") && gapLine.includes("NOT a stall verdict or margin"));
+  check("the gap line states the hung-vs-healthy indistinguishability reason",
+    gapLine.includes("IDENTICAL reading"));
+  check("the gap line states the value", gapLine.includes("42434ms"));
+
+  check("the retired stall-watchdog framing is gone from the line",
+    !gapLine.includes("stall watchdog input"));
 
   // The `partial` flag (manager follow-up — the crash path) must produce a VISIBLY DIFFERENT line, never
   // the clean-path line reused verbatim: a lower-confidence, sampling-stopped-early max deserves its own
