@@ -490,6 +490,18 @@ type ConfirmMergeResult = {
    *  otherwise has no way to tell a reduced gate from a full one at all, not just no way to see which
    *  files were excluded from it. */
   reducedGateWarning?: string;
+  /** Card 725dc89a: the STRUCTURED sibling of `reducedGateWarning` above — that field carries the
+   *  RENDERED sentence (for the nudge); this carries the facts a reader can actually query, for the
+   *  RETROSPECTIVE `gate_status(opId)` read (see `PendingGateOpVerdict.emitCompareReduced`'s own doc for
+   *  the full tri-state discipline and field-by-field scope — this is the identical shape, one hop
+   *  upstream, before `deriveMergeGateVerdict` copies it into the durable payload). `true`/`false` set on
+   *  the same two dominant return paths `gateCap`/`outputTail` already cover; `undefined` for a gateless
+   *  project, a REUSED self-check, or a rarer post-gate-PASS rejection those two fields also leave
+   *  unwired. */
+  emitCompareReduced?: boolean;
+  emitCompareIdenticalCount?: number;
+  emitCompareTestFiles?: string[];
+  emitCompareNotHermeticExcluded?: string[];
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -690,6 +702,14 @@ function deriveMergeGateVerdict(
       ...(v.gateCap !== undefined ? { gateCap: v.gateCap } : {}),
       ...(v.concurrentGates !== undefined ? { concurrentGates: v.concurrentGates } : {}),
       ...(v.concurrentGatesMax !== undefined ? { concurrentGatesMax: v.concurrentGatesMax } : {}),
+      // Card 725dc89a: the retrospective read of the same reduced-gate facts `65336570` already echoes into
+      // the live `[loom:merge-done]` nudge (`ConfirmMergeResult.reducedGateWarning`, untouched by this card
+      // — see its own doc) — `undefined` here means EITHER no gate spawned for this op OR this row predates
+      // this card; see `PendingGateOpVerdict.emitCompareReduced`'s own doc for the full tri-state discipline.
+      ...(v.emitCompareReduced !== undefined ? { emitCompareReduced: v.emitCompareReduced } : {}),
+      ...(v.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: v.emitCompareIdenticalCount } : {}),
+      ...(v.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: v.emitCompareTestFiles } : {}),
+      ...(v.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: v.emitCompareNotHermeticExcluded } : {}),
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -3674,6 +3694,17 @@ export class SessionService {
      *  or a "gate" (worker self-check) row (a narrower, deliberate gap — see {@link PendingGateOpVerdict
      *  .gateCap}'s own doc). */
     gateCap?: number; concurrentGates?: number; concurrentGatesMax?: number;
+    /** Card 725dc89a — the RETROSPECTIVE read of the reduced-gate facts `65336570` already echoes LIVE into
+     *  the `[loom:merge-done]` nudge TEXT (never touched by this card). TRI-STATE, deliberately (see
+     *  {@link PendingGateOpVerdict.emitCompareReduced}'s own doc for the full discipline): `true` = this
+     *  op's gate genuinely ran reduced; `false` = a real gate spawned and was PROVEN not reduced (the
+     *  positive control — never conflate with "nothing to report"); `undefined` = no gate spawned for this
+     *  op OR this row predates card 725dc89a. `emitCompareIdenticalCount`/`emitCompareTestFiles`/
+     *  `emitCompareNotHermeticExcluded` (the last, card 17cd1f30, names the specific changed test file(s)
+     *  excluded from `--only=`, not just a count) are present ONLY alongside `emitCompareReduced:true`.
+     *  Populated for "merge" rows only, on the same two dominant outcomes `gateCap` above already covers. */
+    emitCompareReduced?: boolean; emitCompareIdenticalCount?: number;
+    emitCompareTestFiles?: string[]; emitCompareNotHermeticExcluded?: string[];
     /** Card 9f6598dd: the SAME `pass`/`fail`/`error`/`cancelled` classification `passed`/`cancelled`
      *  above already encode as two separate booleans — surfaced ALSO as one literal string so a caller
      *  doesn't have to reconstruct it (`extended:true` paired with `outcome:"fail"` is the specific
@@ -3739,6 +3770,13 @@ export class SessionService {
           ...(payload?.gateCap !== undefined ? { gateCap: payload.gateCap } : {}),
           ...(payload?.concurrentGates !== undefined ? { concurrentGates: payload.concurrentGates } : {}),
           ...(payload?.concurrentGatesMax !== undefined ? { concurrentGatesMax: payload.concurrentGatesMax } : {}),
+          // Card 725dc89a: same "written to verdict_payload_json but never read back" gap e2b6f900 already
+          // closed for the concurrency triple, one field over — the RETROSPECTIVE half of card 65336570 (see
+          // this method's own return-type doc, `emitCompareReduced`, for the tri-state discipline).
+          ...(payload?.emitCompareReduced !== undefined ? { emitCompareReduced: payload.emitCompareReduced } : {}),
+          ...(payload?.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: payload.emitCompareIdenticalCount } : {}),
+          ...(payload?.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: payload.emitCompareTestFiles } : {}),
+          ...(payload?.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: payload.emitCompareNotHermeticExcluded } : {}),
           ...settleTimingFields,
         }
         : t.record.verdict === "cancelled"
@@ -12997,6 +13035,12 @@ export class SessionService {
           ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
           ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
           ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
+          // Card 725dc89a: mirrors the plain-GREEN return's own `emitCompareReduced` triple below — a real
+          // gate genuinely spawned to reach this rejection, so `emitCompareReduced` is always DECIDABLE here
+          // (true or false, never fabricated undefined) — see `PendingGateOpVerdict.emitCompareReduced`'s
+          // own doc for the tri-state discipline.
+          emitCompareReduced: emitCompareSkip,
+          ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
           // Card 720bb7ad: mirrors the plain-GREEN return's own `gateSteps` — see this field's own doc for
           // why the rejection path used to leave it unset here (nested only in `gateDetail.steps` above).
           ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}),
@@ -13288,9 +13332,19 @@ export class SessionService {
       ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
       ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
     };
+    // Card 725dc89a: the STRUCTURED sibling of `emitCompareWarning` above (mirrors the rejection return's
+    // own `emitCompareReduced` fields, just above in this method). Gated on `gateRan` — NOT just present
+    // unconditionally like `emitCompareWarning`/`emitCompareSkip` themselves — because this GREEN return is
+    // ALSO reached by the reuse and inert-diff-skip paths, where `emitCompareSkip` never gets a chance to be
+    // set true at all (it stays its initial `false`); reporting `emitCompareReduced:false` there would be a
+    // fabricated "genuinely not reduced" claim for a merge whose gate never spawned to be reduced OR not —
+    // same "nothing to report" discipline `gateCapForRecord`/`gateExtended` already follow.
+    const emitCompareStructuredFields = gateRan
+      ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
+      : {};
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**

@@ -347,7 +347,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
       "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
-      "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?}. `queued`/`running` " +
+      "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
+      "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?}. `queued`/`running` " +
       "mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge as your PRIMARY, unprompted way to learn the outcome, but a settled op " +
@@ -396,7 +397,24 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "enforces with NO auto-extend (card 24642c3d) — never the ~2× effective ceiling a FIRST attempt's " +
       "own one-time auto-extend can reach; a `fraction` over `1` means this step already needed more than " +
       "the hard ceiling and only survived because it was a first attempt. Same " +
-      "`undefined`-for-no-gate-spawned discipline as `extended`. These settled- " +
+      "`undefined`-for-no-gate-spawned discipline as `extended`. `emitCompareReduced` (card 725dc89a) is the " +
+      "RETROSPECTIVE answer to \"was this merge's gate reduced, and what went ungated?\" — the SAME " +
+      "declaration `[loom:merge-done]` already announces live (card 65336570), now readable after the fact " +
+      "once that nudge has scrolled away. TRI-STATE, deliberately: `true` means a real gate spawned for this " +
+      "op and ran REDUCED (card 2154b6ad — `pnpm build` + the static guards + any changed test file, instead " +
+      "of the full suite, because every changed compiled file was proven transpile-identical); `false` means " +
+      "a real gate spawned and was PROVEN NOT reduced — never confuse this with `undefined`, which means " +
+      "EITHER no gate spawned for this op at all (gateless project, a REUSED self-check) OR this settled row " +
+      "predates card 725dc89a — a bare `undefined` conflating \"genuinely not reduced\" with \"nothing " +
+      "recorded\" is exactly the ambiguity this field exists to remove. `emitCompareIdenticalCount` (the " +
+      "count of compiled files proven transpile-identical) and `emitCompareTestFiles` (the changed test " +
+      "file(s) actually run directly) are present ONLY alongside `emitCompareReduced:true`. " +
+      "`emitCompareNotHermeticExcluded` (card 17cd1f30) names the SPECIFIC changed test file(s) excluded " +
+      "from `--only=` because they're NOT_HERMETIC (same exclusion the full suite already makes) — the file " +
+      "names, not just a count, so you can tell WHICH changed test(s) went ungated without re-deriving it; " +
+      "an empty array here means none were excluded, distinct from `emitCompareReduced` itself being " +
+      "`undefined`/`false`. Same two-dominant-outcomes population as `gateCap`/`concurrentGates` above " +
+      "(a plain gate-fail rejection, a plain successful merge) — populated for \"merge\" rows only. These settled- " +
       "record fields are OMITTED, never fabricated, for a settled op that predates this capability. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +

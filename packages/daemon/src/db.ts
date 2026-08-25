@@ -1938,6 +1938,32 @@ export interface PendingGateOpVerdict {
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
+  /** Card 725dc89a — the RETROSPECTIVE half of `65336570` (which echoed this same declaration into the
+   *  `[loom:merge-done]` nudge TEXT only — see `ConfirmMergeResult.reducedGateWarning`'s own doc). The
+   *  durable `build_gate` audit event has always persisted `emitCompareReduced`/`emitCompareIdenticalCount`/
+   *  `emitCompareTestFiles`/`emitCompareNotHermeticExcluded` unconditionally (card 17cd1f30), but nothing
+   *  read it back on a settled op — a manager investigating a PAST merge after the nudge scrolled away had
+   *  to go read raw audit events. This closes that: the STRUCTURED facts (not `reducedGateWarning`'s
+   *  rendered sentence — see card 725dc89a's DoD-2) land here too.
+   *  ⭐ TRI-STATE, on purpose (card 725dc89a DoD-3 — the `composerDirtyLen` null-vs-0 discipline, one field
+   *  over): `true` means this merge's gate genuinely ran REDUCED (card 2154b6ad); `false` means a REAL gate
+   *  spawned for this op and was PROVEN NOT reduced (the positive control — a non-reduced merge must read
+   *  as genuinely non-reduced, never as missing data); `undefined` means EITHER no gate spawned for this op
+   *  (gateless project, a REUSED self-check, a pre-gate rejection — same "nothing to report" discipline as
+   *  `gateExtended`) OR this row predates card 725dc89a entirely. Populated on the same two dominant return
+   *  paths `gateCap`/`outputTail` already cover (a plain gate-fail rejection, a plain successful merge) —
+   *  `undefined`, not fabricated `false`, on the rarer post-gate-PASS rejections those two fields also leave
+   *  unwired. `emitCompareIdenticalCount`/`emitCompareTestFiles`/`emitCompareNotHermeticExcluded` are set
+   *  ONLY alongside `emitCompareReduced:true` — mirroring the `build_gate` event's own `emitCompareSkip ?
+   *  {...} : {}` gating exactly — and are `undefined` (never `[]`/`0`) whenever `emitCompareReduced` isn't
+   *  `true`, so an empty array can never be misread as "reduced, but nothing was excluded" vs "not reduced
+   *  at all". `emitCompareNotHermeticExcluded` (card 17cd1f30) names the specific changed test file(s) that
+   *  were excluded from `--only=` (same NOT_HERMETIC exclusion the full suite also never gates) — the file
+   *  names, not just a count, so a reader can tell WHICH changed test(s) went unrun without re-deriving it. */
+  emitCompareReduced?: boolean;
+  emitCompareIdenticalCount?: number;
+  emitCompareTestFiles?: string[];
+  emitCompareNotHermeticExcluded?: string[];
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and
