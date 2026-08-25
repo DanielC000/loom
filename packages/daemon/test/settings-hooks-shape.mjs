@@ -15,6 +15,11 @@
 // definition. A `matcher` alongside a correctly-shaped `hooks` array (PreToolUse, vault-lint's
 // PostToolUse) is the VALID form (DoD 3) and is not forbidden here.
 //
+// Card 5a88166d added a SEPARATE presence axis: `hooksShapeViolations({})` returns `[]`, so the shape
+// iteration above passes on an emitted hooks object that silently dropped events entirely — shape-clean
+// is not event-complete. The presence checks below assert the expected event KEYS actually show up
+// (Array.isArray + length > 0), independent of the shape checker.
+//
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   pnpm build (repo root) then `node test/settings-hooks-shape.mjs` from packages/daemon.
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
@@ -72,8 +77,8 @@ try {
   );
   const violations = hooksShapeViolations(withVault.hooks);
   check(
-    "the real emitted settings.hooks (SessionStart/UserPromptSubmit/Stop/StopFailure/PreToolUse/"
-      + "SubagentStop/PostToolUse) has zero shape violations",
+    "the real emitted settings.hooks has zero SHAPE violations (per-group array/matcher/command shape "
+      + "ONLY — does NOT confirm which event keys are present; see the presence checks below for that)",
     violations.length === 0,
   );
   if (violations.length) console.log("  violations:", violations);
@@ -92,6 +97,29 @@ try {
   check("the no-vaultPath emitted settings.hooks (no PostToolUse) also has zero shape violations",
     hooksShapeViolations(plain.hooks).length === 0);
   check("no-vaultPath path correctly omits PostToolUse entirely", !("PostToolUse" in plain.hooks));
+
+  // --- PRESENCE (card 5a88166d, DoD 2): the shape checker above is silent on event-key presence — a
+  // `hooks` object missing an event entirely has zero shape violations. Assert each expected event key is
+  // actually present (a non-empty groups array), independent of the shape checker. Re-derived directly
+  // from `writeSessionSettings` (packages/daemon/src/pty/claude-settings.ts), NOT copied from this file's
+  // old check-1 label or the card body — see this task's worker_report for the two-lists comparison.
+  const UNCONDITIONAL_EVENTS = [
+    "SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse", "SubagentStart", "SubagentStop",
+  ];
+  for (const event of UNCONDITIONAL_EVENTS) {
+    check(`settings.hooks.${event} is present (non-empty groups array) with vaultPath set`,
+      Array.isArray(withVault.hooks[event]) && withVault.hooks[event].length > 0);
+  }
+  for (const event of UNCONDITIONAL_EVENTS) {
+    check(`settings.hooks.${event} is present (non-empty groups array) with no vaultPath`,
+      Array.isArray(plain.hooks[event]) && plain.hooks[event].length > 0);
+  }
+  // PostToolUse is conditional on vaultPath — assert presence is gated on the CONDITION, not just that
+  // one arm happens to have it: present (non-empty) when vaultPath is set, absent when it is not (the
+  // "no-vaultPath path correctly omits PostToolUse entirely" check above already covers the absence arm;
+  // this is the presence arm of the same condition).
+  check("settings.hooks.PostToolUse is present (non-empty groups array) when vaultPath is set",
+    Array.isArray(withVault.hooks.PostToolUse) && withVault.hooks.PostToolUse.length > 0);
 
   // --- RED-PROOF (DoD 2): the SAME checker must FAIL against the exact historical double-wrap defect.
   // Reconstructs the real broken shape from cd0c7fee/8d158088 verbatim: `hookCmd` is already a
@@ -123,7 +151,8 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — the emitted settings.hooks object is shape-valid for every hook event "
-    + "(Array.isArray(group.hooks), every element { type: \"command\", command: <string> }), matcher "
-    + "handling is correct, and the checker is proven to fail on the exact historical double-wrap defect."
+    + "(Array.isArray(group.hooks), every element { type: \"command\", command: <string> }), every "
+    + "expected event key is actually PRESENT (both with and without vaultPath), matcher handling is "
+    + "correct, and the checker is proven to fail on the exact historical double-wrap defect."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
