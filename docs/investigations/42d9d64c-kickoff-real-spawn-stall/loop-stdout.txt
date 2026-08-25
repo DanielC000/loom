@@ -1,0 +1,62 @@
+[run-loop] starting 20 sequential runs of C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\packages\daemon\test\kickoff-real-spawn.mjs
+[run-loop] ALL_SESSION_IDS_ORDER=["real-worker","real-manager","real-platform","real-setup","real-assistant","real-auditor","real-large-10000","real-large-40000","real-late-ready"]
+[run-loop] writing per-run logs to C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\docs\investigations\42d9d64c-kickoff-real-spawn-stall\runs
+[run-loop] appending rows to C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\docs\investigations\42d9d64c-kickoff-real-spawn-stall\runs.ndjson
+[run-loop] run 1: FAIL in 94165ms (exit=1 signal=none) -> run-01-fail.log
+[run-loop]   failedLabel=[large 40000] (real-large-40000, index 7) kind=stall
+[run-loop]   giveUpRecoveryCount=1 falseNegativeTextPresent=false
+[run-loop]   absentSessions=["real-late-ready"] strandedSetMatchesAbsent=true anyAbsentNotStrandedOrFailed=false
+[run-loop] run 2: PASS in 120804ms (exit=0 signal=none) -> run-02-pass.log
+[run-loop]   giveUpRecoveryCount=7 falseNegativeTextPresent=false
+[run-loop] run 3: PASS in 88803ms (exit=0 signal=none) -> run-03-pass.log
+[run-loop]   giveUpRecoveryCount=3 falseNegativeTextPresent=false
+[run-loop] run 4: PASS in 51269ms (exit=0 signal=none) -> run-04-pass.log
+[run-loop] run 5: PASS in 52595ms (exit=0 signal=none) -> run-05-pass.log
+[run-loop] run 6: PASS in 49462ms (exit=0 signal=none) -> run-06-pass.log
+[run-loop] run 7: PASS in 50497ms (exit=0 signal=none) -> run-07-pass.log
+[run-loop] starting 13 sequential runs of C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\packages\daemon\test\kickoff-real-spawn.mjs, numbered 8..20
+[run-loop] ALL_SESSION_IDS_ORDER=["real-worker","real-manager","real-platform","real-setup","real-assistant","real-auditor","real-large-10000","real-large-40000","real-late-ready"]
+[run-loop] writing per-run logs to C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\docs\investigations\42d9d64c-kickoff-real-spawn-stall\runs
+[run-loop] appending rows to C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\3e7b9eb2c7ac\docs\investigations\42d9d64c-kickoff-real-spawn-stall\runs.ndjson
+[run-loop] run 8: FAIL in 94649ms (exit=1 signal=none) -> run-08-fail.log
+[run-loop]   failedLabel=[large 40000] (real-large-40000, index 7) kind=stall
+[run-loop]   giveUpRecoveryCount=2 falseNegativeTextPresent=false
+[run-loop]   absentSessions=["real-late-ready"] strandedSetMatchesAbsent=true anyAbsentNotStrandedOrFailed=false
+[run-loop]   maxInterEventGapPreFailureMs=25013 maxInterEventGapWholeRunMs=25013
+[run-loop] run 9: PASS in 58983ms (exit=0 signal=none) -> run-09-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4084 maxInterEventGapWholeRunMs=4084
+[run-loop] run 10: PASS in 66523ms (exit=0 signal=none) -> run-10-pass.log
+[run-loop]   giveUpRecoveryCount=1 falseNegativeTextPresent=false
+[run-loop]   maxInterEventGapPreFailureMs=4073 maxInterEventGapWholeRunMs=4073
+[run-loop] run 11: FAIL in 124926ms (exit=1 signal=none) -> run-11-fail.log
+[run-loop]   failedLabel=[auditor] (real-auditor, index 5) kind=stall
+[run-loop]   giveUpRecoveryCount=1 falseNegativeTextPresent=false
+[run-loop]   absentSessions=["real-large-10000","real-large-40000","real-late-ready"] strandedSetMatchesAbsent=true anyAbsentNotStrandedOrFailed=false
+[run-loop]   maxInterEventGapPreFailureMs=25009 maxInterEventGapWholeRunMs=25009
+[run-loop] run 12: PASS in 64287ms (exit=0 signal=none) -> run-12-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4045 maxInterEventGapWholeRunMs=4045
+[run-loop] run 13: PASS in 54173ms (exit=0 signal=none) -> run-13-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4050 maxInterEventGapWholeRunMs=4050
+[run-loop] run 14: FAIL in 92223ms (exit=1 signal=none) -> run-14-fail.log
+[run-loop]   failedLabel=[large 40000] (real-large-40000, index 7) kind=stall
+[run-loop]   giveUpRecoveryCount=1 falseNegativeTextPresent=false
+[run-loop]   absentSessions=["real-late-ready"] strandedSetMatchesAbsent=true anyAbsentNotStrandedOrFailed=false
+[run-loop]   maxInterEventGapPreFailureMs=25019 maxInterEventGapWholeRunMs=25019
+[run-loop] run 15: FAIL in 195759ms (exit=1 signal=none) -> run-15-fail.log
+[run-loop]   failedLabel=[platform] (real-platform, index 2) kind=stall
+[run-loop]   giveUpRecoveryCount=2 falseNegativeTextPresent=false
+[run-loop]   absentSessions=["real-setup","real-assistant","real-auditor","real-large-10000","real-large-40000","real-late-ready"] strandedSetMatchesAbsent=true anyAbsentNotStrandedOrFailed=false
+[run-loop]   maxInterEventGapPreFailureMs=25030 maxInterEventGapWholeRunMs=25030
+[run-loop] run 16: PASS in 72238ms (exit=0 signal=none) -> run-16-pass.log
+[run-loop]   giveUpRecoveryCount=1 falseNegativeTextPresent=false
+[run-loop]   maxInterEventGapPreFailureMs=7363 maxInterEventGapWholeRunMs=7363
+[run-loop] run 17: PASS in 57928ms (exit=0 signal=none) -> run-17-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4063 maxInterEventGapWholeRunMs=4063
+[run-loop] run 18: PASS in 61273ms (exit=0 signal=none) -> run-18-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4059 maxInterEventGapWholeRunMs=4059
+[run-loop] run 19: PASS in 53191ms (exit=0 signal=none) -> run-19-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4067 maxInterEventGapWholeRunMs=4067
+[run-loop] run 20: PASS in 54141ms (exit=0 signal=none) -> run-20-pass.log
+[run-loop]   maxInterEventGapPreFailureMs=4077 maxInterEventGapWholeRunMs=4077
+
+[run-loop] DONE — 9 pass / 4 fail out of 13

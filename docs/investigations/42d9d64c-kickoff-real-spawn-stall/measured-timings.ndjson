@@ -1,0 +1,168 @@
+{"run":1,"outcome":"fail","fixture":"[worker]","sessionStartToReceivedMs":4920,"stallBudgetMs":15000,"order":1}
+{"run":1,"outcome":"fail","fixture":"[manager]","sessionStartToReceivedMs":5225,"stallBudgetMs":15000,"order":2}
+{"run":1,"outcome":"fail","fixture":"[platform]","sessionStartToReceivedMs":4925,"stallBudgetMs":15000,"order":3}
+{"run":1,"outcome":"fail","fixture":"[setup]","sessionStartToReceivedMs":4785,"stallBudgetMs":15000,"order":4}
+{"run":1,"outcome":"fail","fixture":"[assistant]","sessionStartToReceivedMs":4751,"stallBudgetMs":15000,"order":5}
+{"run":1,"outcome":"fail","fixture":"[auditor]","sessionStartToReceivedMs":7171,"stallBudgetMs":15000,"order":6}
+{"run":1,"outcome":"fail","fixture":"[large 10000]","sessionStartToReceivedMs":8900,"stallBudgetMs":15000,"order":7}
+{"run":1,"outcome":"fail","fixture":"[large 40000]","sessionStartToReceivedMs":24580,"stallBudgetMs":15000,"order":8}
+{"run":2,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":15689,"stallBudgetMs":15000,"order":1}
+{"run":2,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":8820,"stallBudgetMs":15000,"order":2}
+{"run":2,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":5641,"stallBudgetMs":15000,"order":3}
+{"run":2,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":6027,"stallBudgetMs":15000,"order":4}
+{"run":2,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":11785,"stallBudgetMs":15000,"order":5}
+{"run":2,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":14262,"stallBudgetMs":15000,"order":6}
+{"run":2,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":19106,"stallBudgetMs":15000,"order":7}
+{"run":2,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":11701,"stallBudgetMs":15000,"order":8}
+{"run":2,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":20142,"stallBudgetMs":15000,"order":9}
+{"run":3,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":8834,"stallBudgetMs":15000,"order":1}
+{"run":3,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":9010,"stallBudgetMs":15000,"order":2}
+{"run":3,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":5853,"stallBudgetMs":15000,"order":3}
+{"run":3,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":10619,"stallBudgetMs":15000,"order":4}
+{"run":3,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":25327,"stallBudgetMs":15000,"order":5}
+{"run":3,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":5013,"stallBudgetMs":15000,"order":6}
+{"run":3,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4986,"stallBudgetMs":15000,"order":7}
+{"run":3,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":7043,"stallBudgetMs":15000,"order":8}
+{"run":3,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4748,"stallBudgetMs":15000,"order":9}
+{"run":4,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4800,"stallBudgetMs":15000,"order":1}
+{"run":4,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4792,"stallBudgetMs":15000,"order":2}
+{"run":4,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4918,"stallBudgetMs":15000,"order":3}
+{"run":4,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":4760,"stallBudgetMs":15000,"order":4}
+{"run":4,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4924,"stallBudgetMs":15000,"order":5}
+{"run":4,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4729,"stallBudgetMs":15000,"order":6}
+{"run":4,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4939,"stallBudgetMs":15000,"order":7}
+{"run":4,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":7723,"stallBudgetMs":15000,"order":8}
+{"run":4,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4792,"stallBudgetMs":15000,"order":9}
+{"run":5,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4782,"stallBudgetMs":15000,"order":1}
+{"run":5,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4830,"stallBudgetMs":15000,"order":2}
+{"run":5,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4816,"stallBudgetMs":15000,"order":3}
+{"run":5,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":5335,"stallBudgetMs":15000,"order":4}
+{"run":5,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4993,"stallBudgetMs":15000,"order":5}
+{"run":5,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4806,"stallBudgetMs":15000,"order":6}
+{"run":5,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4933,"stallBudgetMs":15000,"order":7}
+{"run":5,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":7782,"stallBudgetMs":15000,"order":8}
+{"run":5,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4998,"stallBudgetMs":15000,"order":9}
+{"run":6,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4747,"stallBudgetMs":15000,"order":1}
+{"run":6,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4818,"stallBudgetMs":15000,"order":2}
+{"run":6,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4751,"stallBudgetMs":15000,"order":3}
+{"run":6,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":4811,"stallBudgetMs":15000,"order":4}
+{"run":6,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4884,"stallBudgetMs":15000,"order":5}
+{"run":6,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4733,"stallBudgetMs":15000,"order":6}
+{"run":6,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4904,"stallBudgetMs":15000,"order":7}
+{"run":6,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":6490,"stallBudgetMs":15000,"order":8}
+{"run":6,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4753,"stallBudgetMs":15000,"order":9}
+{"run":7,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4773,"stallBudgetMs":15000,"order":1}
+{"run":7,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4851,"stallBudgetMs":15000,"order":2}
+{"run":7,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4714,"stallBudgetMs":15000,"order":3}
+{"run":7,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":4985,"stallBudgetMs":15000,"order":4}
+{"run":7,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4762,"stallBudgetMs":15000,"order":5}
+{"run":7,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4808,"stallBudgetMs":15000,"order":6}
+{"run":7,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4852,"stallBudgetMs":15000,"order":7}
+{"run":7,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":7218,"stallBudgetMs":15000,"order":8}
+{"run":7,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4839,"stallBudgetMs":15000,"order":9}
+{"run":8,"outcome":"fail","fixture":"[worker]","sessionStartToReceivedMs":4825,"stallBudgetMs":15000,"order":1}
+{"run":8,"outcome":"fail","fixture":"[manager]","sessionStartToReceivedMs":7293,"stallBudgetMs":15000,"order":2}
+{"run":8,"outcome":"fail","fixture":"[platform]","sessionStartToReceivedMs":6621,"stallBudgetMs":15000,"order":3}
+{"run":8,"outcome":"fail","fixture":"[setup]","sessionStartToReceivedMs":4814,"stallBudgetMs":15000,"order":4}
+{"run":8,"outcome":"fail","fixture":"[assistant]","sessionStartToReceivedMs":5046,"stallBudgetMs":15000,"order":5}
+{"run":8,"outcome":"fail","fixture":"[auditor]","sessionStartToReceivedMs":11207,"stallBudgetMs":15000,"order":6}
+{"run":8,"outcome":"fail","fixture":"[large 10000]","sessionStartToReceivedMs":6253,"stallBudgetMs":15000,"order":7}
+{"run":8,"outcome":"fail","fixture":"[large 40000]","sessionStartToReceivedMs":19922,"stallBudgetMs":15000,"order":8}
+{"run":9,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":5351,"stallBudgetMs":15000,"order":1}
+{"run":9,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":5237,"stallBudgetMs":15000,"order":2}
+{"run":9,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":6580,"stallBudgetMs":15000,"order":3}
+{"run":9,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":6193,"stallBudgetMs":15000,"order":4}
+{"run":9,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4979,"stallBudgetMs":15000,"order":5}
+{"run":9,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4943,"stallBudgetMs":15000,"order":6}
+{"run":9,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":5147,"stallBudgetMs":15000,"order":7}
+{"run":9,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":9393,"stallBudgetMs":15000,"order":8}
+{"run":9,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":5277,"stallBudgetMs":15000,"order":9}
+{"run":10,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":5724,"stallBudgetMs":15000,"order":1}
+{"run":10,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":7157,"stallBudgetMs":15000,"order":2}
+{"run":10,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":7315,"stallBudgetMs":15000,"order":3}
+{"run":10,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":5371,"stallBudgetMs":15000,"order":4}
+{"run":10,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5676,"stallBudgetMs":15000,"order":5}
+{"run":10,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":5660,"stallBudgetMs":15000,"order":6}
+{"run":10,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":6712,"stallBudgetMs":15000,"order":7}
+{"run":10,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":10545,"stallBudgetMs":15000,"order":8}
+{"run":10,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":6571,"stallBudgetMs":15000,"order":9}
+{"run":11,"outcome":"fail","fixture":"[worker]","sessionStartToReceivedMs":5029,"stallBudgetMs":15000,"order":1}
+{"run":11,"outcome":"fail","fixture":"[manager]","sessionStartToReceivedMs":5209,"stallBudgetMs":15000,"order":2}
+{"run":11,"outcome":"fail","fixture":"[platform]","sessionStartToReceivedMs":5014,"stallBudgetMs":15000,"order":3}
+{"run":11,"outcome":"fail","fixture":"[setup]","sessionStartToReceivedMs":6505,"stallBudgetMs":15000,"order":4}
+{"run":11,"outcome":"fail","fixture":"[assistant]","sessionStartToReceivedMs":5632,"stallBudgetMs":15000,"order":5}
+{"run":11,"outcome":"fail","fixture":"[auditor]","sessionStartToReceivedMs":19849,"stallBudgetMs":15000,"order":6}
+{"run":12,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":5296,"stallBudgetMs":15000,"order":1}
+{"run":12,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":7712,"stallBudgetMs":15000,"order":2}
+{"run":12,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":6709,"stallBudgetMs":15000,"order":3}
+{"run":12,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":7027,"stallBudgetMs":15000,"order":4}
+{"run":12,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5638,"stallBudgetMs":15000,"order":5}
+{"run":12,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":5795,"stallBudgetMs":15000,"order":6}
+{"run":12,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":5726,"stallBudgetMs":15000,"order":7}
+{"run":12,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":8988,"stallBudgetMs":15000,"order":8}
+{"run":12,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4745,"stallBudgetMs":15000,"order":9}
+{"run":13,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4842,"stallBudgetMs":15000,"order":1}
+{"run":13,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":5310,"stallBudgetMs":15000,"order":2}
+{"run":13,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4848,"stallBudgetMs":15000,"order":3}
+{"run":13,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":4985,"stallBudgetMs":15000,"order":4}
+{"run":13,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4804,"stallBudgetMs":15000,"order":5}
+{"run":13,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4965,"stallBudgetMs":15000,"order":6}
+{"run":13,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":5734,"stallBudgetMs":15000,"order":7}
+{"run":13,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":8179,"stallBudgetMs":15000,"order":8}
+{"run":13,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4980,"stallBudgetMs":15000,"order":9}
+{"run":14,"outcome":"fail","fixture":"[worker]","sessionStartToReceivedMs":5088,"stallBudgetMs":15000,"order":1}
+{"run":14,"outcome":"fail","fixture":"[manager]","sessionStartToReceivedMs":5027,"stallBudgetMs":15000,"order":2}
+{"run":14,"outcome":"fail","fixture":"[platform]","sessionStartToReceivedMs":8281,"stallBudgetMs":15000,"order":3}
+{"run":14,"outcome":"fail","fixture":"[setup]","sessionStartToReceivedMs":4881,"stallBudgetMs":15000,"order":4}
+{"run":14,"outcome":"fail","fixture":"[assistant]","sessionStartToReceivedMs":5652,"stallBudgetMs":15000,"order":5}
+{"run":14,"outcome":"fail","fixture":"[auditor]","sessionStartToReceivedMs":5824,"stallBudgetMs":15000,"order":6}
+{"run":14,"outcome":"fail","fixture":"[large 10000]","sessionStartToReceivedMs":7921,"stallBudgetMs":15000,"order":7}
+{"run":14,"outcome":"fail","fixture":"[large 40000]","sessionStartToReceivedMs":20938,"stallBudgetMs":15000,"order":8}
+{"run":15,"outcome":"fail","fixture":"[worker]","sessionStartToReceivedMs":5273,"stallBudgetMs":15000,"order":1}
+{"run":15,"outcome":"fail","fixture":"[manager]","sessionStartToReceivedMs":19200,"stallBudgetMs":15000,"order":2}
+{"run":15,"outcome":"fail","fixture":"[platform]","sessionStartToReceivedMs":18602,"stallBudgetMs":15000,"order":3}
+{"run":16,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4961,"stallBudgetMs":15000,"order":1}
+{"run":16,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":16388,"stallBudgetMs":15000,"order":2}
+{"run":16,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":6553,"stallBudgetMs":15000,"order":3}
+{"run":16,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":6069,"stallBudgetMs":15000,"order":4}
+{"run":16,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5250,"stallBudgetMs":15000,"order":5}
+{"run":16,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":6571,"stallBudgetMs":15000,"order":6}
+{"run":16,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":5087,"stallBudgetMs":15000,"order":7}
+{"run":16,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":9489,"stallBudgetMs":15000,"order":8}
+{"run":16,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":5038,"stallBudgetMs":15000,"order":9}
+{"run":17,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":5684,"stallBudgetMs":15000,"order":1}
+{"run":17,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4963,"stallBudgetMs":15000,"order":2}
+{"run":17,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":5785,"stallBudgetMs":15000,"order":3}
+{"run":17,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":5369,"stallBudgetMs":15000,"order":4}
+{"run":17,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5178,"stallBudgetMs":15000,"order":5}
+{"run":17,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":5636,"stallBudgetMs":15000,"order":6}
+{"run":17,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":5705,"stallBudgetMs":15000,"order":7}
+{"run":17,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":9260,"stallBudgetMs":15000,"order":8}
+{"run":17,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4876,"stallBudgetMs":15000,"order":9}
+{"run":18,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":7411,"stallBudgetMs":15000,"order":1}
+{"run":18,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":5242,"stallBudgetMs":15000,"order":2}
+{"run":18,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":7798,"stallBudgetMs":15000,"order":3}
+{"run":18,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":7559,"stallBudgetMs":15000,"order":4}
+{"run":18,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5074,"stallBudgetMs":15000,"order":5}
+{"run":18,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":5150,"stallBudgetMs":15000,"order":6}
+{"run":18,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4965,"stallBudgetMs":15000,"order":7}
+{"run":18,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":6800,"stallBudgetMs":15000,"order":8}
+{"run":18,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":5070,"stallBudgetMs":15000,"order":9}
+{"run":19,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4877,"stallBudgetMs":15000,"order":1}
+{"run":19,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4875,"stallBudgetMs":15000,"order":2}
+{"run":19,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":6667,"stallBudgetMs":15000,"order":3}
+{"run":19,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":5047,"stallBudgetMs":15000,"order":4}
+{"run":19,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":4873,"stallBudgetMs":15000,"order":5}
+{"run":19,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4755,"stallBudgetMs":15000,"order":6}
+{"run":19,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4937,"stallBudgetMs":15000,"order":7}
+{"run":19,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":6919,"stallBudgetMs":15000,"order":8}
+{"run":19,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":4771,"stallBudgetMs":15000,"order":9}
+{"run":20,"outcome":"pass","fixture":"[worker]","sessionStartToReceivedMs":4759,"stallBudgetMs":15000,"order":1}
+{"run":20,"outcome":"pass","fixture":"[manager]","sessionStartToReceivedMs":4802,"stallBudgetMs":15000,"order":2}
+{"run":20,"outcome":"pass","fixture":"[platform]","sessionStartToReceivedMs":4868,"stallBudgetMs":15000,"order":3}
+{"run":20,"outcome":"pass","fixture":"[setup]","sessionStartToReceivedMs":4803,"stallBudgetMs":15000,"order":4}
+{"run":20,"outcome":"pass","fixture":"[assistant]","sessionStartToReceivedMs":5619,"stallBudgetMs":15000,"order":5}
+{"run":20,"outcome":"pass","fixture":"[auditor]","sessionStartToReceivedMs":4985,"stallBudgetMs":15000,"order":6}
+{"run":20,"outcome":"pass","fixture":"[large 10000]","sessionStartToReceivedMs":4863,"stallBudgetMs":15000,"order":7}
+{"run":20,"outcome":"pass","fixture":"[large 40000]","sessionStartToReceivedMs":8171,"stallBudgetMs":15000,"order":8}
+{"run":20,"outcome":"pass","fixture":"[late-ready]","sessionStartToReceivedMs":5651,"stallBudgetMs":15000,"order":9}
