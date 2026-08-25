@@ -12,7 +12,7 @@ import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
-import { ToolAttributionTracker, WATCHED_TOOL_NAMES, type ToolAttributionResult } from "./tool-attribution.js";
+import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, type ToolAttributionResult } from "./tool-attribution.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
@@ -4018,6 +4018,9 @@ export class PtyHost {
   /** Card cd0c7fee: correlates a PreToolUse hook's `agent_id`/`agent_type` to the MCP request it
    *  precedes. Pure/dependency-free (see its own file doc) — no opts needed, so this is unconditional. */
   private readonly toolAttribution = new ToolAttributionTracker();
+  /** Card 8d158088: the independent SubagentStart/SubagentStop drift cross-check — see
+   *  SubagentDriftTracker's own doc in tool-attribution.ts for the mechanism and who reads it. */
+  private readonly subagentDrift = new SubagentDriftTracker();
   /**
    * M2 tripwire: true ONLY while deliverHook is finalizing a turn (between lowering busy and draining
    * the FIFO). deliverHook is fully synchronous, so an external `enqueueStdin` can NEVER observe this
@@ -4732,6 +4735,14 @@ export class PtyHost {
             toolUseId: hook.tool_use_id,
           });
         }
+        break;
+      }
+      case "SubagentStop": {
+        // Card 8d158088: the independent drift cross-check — fires from the subagent lifecycle itself,
+        // NOT from `agent_id` riding a tool-call hook (see SubagentDriftTracker's own doc). Advisory only.
+        const counts = this.subagentDrift.recordStop(sessionId);
+        // eslint-disable-next-line no-console
+        console.log(`[subagent-drift] ${sessionId} stops=${counts.stops} confirmedSubagent=${counts.confirmedSubagent}`);
         break;
       }
       case "SessionStart":
@@ -6026,16 +6037,24 @@ export class PtyHost {
   }
 
   /**
-   * Card cd0c7fee: consume this session's correlation queue for `toolName` — called from
+   * Card cd0c7fee: consume this session's correlation queue for `toolName` — called ONCE per request from
    * gateway/server.ts at MCP-request time, BEFORE the request is dispatched to its router (mirrors
    * markMcpSeen's own "before dispatch" placement just below). Read-mostly: only the unambiguous
    * single-candidate case actually removes an entry — see ToolAttributionTracker.consume's own doc.
-   * Correlation-only: this NEVER refuses or blocks a call, it only classifies for observability today
-   * (the `[mcp]` log line in gateway/server.ts). A tool name outside WATCHED_TOOL_NAMES always reads
-   * "unknown" (nothing was ever recorded for it) — cheap and harmless to call unconditionally.
+   * A tool name outside WATCHED_TOOL_NAMES always reads "unknown" (nothing was ever recorded for it) —
+   * cheap and harmless to call unconditionally.
+   *
+   * ⚠️ Card 8d158088: this result is now ALSO threaded into `memory_write`/`worker_report`'s own
+   * enforcement (mcp/server.ts, mcp/orchestration.ts) — no longer purely observational. `consume()` is
+   * destructive/single-shot, so gateway/server.ts calls this AT MOST ONCE per request and threads the
+   * SAME result to both the `[mcp]` log line and the enforcing handler; a second independent call here
+   * would always read "unknown" and silently fail open forever while looking fully operational (see this
+   * method's own call site in gateway/server.ts for the thread-don't-requery discipline this relies on).
    */
   consumeToolAttribution(sessionId: string, toolName: string): ToolAttributionResult {
-    return this.toolAttribution.consume(sessionId, toolName);
+    const result = this.toolAttribution.consume(sessionId, toolName);
+    if (result.state === "confirmed-subagent") this.subagentDrift.recordConfirmedSubagent(sessionId);
+    return result;
   }
 
   /**

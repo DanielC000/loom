@@ -13,6 +13,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
+import type { ToolAttributionResult } from "../pty/tool-attribution.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
@@ -106,7 +107,7 @@ export class TaskMcpRouter {
     return this.db.getSession(sessionId)?.projectId ?? null;
   }
 
-  private buildServer(projectId: string, sessionId: string): McpServer {
+  private buildServer(projectId: string, sessionId: string, attributions?: Map<string, ToolAttributionResult>): McpServer {
     const db = this.db;
     const wakes = this.wakes;
     const fetchOverride = this.fetchOverride;
@@ -375,7 +376,12 @@ export class TaskMcpRouter {
           "`[linked request <id>: <STATE> as of <date>]`, so a note written while a request is PENDING " +
           "self-corrects the moment the owner answers it instead of saying PENDING forever. Omitting " +
           "`requestIds` on an update preserves the existing links (same PATCH semantics as `tags`); pass " +
-          "`[]` explicitly to clear them.",
+          "`[]` explicitly to clear them. " +
+          "Card 8d158088: REFUSED with {error} if this specific call is CONFIRMED to have originated from " +
+          "a sub-agent (a Task/Agent sub-call), rather than your own top-level turn — project memory is " +
+          "shared, durable knowledge meant to reflect the calling agent's own reasoning; call this " +
+          "directly, not through a delegated sub-agent. An UNCERTAIN attribution never refuses (fail-open) " +
+          "— only a positively-confirmed sub-agent call is rejected.",
         inputSchema: strictShape({
           key: z.string(),
           text: z.string(),
@@ -386,7 +392,24 @@ export class TaskMcpRouter {
           baseVersion: z.number().int().optional(),
         }),
       },
-      async (args) => ok(writeProjectMemory(db, projectId, args)),
+      async (args) => {
+        // Card 8d158088 (enforcement half of cd0c7fee): refuse ONLY on a POSITIVELY CONFIRMED sub-agent
+        // call — "unknown"/"ambiguous" (a correlation failure, an old CLI, a post-restart empty queue)
+        // MUST fail open, non-negotiably (CLAUDE.md's own standing rule on this card). memory_write has no
+        // stranding risk (unlike worker_report, a worker's only channel up), so this is the one of the two
+        // watched tools where the directionality review landed on refusal rather than attribute-and-allow.
+        const attribution = attributions?.get("memory_write");
+        if (attribution?.state === "confirmed-subagent") {
+          return ok({
+            error:
+              `memory_write REFUSED — this call was attributed to a sub-agent` +
+              `${attribution.agentType ? ` (agentType=${attribution.agentType})` : ""}, not your own top-level ` +
+              "turn. Project memory is shared, durable knowledge — call memory_write directly from your own " +
+              "reasoning, not through a delegated Task/Agent sub-call.",
+          });
+        }
+        return ok(writeProjectMemory(db, projectId, args));
+      },
     );
     server.registerTool(
       "memory_forget",
@@ -528,8 +551,15 @@ export class TaskMcpRouter {
     return server;
   }
 
-  /** HTTP entry for /mcp/:sessionId. `body` is the Fastify-parsed JSON (or undefined). */
-  async handle(req: IncomingMessage, res: ServerResponse, sessionId: string, body: unknown): Promise<void> {
+  /**
+   * HTTP entry for /mcp/:sessionId. `body` is the Fastify-parsed JSON (or undefined). `attributions`
+   * (card 8d158088) is gateway/server.ts's ALREADY-COMPUTED sub-agent-call attribution for this exact
+   * request (keyed by tool name) — threaded through rather than re-derived here, since
+   * `PtyHost.consumeToolAttribution` is destructive/single-shot (see its own doc); optional so every
+   * existing test that calls `.handle()` directly with no 5th arg stays byte-identical (fails open, same
+   * as an "unknown" attribution).
+   */
+  async handle(req: IncomingMessage, res: ServerResponse, sessionId: string, body: unknown, attributions?: Map<string, ToolAttributionResult>): Promise<void> {
     const projectId = this.resolveProject(sessionId);
     if (!projectId) {
       res.writeHead(404, { "content-type": "application/json" });
@@ -541,7 +571,7 @@ export class TaskMcpRouter {
     // transient stream close can't strand the session. (The old per-session cache deleted the
     // transport on onclose, and claude never re-initialized a server it thought died → the
     // loom-tasks "drop".) The same surface is rebuilt every request from the session→project map.
-    const server = this.buildServer(projectId, sessionId);
+    const server = this.buildServer(projectId, sessionId, attributions);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => { void transport.close(); void server.close(); });
     await server.connect(transport);

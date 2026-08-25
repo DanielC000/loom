@@ -34,7 +34,7 @@ import type { OperatorMcpRouter } from "../mcp/operator.js";
 import { isOperatorEnabled } from "../mcp/operator.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { logInboundMcpRequest } from "../mcp/inbound-log.js";
-import { WATCHED_TOOL_NAMES } from "../pty/tool-attribution.js";
+import { WATCHED_TOOL_NAMES, extractWatchedToolCalls, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
@@ -711,23 +711,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { gitLocalMs: t.gitLocalMs, gitPushMs: t.gitPushMs };
   })();
 
-  // Card cd0c7fee: shared by both routes below that can carry a watched tool (worker_report is
+  // Card cd0c7fee/8d158088: shared by both routes below that can carry a watched tool (worker_report is
   // orchestration-only, memory_write is task-only, but one helper is simpler than two near-duplicates).
-  // Scoped to WATCHED_TOOL_NAMES so every OTHER tool's [mcp] line stays byte-identical to before this
-  // card — we never even attempt correlation for a tool we don't track, so there is nothing honest to
-  // print for it (as opposed to a tracked tool's genuine "unknown", which DOES get printed).
-  // Optional-chained on consumeToolAttribution: several existing tests wire a minimal `{ markMcpSeen }`-
-  // only `deps.pty` stub, and this is a purely additive observability call, so a stub without the method
-  // should stay a harmless no-op rather than a 500 — the real PtyHost always implements it.
-  const attributeToolCall = (sid: string, tool: string) =>
-    WATCHED_TOOL_NAMES.has(tool) ? deps.pty.consumeToolAttribution?.(sid, tool) : undefined;
+  // `consumeToolAttribution` is DESTRUCTIVE/single-shot (see its own doc in pty/host.ts) — this computes
+  // each watched tool's attribution AT MOST ONCE per request, into a Map, and that SAME Map is threaded to
+  // BOTH the `[mcp]` log line below AND the router's `handle()` call, which passes it on to the enforcing
+  // tool handler (mcp/server.ts memory_write, mcp/orchestration.ts worker_report). Do NOT re-derive
+  // attribution a second time anywhere downstream — a second `consumeToolAttribution` call for the same
+  // (session, tool) always reads "unknown" (the entry is already gone), which would silently fail open
+  // FOREVER while looking fully operational — exactly the card's own silent-all-clear failure mode one
+  // level up. Optional-chained on consumeToolAttribution: several existing tests wire a minimal
+  // `{ markMcpSeen }`-only `deps.pty` stub, and a stub without the method stays a harmless no-op (empty
+  // Map) rather than a 500 — the real PtyHost always implements it.
+  const computeAttributions = (sid: string, body: unknown): Map<string, ToolAttributionResult> => {
+    const map = new Map<string, ToolAttributionResult>();
+    for (const tool of extractWatchedToolCalls(body, WATCHED_TOOL_NAMES)) {
+      if (map.has(tool)) continue; // one consume() per (session, tool) per request — see doc above.
+      const result = deps.pty.consumeToolAttribution?.(sid, tool);
+      if (result) map.set(tool, result);
+    }
+    return map;
+  };
 
   // --- Project-scoped task MCP (session id in the path; project resolved server-side) ---
   app.all("/mcp/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("task", sessionId, req.body, attributeToolCall); // card 98c4a651: identity-only inbound MCP census; cd0c7fee: + sub-agent-call correlation
+    const attributions = computeAttributions(sessionId, req.body);
+    logInboundMcpRequest("task", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651: identity-only inbound MCP census; cd0c7fee: + sub-agent-call correlation
     reply.hijack(); // hand raw req/res to the MCP transport; pass the Fastify-parsed body
-    await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body);
+    await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);
   });
 
   // --- Manager-scoped orchestration MCP (role-gated; manager derived server-side) ---
@@ -738,9 +750,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (sessions/service.ts resumeFleetOnBoot/recoverCrashOrphanedWorkers) only needs to know contact was
     // made, not that this particular call succeeded.
     deps.pty.markMcpSeen(sessionId);
-    logInboundMcpRequest("orchestration", sessionId, req.body, attributeToolCall); // card 98c4a651; cd0c7fee
+    const attributions = computeAttributions(sessionId, req.body);
+    logInboundMcpRequest("orchestration", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651; cd0c7fee
     reply.hijack();
-    await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
+    await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);
   });
 
   // --- Platform-lead MCP (role-gated to 'platform'; project/agent creation — Pillar C) ---

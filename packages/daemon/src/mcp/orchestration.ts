@@ -14,6 +14,7 @@ import type { Db } from "../db.js";
 import { MAX_GATE_HISTORY_PAGE } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { possibleDuplicateRootLabel } from "../pty/host.js";
+import type { ToolAttributionResult } from "../pty/tool-attribution.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
@@ -1625,7 +1626,7 @@ export class OrchestrationMcpRouter {
     );
   }
 
-  private buildServer(sessionId: string, role: SessionRole): McpServer {
+  private buildServer(sessionId: string, role: SessionRole, attributions?: Map<string, ToolAttributionResult>): McpServer {
     const db = this.db;
     const sessions = this.sessions;
     const pty = this.pty;
@@ -1772,7 +1773,12 @@ export class OrchestrationMcpRouter {
           }),
         },
         async ({ status, summary, prUrl, needs, noChanges, awaiting }) =>
-          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges, awaiting })),
+          // Card 8d158088: attribute-and-ALWAYS-ALLOW, never refuse — worker_report is a worker's ONLY
+          // channel up, so a wrongful refusal (or a refusal on the fail-open unknown/ambiguous states)
+          // would strand it with no way to report at all, strictly worse than letting a sub-agent's call
+          // through. The attribution (when confirmed-subagent) rides the durable report record instead —
+          // see sessions.workerReport's own doc for where the manager actually sees it.
+          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges, awaiting, subagentAttribution: attributions?.get("worker_report") })),
       );
       // run_gate (card 7f96aa09 — structural fix B for d5c5ccdf): run THIS gate through the daemon's
       // GateSemaphore instead of a raw Bash self-check, so N parallel workers can't structurally exceed
@@ -2711,7 +2717,11 @@ export class OrchestrationMcpRouter {
           "report instead of the latest one. `error` (a string) means nothing to read — 'not your worker' " +
           "(scoped the same way every other per-worker tool is — your own lineage only), 'no worker_report " +
           "recorded for this worker', an ambiguous-prefix message naming the matching ids, or 'no " +
-          "worker_report event matching id …' — never a partial/best-effort result. OVERSIZE: `summary` has " +
+          "worker_report event matching id …' — never a partial/best-effort result. Also carries " +
+          "`subagentAttribution` ({agentId, agentType}) when card 8d158088's correlation POSITIVELY " +
+          "CONFIRMED this report was filed by a sub-agent call rather than the worker's own top-level turn " +
+          "— advisory only (never refused), absent means either a genuine main-turn call or an honest " +
+          "correlation failure (never conflate the two). OVERSIZE: `summary` has " +
           "NO fixed truncation — spill, don't widen (the same defect this tool exists to fix, not " +
           "reintroduced here): it is bounded to the same SPILL_INLINE_BUDGET_CHARS inline cap every other " +
           "spillable surface on this MCP uses, and a summary above it is written verbatim (plain UTF-8) to " +
@@ -4506,8 +4516,12 @@ export class OrchestrationMcpRouter {
     return server;
   }
 
-  /** HTTP entry for /mcp-orch/:sessionId. `body` is the Fastify-parsed JSON (or undefined). */
-  async handle(req: IncomingMessage, res: ServerResponse, sessionId: string, body: unknown): Promise<void> {
+  /**
+   * HTTP entry for /mcp-orch/:sessionId. `body` is the Fastify-parsed JSON (or undefined). `attributions`
+   * (card 8d158088) — see TaskMcpRouter.handle's own doc; same thread-don't-requery contract, same
+   * optional/fail-open default for any existing test that calls `.handle()` directly.
+   */
+  async handle(req: IncomingMessage, res: ServerResponse, sessionId: string, body: unknown, attributions?: Map<string, ToolAttributionResult>): Promise<void> {
     const resolved = this.resolveRole(sessionId);
     if (!resolved) {
       res.writeHead(404, { "content-type": "application/json" });
@@ -4517,7 +4531,7 @@ export class OrchestrationMcpRouter {
 
     // Stateless per request (see TaskMcpRouter): no cached transport to be deleted on a transient
     // onclose, so the worker_* surface can't vanish mid-session. Rebuilt each call from the role.
-    const server = this.buildServer(sessionId, resolved.role);
+    const server = this.buildServer(sessionId, resolved.role, attributions);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => {
       // `close` also fires on a NORMAL completed response (after res.end()) AND on the transport's

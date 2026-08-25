@@ -158,3 +158,67 @@ export class ToolAttributionTracker {
     return fresh;
   }
 }
+
+/**
+ * Card 8d158088 (the enforcement half of cd0c7fee): parses the tool name(s) out of an inbound MCP
+ * JSON-RPC request body, restricted to `watched`. Mirrors `mcp/inbound-log.ts`'s own inline body-parsing
+ * exactly (a streamable-HTTP body may be a single request or a batch array) — pulled out here as ONE
+ * shared definition so `gateway/server.ts` can compute each watched tool's attribution ONCE per request
+ * and thread that SAME result to both the `[mcp]` log line and the tool handler that enforces it, instead
+ * of parsing the body a second, independently-driftable way. See `consume()`'s own doc above for why a
+ * second, independent call would silently read "unknown" forever (consume() is destructive/single-shot).
+ */
+export function extractWatchedToolCalls(body: unknown, watched: ReadonlySet<string>): string[] {
+  const entries = Array.isArray(body) ? body : [body];
+  const names: string[] = [];
+  for (const entry of entries) {
+    const name = (entry as { params?: { name?: unknown } } | undefined)?.params?.name;
+    if (typeof name === "string" && watched.has(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Card 8d158088: per-session drift counters for the SubagentStart/SubagentStop cross-check this file's
+ * own `consume()` doc proposed (round-2 review of cd0c7fee) as the independent check on the `agent_id`
+ * absence this tracker otherwise relies on for "confirmed-main". `stops` counts REAL `SubagentStop` hook
+ * deliveries (wired in `claude-settings.ts`, dispatched in `pty/host.ts`'s `deliverHook`) — a mechanism
+ * that fires from the subagent LIFECYCLE itself, independent of whether `agent_id` still rides PreToolUse.
+ * `confirmedSubagent` counts how many `consumeToolAttribution` calls actually returned
+ * "confirmed-subagent". `stops > 0` with `confirmedSubagent === 0` over a real window is the drift tell:
+ * `agent_id` stopped arriving on tool-call hooks even though real subagents are genuinely running, which
+ * — under this card's own correct fail-open rule — means enforcement is silently refusing nothing while
+ * reading as fully operational (the exact silent-all-clear this cross-check exists to make legible).
+ *
+ * ⭐ WHO READS THIS, AND WHEN: the Loom lead/manager greps `[subagent-drift]` in the daemon log WHEN
+ * diagnosing whether enforcement (card 8d158088) might be silently blind — e.g. after a Claude Code
+ * upgrade, or on a report that a sub-agent's `worker_report`/`memory_write` went through unattributed
+ * more than expected. NOT a periodic check nobody will run — mirrors `mcp/inbound-log.ts`'s own "WHO
+ * READS THIS" precedent for the `[mcp]` line. Both numbers are logged on the SAME line, side by side, so
+ * the comparison the card's own tell describes is a single glance, not a cross-referencing exercise.
+ * ⚠️ ADVISORY ONLY — same posture as the rest of this module: nothing here refuses or blocks anything.
+ */
+export class SubagentDriftTracker {
+  private readonly counts = new Map<string, { stops: number; confirmedSubagent: number }>();
+
+  private bucket(sessionId: string): { stops: number; confirmedSubagent: number } {
+    let b = this.counts.get(sessionId);
+    if (!b) {
+      b = { stops: 0, confirmedSubagent: 0 };
+      this.counts.set(sessionId, b);
+    }
+    return b;
+  }
+
+  /** Called from `deliverHook`'s `SubagentStop` case. Returns the updated counts for that same log line. */
+  recordStop(sessionId: string): { stops: number; confirmedSubagent: number } {
+    const b = this.bucket(sessionId);
+    b.stops += 1;
+    return { ...b };
+  }
+
+  /** Called from `PtyHost.consumeToolAttribution` whenever the result is "confirmed-subagent". */
+  recordConfirmedSubagent(sessionId: string): void {
+    this.bucket(sessionId).confirmedSubagent += 1;
+  }
+}

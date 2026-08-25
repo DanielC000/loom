@@ -8858,7 +8858,19 @@ export class SessionService {
    */
   async workerReport(
     workerSessionId: string,
-    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string; noChanges?: boolean; awaiting?: "manager" | "background" },
+    report: {
+      status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string; noChanges?: boolean; awaiting?: "manager" | "background";
+      /** Card 8d158088: this report's sub-agent-call attribution, threaded from mcp/orchestration.ts's
+       *  already-computed (gateway/server.ts) correlation result — NEVER re-derived here. ADVISORY ONLY:
+       *  worker_report never refuses on this (fail-open, always — see CLAUDE.md's non-negotiable rule on
+       *  this card); when its state is "confirmed-subagent" it rides the durable `worker_report` event
+       *  (surfaced via worker_report_get) and the `[loom:worker-report]` text below, so the manager sees
+       *  "this report was filed by a sub-agent" AT THE POINT of deciding whether to act on it — the
+       *  action path, not a separate log line nobody reads (per pinned memory
+       *  `shipping-a-detector-is-not-someone-reading-it`). Any other state (confirmed-main/unknown/
+       *  ambiguous) is deliberately NOT surfaced here — only a positive confirmation is actionable info. */
+      subagentAttribution?: { state: string; agentId?: string; agentType?: string };
+    },
   ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
@@ -9115,6 +9127,11 @@ export class SessionService {
         ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}),
         ...(report.awaiting === "background" ? { awaiting: "background" } : {}),
         ...(managerSessionId ? { managerTurnSeqAtReport: this.db.getSession(managerSessionId)?.turnSeq ?? 0 } : {}),
+        // Card 8d158088: recorded ONLY on a positive confirmation — see this method's own doc on
+        // `subagentAttribution` above for why "unknown"/"ambiguous"/"confirmed-main" are never surfaced.
+        ...(report.subagentAttribution?.state === "confirmed-subagent"
+          ? { subagentAttribution: { agentId: report.subagentAttribution.agentId, agentType: report.subagentAttribution.agentType } }
+          : {}),
       },
     });
 
@@ -9127,6 +9144,12 @@ export class SessionService {
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
+      // Card 8d158088: surfaced in the SAME nudge the manager already reads to decide whether to act on
+      // this report — the action path, not a separate advisory log line (see this method's own doc above).
+      if (report.subagentAttribution?.state === "confirmed-subagent") {
+        const agentType = report.subagentAttribution.agentType ? ` agentType=${report.subagentAttribution.agentType}` : "";
+        framed += ` | ATTRIBUTION: this report was filed by a SUB-AGENT call, not the worker's own top-level turn (${agentType.trim() || "agentType unknown"})`;
+      }
       if (autoRetireNoCommit) {
         const why = autoRetireTrigger === "declared-no-op" ? "declared no-op done (noChanges)" : "declared no-commit role";
         framed += ` | auto-retired (${why}, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
