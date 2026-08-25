@@ -17,6 +17,7 @@ import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-att
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { recordBoardRead } from "../orchestration/board-read.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -144,7 +145,16 @@ export class TaskMcpRouter {
         // never pays for row bodies or the merged-state git enrichment (card 9798200c).
         if (args.countsOnly) return ok(countProjectTasks(db, projectId, args));
         const effective = { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP };
-        return okLinesSpillable(sessionId, "tasks-list-spills", taskListSpillKey(effective), await listProjectTasks(db, projectId, effective));
+        const result = okLinesSpillable(sessionId, "tasks-list-spills", taskListSpillKey(effective), await listProjectTasks(db, projectId, effective));
+        // Card 9c8e256e: this is the genuine "recipient read the board" signal the idle-watcher's delta
+        // digest anchors to (board-read.ts) — recorded for manager/platform sessions only, the only roles
+        // the idle nudge ever reaches. Snapshots the FULL non-terminal board regardless of this call's own
+        // filter/pagination args (see recordBoardRead's own doc), so a later delta is never computed
+        // against a partial view. countsOnly above never reaches here (no card contents were actually seen).
+        if (session?.role === "manager" || session?.role === "platform") {
+          recordBoardRead(db, sessionId, projectId, new Date().toISOString());
+        }
+        return result;
       },
     );
     server.registerTool(

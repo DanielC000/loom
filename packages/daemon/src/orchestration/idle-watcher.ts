@@ -4,6 +4,7 @@ import type { OrchestrationEventKind } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
+import { computeBoardDelta, formatBoardDeltaDigest } from "./board-read.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface IdlePty {
@@ -447,10 +448,18 @@ export class IdleWatcher {
         : ` (Also: ${undocumentedManualDeferrals.length} manually-deferred card(s) have no reason recorded — legacy, ` +
           `predates this field, not actionable — add one via tasks_update(deferredReason:...) to silence this ` +
           `permanently: ${deferralIds}${undocumentedManualDeferrals.length > ACTIONABLE_LIST_CAP ? `, +${undocumentedManualDeferrals.length - ACTIONABLE_LIST_CAP} more` : ""}.)`;
+      // Card 9c8e256e: what changed on the board since THIS recipient's own last tasks_list read (never a
+      // wall-clock window — see board-read.ts). Applied to every nudge variant above (isPlatform/stranded/
+      // liveWorkers/none all flow through this ONE insertion point) so the digest is never a half-fix
+      // covering only one shape. A "not computed" delta is never phrased so it could be mistaken for a
+      // measured empty one (DoD-3) — see formatBoardDeltaDigest's own three-way contract.
+      const boardDeltaSuffix = ` ${formatBoardDeltaDigest(computeBoardDelta(db, m.id, nonTerminal))}`;
       // Card a193398f: append the bounded-recheck hint to the MANAGER branches only (they cite the
       // openTodos/stranded/live-worker counts this hint refers to) — the platform (Lead) branch above
       // doesn't surface those counts, so the hint wouldn't make sense appended there.
-      const finalMsg = isPlatform ? msg + undocumentedDeferralSuffix : msg + undocumentedDeferralSuffix + IDLE_NUDGE_BOUNDED_HINT;
+      const finalMsg = isPlatform
+        ? msg + undocumentedDeferralSuffix + boardDeltaSuffix
+        : msg + undocumentedDeferralSuffix + boardDeltaSuffix + IDLE_NUDGE_BOUNDED_HINT;
       try { pty.enqueueStdin(m.id, finalMsg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
