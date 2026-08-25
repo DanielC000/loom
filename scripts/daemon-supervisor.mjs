@@ -109,8 +109,16 @@ if (wantsDetach && !isDetachedChild) {
   // completely untracked (no way for daemon:stable:stop to ever find it again) — kill it rather than
   // leave that orphan. Finding #3: the record now carries `port` too, so stop() doesn't have to
   // re-derive it from its OWN env (which can disagree — see that finding).
+  //
+  // Card 9fb849de: `supervisorStartedAt` (not `startedAt`) — this is when SUPERVISION began, not when the
+  // daemon last started. The restart loop below relaunches the daemon inside this SAME supervisor process
+  // (daemon exits 75, supervisor re-spawns it) and never rewrites this file, so this timestamp is stable
+  // across every `daemon_restart` — by design, and unrelated to whether the currently-running daemon is
+  // up to date. To answer "is my merge live", read the daemon's own `served_status` → `deployStaleness`
+  // (`processStartedAt` / `runningCodeBuiltAt` / `commitsBehind`, packages/daemon/src/deploy-staleness.ts)
+  // instead — that is computed fresh per call and is the authoritative deploy-currency signal, not this file.
   try {
-    fs.writeFileSync(SUPERVISOR_PID_PATH, JSON.stringify({ pid: child.pid, port: PORT, startedAt: new Date().toISOString() }, null, 2) + "\n");
+    fs.writeFileSync(SUPERVISOR_PID_PATH, JSON.stringify({ pid: child.pid, port: PORT, supervisorStartedAt: new Date().toISOString() }, null, 2) + "\n");
   } catch (err) {
     console.error(`[supervisor] failed to write the PID file (${err.message}) — killing the just-spawned detached child so it can't become an untracked orphan.`);
     try { process.kill(child.pid, "SIGKILL"); } catch { /* best-effort */ }
