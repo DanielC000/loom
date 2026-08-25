@@ -89,6 +89,14 @@ const PROD_PORT = 4317;
  * Abort unless this process is pointed at an isolated test environment — never prod.
  * @param {{ port?: boolean }} opts  port:true also requires LOOM_PORT to be set and != 4317
  *   (use for any test that fetch()es a live daemon).
+ *
+ * SCOPE, NARROWER THAN IT LOOKS (card 7a5948bd): this only proves `LOOM_HOME` (and, with `port:true`,
+ * `LOOM_PORT`) are isolated — it does NOT mean this process can't reach real `~/.loom` by any route.
+ * Since card d1e10795, every test child spawned by `scripts/test-daemon.mjs` also carries a SEPARATE,
+ * ADDITIVE `LOOM_REAL_HOME` env var (the harness's own real home, for durable diagnostic telemetry) that
+ * this function never inspects and never could — a test reading `process.env.LOOM_REAL_HOME` and writing
+ * through it reaches prod with this guard passing the whole time. That's a real, narrower gap, closed not
+ * here but by `real-home-scope-guard.mjs`, which allowlists+shape-checks every such read instead.
  */
 export function requireHermeticEnv({ port = false } = {}) {
   const problems = [];

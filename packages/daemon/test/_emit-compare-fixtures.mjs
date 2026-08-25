@@ -24,7 +24,7 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const GIT_ID = "-c user.email=ecg@loom -c user.name=ecg";
 export const now = new Date().toISOString();
 export const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
-export const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs", "fixed-wait-witness-guard.mjs"];
+export const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs", "fixed-wait-witness-guard.mjs", "real-home-scope-guard.mjs"];
 
 // Card 815b4b30: (I)/(J)/(K) (in emit-compare-gate-scope.mjs) need each fixture repo to carry a REAL,
 // importable packages/daemon/scripts/test-daemon.mjs so `loadExcludedTestDirNames` (git/worktrees.ts) can

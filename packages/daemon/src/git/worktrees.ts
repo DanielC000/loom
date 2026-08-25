@@ -2187,6 +2187,13 @@ export const STATIC_GUARD_REPO_PATHS = [
   // source-TEXT (a real `git diff`, not compiled behavior), so it belongs in this list on the same
   // grounds `fixed-wait-negative-guard.mjs` already does.
   "packages/daemon/test/fixed-wait-witness-guard.mjs",
+  // Card 7a5948bd: a corpus-wide scan (same shape as its siblings above) asserting that
+  // `process.env.LOOM_REAL_HOME` (card d1e10795) is read only by its allowlisted consumer(s), and that
+  // every read resolves exclusively to a `gate-timing/` (telemetry-only) path. See the guard's own header
+  // for the full reasoning: without this entry, a NEW test file reading this var to reach the real
+  // `~/.loom` (which holds `loom.db`) would ship on the reduced gate path with nothing catching it — the
+  // exact hermetic-guard blind spot (`requireHermeticEnv` cannot see this var) this card closed.
+  "packages/daemon/test/real-home-scope-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */
