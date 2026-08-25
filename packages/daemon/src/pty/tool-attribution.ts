@@ -47,6 +47,18 @@ export interface ToolAttributionResult {
   candidateCount?: number;
 }
 
+/**
+ * Card e6ef5062: the single source of truth for "was this call positively confirmed as a sub-agent's own
+ * call" — collapses what used to be four independent hand-typed `=== "confirmed-subagent"` string
+ * comparisons (mcp/server.ts, sessions/service.ts ×2, plus this file's own `SubagentDriftTracker`) into
+ * one typed predicate. Typed against {@link ToolAttributionState} (a 4-member union), so a typo or rename
+ * at any call site is a COMPILE ERROR, not a comparison that silently reads `false` forever — the same
+ * silent-all-clear failure mode this whole module exists to make legible, one level up.
+ */
+export function isConfirmedSubagent(state: ToolAttributionState | undefined | null): boolean {
+  return state === "confirmed-subagent";
+}
+
 export interface ToolAttributionEntry {
   /** Present only when the firing PreToolUse hook was inside a subagent call. */
   agentId?: string;
@@ -117,17 +129,22 @@ export class ToolAttributionTracker {
    * At enforcement time (not built yet) that would mean silently permitting every sub-agent call instead
    * of failing open on an honest "unknown".
    *
-   * A CHEAP, INDEPENDENT CROSS-CHECK EXISTS FOR A FUTURE READER/ENFORCEMENT-CARD PRECONDITION (this is a
-   * proposal to verify then, not something this module implements): `SubagentStart`/`SubagentStop` are
-   * documented as their OWN distinct hook events (code.claude.com/docs/en/hooks), separate from
-   * PreToolUse/PostToolUse and NOT gated on the `agent_id` field surviving on tool-call hooks — they fire
-   * from the subagent LIFECYCLE itself, a different mechanism. If Loom ever wires either (not done today —
-   * Loom wires neither, see sessions/service.ts's own wired-hook comment), a bare COUNT of subagent turns
-   * per session, cross-referenced against how many "confirmed-subagent" results this tracker actually
-   * produced, is the drift detector: count > 0 with zero confirmed-subagent results (all confirmed-main/
-   * unknown instead) means the field stopped arriving, not that no subagent ever called a watched tool.
-   * NOT the same as the card's excluded `isSidechain`/transcript-parsing fallback — this is a first-class
-   * documented hook EVENT TYPE, not internal/unstable transcript schema.
+   * ⭐⭐ CARD e6ef5062 CORRECTED THE CROSS-CHECK THIS PARAGRAPH ONCE PROPOSED — the original design (a bare
+   * `stops > 0` with `confirmedSubagent === 0` comparison, see `SubagentDriftTracker`'s history) does NOT
+   * discriminate: a session running sub-agents that simply never call a watched tool logs EXACTLY that
+   * signature in perfectly healthy operation (`agent_id` arriving normally, just never observed because no
+   * watched-tool call happened during a live sub-agent's turn) — the SAME reading a genuinely blind session
+   * produces. `SubagentDriftTracker` now wires BOTH `SubagentStart` and `SubagentStop` (per-session live
+   * count, incremented/decremented on each) and correlates it against every watched-tool attribution
+   * result at CONSUME time: Claude Code blocks the invoking turn until its own Task-tool call returns (see
+   * this file's own ORDERING GUARANTEE above), so ANY watched-tool call observed while the live count is
+   * >0 is KNOWN, from the lifecycle hooks alone, to have originated inside that live sub-agent — regardless
+   * of what `consume()` returns for it. A result that is NOT "confirmed-subagent" under that condition
+   * (`confirmed-main`, `unknown`, or `ambiguous`) is therefore a genuine, per-event drift observation, not
+   * an inference from an aggregate count: `agent_id` failed to arrive on a call the lifecycle hooks
+   * independently prove was a sub-agent's. In the common case — no watched tool called while any sub-agent
+   * is live — the signal correctly stays silent in BOTH healthy and blind operation, because there is
+   * genuinely no data to discriminate on either way; it no longer reads that silence as an alarm.
    */
   consume(sessionId: string, toolName: string, now = Date.now()): ToolAttributionResult {
     const key = keyFor(sessionId, toolName);
@@ -167,58 +184,99 @@ export class ToolAttributionTracker {
  * and thread that SAME result to both the `[mcp]` log line and the tool handler that enforces it, instead
  * of parsing the body a second, independently-driftable way. See `consume()`'s own doc above for why a
  * second, independent call would silently read "unknown" forever (consume() is destructive/single-shot).
+ *
+ * `method === "tools/call"` gated (card e6ef5062 nitpick): a JSON-RPC request carrying `params.name` under
+ * some OTHER method would otherwise still be treated as a watched tool call and destructively consume a
+ * pending correlation entry. Not reachable today — the only client is Claude Code's own MCP transport,
+ * which always sends `tools/call` for a tool invocation — but the guard makes the intent exact rather than
+ * relying on that being true forever.
  */
 export function extractWatchedToolCalls(body: unknown, watched: ReadonlySet<string>): string[] {
   const entries = Array.isArray(body) ? body : [body];
   const names: string[] = [];
   for (const entry of entries) {
-    const name = (entry as { params?: { name?: unknown } } | undefined)?.params?.name;
+    const parsed = entry as { method?: unknown; params?: { name?: unknown } } | undefined;
+    if (parsed?.method !== "tools/call") continue;
+    const name = parsed.params?.name;
     if (typeof name === "string" && watched.has(name)) names.push(name);
   }
   return names;
 }
 
 /**
- * Card 8d158088: per-session drift counters for the SubagentStart/SubagentStop cross-check this file's
- * own `consume()` doc proposed (round-2 review of cd0c7fee) as the independent check on the `agent_id`
- * absence this tracker otherwise relies on for "confirmed-main". `stops` counts REAL `SubagentStop` hook
- * deliveries (wired in `claude-settings.ts`, dispatched in `pty/host.ts`'s `deliverHook`) — a mechanism
- * that fires from the subagent LIFECYCLE itself, independent of whether `agent_id` still rides PreToolUse.
- * `confirmedSubagent` counts how many `consumeToolAttribution` calls actually returned
- * "confirmed-subagent". `stops > 0` with `confirmedSubagent === 0` over a real window is the drift tell:
- * `agent_id` stopped arriving on tool-call hooks even though real subagents are genuinely running, which
- * — under this card's own correct fail-open rule — means enforcement is silently refusing nothing while
- * reading as fully operational (the exact silent-all-clear this cross-check exists to make legible).
+ * Card e6ef5062 (replaces the non-discriminating counters card 8d158088 originally shipped — see this
+ * file's own `consume()` doc for why the original `stops`/`confirmedSubagent` comparison could not tell
+ * healthy operation from blindness): per-session sub-agent-lifecycle drift tracker, now wired to BOTH
+ * `SubagentStart` and `SubagentStop` (`claude-settings.ts`, dispatched in `pty/host.ts`'s `deliverHook`).
+ *
+ * `live` is a per-session count of currently in-flight sub-agent invocations — incremented on
+ * `SubagentStart`, decremented (floored at 0) on `SubagentStop`. Because Claude Code blocks the invoking
+ * turn until its own Task-tool call returns (this file's own ORDERING GUARANTEE, top of file), any
+ * watched-tool call observed while `live > 0` is KNOWN — from the lifecycle hooks alone, independent of
+ * whatever `agent_id` did or didn't ride the PreToolUse hook — to have originated inside that live
+ * sub-agent. `recordAttribution` is the actual discriminator: called from `PtyHost.consumeToolAttribution`
+ * with EVERY watched-tool result (not just "confirmed-subagent"), it counts `blindWhileLive` whenever the
+ * result is NOT "confirmed-subagent" (i.e. `confirmed-main`/`unknown`/`ambiguous`) while `live > 0` at that
+ * moment — a genuine, per-event drift observation, not an inference from an aggregate count. `stops` and
+ * `confirmedSubagent` are kept as supporting context on the same log line, not as the tell itself.
+ *
+ * ⭐⭐ WHY THIS DISCRIMINATES WHERE THE ORIGINAL DIDN'T: the common case — a session running sub-agents that
+ * never call a watched tool — now produces `blindWhileLive === 0` in BOTH healthy and blind operation
+ * (there is genuinely no data to discriminate on either way), instead of the original design's false
+ * alarm (`stops > 0, confirmedSubagent === 0` in that SAME common healthy case). And when a watched tool
+ * IS called during a live sub-agent's turn, `blindWhileLive` increments if and only if `agent_id` failed
+ * to arrive on that specific call — healthy and blind operation now provably diverge in the tracker's own
+ * output for the identical event, not just "does it ever fire".
  *
  * ⭐ WHO READS THIS, AND WHEN: the Loom lead/manager greps `[subagent-drift]` in the daemon log WHEN
  * diagnosing whether enforcement (card 8d158088) might be silently blind — e.g. after a Claude Code
- * upgrade, or on a report that a sub-agent's `worker_report`/`memory_write` went through unattributed
- * more than expected. NOT a periodic check nobody will run — mirrors `mcp/inbound-log.ts`'s own "WHO
- * READS THIS" precedent for the `[mcp]` line. Both numbers are logged on the SAME line, side by side, so
- * the comparison the card's own tell describes is a single glance, not a cross-referencing exercise.
+ * upgrade, or on a report that a sub-agent's `worker_report`/`memory_write` went through unattributed more
+ * than expected. NOT a periodic check nobody will run — mirrors `mcp/inbound-log.ts`'s own "WHO READS
+ * THIS" precedent for the `[mcp]` line. A non-zero `blindWhileLive` is logged distinctly (its own line, on
+ * the event that produced it) so it doesn't wait to be noticed in an aggregate.
  * ⚠️ ADVISORY ONLY — same posture as the rest of this module: nothing here refuses or blocks anything.
  */
 export class SubagentDriftTracker {
-  private readonly counts = new Map<string, { stops: number; confirmedSubagent: number }>();
+  private readonly counts = new Map<string, { stops: number; confirmedSubagent: number; live: number; blindWhileLive: number }>();
 
-  private bucket(sessionId: string): { stops: number; confirmedSubagent: number } {
+  private bucket(sessionId: string): { stops: number; confirmedSubagent: number; live: number; blindWhileLive: number } {
     let b = this.counts.get(sessionId);
     if (!b) {
-      b = { stops: 0, confirmedSubagent: 0 };
+      b = { stops: 0, confirmedSubagent: 0, live: 0, blindWhileLive: 0 };
       this.counts.set(sessionId, b);
     }
     return b;
   }
 
+  /** Called from `deliverHook`'s `SubagentStart` case. */
+  recordStart(sessionId: string): void {
+    this.bucket(sessionId).live += 1;
+  }
+
   /** Called from `deliverHook`'s `SubagentStop` case. Returns the updated counts for that same log line. */
-  recordStop(sessionId: string): { stops: number; confirmedSubagent: number } {
+  recordStop(sessionId: string): { stops: number; confirmedSubagent: number; live: number; blindWhileLive: number } {
     const b = this.bucket(sessionId);
     b.stops += 1;
+    if (b.live > 0) b.live -= 1;
     return { ...b };
   }
 
-  /** Called from `PtyHost.consumeToolAttribution` whenever the result is "confirmed-subagent". */
-  recordConfirmedSubagent(sessionId: string): void {
-    this.bucket(sessionId).confirmedSubagent += 1;
+  /**
+   * Called from `PtyHost.consumeToolAttribution` with EVERY watched-tool result (the actual discriminator
+   * — see this class's own doc above). Returns the updated counts plus `blindEvent` (whether THIS specific
+   * call is the one that just incremented `blindWhileLive`), so the caller can log a distinct line only
+   * when something new actually happened, not on every confirmed/quiescent call.
+   */
+  recordAttribution(sessionId: string, state: ToolAttributionState): { stops: number; confirmedSubagent: number; live: number; blindWhileLive: number; blindEvent: boolean } {
+    const b = this.bucket(sessionId);
+    if (isConfirmedSubagent(state)) {
+      b.confirmedSubagent += 1;
+      return { ...b, blindEvent: false };
+    }
+    if (b.live > 0) {
+      b.blindWhileLive += 1;
+      return { ...b, blindEvent: true };
+    }
+    return { ...b, blindEvent: false };
   }
 }

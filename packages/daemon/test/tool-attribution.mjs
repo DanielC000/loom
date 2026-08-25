@@ -2,7 +2,7 @@
 // Covers the confirmed cases AND, deliberately, the correlation-FAILURE paths (unknown/ambiguous/TTL
 // expiry/max-depth) — the whole point of this card was refusing to fold those into a false-definite
 // answer. Run (after a build): node test/tool-attribution.mjs
-import { ToolAttributionTracker, ATTRIBUTION_TTL_MS, WATCHED_TOOL_NAMES } from "../dist/pty/tool-attribution.js";
+import { ToolAttributionTracker, ATTRIBUTION_TTL_MS, WATCHED_TOOL_NAMES, SubagentDriftTracker, isConfirmedSubagent, extractWatchedToolCalls } from "../dist/pty/tool-attribution.js";
 import { PRE_TOOL_USE_ATTRIBUTION_MATCHER } from "../dist/pty/claude-settings.js";
 
 let failures = 0;
@@ -123,7 +123,127 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("the two sets are EXACTLY equal, not just overlapping", matcherSet.size === watchedSet.size && bareNamesFromMatcher.every((n) => watchedSet.has(n)));
 }
 
+// --- isConfirmedSubagent: the single collapsed predicate (card e6ef5062, DoD-4) --------------------
+{
+  check("isConfirmedSubagent(\"confirmed-subagent\") -> true", isConfirmedSubagent("confirmed-subagent") === true);
+  check("isConfirmedSubagent(\"confirmed-main\") -> false", isConfirmedSubagent("confirmed-main") === false);
+  check("isConfirmedSubagent(\"unknown\") -> false", isConfirmedSubagent("unknown") === false);
+  check("isConfirmedSubagent(\"ambiguous\") -> false", isConfirmedSubagent("ambiguous") === false);
+  check("isConfirmedSubagent(undefined) -> false (never throws on an absent attribution)", isConfirmedSubagent(undefined) === false);
+}
+
+// --- extractWatchedToolCalls: method-gated (card e6ef5062 nitpick 5b) --------------------------------
+{
+  const call = { method: "tools/call", params: { name: "worker_report" } };
+  const notACall = { method: "tools/list", params: { name: "worker_report" } };
+  check("a real tools/call for a watched tool is extracted", extractWatchedToolCalls(call, WATCHED_TOOL_NAMES).length === 1);
+  check("the SAME params.name under a non-\"tools/call\" method is NOT extracted (method-gated, not name-only)",
+    extractWatchedToolCalls(notACall, WATCHED_TOOL_NAMES).length === 0);
+  check("a batch mixes correctly — only the real tools/call entry counts",
+    extractWatchedToolCalls([call, notACall], WATCHED_TOOL_NAMES).length === 1);
+}
+
+// ====================================================================================================
+// --- SubagentDriftTracker: THE CORE OF THIS CARD (e6ef5062) — prove the tell actually DISCRIMINATES.
+// The predecessor detector (card 8d158088) alarmed on `stops>0, confirmedSubagent===0`, which is ALSO the
+// signature of perfectly healthy operation whenever a sub-agent simply never calls a watched tool — it
+// could not tell the two states apart. This suite proves the redesigned tracker CAN: the SAME lifecycle
+// shape (a live sub-agent, a watched-tool call observed during it) must produce DIFFERENT tracker output
+// depending on whether `agent_id` arrived on that call or not.
+// ====================================================================================================
+
+// --- HEALTHY: agent_id arrives on a watched-tool call made while a sub-agent is live -----------------
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("h1");
+  const healthy = d.recordAttribution("h1", "confirmed-subagent");
+  check("HEALTHY: confirmed-subagent while live -> confirmedSubagent bumps", healthy.confirmedSubagent === 1);
+  check("HEALTHY: confirmed-subagent while live -> blindWhileLive stays 0", healthy.blindWhileLive === 0);
+  check("HEALTHY: confirmed-subagent while live -> not flagged as a blind event", healthy.blindEvent === false);
+  const stopped = d.recordStop("h1");
+  check("HEALTHY: live count returns to 0 once the sub-agent stops", stopped.live === 0);
+}
+
+// --- BLIND: agent_id is ABSENT on a watched-tool call made while a sub-agent is live (the drift itself) -
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("b1");
+  const blind = d.recordAttribution("b1", "confirmed-main"); // agent_id failed to arrive
+  check("BLIND: confirmed-main while live -> blindWhileLive bumps", blind.blindWhileLive === 1);
+  check("BLIND: confirmed-main while live -> flagged as a blind event", blind.blindEvent === true);
+  check("BLIND: confirmed-main while live -> confirmedSubagent stays 0", blind.confirmedSubagent === 0);
+}
+
+// --- ⭐⭐ THE DISCRIMINATION ITSELF: identical lifecycle shape, only agent_id presence differs, and the
+// tracker's own output DIFFERS between the two — this is the DoD-2 bar, not merely "does it fire" -------
+{
+  const healthyTracker = new SubagentDriftTracker();
+  healthyTracker.recordStart("same-shape");
+  const healthyResult = healthyTracker.recordAttribution("same-shape", "confirmed-subagent");
+
+  const blindTracker = new SubagentDriftTracker();
+  blindTracker.recordStart("same-shape");
+  const blindResult = blindTracker.recordAttribution("same-shape", "confirmed-main");
+
+  check("SAME lifecycle shape (one SubagentStart, one watched-tool call while live) produces a DIFFERENT blindEvent between healthy and blind",
+    healthyResult.blindEvent !== blindResult.blindEvent);
+  check("...and a DIFFERENT blindWhileLive count", healthyResult.blindWhileLive !== blindResult.blindWhileLive);
+}
+
+// --- ⭐⭐ THE COMMON CASE (the predecessor's actual bug): a sub-agent runs but NEVER calls a watched tool.
+// The original detector alarmed here (stops>0, confirmedSubagent===0). The redesigned one must NOT — in
+// this case there is genuinely no data to discriminate on, in EITHER healthy or blind operation, and it
+// must read the same (silent) in both, rather than reading as an alarm regardless of ground truth.
+{
+  const healthyNoCall = new SubagentDriftTracker();
+  healthyNoCall.recordStart("quiet-h");
+  const healthyStopped = healthyNoCall.recordStop("quiet-h"); // sub-agent ran and stopped; never called a watched tool
+  check("COMMON CASE (healthy ground truth): a quiet sub-agent -> blindWhileLive stays 0, not a false alarm",
+    healthyStopped.blindWhileLive === 0);
+  check("COMMON CASE (healthy ground truth): stops still counts the real lifecycle event", healthyStopped.stops === 1);
+
+  const blindNoCall = new SubagentDriftTracker();
+  blindNoCall.recordStart("quiet-b");
+  const blindStopped = blindNoCall.recordStop("quiet-b"); // same shape, but agent_id would ALSO never have been asked for
+  check("COMMON CASE (blind ground truth, same shape): ALSO reads blindWhileLive===0 — correctly silent, not a guess either way",
+    blindStopped.blindWhileLive === 0);
+  check("...i.e. the predecessor's exact false-alarm signature (stops>0, confirmedSubagent===0) no longer reads as drift on its own",
+    healthyStopped.stops > 0 && healthyStopped.confirmedSubagent === 0 && healthyStopped.blindWhileLive === 0);
+}
+
+// --- live count is floored at 0 (a stray SubagentStop with no matching Start can't go negative) -------
+{
+  const d = new SubagentDriftTracker();
+  const stopped = d.recordStop("no-start");
+  check("SubagentStop with no prior Start -> live floors at 0, not negative", stopped.live === 0);
+}
+
+// --- multiple concurrent sub-agents: live count tracks depth, not just presence ------------------------
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("multi");
+  d.recordStart("multi");
+  const whileTwoLive = d.recordAttribution("multi", "unknown");
+  check("two concurrent sub-agents live -> an unattributed call while EITHER is live still flags blind", whileTwoLive.blindEvent === true);
+  const afterOneStop = d.recordStop("multi");
+  check("one Stop only decrements by one -> still live", afterOneStop.live === 1);
+  const stillBlind = d.recordAttribution("multi", "ambiguous");
+  check("still live after one stop -> a second unattributed call still flags blind", stillBlind.blindEvent === true);
+  const afterSecondStop = d.recordStop("multi");
+  check("second Stop -> live back to 0", afterSecondStop.live === 0);
+  const noLongerLive = d.recordAttribution("multi", "unknown");
+  check("once fully stopped -> an unattributed call is no longer flagged (correctly silent, no data to discriminate)", noLongerLive.blindEvent === false);
+}
+
+// --- sessions are independent: one session's live sub-agent never taints another's reading -------------
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("sess-A");
+  const crossSession = d.recordAttribution("sess-B", "confirmed-main");
+  check("a DIFFERENT session's watched-tool call is never flagged blind off session-A's live sub-agent", crossSession.blindEvent === false);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; and the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment."
+  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; and SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -77,10 +77,12 @@ const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as c
  * only (see `PRE_TOOL_USE_ATTRIBUTION_MATCHER`) — feeds PtyHost's sub-agent-call correlation queue.
  * Advisory/observational only, same as the vault-lint PostToolUse below — it never blocks or denies.
  *
- * SubagentStop (card 8d158088) is ALSO ALWAYS wired, with NO matcher (SubagentStop's own matcher field
- * filters by `agent_type`; a bare per-session COUNT — the drift cross-check — wants every subagent,
- * regardless of type). Advisory/observational only, same posture as PreToolUse above: it never blocks a
- * subagent from stopping. See SubagentDriftTracker's own doc (tool-attribution.ts) for the mechanism.
+ * SubagentStart/SubagentStop (card 8d158088, cross-check redesigned by card e6ef5062) are ALSO ALWAYS
+ * wired, with NO matcher (their matcher field filters by `agent_type`; the drift cross-check wants every
+ * subagent, regardless of type) — together they give PtyHost a per-session LIVE sub-agent count, which is
+ * what makes the drift tell actually discriminate (see SubagentDriftTracker's own doc in
+ * tool-attribution.ts for the mechanism). Advisory/observational only, same posture as PreToolUse above:
+ * neither blocks a subagent from starting or stopping.
  *
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
@@ -112,7 +114,9 @@ export function writeSessionSettings(
     // block/deny anything — it only lets PtyHost's ToolAttributionTracker observe `agent_id`/`agent_type`
     // (present only for a subagent's own call) before the matched tool's own MCP request arrives.
     PreToolUse: [{ matcher: PRE_TOOL_USE_ATTRIBUTION_MATCHER, hooks: hookCmd.hooks }],
-    // Card 8d158088: no matcher — every subagent stop, regardless of agent_type, feeds the bare count.
+    // Card e6ef5062: no matcher on either — every subagent start/stop, regardless of agent_type, feeds the
+    // live-count drift cross-check (SubagentDriftTracker).
+    SubagentStart: [hookCmd],
     SubagentStop: [hookCmd],
   };
   const postToolUse: unknown[] = [];

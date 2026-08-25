@@ -13,7 +13,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
-import type { ToolAttributionResult } from "../pty/tool-attribution.js";
+import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
@@ -399,11 +399,11 @@ export class TaskMcpRouter {
         // stranding risk (unlike worker_report, a worker's only channel up), so this is the one of the two
         // watched tools where the directionality review landed on refusal rather than attribute-and-allow.
         const attribution = attributions?.get("memory_write");
-        if (attribution?.state === "confirmed-subagent") {
+        if (isConfirmedSubagent(attribution?.state)) {
           return ok({
             error:
               `memory_write REFUSED — this call was attributed to a sub-agent` +
-              `${attribution.agentType ? ` (agentType=${attribution.agentType})` : ""}, not your own top-level ` +
+              `${attribution?.agentType ? ` (agentType=${attribution.agentType})` : ""}, not your own top-level ` +
               "turn. Project memory is shared, durable knowledge — call memory_write directly from your own " +
               "reasoning, not through a delegated Task/Agent sub-call.",
           });

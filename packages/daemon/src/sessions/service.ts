@@ -13,6 +13,7 @@ import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdic
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
+import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
@@ -8869,7 +8870,7 @@ export class SessionService {
        *  action path, not a separate log line nobody reads (per pinned memory
        *  `shipping-a-detector-is-not-someone-reading-it`). Any other state (confirmed-main/unknown/
        *  ambiguous) is deliberately NOT surfaced here — only a positive confirmation is actionable info. */
-      subagentAttribution?: { state: string; agentId?: string; agentType?: string };
+      subagentAttribution?: { state: ToolAttributionState; agentId?: string; agentType?: string };
     },
   ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {
     const worker = this.db.getSession(workerSessionId);
@@ -9129,8 +9130,8 @@ export class SessionService {
         ...(managerSessionId ? { managerTurnSeqAtReport: this.db.getSession(managerSessionId)?.turnSeq ?? 0 } : {}),
         // Card 8d158088: recorded ONLY on a positive confirmation — see this method's own doc on
         // `subagentAttribution` above for why "unknown"/"ambiguous"/"confirmed-main" are never surfaced.
-        ...(report.subagentAttribution?.state === "confirmed-subagent"
-          ? { subagentAttribution: { agentId: report.subagentAttribution.agentId, agentType: report.subagentAttribution.agentType } }
+        ...(isConfirmedSubagent(report.subagentAttribution?.state)
+          ? { subagentAttribution: { agentId: report.subagentAttribution?.agentId, agentType: report.subagentAttribution?.agentType } }
           : {}),
       },
     });
@@ -9146,8 +9147,8 @@ export class SessionService {
       if (warning) framed += ` | warning: ${warning}`;
       // Card 8d158088: surfaced in the SAME nudge the manager already reads to decide whether to act on
       // this report — the action path, not a separate advisory log line (see this method's own doc above).
-      if (report.subagentAttribution?.state === "confirmed-subagent") {
-        const agentType = report.subagentAttribution.agentType ? ` agentType=${report.subagentAttribution.agentType}` : "";
+      if (isConfirmedSubagent(report.subagentAttribution?.state)) {
+        const agentType = report.subagentAttribution?.agentType ? ` agentType=${report.subagentAttribution.agentType}` : "";
         framed += ` | ATTRIBUTION: this report was filed by a SUB-AGENT call, not the worker's own top-level turn (${agentType.trim() || "agentType unknown"})`;
       }
       if (autoRetireNoCommit) {
@@ -9362,14 +9363,21 @@ export class SessionService {
    *   it NO reply — it resumes itself when the wake fires — so this is reported with distinct wording
    *   rather than folded into `parked-ack`'s "awaiting your reply" phrasing, which would be false here.
    * - `parked-background` — card c36bac53: the worker's report itself SELF-ATTRIBUTED the park via
-   *   `worker_report({..., awaiting: "background"})` — it kicked off a backgrounded command/sub-agent and
-   *   is relying on ITS OWN completion (or the harness's on-completion re-invoke) to resume, not the
-   *   manager. This is genuinely UNDETECTABLE from any daemon-observable state otherwise: the daemon has
-   *   no API into the engine's background-task registry (confirmed in orchestration/resume-nudge.ts — a
-   *   `claude --resume` kills any in-flight `run_in_background` shell precisely because Loom has no
-   *   visibility into it, only the OS process tree), and the hook surface wired up for every session
-   *   (SessionStart/UserPromptSubmit/Stop/StopFailure, plus PostToolUse only for the vault-lint matcher)
-   *   captures no per-tool-call signal that could infer a live background job. UNLIKE `parked-wake`, this
+   *   `worker_report({..., awaiting: "background"})` — it kicked off a backgrounded SHELL command (or any
+   *   other async continuation) and is relying on ITS OWN completion (or the harness's on-completion
+   *   re-invoke) to resume, not the manager. This is genuinely UNDETECTABLE from any daemon-observable
+   *   state otherwise: the daemon has no API into the engine's background-task registry (confirmed in
+   *   orchestration/resume-nudge.ts — a `claude --resume` kills any in-flight `run_in_background` shell
+   *   precisely because Loom has no visibility into it, only the OS process tree). The wired hook surface
+   *   (SessionStart/UserPromptSubmit/Stop/StopFailure; PreToolUse matcher-scoped to worker_report/
+   *   memory_write; SubagentStart/SubagentStop for the drift cross-check, card e6ef5062 — see
+   *   SubagentDriftTracker's own doc, pty/tool-attribution.ts; PostToolUse only for the vault-lint matcher)
+   *   STILL captures nothing here: SubagentStart/Stop only bound a SYNCHRONOUS, same-turn Task-tool
+   *   sub-agent call — Claude Code blocks the invoking turn until that tool call itself returns (see
+   *   tool-attribution.ts's own ORDERING GUARANTEE), so by the time a worker's OWN turn ends (Stop) any
+   *   sub-agent it invoked that turn has necessarily already stopped too. None of the wired hooks fire for,
+   *   or say anything about, a `run_in_background` shell or any other continuation that outlives its own
+   *   invoking turn. UNLIKE `parked-wake`, this
    *   flag is a bare, self-reported claim with NO backing row and NO expiry of its own — checked AFTER the
    *   wake lookup now (round-2 CR fix): a pending wake is Loom's OWN verifiable, bounded resume signal (it
    *   drives the actual resume and names a concrete `wakeAt`), so it wins over the worker's unbacked

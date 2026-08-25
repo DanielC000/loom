@@ -145,7 +145,10 @@ for (const [label, attribution] of [
   nextAttribution = attribution;
   capturedReport = undefined;
   const r = toolJson(await callWorkerReport(`report under ${label}`));
-  check(`(worker_report) '${label}' attribution -> call SUCCEEDS (no refusal field, reported:true)`, r.reported === true && r.refused === undefined);
+  // Card e6ef5062 nitpick: dropped the `r.refused === undefined` conjunct — the `sessions.workerReport`
+  // stub above never produces a `refused` field regardless of the code under test, so that check was
+  // unfalsifiable (always true). `reported === true` is the real assertion here.
+  check(`(worker_report) '${label}' attribution -> call SUCCEEDS (reported:true)`, r.reported === true);
   check(`(worker_report) '${label}' -> the SAME attribution was threaded through to sessions.workerReport`,
     capturedReport?.subagentAttribution?.state === attribution.state);
 }

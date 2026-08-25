@@ -4737,12 +4737,19 @@ export class PtyHost {
         }
         break;
       }
+      case "SubagentStart": {
+        // Card e6ef5062: the OTHER half of the live-count cross-check — see SubagentDriftTracker's own
+        // doc (tool-attribution.ts) for why both Start AND Stop are needed to discriminate. Advisory only.
+        this.subagentDrift.recordStart(sessionId);
+        break;
+      }
       case "SubagentStop": {
-        // Card 8d158088: the independent drift cross-check — fires from the subagent lifecycle itself,
-        // NOT from `agent_id` riding a tool-call hook (see SubagentDriftTracker's own doc). Advisory only.
+        // Card 8d158088/e6ef5062: the independent drift cross-check — fires from the subagent lifecycle
+        // itself, NOT from `agent_id` riding a tool-call hook (see SubagentDriftTracker's own doc).
+        // Advisory only.
         const counts = this.subagentDrift.recordStop(sessionId);
         // eslint-disable-next-line no-console
-        console.log(`[subagent-drift] ${sessionId} stops=${counts.stops} confirmedSubagent=${counts.confirmedSubagent}`);
+        console.log(`[subagent-drift] ${sessionId} stops=${counts.stops} confirmedSubagent=${counts.confirmedSubagent} live=${counts.live} blindWhileLive=${counts.blindWhileLive}`);
         break;
       }
       case "SessionStart":
@@ -6053,7 +6060,13 @@ export class PtyHost {
    */
   consumeToolAttribution(sessionId: string, toolName: string): ToolAttributionResult {
     const result = this.toolAttribution.consume(sessionId, toolName);
-    if (result.state === "confirmed-subagent") this.subagentDrift.recordConfirmedSubagent(sessionId);
+    // Card e6ef5062: thread EVERY watched-tool result (not just confirmed-subagent) into the drift
+    // tracker — recordAttribution is what actually discriminates (see its own doc, tool-attribution.ts).
+    const drift = this.subagentDrift.recordAttribution(sessionId, result.state);
+    if (drift.blindEvent) {
+      // eslint-disable-next-line no-console
+      console.log(`[subagent-drift] ${sessionId} BLIND: watched tool "${toolName}" resolved "${result.state}" while a sub-agent was LIVE (live=${drift.live}) — agent_id did not arrive on a call the lifecycle hooks prove was a sub-agent's. stops=${drift.stops} confirmedSubagent=${drift.confirmedSubagent} blindWhileLive=${drift.blindWhileLive}`);
+    }
     return result;
   }
 
