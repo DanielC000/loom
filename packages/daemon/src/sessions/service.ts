@@ -11494,6 +11494,12 @@ export class SessionService {
     let emitCompareSkip = false;
     let emitCompareTestFiles: string[] = [];
     let emitCompareIdenticalCount = 0;
+    // Card 17cd1f30: changed test/*.mjs files excluded from `emitCompareTestFiles` because the harness's
+    // own NOT_HERMETIC set names them — see EmitCompareGateResult.notHermeticExcluded's own doc
+    // (git/worktrees.ts) for why this doesn't block eligibility. Diagnostic only, same as
+    // emitCompareTestFiles/emitCompareIdenticalCount — surfaced below via emitCompareWarning so a reduced
+    // gate never silently drops coverage reporting for these files.
+    let emitCompareNotHermeticExcluded: string[] = [];
     // Card 7183540f: the branch/main tips THIS classification actually ran against — captured strictly
     // BEFORE the `computeEmitCompareGate` call below (see that call site's own doc for the ordering-trap
     // reasoning, mirroring db413510's identical discipline for the inert-skip path). Read again at
@@ -12158,6 +12164,7 @@ export class SessionService {
         if (emitCompare.eligible) {
           emitCompareSkip = true;
           emitCompareTestFiles = emitCompare.changedTestFiles;
+          emitCompareNotHermeticExcluded = emitCompare.notHermeticExcluded;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
         }
       }
@@ -12365,6 +12372,7 @@ export class SessionService {
               : undefined;
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
+              emitCompareNotHermeticExcluded = reclassified.notHermeticExcluded;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
               effectiveGate = buildReducedGateCommand(emitCompareTestFiles);
             } else {
@@ -12650,7 +12658,7 @@ export class SessionService {
         // Card 2154b6ad: a REAL gate still ran (gateRan:true, unlike the inert-diff skip above) but with
         // the runtime test suite swapped out — surfaced here so `gate_history` never reads this as an
         // ordinary full-suite pass with no signal that anything was reduced.
-        ...(emitCompareSkip ? { emitCompareReduced: true, emitCompareIdenticalCount, emitCompareTestFiles } : {}),
+        ...(emitCompareSkip ? { emitCompareReduced: true, emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
         // Card 344ce950: stamped onto this SAME `build_gate` row (never a second history row) so
         // `gate_history` shows the weaker-pass shape directly, on both a resulting pass and a resulting
         // rejection (a retry that also failed still recorded a retry was attempted).
@@ -13239,8 +13247,14 @@ export class SessionService {
     // ~668-test suite, because every changed compiled file was proven transpile-identical (comments/
     // whitespace only). Surfaced unconditionally, same reasoning as `inertSkipWarning`: a silent skip is
     // indistinguishable from a gate that never ran.
+    // Card 17cd1f30: a NOT_HERMETIC-excluded file must be NAMED here, not just counted — a bare count would
+    // gate a branch while quietly verifying nothing for those specific files, leaving a reviewer with no
+    // way to tell WHICH changed test(s) went unrun without re-deriving it themselves. Not a regression in
+    // coverage introduced by the reduction: the full gate never runs a NOT_HERMETIC file either (see
+    // EmitCompareGateResult.notHermeticExcluded's own doc), so this is declaring an existing gap, not a
+    // new one — but it must never read as a silent, ordinary green.
     const emitCompareWarning = emitCompareSkip
-      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite`
+      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}`
       : undefined;
     const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, emitCompareWarning].filter((w): w is string => !!w).join(" ") || undefined;
     // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map

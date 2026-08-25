@@ -40,6 +40,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import {
   GIT_ID, FULL_GATE, GUARD_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
+  writeRealTestDaemonScript,
 } from "./_emit-compare-fixtures.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
@@ -141,6 +142,11 @@ try {
     fs.mkdirSync(D.repo, { recursive: true });
     fs.writeFileSync(path.join(D.repo, "README.md"), "# ecg\n");
     mkdirp(path.join(D.repo, "packages", "daemon", "test"));
+    // Card 17cd1f30: a top-level changed test/*.mjs file now ALSO needs loadNotHermeticNames to resolve
+    // (classification against NOT_HERMETIC happens for every changed test file, not just ones inside a
+    // subdirectory) — a REAL, self-resolving test-daemon.mjs so that load genuinely succeeds here, the
+    // same reasoning writeRealTestDaemonScript's own doc gives.
+    writeRealTestDaemonScript(D.repo);
     fs.writeFileSync(path.join(D.repo, "packages", "daemon", "test", "placeholder.mjs"), BASE_TEST);
     execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: D.repo });
     const db = new Db(); dbs.push(db);

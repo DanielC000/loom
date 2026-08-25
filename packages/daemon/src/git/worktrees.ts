@@ -2205,6 +2205,19 @@ export interface EmitCompareGateResult {
    *  Routed through the harness, running the file here really is at least as strong as leaving it unrun
    *  in a full suite pass it would have passed anyway — the guarantee this field now actually delivers. */
   changedTestFiles: string[];
+  /** Card 17cd1f30: repo-relative paths of changed, non-helper `test/*.mjs` files that were EXCLUDED from
+   *  {@link changedTestFiles} because the harness's own `NOT_HERMETIC` set (scripts/test-daemon.mjs) names
+   *  them — a legitimate, maintained test that simply can't run through `test:daemon --only=` (needs a
+   *  manually-started daemon, a real `claude`, or mutates shared build output). Distinct from a genuinely
+   *  not-a-test path (fixtures/census, underscore helper): those fail the WHOLE diff closed above. A
+   *  `NOT_HERMETIC` file does NOT block eligibility — it only ever moves itself here instead of into
+   *  {@link changedTestFiles} — because the FULL gate never runs it either (`test:daemon` with no `--only`
+   *  resolves to the discovered `hermetic` set, which already excludes every `NOT_HERMETIC` name by
+   *  construction). Populated only when `eligible`. The caller MUST surface this list by name wherever it
+   *  reports the reduced gate's result — a silent drop would gate a branch while quietly verifying nothing
+   *  for these files, indistinguishable from a clean run. See {@link buildReducedGateCommand}'s caller in
+   *  sessions/service.ts for where this is declared (`emitCompareWarning`). */
+  notHermeticExcluded: string[];
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
@@ -2307,7 +2320,7 @@ export interface EmitCompareGateResult {
 export async function computeEmitCompareGate(
   repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
-  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], identicalFileCount: 0, reason });
+  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2324,10 +2337,16 @@ export async function computeEmitCompareGate(
 
   const changedTsFiles: string[] = [];
   const changedTestFiles: string[] = [];
+  // Card 17cd1f30: paths classified as NOT_HERMETIC (see EmitCompareGateResult.notHermeticExcluded's own
+  // doc) — filtered OUT of changedTestFiles rather than blocking eligibility.
+  const notHermeticExcluded: string[] = [];
   // Lazily loaded (only if a test/*.mjs path with a subdirectory actually shows up below) and cached for
   // the rest of this call. `undefined` = not attempted yet; `null` = attempted and failed (fail closed);
   // a `Set` = the real names, loaded straight from THIS diff's own worktree copy of test-daemon.mjs.
   let excludedDirNames: Set<string> | null | undefined;
+  // Same lazy-load-and-cache shape as excludedDirNames above, but for the harness's NOT_HERMETIC export —
+  // loaded only if a top-level (non-deleted) test/*.mjs path actually reaches the classification below.
+  let notHermeticNames: Set<string> | null | undefined;
   for (const line of entries) {
     const tab = line.indexOf("\t");
     if (tab < 0) return notEligible(`unparseable diff line: ${line}`);
@@ -2385,20 +2404,44 @@ export async function computeEmitCompareGate(
       // guards the analogous interpolation with an explicit allowlist before building its own command
       // string — same subsystem, same posture.
       if (!/^[A-Za-z0-9_.\-/]+$/.test(p)) return notEligible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
-      if (status === "A" || status === "M") changedTestFiles.push(p);
+      if (status === "A" || status === "M") {
+        // Card 17cd1f30: classify against the harness's own NOT_HERMETIC set BEFORE pushing into
+        // changedTestFiles — a NOT_HERMETIC file is a real, maintained test (not a fixture/helper, both of
+        // which already returned above), it just can't run through `test:daemon --only=` (needs a
+        // manually-started daemon, a real `claude`, or mutates shared build output). Same bare-name shape
+        // buildReducedGateCommand's own `--only=` list construction uses (repo-relative path minus the
+        // test/ prefix and .mjs suffix), so a top-level file's name here is exactly what `NOT_HERMETIC`
+        // keys on; a nested file's name (containing a `/`) can never match a NOT_HERMETIC entry, which is
+        // correct — NOT_HERMETIC only ever names test/'s top-level files.
+        if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath);
+        if (notHermeticNames === null) return notEligible(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
+        if (notHermeticNames.has(harnessName)) {
+          notHermeticExcluded.push(p);
+        } else {
+          changedTestFiles.push(p);
+        }
+      }
       // status "D" (deleted): nothing left to run directly; the guards below still cover its blast radius.
       continue;
     }
     return notEligible(`path outside emit-compare scope: ${p}`);
   }
 
-  if (changedTsFiles.length === 0 && changedTestFiles.length === 0) {
+  if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0) {
     // Every changed path was a DELETED test/*.mjs file — an excluded-dir (fixtures/, census/) path already
     // returned notEligible above (card 44968963), so it can never reach here. Nothing left needing
     // behavioral proof, but nothing PROVEN inert either — fail closed rather than report a green run that
     // proved nothing.
     return notEligible("no eligible changed path left to prove inert");
   }
+  // Card 17cd1f30 DoD-3: a diff whose ONLY changed test-shaped path(s) are NOT_HERMETIC (empty
+  // changedTestFiles, non-empty notHermeticExcluded) stays eligible rather than failing closed here — the
+  // caller declares the exclusion by name (see EmitCompareGateResult.notHermeticExcluded's own doc) and
+  // buildReducedGateCommand emits build + static guards only, no test:daemon step. This is deliberately
+  // NOT a refusal: the FULL gate never runs a NOT_HERMETIC file either (test:daemon with no --only resolves
+  // to the discovered hermetic set, which already excludes it), so the reduced gate's coverage here is
+  // exactly the full gate's own coverage — zero — not a regression the reduction introduced.
 
   if (changedTsFiles.length > 0) {
     if (!(await emitCompareSoundnessOk(worktreePath))) {
@@ -2430,7 +2473,7 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, identicalFileCount: changedTsFiles.length };
+  return { eligible: true, changedTestFiles, notHermeticExcluded, identicalFileCount: changedTsFiles.length };
 }
 
 /**
@@ -2458,6 +2501,25 @@ async function loadExcludedTestDirNames(worktreePath: string): Promise<Set<strin
     // (ERR_UNSUPPORTED_ESM_URL_SCHEME) — same caveat test/census/lib.mjs's own import already documents.
     const mod = (await import(pathToFileURL(scriptPath).href)) as { EXCLUDED_DIR_NAMES?: unknown };
     return mod.EXCLUDED_DIR_NAMES instanceof Set ? (mod.EXCLUDED_DIR_NAMES as Set<string>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Card 17cd1f30 — the same reuse shape as {@link loadExcludedTestDirNames} immediately above, applied to
+ * the harness's OTHER driftable name set: `NOT_HERMETIC` (scripts/test-daemon.mjs). Loaded from THIS
+ * diff's OWN worktree copy of the script, dynamically imported (never a hand-copied second list — the
+ * precise pattern card 815b4b30 established and forbids re-diverging from), so a future edit to that set
+ * is seen immediately by the reduced gate, not after a daemon restart. Same fail-closed contract: `null`
+ * on any load/parse error or a non-`Set` export — a caller that gets `null` MUST fail the whole diff
+ * closed, same as the `EXCLUDED_DIR_NAMES` case.
+ */
+async function loadNotHermeticNames(worktreePath: string): Promise<Set<string> | null> {
+  try {
+    const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
+    const mod = (await import(pathToFileURL(scriptPath).href)) as { NOT_HERMETIC?: unknown };
+    return mod.NOT_HERMETIC instanceof Set ? (mod.NOT_HERMETIC as Set<string>) : null;
   } catch {
     return null;
   }
@@ -2568,7 +2630,18 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  violation) fails this reduced gate LOUDLY instead of quietly running zero tests. Never runs the
  *  ~668-test suite UNFILTERED — that omission is the entire saving this mechanism exists for; `--only=`
  *  is what lets a changed file's OWN behavior be exercised (not merely proven absent from `src/`) without
- *  paying for the rest of the suite. */
+ *  paying for the rest of the suite.
+ *
+ *  Card 17cd1f30: `changedTestFiles` here is expected to ALREADY exclude any `NOT_HERMETIC` name —
+ *  {@link computeEmitCompareGate} does that filtering (see its `notHermeticExcluded` field) before this
+ *  function ever sees the list, exactly so a `NOT_HERMETIC` name can never reach `--only=` and trip
+ *  `resolveSelection`'s refusal above (the merge op `5113c720` specimen: 4 `NOT_HERMETIC` names landed in
+ *  `--only=` unfiltered and the gate failed identically on every re-fire). This function does not
+ *  re-filter — it trusts its caller, same as it always has for excluded-dir/underscore/shell-safety, which
+ *  are also enforced by the caller before a path ever reaches `changedTestFiles`. The caller is
+ *  responsible for declaring any excluded name by name in the merge result (`emitCompareWarning` in
+ *  sessions/service.ts) — a silent drop would gate a branch while quietly verifying nothing for those
+ *  files. */
 export function buildReducedGateCommand(changedTestFiles: string[]): string {
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
   if (changedTestFiles.length > 0) {

@@ -35,6 +35,34 @@ export const REAL_TEST_DAEMON_SCRIPT = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "test-daemon.mjs"), "utf8",
 );
 
+// Card 17cd1f30: `test-daemon.mjs` itself statically imports `../test/_tmp-fixture.mjs` and
+// `./temp-reaper.mjs` — a fixture repo that writes ONLY `REAL_TEST_DAEMON_SCRIPT` and dynamically imports
+// it (to exercise `loadExcludedTestDirNames`/`loadNotHermeticNames` for REAL, not a stubbed-out success)
+// fails module resolution on those two siblings and falls back to `null` — for (I)/(J)/(K) that happens to
+// still land on the SAME "full gate" verdict their assertions expect (fixtures/-dir membership would have
+// forced it anyway), so the gap was invisible there; a scenario that needs the load to actually SUCCEED
+// (proving a NOT_HERMETIC name gets filtered, not just proving "some notEligible path fired") surfaces it
+// immediately. Both siblings only import node builtins + each other — no further transitive fixture is
+// needed. REAL content (not hand-typed stubs), same reasoning as REAL_TEST_DAEMON_SCRIPT itself.
+const REAL_TMP_FIXTURE_SCRIPT = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "_tmp-fixture.mjs"), "utf8",
+);
+const REAL_TEMP_REAPER_SCRIPT = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "temp-reaper.mjs"), "utf8",
+);
+
+// Writes a REAL, fully self-resolving copy of scripts/test-daemon.mjs (plus its two real sibling imports)
+// into `repoDir` — unlike writing `REAL_TEST_DAEMON_SCRIPT` alone (see (I)/(J)/(K) above), a dynamic
+// import of the result actually SUCCEEDS, so a caller needing `loadExcludedTestDirNames`/
+// `loadNotHermeticNames` to genuinely resolve (not merely fail closed) should use this instead.
+export function writeRealTestDaemonScript(repoDir) {
+  mkdirp(path.join(repoDir, "packages", "daemon", "scripts"));
+  mkdirp(path.join(repoDir, "packages", "daemon", "test"));
+  fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
+  fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "temp-reaper.mjs"), REAL_TEMP_REAPER_SCRIPT);
+  fs.writeFileSync(path.join(repoDir, "packages", "daemon", "test", "_tmp-fixture.mjs"), REAL_TMP_FIXTURE_SCRIPT);
+}
+
 export function seed(db, p) {
   db.insertProject({ id: p.projId, name: "ECG", repoPath: p.repo, vaultPath: p.repo, config: { orchestration: { gateCommand: FULL_GATE } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
