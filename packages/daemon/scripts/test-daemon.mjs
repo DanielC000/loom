@@ -404,7 +404,7 @@ export const NOT_HERMETIC = new Set([
   "integration-e2e", "orchestration-e2e", "manager-live", "messaging", "mgmt-surface", "orch-scope",
   "orch-spawn", "mcp-scope", "platform-scope", "recycle", "scheduler", "scheduler-drain",
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
-  "busy-flag", "merge-gate", "board-consistency", "skills-e2e", "profiles-rest",
+  "busy-flag", "merge-gate", "board-consistency", "skills-e2e",
   "merge-confirm-slow-gate-pending", // ~20s wall-clock (a real 15s gate) + needs a manually-started daemon
   "web-build-no-orphans", // mutates the REAL packages/web/src/main.tsx + rebuilds the shared packages/web/dist
   // 2-3x (~5-20s each) to exercise turbo's actual cache — would race codescape-privacy-guard.mjs (which

@@ -1,26 +1,39 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Profiles REST test (Agents→Profiles P3). Boots an ISOLATED daemon (temp LOOM_HOME + a
+// Profiles REST test (Agents→Profiles P3). Boots an ISOLATED daemon (own temp LOOM_HOME + a
 // non-4317 LOOM_PORT) so it never touches a live :4317 daemon, exercises the new HTTP surface, then
 // tears the daemon down. NO claude is spawned (we never POST /sessions — the role→spawn seam is
 // covered claude-free by profiles-crud.mjs / profile-spawn.mjs). Covers:
 //   • Profile CRUD round-trip: POST create (201) → GET list/get → PUT partial update → POST reset →
 //     DELETE; plus GET/PUT/POST-reset 404s and 400 validation (bad role / unknown key).
 //   • Agent assignment: POST /api/agents/:id SETS and CLEARS profileId; 404 on a bogus profileId.
-// Run (self-contained): node test/profiles-rest.mjs   (honors LOOM_HOME/LOOM_PORT if you pre-set them
-// to target an externally-started daemon instead).
+// Run: node test/profiles-rest.mjs — self-contained, ALWAYS boots its own daemon on its own fresh
+// LOOM_HOME (card 4f1d4276: this used to reuse an operator-pre-set LOOM_HOME as an externally-started
+// daemon to hit, but that collided with the test harness's OWN use of that identical var for per-test
+// isolation — every runOne child inherits a LOOM_HOME pointed at a free port with nothing listening on
+// it, so under the gate the "reuse" branch was ALWAYS taken and ALWAYS hit a dead port. Removed; this
+// file now self-isolates unconditionally, like every sibling test that spawns dist/index.js
+// (periodic-snapshot.mjs, shutdown-snapshot.mjs, deploy-staleness.mjs, codescape-privacy-guard.mjs).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
 const BASE = `http://127.0.0.1:${PORT}`;
-const ownDaemon = !process.env.LOOM_HOME; // if the operator pre-set LOOM_HOME we reuse their daemon
-const LOOM_HOME = process.env.LOOM_HOME || path.join(os.tmpdir(), `loom-prest-${Date.now()}-${process.pid}`);
+// Always true now (see header) — kept as a named const (rather than inlining `true` at every use below)
+// so a future reader auditing this file for the mode-switch this card removed finds a single, obvious
+// definition instead of a literal scattered across the boot/teardown logic.
+const ownDaemon = true;
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-prest-${Date.now()}-${process.pid}`); // never ambient
+process.env.LOOM_PORT = String(PORT);
+const LOOM_HOME = process.env.LOOM_HOME;
 fs.mkdirSync(LOOM_HOME, { recursive: true });
+requireHermeticEnv({ port: true });
+console.log(`profiles-rest: ownDaemon=${ownDaemon} PORT=${PORT} LOOM_HOME=${LOOM_HOME}`);
 
 // POST /api/projects validates repoPath is a real git repo — LOOM_HOME itself isn't one, so the
 // agent-assignment section below needs its own throwaway repo dir.
@@ -31,10 +44,17 @@ execSync(`git init -q && git add . && git -c user.email=prest@loom -c user.name=
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// The gateway's loopback write guard (card 4ff9a073, 2026-08-07) requires an
+// `Authorization: Bearer <loopback secret>` header on every non-GET /api/* request — set once the
+// daemon has booted (below) and the secret file is readable. GET is never guarded, so `loopbackToken`
+// stays null until then and an early GET (the seed reads) still works with no header at all.
+let loopbackToken = null;
 const json = async (method, u, body) => {
+  const headers = body === undefined ? {} : { "content-type": "application/json" };
+  if (loopbackToken) headers.authorization = `Bearer ${loopbackToken}`;
   const r = await fetch(BASE + u, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let parsed = null; try { parsed = await r.json(); } catch { /* empty body */ }
@@ -42,13 +62,10 @@ const json = async (method, u, body) => {
 };
 
 // --- boot the isolated daemon (dist/index.js) ---
-let daemon = null;
-if (ownDaemon) {
-  daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-    env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT) },
-    stdio: "ignore",
-  });
-}
+const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
+  env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT) },
+  stdio: "ignore",
+});
 // Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): pure poll-until-predicate loop, no
 // externally-anchored budget — a thrown predicate is a real bug and should propagate, not fold into false.
 async function waitReady(timeoutMs = 20000) {
@@ -65,6 +82,9 @@ async function waitReady(timeoutMs = 20000) {
 
 try {
   if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+  // index.ts calls getOrCreateLoopbackSecret() before the HTTP listener opens (see gateway/
+  // loopback-secret.ts), so by the time waitReady() observes a response the file is already there.
+  loopbackToken = fs.readFileSync(path.join(LOOM_HOME, "gateway-loopback.key"), "utf8").trim();
 
   // The daemon seeds the bundled profiles on boot — grab one for the reset/assign cases.
   const seeded = (await json("GET", "/api/profiles")).body;
@@ -135,8 +155,8 @@ try {
   check("POST /api/agents/:id: a rejected bogus assignment did NOT change the agent", (await json("GET", `/api/projects/${proj.body.id}/agents`)).body.find((t) => t.id === tid).profileId === null);
   check("POST /api/agents/:id → 404 for an unknown agent id", (await json("POST", "/api/agents/no-such-agent", { name: "x" })).status === 404);
 } finally {
-  if (daemon) { try { daemon.kill(); } catch { /* ignore */ } }
-  if (ownDaemon) { try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ } }
+  try { daemon.kill(); } catch { /* ignore */ }
+  try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ }
   try { fs.rmSync(REPO_DIR, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
