@@ -15,14 +15,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // transport, driven with a FAKE `pty` and a FAKE `companion` (deliverReply) — never a real claude process.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-trust-window-retrofit.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const tmpHome = path.join(os.tmpdir(), `loom-companion-trust-window-retrofit-${Date.now()}-${process.pid}`);
+const tmpHome = mkdtempManaged("loom-companion-trust-window-retrofit-"); // card f273ebb9: this file had NO cleanup at all before this change
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 const sandboxHome = path.join(tmpHome, "home");
@@ -232,5 +232,5 @@ try {
   }
 } finally {
   console.log(`\n${failures === 0 ? "ALL PASS" : `${failures} FAILURE(S)`}`);
-  process.exit(failures === 0 ? 0 : 1);
 }
+await finishAndExit(failures === 0 ? 0 : 1);

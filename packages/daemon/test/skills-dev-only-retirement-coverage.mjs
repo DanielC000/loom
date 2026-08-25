@@ -25,6 +25,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// card f273ebb9: no cleanup call needed here — this path is never mkdir'd (this file, curate-release-skills.mjs,
+// and store.js's module load are all fs-inert; ensureDirs() is only ever called from index.ts's real boot
+// path), so nothing is ever created on disk to leak.
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-skills-devonly-coverage-${Date.now()}-${process.pid}`);
 process.env.LOOM_PORT = "45425";
 

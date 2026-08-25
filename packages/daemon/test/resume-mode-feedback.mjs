@@ -15,10 +15,10 @@ import "./_guard.mjs"; // prod-guard (sets LOOM_TEST=1) — belt-and-suspenders,
 //
 // RUN: pnpm build (repo root) then `node test/resume-mode-feedback.mjs` from packages/daemon.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const tmpHome = path.join(os.tmpdir(), `loom-rmf-${Date.now()}-${process.pid}`);
+const tmpHome = mkdtempManaged("loom-rmf-"); // card f273ebb9: this file had NO cleanup at all before this change
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome; // host.ts reads paths at import time
 
@@ -119,4 +119,4 @@ function simulate(modes, target, maxPresses) {
 console.log(failures === 0
   ? "\n✅ ALL PASS — the resume cycle map (acceptEdits-relative order) and the bounded press-until-target decision are correct: acceptEdits→auto takes 2 presses, a stuck footer gives up at the cap (never infinite-loops), and the press count is always bounded — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

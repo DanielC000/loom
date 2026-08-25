@@ -23,7 +23,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     points (worker_status's queriedDirective via directiveByMsgId, directive_status via
 //     directiveDeliveriesForCaller) resolves "delivered" without throwing, proving part (1) isn't just an
 //     unconditional throw regardless of input.
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -31,6 +30,7 @@ import { Db } from "../dist/db.js";
 import { OrchestrationMcpRouter, resolveDirectiveOutcome } from "../dist/mcp/orchestration.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -139,7 +139,10 @@ try {
   await mgrClient.close();
 } finally {
   db.close();
-  try { fs.unlinkSync(dbFile); } catch { /* best-effort */ }
+  // card f273ebb9: the DB runs in WAL mode (db.ts), so a bare unlink of dbFile alone could leave its
+  // `-wal`/`-shm` sidecars behind — sweep all three through the shared bounded-retry helper, which also
+  // no-ops cleanly on a sidecar that was never created.
+  for (const p of [dbFile, `${dbFile}-wal`, `${dbFile}-shm`]) cleanupPathSync(p);
 }
 
 console.log(failures === 0

@@ -46,6 +46,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "../test/_tmp-fixture.mjs";
+import { reapStaleLoomTempDirs } from "./temp-reaper.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
@@ -1269,6 +1270,23 @@ if (isMain) {
   const EFFECTIVE_POOL_SIZE = cliMode.concurrency != null
     ? Math.max(1, Math.min(cliMode.concurrency, MAX_CONCURRENCY))
     : POOL_SIZE;
+
+  // Card f273ebb9: reap orphaned `loom-*` temp dirs left behind by a PRIOR run's force-killed process tree
+  // (see gate-runner.ts's killGateProcessTree — a taskkill /T /F on timeout or cancel bypasses this
+  // runner's own tmpRoots cleanup below, and every mid-flight test file's cleanup too, regardless of how
+  // well that file's own cleanup is written). Runs automatically here, once, before any test spawns — so
+  // nobody is ever asked to run this by hand (a human was asked to approve this pattern twice already, on
+  // 2026-08-06 and 2026-08-24). Age-gated + `loom-*`-scoped + bounded — see temp-reaper.mjs's own header
+  // for why each of those is load-bearing. Best-effort: a reaper problem must never fail the suite it runs
+  // ahead of, so only log the summary, never throw.
+  try {
+    const reapSummary = reapStaleLoomTempDirs(os.tmpdir());
+    if (reapSummary.reaped > 0 || reapSummary.errors.length > 0) {
+      console.log(`ℹ temp-reaper: reaped ${reapSummary.reaped}/${reapSummary.candidates} stale loom-* temp dir(s) (skipped ${reapSummary.skippedTooYoung} too-young, ${reapSummary.skippedOverCap} over this run's cap)${reapSummary.errors.length ? `; ${reapSummary.errors.length} error(s): ${reapSummary.errors.join("; ")}` : ""}`);
+    }
+  } catch (err) {
+    console.warn(`⚠ temp-reaper failed (non-fatal): ${err.message}`);
+  }
 
   // Card e6e55f7a: sample only around the actual test run, never during --count/--help/error paths above.
   // `runInstrumentedSuite` seeds the gap series with the run's own start (so a long stall BEFORE the
