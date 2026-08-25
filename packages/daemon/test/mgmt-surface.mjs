@@ -5,26 +5,62 @@
 // ASSIGNED if a human already minted it — a non-existent profileId is rejected; profile CREATE/edit
 // is NOT on the surface), and that a WORKER never sees any of them (role gate at the surface).
 //
-// RUN against a fresh isolated LOOM_HOME daemon:
-//   1) LOOM_HOME=<temp> node dist/index.js
-//   2) LOOM_HOME=<temp> node test/mgmt-surface.mjs        (SAME LOOM_HOME)
+// HERMETIC (card 76388dcb — un-excluded from NOT_HERMETIC): boots its OWN isolated daemon on a temp
+// LOOM_HOME + a non-4317 LOOM_PORT (mirrors profiles-rest.mjs / board-consistency.mjs), self-contained,
+// no claude. Run: node test/mgmt-surface.mjs
 import Database from "better-sqlite3";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { resolveConfig } from "@loom/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
+const BASE = `http://127.0.0.1:${PORT}`;
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgmt-surface-${Date.now()}-${process.pid}`); // never ambient
+process.env.LOOM_PORT = String(PORT);
+const LOOM = process.env.LOOM_HOME;
+fs.mkdirSync(LOOM, { recursive: true });
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
-const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
-const LOOM = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const now = new Date().toISOString();
 const get = async (u) => (await fetch(BASE + u)).json();
+
+// --- boot the isolated daemon (dist/index.js) ---
+const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  stdio: "ignore",
+});
+async function waitReady(timeoutMs = 20000) {
+  try {
+    return await sharedWaitUntil(async () => {
+      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
+    }, { timeoutMs, intervalMs: 200, label: "mgmt-surface: daemon ready" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
+  }
+}
+if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — the secret is
+// minted before app.listen(), so it's already there once waitReady() observes a response.
+const loopbackToken = readLoopbackToken(LOOM);
 const patchJson = async (u, body) => {
-  const r = await fetch(BASE + u, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(BASE + u, { method: "PATCH", headers: authHeaders(loopbackToken), body: JSON.stringify(body) });
   return { status: r.status, body: await r.json() };
 };
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+try {
 
 // --- seed the daemon's DB directly: a project + agent, a human-authored profile, and one session per role ---
 const db = new Database(path.join(LOOM, "loom.db"));
@@ -53,9 +89,6 @@ async function connect(base, sessionId) {
 }
 const parse = (res) => JSON.parse(res.content[0].text);
 const call = async (c, name, args) => parse(await c.callTool({ name, arguments: args }));
-
-let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const M = await connect("mcp-orch", "M");
 
@@ -174,4 +207,8 @@ await PL.close();
 console.log(failures === 0
   ? "\n✅ ALL PASS — the manager self-service management surface works end-to-end (assign profile / update agent / update+archive project / create+update schedule), the trust-boundary guardrails hold (gateCommand rejected on the agent path; profiles can only be ASSIGNED, never minted), and workers/plain sessions never see it."
   : `\n❌ ${failures} FAILURE(S).`);
+} finally {
+  try { daemon.kill(); } catch { /* ignore */ }
+  try { fs.rmSync(LOOM, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ }
+}
 process.exit(failures === 0 ? 0 : 1);

@@ -4,29 +4,57 @@
 // create/configure projects + agents end-to-end (visible via the REST API), and that the guardrails
 // reject a bad repoPath (missing / non-git) and an invalid config (both project_create + configure).
 //
-// RUN against a fresh isolated LOOM_HOME daemon (real git is used for the repo guardrail):
-//   1) LOOM_HOME=<temp> node dist/index.js
-//   2) LOOM_HOME=<temp> node test/platform-scope.mjs        (SAME LOOM_HOME)
+// HERMETIC (card 76388dcb — un-excluded from NOT_HERMETIC): boots its OWN isolated daemon on a temp
+// LOOM_HOME + a non-4317 LOOM_PORT (mirrors profiles-rest.mjs / board-consistency.mjs), self-contained,
+// no claude (real git IS used for the repo guardrail). Run: node test/platform-scope.mjs
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { spawn, execSync } from "node:child_process";
 import { resolveConfig } from "@loom/shared";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
-requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
-const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
+const BASE = `http://127.0.0.1:${PORT}`;
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-platform-scope-${Date.now()}-${process.pid}`); // never ambient
+process.env.LOOM_PORT = String(PORT);
 const LOOM = process.env.LOOM_HOME;
-if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
+fs.mkdirSync(LOOM, { recursive: true });
+requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const get = async (u) => (await fetch(BASE + u)).json();
+const now = new Date().toISOString();
+
+// --- boot the isolated daemon (dist/index.js) ---
+const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  stdio: "ignore",
+});
+async function waitReady(timeoutMs = 20000) {
+  try {
+    return await sharedWaitUntil(async () => {
+      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
+    }, { timeoutMs, intervalMs: 200, label: "platform-scope: daemon ready" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
+  }
+}
+if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — the secret is
+// minted before app.listen(), so it's already there once waitReady() observes a response.
+const loopbackToken = readLoopbackToken(LOOM);
 const patchJson = async (u, body) => {
-  const r = await fetch(BASE + u, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(BASE + u, { method: "PATCH", headers: authHeaders(loopbackToken), body: JSON.stringify(body) });
   return { status: r.status, body: await r.json() };
 };
-const now = new Date().toISOString();
 
 // --- seed the daemon's DB directly: a host project/agent + one session per role ---
 const db = new Database(path.join(LOOM, "loom.db"));
@@ -155,6 +183,8 @@ try {
   check("role-gate: plain session P gets no platform surface", await rejected("P"));
 } finally {
   for (const d of [gitRepo, nonGit]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
+  try { daemon.kill(); } catch { /* ignore */ }
+  try { fs.rmSync(LOOM, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ }
 }
 
 console.log(failures === 0

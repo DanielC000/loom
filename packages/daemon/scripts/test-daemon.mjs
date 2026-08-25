@@ -400,9 +400,15 @@ export function formatGateTimingSummaryLines(results, wallClockMs, { topN = 20 }
 // Exported so an out-of-band census/probe harness (test/census/*) can import the REAL exclusion list
 // instead of keeping its own copy — a duplicated copy is exactly the shared-unit-divergence anti-pattern
 // this codebase keeps paying for (see card ec7983c6's 116-copy SeamHost fixture).
+// mgmt-surface / platform-scope / scheduler REMOVED (card 76388dcb): all three were only excluded as
+// collateral from the same loopback-guard breakage 4f1d4276 fixed on profiles-rest.mjs (card 4ff9a073,
+// 2026-08-07 — a REAL spawned daemon 401s every unauthenticated non-GET /api/* write). None of the three
+// need a real `claude` spawn or mutate shared state — read `gateway-loopback.key` after the daemon is up
+// and send it as `Authorization: Bearer`, same fix, same pattern (see test/_loopback-auth.mjs). Verified
+// green (exit 0) against a fresh isolated daemon before removal.
 export const NOT_HERMETIC = new Set([
-  "integration-e2e", "orchestration-e2e", "manager-live", "messaging", "mgmt-surface", "orch-scope",
-  "orch-spawn", "mcp-scope", "platform-scope", "recycle", "scheduler", "scheduler-drain",
+  "integration-e2e", "orchestration-e2e", "manager-live", "messaging", "orch-scope",
+  "orch-spawn", "mcp-scope", "recycle", "scheduler-drain",
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
   "busy-flag", "merge-gate", "board-consistency", "skills-e2e",
   "merge-confirm-slow-gate-pending", // ~20s wall-clock (a real 15s gate) + needs a manually-started daemon

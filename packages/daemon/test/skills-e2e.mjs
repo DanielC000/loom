@@ -9,12 +9,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 
 const PORT = 4319;
 const BASE = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const get = async (u) => (await fetch(BASE + u)).json();
-const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: b ? { "content-type": "application/json" } : undefined, body: b ? JSON.stringify(b) : undefined })).json();
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — set once the
+// "wait for listen" loop below confirms the daemon is up (the secret is minted before app.listen(), so
+// it's already there); post()'s callers all run after that point.
+let loopbackToken = null;
+const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: authHeaders(loopbackToken, !!b), body: b ? JSON.stringify(b) : undefined })).json();
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,6 +46,7 @@ try {
   for (let i = 0; i < 30 && !up; i++) { await sleep(1000); try { await get("/api/projects"); up = true; } catch { /* not yet */ } }
   check("daemon up on alt port", up);
   if (!up) throw new Error("daemon never listened");
+  loopbackToken = readLoopbackToken(home);
 
   const P = await post("/api/projects", { name: `E2E-${Date.now()}`, repoPath: repo, vaultPath: repo });
   const agent = await post(`/api/projects/${P.id}/agents`, { name: "t", startupPrompt: "Reply with exactly READY and stop. Do not use tools." });

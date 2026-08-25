@@ -6,12 +6,15 @@
 //   PART 2 (REST): create→list→disable→delete via the daemon's HTTP endpoints (far-future cron so
 //     the daemon's own 60s tick never fires it during the test).
 //
-// RUN against a fresh isolated LOOM_HOME daemon (PART 2 needs the HTTP endpoints):
-//   1) LOOM_HOME=<temp> node dist/index.js
-//   2) LOOM_HOME=<temp> node test/scheduler.mjs        (SAME LOOM_HOME)
+// HERMETIC (card 76388dcb — un-excluded from NOT_HERMETIC): PART 2 boots its OWN isolated daemon on a
+// temp LOOM_HOME + a non-4317 LOOM_PORT (mirrors profiles-rest.mjs / board-consistency.mjs), spawned
+// lazily right before PART 2 so PART 1 stays genuinely daemon-free as documented above. Self-contained,
+// no claude. Run: node test/scheduler.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import Database from "better-sqlite3";
 import { Db } from "../dist/db.js";
 import { Scheduler } from "../dist/orchestration/scheduler.js";
@@ -19,12 +22,21 @@ import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { nextFireAt } from "../dist/orchestration/cron.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
-requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
-const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
+const BASE = `http://127.0.0.1:${PORT}`;
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-scheduler-${Date.now()}-${process.pid}`); // never ambient
+process.env.LOOM_PORT = String(PORT);
 const LOOM = process.env.LOOM_HOME;
-if (!LOOM) { console.error("LOOM_HOME must be set (and match the daemon's)."); process.exit(2); }
+requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const DB_FILE = path.join(LOOM, "loom.db");
-const post = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) });
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — set once PART
+// 2 boots its own daemon (below); post()'s callers all run after that point.
+let loopbackToken = null;
+const post = (u, b) => fetch(BASE + u, { method: "POST", headers: authHeaders(loopbackToken), body: JSON.stringify(b ?? {}) });
 const get = async (u) => (await fetch(BASE + u)).json();
 
 let failures = 0;
@@ -383,6 +395,27 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 }
 
 // --- PART 2: REST round-trip via the daemon's endpoints ---
+// --- boot the isolated daemon (dist/index.js) — deferred until here so PART 1 stays daemon-free ---
+fs.mkdirSync(LOOM, { recursive: true });
+const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
+  env: { ...process.env, LOOM_HOME: LOOM, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  stdio: "ignore",
+});
+async function waitReady(timeoutMs = 20000) {
+  try {
+    return await sharedWaitUntil(async () => {
+      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
+    }, { timeoutMs, intervalMs: 200, label: "scheduler: daemon ready" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
+  }
+}
+if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — the secret is
+// minted before app.listen(), so it's already there once waitReady() observes a response.
+loopbackToken = readLoopbackToken(LOOM);
+
 const rid = `rest-${Date.now()}`;
 const rproj = `rp-${rid}`, ragent = `rt-${rid}`;
 {
@@ -403,7 +436,7 @@ try {
   check("REST update: disable → enabled:false", updated.enabled === false);
   const renamed = await (await post(`/api/schedules/${created.id}`, { name: "Renamed fire" })).json();
   check("REST update: rename → name changes", renamed.name === "Renamed fire");
-  await fetch(`${BASE}/api/schedules/${created.id}`, { method: "DELETE" });
+  await fetch(`${BASE}/api/schedules/${created.id}`, { method: "DELETE", headers: authHeaders(loopbackToken, false) });
   list = await get("/api/schedules");
   check("REST delete: no longer listed", !list.some((s) => s.id === created.id));
   // Validation: a bad cron is rejected 400 (not inserted).
@@ -421,16 +454,20 @@ try {
   check("REST list: the workspace-auditor schedule shows its kind", wsaList.some((s) => s.id === wsa.id && s.kind === "workspace-auditor"));
   const wsaDisabled = await (await post(`/api/schedules/${wsa.id}`, { enabled: false })).json();
   check("REST update: disable a workspace-auditor schedule (kind preserved)", wsaDisabled.enabled === false && wsaDisabled.kind === "workspace-auditor");
-  await fetch(`${BASE}/api/schedules/${wsa.id}`, { method: "DELETE" });
+  await fetch(`${BASE}/api/schedules/${wsa.id}`, { method: "DELETE", headers: authHeaders(loopbackToken, false) });
   // Validation: an unknown kind is rejected 400 (not coerced).
   const badKind = await post("/api/schedules", { name: "bad kind", agentId: ragent, cron: "0 0 1 1 *", kind: "bogus" });
   check("REST create: invalid kind → 400", badKind.status === 400);
 } finally {
-  const t = new Database(DB_FILE);
-  t.prepare("DELETE FROM schedules WHERE agent_id = ?").run(ragent);
-  t.prepare("DELETE FROM agents WHERE id = ?").run(ragent);
-  t.prepare("DELETE FROM projects WHERE id = ?").run(rproj);
-  t.close();
+  try {
+    const t = new Database(DB_FILE);
+    t.prepare("DELETE FROM schedules WHERE agent_id = ?").run(ragent);
+    t.prepare("DELETE FROM agents WHERE id = ?").run(ragent);
+    t.prepare("DELETE FROM projects WHERE id = ?").run(rproj);
+    t.close();
+  } catch { /* ignore — daemon may never have come up */ }
+  try { daemon.kill(); } catch { /* ignore */ }
+  try { fs.rmSync(LOOM, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ }
 }
 
 console.log(failures === 0

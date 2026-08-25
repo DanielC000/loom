@@ -11,20 +11,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // profiles-rest.mjs / skills-e2e.mjs) so it NEVER touches the real ~/.loom or the prod loom.db —
 // the Board-<ts> project/agent/session it creates live only in the throwaway db, which is deleted
 // on teardown. Spawns one real claude. Run after build (needs dist/):  node test/board-consistency.mjs
-// (honors LOOM_HOME/LOOM_PORT if you pre-set them to target an externally-started daemon instead.)
+// ALWAYS self-isolates (card 76388dcb, mirroring 4f1d4276's profiles-rest.mjs fix): this used to
+// reuse an operator-pre-set LOOM_HOME as an externally-started daemon to hit, but that collided with
+// the test harness's OWN use of that identical var for per-test isolation — every runOne child inherits
+// a LOOM_HOME pointed at a free port with nothing listening on it, so under the gate the "reuse" branch
+// was ALWAYS taken and ALWAYS hit a dead port. Removed; this file now self-isolates unconditionally,
+// like every sibling test that spawns dist/index.js.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
 const BASE = `http://127.0.0.1:${PORT}`;
-const ownDaemon = !process.env.LOOM_HOME; // if the operator pre-set LOOM_HOME we reuse their daemon
-const LOOM_HOME = process.env.LOOM_HOME || path.join(os.tmpdir(), `loom-board-home-${Date.now()}-${process.pid}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-board-home-${Date.now()}-${process.pid}`); // never ambient
+process.env.LOOM_PORT = String(PORT);
+const LOOM_HOME = process.env.LOOM_HOME;
 fs.mkdirSync(LOOM_HOME, { recursive: true });
+requireHermeticEnv({ port: true });
 
 // The project's repo/vault dir — separate from LOOM_HOME; also the spawned agent's cwd. POST
 // /api/projects validates repoPath is a real git repo, so this must be git-init'd.
@@ -41,7 +50,11 @@ const PROMPT =
   "(4) Then stop. Do not call any other tools and do not ask questions.";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
+// gateway's loopback write guard (card 4ff9a073) is active for any REAL spawned daemon — set once
+// waitReady() confirms the daemon is up (the secret is minted before app.listen(), so it's already
+// there); post()'s callers all run after that point.
+let loopbackToken = null;
+const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: authHeaders(loopbackToken), body: JSON.stringify(b ?? {}) })).json();
 const get = async (u) => (await fetch(BASE + u)).json();
 
 // The real-claude spawn adds a trust key for `dir` to ~/.claude.json — clean it iff it wasn't there.
@@ -53,13 +66,10 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- boot the isolated daemon (dist/index.js) ---
-let daemon = null;
-if (ownDaemon) {
-  daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
-    env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
-    stdio: "ignore",
-  });
-}
+const daemon = spawn(process.execPath, [path.join(__dirname, "..", "dist", "index.js")], {
+  env: { ...process.env, LOOM_HOME, LOOM_PORT: String(PORT), LOOM_SCHEDULER_ENABLED: "0" },
+  stdio: "ignore",
+});
 // Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/200ms-interval budget;
 // the predicate keeps swallowing a not-up-yet fetch failure internally (unchanged), only a genuine
 // non-timeout error from the shared helper itself would propagate.
@@ -77,6 +87,7 @@ async function waitReady(timeoutMs = 20000) {
 let session = null;
 try {
   if (!(await waitReady())) { console.error("daemon did not become ready"); process.exit(2); }
+  loopbackToken = readLoopbackToken(LOOM_HOME);
 
   const P = await post("/api/projects", { name: `Board-${Date.now()}`, repoPath: dir, vaultPath: dir });
   const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "BOARD-ONE" });           // backlog
@@ -100,7 +111,7 @@ try {
   // Hard-stop the pty first so the OS releases the agent's .claude/ handles under `dir`.
   try { if (session?.id) await post(`/api/sessions/${session.id}/stop`, { mode: "hard" }); } catch { /* ignore */ }
   await sleep(1000);
-  try { daemon?.kill(); } catch { /* ignore */ }
+  try { daemon.kill(); } catch { /* ignore */ }
   await sleep(1000);
   // The spawned agent's cwd is `dir`, so on Windows the OS can briefly hold its .claude/
   // handles after the hard-stop kills the pty. Retry the removal a few times until the
@@ -109,7 +120,7 @@ try {
     try { fs.rmSync(dir, { recursive: true, force: true }); break; }
     catch { await sleep(300); }
   }
-  if (ownDaemon) { try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ } }
+  try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ }
   // Surgically remove the trust key the spawn added to the REAL ~/.claude.json (iff we added it).
   if (!hadTrust) {
     try { const c = JSON.parse(fs.readFileSync(realClaudeJson, "utf8")); if (c.projects && trustKey in c.projects) { delete c.projects[trustKey]; fs.writeFileSync(realClaudeJson, JSON.stringify(c, null, 2)); } } catch { /* ignore */ }

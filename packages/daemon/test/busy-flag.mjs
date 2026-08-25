@@ -23,10 +23,14 @@ import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
-const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
-const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) });
+// gateway's loopback write guard (card 4ff9a073) is active by the time this file runs — the daemon
+// (started per this file's own header instructions) mints the secret before it starts listening.
+const loopbackToken = readLoopbackToken(process.env.LOOM_HOME);
+const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: authHeaders(loopbackToken), body: JSON.stringify(b ?? {}) })).json();
+const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: authHeaders(loopbackToken), body: JSON.stringify(b ?? {}) });
 const get = async (u) => (await fetch(BASE + u)).json();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
