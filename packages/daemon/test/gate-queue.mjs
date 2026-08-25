@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -49,13 +50,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // that assignment throws `TypeError: ... is not a function` (the exact failure this closed — a real
 // regression from that change, not a flake: 537/538 hermetic tests passed, only this file's fixed-delay
 // assumption broke). Poll for the assignment instead of assuming a fixed delay covers it.
+//
+// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148): this file was excluded from the
+// 22796d42 migration on the stated reason "deliberately performance.now(); migrating as-is reintroduces
+// a documented CI flake class." That reason was accurate ONLY while _wait.mjs's own waitUntil was
+// Date.now()-anchored — card 32ac0273 made it performance.now()-anchored (monotonic) before batch 3 even
+// started, so both sides now share the same clock and the original discriminator no longer holds. This
+// file's local waitUntil/waitUntilInvoked are pure poll-until-predicate loops (no lower-bound elapsed-time
+// assertion), the exact shape already migrated elsewhere — same timeoutMs/intervalMs defaults and
+// throw-on-timeout contract preserved; no call site here ever used the return value, so delegating
+// straight to the shared helper (rather than swallowing its timeout like the "return false" wrappers
+// elsewhere) is the faithful migration for a contract that already throws.
 async function waitUntilInvoked(getRelease, label, timeoutMs = 5000, intervalMs = 25) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
-    if (typeof getRelease() === "function") return;
-    await sleep(intervalMs);
-  }
-  throw new Error(`${label}: the gate runner was not invoked within ${timeoutMs}ms (admission recorded, but the post-admission admitStamp/runGate call never landed — genuinely wedged, not just slow)`);
+  return sharedWaitUntil(() => typeof getRelease() === "function", { timeoutMs, intervalMs, label });
 }
 // Card 7b3a585a (from the 7b634e58 audit): `runWorkerGate` reads a REAL async git subprocess
 // (`computeWorktreeGateStamp`) BEFORE the semaphore ever sees the op, so "issue op 1, then op 2" does NOT
@@ -63,13 +70,9 @@ async function waitUntilInvoked(getRelease, label, timeoutMs = 5000, intervalMs 
 // which is genuinely elapsed-time dependent, not JS-synchronous-guaranteed. A fixed `sleep(...)` before
 // issuing a competing op is a bet on a margin, not a guarantee. This polls the LIVE gateQueueForManager/
 // snapshotGates registry for the actual admission state instead, so ordering is ESTABLISHED BY OBSERVATION.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148) — see waitUntilInvoked's doc above.
 async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
-    if (cond()) return;
-    await sleep(intervalMs);
-  }
-  throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
+  return sharedWaitUntil(cond, { timeoutMs, intervalMs, label });
 }
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}-${process.pid}`);

@@ -17,6 +17,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -39,27 +40,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // upstream (real git-subprocess work, admission itself) took to get there. `timeoutMs` is a safety-net
 // backstop against a genuine hang, not part of the correctness logic: it never decides the assertion,
 // only how long a broken run stalls before failing loudly instead of hanging the suite.
+//
+// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148): this file was excluded from the
+// 22796d42 migration on the stated reason "deliberately performance.now(); migrating as-is reintroduces
+// a documented CI flake class." That reason was accurate ONLY while _wait.mjs's own waitUntil was
+// Date.now()-anchored — card 32ac0273 made it performance.now()-anchored (monotonic) before batch 3 even
+// started, so both sides now share the same clock and the original discriminator no longer holds for
+// THIS pair of helpers. (Blocks (L)/(L2) below do a genuinely different, still-untouched thing — a
+// LOWER-bound assertion on the production `durationMs` value via a direct performance.now() delta, not a
+// poll loop at all — and stay exactly as they were.) Same timeoutMs/intervalMs defaults and
+// throw-on-timeout contract preserved; no call site here ever used the return value.
 async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs = 10000, intervalMs = 20) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
+  return sharedWaitUntil(() => {
     const entry = sessions.snapshotGates().gates.find((g) => g.sessionId === sessionId);
-    if (entry?.phase === phase) return;
-    await sleep(intervalMs);
-  }
-  throw new Error(`${label}: sessionId ${sessionId} never reached phase "${phase}" within ${timeoutMs}ms`);
+    return entry?.phase === phase;
+  }, { timeoutMs, intervalMs, label });
 }
 
 // Generic poll-until (card acaf37cc): replaces a guessed fixed-wall-clock sleep before asserting on some
 // side effect (an enqueued array, a callback firing) with a bounded poll against the ACTUAL condition.
 // `timeoutMs` is a safety-net backstop against a genuine hang/regression, never part of the correctness
 // logic — same role as `waitUntilGatePhase`'s own `timeoutMs`.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148) — see waitUntilGatePhase's doc above.
 async function waitUntil(conditionFn, label, timeoutMs = 10000, intervalMs = 20) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
-    if (conditionFn()) return;
-    await sleep(intervalMs);
-  }
-  throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
+  return sharedWaitUntil(conditionFn, { timeoutMs, intervalMs, label });
 }
 
 const GIT_ID = "-c user.email=wg@loom -c user.name=wg";

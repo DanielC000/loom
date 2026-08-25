@@ -45,6 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rghc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -62,13 +63,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // by itself guarantee op 1 is ADMITTED (or queued) first — that depends on how long each op's git
 // subprocess takes, which is genuinely elapsed-time dependent, not JS-synchronous-guaranteed. Poll the
 // LIVE `snapshotGates()` registry for the actual phase instead of betting a fixed sleep outlasts it.
+//
+// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148): this file was excluded from the
+// 22796d42 migration on the stated reason "deliberately performance.now(); migrating as-is reintroduces
+// a documented CI flake class." That reason was accurate ONLY while _wait.mjs's own waitUntil was
+// Date.now()-anchored — card 32ac0273 made it performance.now()-anchored (monotonic) before batch 3 even
+// started, so both sides now share the same clock and the original discriminator no longer holds. This
+// file's local waitUntil is a pure poll-until-predicate loop (no lower-bound elapsed-time assertion
+// anywhere in this file), the exact shape already migrated elsewhere — same timeoutMs/intervalMs defaults
+// and throw-on-timeout contract preserved; no call site here ever used the return value.
 async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
-    if (cond()) return;
-    await sleep(intervalMs);
-  }
-  throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
+  return sharedWaitUntil(cond, { timeoutMs, intervalMs, label });
 }
 const GIT_ID = "-c user.email=rghc@loom -c user.name=rghc";
 const now = new Date().toISOString();
