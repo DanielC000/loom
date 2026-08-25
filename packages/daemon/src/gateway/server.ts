@@ -34,7 +34,7 @@ import type { OperatorMcpRouter } from "../mcp/operator.js";
 import { isOperatorEnabled } from "../mcp/operator.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { logInboundMcpRequest } from "../mcp/inbound-log.js";
-import { WATCHED_TOOL_NAMES, extractWatchedToolCalls, type ToolAttributionResult } from "../pty/tool-attribution.js";
+import { WATCHED_TOOL_NAMES, extractWatchedToolCalls, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import type { CompanionControl } from "../companion/controller.js";
 import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
@@ -723,11 +723,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // level up. Optional-chained on consumeToolAttribution: several existing tests wire a minimal
   // `{ markMcpSeen }`-only `deps.pty` stub, and a stub without the method stays a harmless no-op (empty
   // Map) rather than a 500 — the real PtyHost always implements it.
-  const computeAttributions = (sid: string, body: unknown): Map<string, ToolAttributionResult> => {
+  //
+  // Card 3cc3b726: `server` is THIS route's own MCP server id (`LOOM_TASKS_SERVER_ID` /
+  // `LOOM_ORCHESTRATION_SERVER_ID` — the SAME constants host.ts's `buildMcpServers` registers the
+  // client's servers under, one shared definition rather than two independently-typed literal lists) —
+  // used to reconstruct the FULL `mcp__<server>__<tool>` key that `consumeToolAttribution` now expects
+  // (see its own doc, pty/host.ts). Two different routers can each register a tool with the same BARE
+  // name (`memory_write`: loom-tasks' project memory vs. loom-orchestration's companion-private memory),
+  // and a companion session mounts both routers on the SAME sessionId — a bare-name key let one router's
+  // call destructively consume the other's pending correlation entry. `test/tool-attribution-join.mjs`
+  // pins that this reconstruction actually agrees with what `deliverHook` records, across the two REAL
+  // routes below, with a mismatched-server-id negative control. The returned Map stays keyed by the BARE
+  // tool name (unchanged) — every downstream reader (`attributions?.get("memory_write")` etc.) is
+  // router-scoped by construction (it only ever runs inside ITS OWN router's handler), so it never needs
+  // the qualifier.
+  const computeAttributions = (sid: string, server: string, body: unknown): Map<string, ToolAttributionResult> => {
     const map = new Map<string, ToolAttributionResult>();
     for (const tool of extractWatchedToolCalls(body, WATCHED_TOOL_NAMES)) {
       if (map.has(tool)) continue; // one consume() per (session, tool) per request — see doc above.
-      const result = deps.pty.consumeToolAttribution?.(sid, tool);
+      const result = deps.pty.consumeToolAttribution?.(sid, `mcp__${server}__${tool}`);
       if (result) map.set(tool, result);
     }
     return map;
@@ -736,7 +750,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Project-scoped task MCP (session id in the path; project resolved server-side) ---
   app.all("/mcp/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    const attributions = computeAttributions(sessionId, req.body);
+    const attributions = computeAttributions(sessionId, LOOM_TASKS_SERVER_ID, req.body);
     logInboundMcpRequest("task", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651: identity-only inbound MCP census; cd0c7fee: + sub-agent-call correlation
     reply.hijack(); // hand raw req/res to the MCP transport; pass the Fastify-parsed body
     await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);
@@ -750,7 +764,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (sessions/service.ts resumeFleetOnBoot/recoverCrashOrphanedWorkers) only needs to know contact was
     // made, not that this particular call succeeded.
     deps.pty.markMcpSeen(sessionId);
-    const attributions = computeAttributions(sessionId, req.body);
+    const attributions = computeAttributions(sessionId, LOOM_ORCHESTRATION_SERVER_ID, req.body);
     logInboundMcpRequest("orchestration", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651; cd0c7fee
     reply.hijack();
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);

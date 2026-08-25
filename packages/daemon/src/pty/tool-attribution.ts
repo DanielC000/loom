@@ -81,6 +81,18 @@ export interface ToolAttributionEntry {
  */
 export const WATCHED_TOOL_NAMES: ReadonlySet<string> = new Set(["worker_report", "memory_write"]);
 
+/**
+ * Card 3cc3b726: the two MCP server ids that can register a watched tool — the only ids that matter for
+ * the attribution queue's qualified key (`mcp__<server>__<tool>`, see `keyFor`'s own doc below). Exported
+ * so `pty/host.ts`'s `buildMcpServers` (which mints these as the client's own MCP server names) and
+ * `gateway/server.ts`'s `computeAttributions` (which reconstructs the SAME qualified key at consume time,
+ * from the route it's handling) share ONE definition instead of two independently-typed literal strings
+ * that could silently drift apart. `test/tool-attribution-join.mjs` is the test that actually PINS this
+ * join across both real production sites — read it before touching either side.
+ */
+export const LOOM_TASKS_SERVER_ID = "loom-tasks";
+export const LOOM_ORCHESTRATION_SERVER_ID = "loom-orchestration";
+
 /** How long a PreToolUse entry stays eligible for correlation. Generous for local-loopback + hook-process
  *  spawn overhead; tight enough that it can never span into an unrelated LATER call in the same turn. */
 export const ATTRIBUTION_TTL_MS = 8_000;
@@ -93,6 +105,20 @@ interface StoredEntry extends ToolAttributionEntry {
   receivedAt: number;
 }
 
+/**
+ * Card 3cc3b726: `toolName` is expected to be the FULL qualified `mcp__<server>__<tool>` form (what
+ * `deliverHook`'s PreToolUse case records under, and what `gateway/server.ts`'s `computeAttributions`
+ * reconstructs before calling `consume()`) — NOT the bare tool name. Two different MCP routers can each
+ * register a tool sharing the same bare name (e.g. `memory_write`: loom-tasks' project memory vs.
+ * loom-orchestration's companion-private memory), and a single session (a companion) can mount both on
+ * the SAME sessionId; keying by bare name alone let one router's call destructively consume an entry
+ * recorded for the other's pending call. This function itself is agnostic to that distinction — it just
+ * concatenates whatever string it's given — the qualification discipline lives entirely in the two
+ * callers named above. `test/tool-attribution-join.mjs` PINS that the two callers actually agree (drives
+ * a real PreToolUse hook through `deliverHook`, then consumes through the REAL `/mcp/:sessionId` HTTP
+ * route so `gateway/server.ts`'s own reconstruction is what runs, with a mismatched-server-id negative
+ * control) — read that test rather than trusting this comment to keep the two sides in sync by hand.
+ */
 function keyFor(sessionId: string, toolName: string): string {
   return `${sessionId} ${toolName}`;
 }

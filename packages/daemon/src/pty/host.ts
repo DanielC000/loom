@@ -12,7 +12,7 @@ import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
-import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, type ToolAttributionResult } from "./tool-attribution.js";
+import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
@@ -1607,11 +1607,14 @@ export function buildMcpServers(o: {
   const wantsUserAudit = o.role === "workspace-auditor";
   const wantsSetup = o.role === "setup";
   const wantsOperator = o.role === "operator";
+  // Card 3cc3b726: these two ids (LOOM_TASKS_SERVER_ID/LOOM_ORCHESTRATION_SERVER_ID) are shared with
+  // gateway/server.ts's computeAttributions, which reconstructs the attribution queue's qualified key
+  // from the SAME ids — one definition, not two independently-typed literal lists that could drift apart.
   const mcpServers: Record<string, unknown> = {
-    "loom-tasks": { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
+    [LOOM_TASKS_SERVER_ID]: { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
   };
   if (wantsOrch) {
-    mcpServers["loom-orchestration"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}` };
+    mcpServers[LOOM_ORCHESTRATION_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}` };
   }
   if (wantsPlatform) {
     mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
@@ -4721,15 +4724,25 @@ export class PtyHost {
     switch (hook.hook_event_name) {
       case "PreToolUse": {
         // Card cd0c7fee: record-only — never blocks or denies anything, mirrors the vault-lint
-        // PostToolUse's advisory posture. Bare tool name: the hook reports `mcp__<server>__<tool>` (e.g.
-        // "mcp__loom-orchestration__worker_report"); strip the leading `mcp__<server>__` so the queue key
-        // matches the bare name gateway/server.ts's own consume call passes (the router's registered tool
-        // name, e.g. "worker_report") — split on "__" is safe here since the two server ids in play
-        // ("loom-orchestration", "loom-tasks") use hyphens, never a double underscore, as separators.
+        // PostToolUse's advisory posture. The hook reports the FULL `mcp__<server>__<tool>` name (e.g.
+        // "mcp__loom-orchestration__worker_report") — strip it down to the BARE tool name only for the
+        // WATCHED_TOOL_NAMES membership test (split on "__" is safe here since the two server ids in play,
+        // "loom-orchestration" and "loom-tasks", use hyphens, never a double underscore, as separators).
+        // Card 3cc3b726: the QUEUE KEY passed to `record()` is the FULL qualified name, not the bare one —
+        // two different routers (loom-tasks' project memory, loom-orchestration's companion-private
+        // memory) can each register a tool literally named "memory_write", and a companion session mounts
+        // BOTH on the same sessionId; keying by bare name alone let one router's call destructively consume
+        // an entry recorded for the other's pending call. gateway/server.ts's own consume call reconstructs
+        // this SAME qualified form from the route it's handling, using the SAME LOOM_TASKS_SERVER_ID /
+        // LOOM_ORCHESTRATION_SERVER_ID constants (tool-attribution.ts) that this file's own
+        // `buildMcpServers` mints the client's servers under — one shared definition, not two hand-synced
+        // literal lists. `test/tool-attribution-join.mjs` PINS that this reconstruction actually agrees
+        // with what gets recorded here, across both real production sites, with a mismatched-server-id
+        // negative control — that test is what CHECKS the join, not this comment.
         const parts = (hook.tool_name ?? "").split("__");
         const bareToolName = parts.length >= 3 ? parts.slice(2).join("__") : hook.tool_name;
         if (bareToolName && WATCHED_TOOL_NAMES.has(bareToolName)) {
-          this.toolAttribution.record(sessionId, bareToolName, {
+          this.toolAttribution.record(sessionId, hook.tool_name!, {
             agentId: hook.agent_id,
             agentType: hook.agent_type,
             toolUseId: hook.tool_use_id,
@@ -6050,6 +6063,19 @@ export class PtyHost {
    * single-candidate case actually removes an entry — see ToolAttributionTracker.consume's own doc.
    * A tool name outside WATCHED_TOOL_NAMES always reads "unknown" (nothing was ever recorded for it) —
    * cheap and harmless to call unconditionally.
+   *
+   * ⚠️ Card 3cc3b726: `toolName` here is the FULL qualified `mcp__<server>__<tool>` form, matching what
+   * `deliverHook`'s PreToolUse case now records it under — NOT the bare tool name. Two different routers
+   * can register a tool with the same bare name (`memory_write`: loom-tasks' project memory vs.
+   * loom-orchestration's companion-private memory), and a companion session mounts both on the SAME
+   * sessionId; a bare-name key let one router's call destructively consume the other's pending entry.
+   * gateway/server.ts's `computeAttributions` reconstructs this qualified form itself, from the SAME
+   * LOOM_TASKS_SERVER_ID/LOOM_ORCHESTRATION_SERVER_ID constants (tool-attribution.ts) this file's own
+   * `buildMcpServers` mints the client's servers under — do not pass a bare name here. Don't take this
+   * comment's word that the two sides agree: `test/tool-attribution-join.mjs` drives a real PreToolUse
+   * hook through `deliverHook` and then consumes through the REAL `/mcp/:sessionId` HTTP route (so
+   * gateway/server.ts's own reconstruction is what actually runs), with a mismatched-server-id negative
+   * control — that test is what pins the join.
    *
    * ⚠️ Card 8d158088: this result is now ALSO threaded into `memory_write`/`worker_report`'s own
    * enforcement (mcp/server.ts, mcp/orchestration.ts) — no longer purely observational. `consume()` is

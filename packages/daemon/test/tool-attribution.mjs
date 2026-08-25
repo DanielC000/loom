@@ -243,7 +243,54 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("a DIFFERENT session's watched-tool call is never flagged blind off session-A's live sub-agent", crossSession.blindEvent === false);
 }
 
+// ====================================================================================================
+// --- Card 3cc3b726: two routers sharing a bare tool NAME must not share a queue KEY ------------------
+// `memory_write` is registered on BOTH the task router (project memory) and the orchestration router
+// (companion-private memory), and a companion session mounts both on the SAME sessionId. Prove the
+// FAILURE mode first (bare keying really does let one router's call steal the other's pending entry),
+// then prove the FIX (qualifying the key by the full `mcp__<server>__<tool>` name keeps them isolated) —
+// a control that never demonstrated the failure would be an unfalsifiable green (see this project's own
+// "prove your check can fail" discipline).
+// ====================================================================================================
+
+// --- RED: bare-name keying lets loom-orchestration's call destructively consume loom-tasks' entry -----
+{
+  const t = new ToolAttributionTracker();
+  // A subagent's call reaches the task router's memory_write; its PreToolUse hook records under the
+  // (pre-fix) BARE key.
+  t.record("comp1", "memory_write", { agentId: "sub-task" }, 1_000);
+  // Before the task-router request is actually processed, the SAME session's orchestration-router
+  // memory_write call (companion's own private-memory tool, unrelated) consumes under the SAME bare key.
+  const stolen = t.consume("comp1", "memory_write", 1_005);
+  check("RED (bare keying): loom-orchestration's call reads the entry that was really loom-tasks'", stolen.state === "confirmed-subagent" && stolen.agentId === "sub-task");
+  // The real loom-tasks request now arrives to find its own entry already gone.
+  const starved = t.consume("comp1", "memory_write", 1_010);
+  check("RED (bare keying): the real loom-tasks call is left reading unknown — the entry was stolen, not shared", starved.state === "unknown");
+}
+
+// --- GREEN: qualifying the key by the full mcp__<server>__<tool> name keeps the two routers isolated ---
+{
+  const t = new ToolAttributionTracker();
+  t.record("comp2", "mcp__loom-tasks__memory_write", { agentId: "sub-task" }, 1_000);
+  // The orchestration router's OWN memory_write call consumes its OWN qualified key — there is nothing
+  // recorded under it (its PreToolUse hook is deliberately not wired — see claude-settings.ts's matcher),
+  // so it correctly reads "unknown" instead of stealing loom-tasks' entry.
+  const ownQuery = t.consume("comp2", "mcp__loom-orchestration__memory_write", 1_005);
+  check("GREEN (qualified keying): loom-orchestration's call never sees loom-tasks' entry", ownQuery.state === "unknown");
+  // The real loom-tasks request still finds its own entry intact.
+  const preserved = t.consume("comp2", "mcp__loom-tasks__memory_write", 1_010);
+  check("GREEN (qualified keying): loom-tasks' own call still resolves its own entry correctly", preserved.state === "confirmed-subagent" && preserved.agentId === "sub-task");
+}
+
+// --- GREEN: the reverse direction — loom-tasks never sees a loom-orchestration entry either ------------
+{
+  const t = new ToolAttributionTracker();
+  t.record("comp3", "mcp__loom-orchestration__memory_write", { agentId: "sub-companion" }, 1_000);
+  const crossRouter = t.consume("comp3", "mcp__loom-tasks__memory_write", 1_005);
+  check("GREEN (qualified keying, reverse direction): loom-tasks' call never sees loom-orchestration's entry", crossRouter.state === "unknown");
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; and SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature."
+  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
