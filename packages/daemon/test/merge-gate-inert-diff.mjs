@@ -338,8 +338,18 @@ try {
     let gate1AdmittedResolve;
     const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
     let releaseGate1;
+    // ONLY worker1's own call blocks on the manual release below — that's the deterministic sync point
+    // this scenario needs. A SECOND call (worker2's inert-skip unexpectedly falling through to a real
+    // gate — e.g. a transient reunion-merge failure at the reclassification site, service.ts's
+    // `mergeMainIntoWorktree` call, fails closed into the real-gate path) must never block on a release
+    // this test never issues a second time: `releaseGate1` is reassigned per-call, so an unreleased
+    // second invocation is a genuinely unsettleable promise (reproduced: Node's own "Detected unsettled
+    // top-level await" at this file's `await p2`, card cf90b4d4). Resolving immediately instead means an
+    // unexpected second gate call surfaces as an ordinary, loud check() FAILURE below
+    // ("worker2's inert skip never spawned a gate of its own") rather than a silent hang.
     const fakeGate = async () => {
       gate1Calls++;
+      if (gate1Calls > 1) return { passed: true };
       gate1AdmittedResolve();
       await new Promise((res) => { releaseGate1 = res; });
       return { passed: true };
@@ -461,8 +471,11 @@ try {
     let gate1AdmittedResolve;
     const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
     let releaseGate1;
+    // Same reentrancy hazard as scenario (H)'s identical stub, same fix — see that scenario's own doc
+    // above for the full reasoning (card cf90b4d4).
     const fakeGate = async () => {
       gateCalls++;
+      if (gateCalls > 1) return { passed: true };
       gate1AdmittedResolve();
       await new Promise((res) => { releaseGate1 = res; });
       return { passed: true };
