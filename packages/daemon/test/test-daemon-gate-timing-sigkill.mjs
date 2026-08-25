@@ -7,6 +7,12 @@
 // never appears for the file that was still running when killed, and the never-completed file is nameable
 // by subtracting the surviving "file" rows from the run-start row's "selected" list.
 //
+// Card 937bdb18 extends this same real-kill harness: the killed child's env now carries LOOM_GATE_OP_ID
+// (exactly as gateOpIdEnvOverride sets it for a real merge/deploy/worker-self-check gate), and the assertion
+// below confirms the write-ahead row survives the kill WITH that opId attached — closing the gap where
+// 720bb7ad stamped opId onto the run-summary row only, which a SIGKILLed run never writes at all, leaving
+// the one case anyone most wants to attribute (a timed-out/killed gate) exactly as unattributable as before.
+//
 // Deliberately a REAL subprocess spawn of the whole script (via --only=/--concurrency=, card 6185fbfc) —
 // every OTHER test-daemon.mjs test (test-daemon-cli-args.mjs, test-daemon-gate-timing.mjs, ...) exercises
 // exported functions directly against synthetic inputs specifically to AVOID a real spawn; that pattern is
@@ -84,6 +90,11 @@ function killTree(child) {
 
 const FAST = "test-daemon-cli-args"; // pure-logic self-test of this same script — near-instant, no subprocess of its own.
 const SLOW = "merge-repo-mutex"; // TEST_TIMEOUT_OVERRIDES-listed real-git test — several seconds minimum.
+// Card 937bdb18: a real opId, threaded onto the killed child's env exactly the way gateOpIdEnvOverride
+// does for a real merge/deploy gate — proves the run-start row (the one write-ahead row a SIGKILL cannot
+// defeat) actually carries it end to end through a REAL kill, not just through the pure gateTimingOpId()/
+// appendGateTimingRow unit coverage in test-daemon-gate-timing.mjs.
+const SIGKILL_OP_ID = "opid-937bdb18-sigkill-control";
 
 async function runSigkillScenario() {
   const scratchHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-td-sigkill-"));
@@ -91,7 +102,7 @@ async function runSigkillScenario() {
   const ndjsonPath = path.join(scratchHome, "gate-timing", "daemon-per-file-timing.ndjson");
 
   const child = spawn(process.execPath, [TEST_DAEMON_SCRIPT, `--only=${FAST},${SLOW}`, "--concurrency=1"], {
-    env: { ...process.env, LOOM_HOME: scratchHome, LOOM_TEST: "1" },
+    env: { ...process.env, LOOM_HOME: scratchHome, LOOM_TEST: "1", LOOM_GATE_OP_ID: SIGKILL_OP_ID },
     detached: process.platform !== "win32",
   });
   child.stdout.on("data", () => {}); // drained, not asserted on — this test reads the NDJSON artifact only
@@ -141,6 +152,14 @@ const runSummaryRows = rows.filter((r) => r.kind === "run-summary");
 
 check("[positive control] the killed run left exactly one write-ahead run-start row", runStartRows.length === 1);
 check("the run-start row names both selected files, in the given order", runStartRows[0]?.selected?.join(",") === `${FAST},${SLOW}`);
+check(
+  "[positive control — card 937bdb18, THE FIX] the run-start row carries the opId, surviving a SIGKILL that defeats the run-summary row entirely — this is the row that makes a killed run attributable at all",
+  runStartRows[0]?.opId === SIGKILL_OP_ID,
+);
+check(
+  "[card 937bdb18 DoD-3] the surviving FAST file row is NOT stamped with opId — attribution joins to run-start via runUid instead, so the id is deliberately not duplicated onto every per-file row",
+  !("opId" in (fileRows.find((r) => r.name === FAST) ?? {})),
+);
 check("[positive control] the FAST file's completion row survived the kill", fileRows.some((r) => r.name === FAST));
 check(
   "the surviving file row shares the SAME runUid as the run-start row (same run, not stale data from elsewhere)",

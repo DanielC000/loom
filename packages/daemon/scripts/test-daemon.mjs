@@ -1347,6 +1347,11 @@ if (isMain) {
       kind: "run-start",
       runIndex: gateTimingRunIndex,
       runUid: gateTimingRunUid,
+      // Card 937bdb18: same source + same omit-when-unset discipline as the run-summary row's own opId
+      // (see gateTimingOpId's own doc) — this is the row a SIGKILL/timeout cannot defeat, so it's the one
+      // that must carry the id for a killed run to stay attributable at all; run-summary never gets
+      // written for that run.
+      opId: gateTimingOpId(),
       runStartTs: gateTimingRunStartTs,
       poolSize: EFFECTIVE_POOL_SIZE,
       testCount: SELECTED.length,
