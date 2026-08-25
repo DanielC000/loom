@@ -5697,6 +5697,22 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE task_id = ? AND worktree_path IS NOT NULL ORDER BY created_at")
       .all(id) as Row[]).map(toSession);
   }
+  /**
+   * Card e55371c1 — every OTHER session (any `process_state`, any manager/project, `id` excluded) whose
+   * `worktree_path` is EXACTLY `worktreePath`. The path-keyed aliasing signal `worker_list`/`worker_status`
+   * project as `worktreePathAliases`: it exists because `gen`/`recycledFrom` track RECYCLE CHAINS ONLY and
+   * give NO evidence about worktree-path sharing — `branch`/`worktreePath` are both a pure function of
+   * `taskId` (`taskKey`, git/worktrees.ts), so a plain re-spawn after a rejected merge lands a SECOND
+   * `gen:0`/`recycledFrom:null` row on the SAME path with no recycle involved at all. An EXACT string
+   * match, deliberately not a `task_id` lookup ({@link listWorktreeSessionsForTask} above) — two sessions
+   * on the SAME task but a DIFFERENT `repoKey` get DIFFERENT `worktree_path` strings (the multi-repo axis,
+   * same doc) and must NOT be counted as aliased; matching on the resolved path, not the task, is what
+   * keeps that case out.
+   */
+  listSessionsAtWorktreePath(worktreePath: string, excludeSessionId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE worktree_path = ? AND id != ?")
+      .all(worktreePath, excludeSessionId) as Row[]).map(toSession);
+  }
 
   /**
    * Atomic safe board-column layout change (task B). In ONE transaction: (1) apply the planned card
