@@ -475,6 +475,21 @@ type ConfirmMergeResult = {
    *  unrelated warning; echoed separately into the `[loom:merge-done]` nudge too (see
    *  confirmWorkerMergeTracked's `msg` construction) so both DoD-1 surfaces carry it. */
   skillWarning?: string;
+  /** Card 65336570: the SAME text as the local `emitCompareWarning` computed just above the `warning`/
+   *  return construction (card 2154b6ad's reduced-gate announcement, plus card 17cd1f30's NOT_HERMETIC
+   *  exclusion clause when any changed test file was excluded from `--only=`) — mirrors `skillWarning`
+   *  immediately above EXACTLY, for the identical reason: `emitCompareWarning` already folds into the
+   *  generic `warning` field, but a REAL gate ALWAYS returns `{status:"pending",opId}` (13m+ runs), so
+   *  `warning` — the only surface that carried this before this card — is never delivered on the normal
+   *  async path; only the sync return (a rare fast/reused/gateless settle) ever showed it. A dedicated
+   *  field, echoed separately into the `[loom:merge-done]` nudge too (see confirmWorkerMergeTracked's
+   *  `msg` construction), closes that gap the same way `skillWarning`/`skillNote` already did for the
+   *  skill-liveness case. `undefined` for every merge that didn't run the reduced-gate substitution —
+   *  byte-identical to before this field existed. Carries the WHOLE reduced-gate message, not just the
+   *  NOT_HERMETIC clause (see the card's DoD-2 discussion): a manager reading only the async nudge
+   *  otherwise has no way to tell a reduced gate from a full one at all, not just no way to see which
+   *  files were excluded from it. */
+  reducedGateWarning?: string;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -13274,8 +13289,8 @@ export class SessionService {
       ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
     };
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}) };
   }
 
   /**
@@ -13676,6 +13691,17 @@ export class SessionService {
         const skillNote = outcome.ok && outcome.value.merged && outcome.value.skillWarning
           ? ` ⚠ ${outcome.value.skillWarning}`
           : "";
+        // Card 65336570: the SAME reduced-gate declaration the sync result carries on `reducedGateWarning`
+        // (see confirmWorkerMerge's own `emitCompareWarning` computation, above the `warning`/return
+        // construction) — echoed here too, mirroring `skillNote` immediately above EXACTLY. Without this, a
+        // manager who only reads this async nudge — the ONLY path a real gate ever takes (a real gate
+        // ALWAYS returns `{status:"pending",opId}`, 13m+ runs) — never learns the gate was reduced at all,
+        // let alone which NOT_HERMETIC file(s) it excluded, even though the sync `warning` field carried it
+        // the whole time on the rare fast/reused/gateless settle. Absent (stays "") for every merge that
+        // didn't run the reduced-gate substitution, byte-identical to before this card existed.
+        const reducedGateNote = outcome.ok && outcome.value.merged && outcome.value.reducedGateWarning
+          ? ` ⚠ ${outcome.value.reducedGateWarning}`
+          : "";
         // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
         // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
         // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
@@ -13687,7 +13713,7 @@ export class SessionService {
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${skillNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during
