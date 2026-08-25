@@ -2304,7 +2304,12 @@ export class PlatformMcpRouter {
           "Message ANY session by id, cross-project (the Lead is above the manager/worker tree, so there is " +
           "NO parent/child scoping). Returns a deliveryStatus so you get an HONEST outcome: a LIVE target gets " +
           "the message submitted as a turn if idle (delivered-live) or queued FIFO + delivered on its next turn " +
-          "boundary if mid-turn (queued); a NOT-LIVE target whose recycle lineage has a LIVE successor is " +
+          "boundary if mid-turn (queued). `delivered-live` is NOT a terminal guarantee (card 0ab96d24): it means " +
+          "Loom SUBMITTED the message this turn, not that the recipient's engine has CONFIRMED receiving it — a " +
+          "submission can still, rarely, fail to land, and Loom's own redelivery retries can later exhaust and " +
+          "PARK it (a `[loom:redelivery-parked]` notice back to you), minutes after you saw delivered-live. Treat " +
+          "delivered-live as strong evidence, not proof, for anything safety-critical or time-sensitive. " +
+          "A NOT-LIVE target whose recycle lineage has a LIVE successor is " +
           "routed there instead (deliveryStatus reflects the successor's delivery, and routedTo names it); a " +
           "NOT-LIVE target with no live successor anywhere in its lineage is BOARDED as a durable card on that " +
           "target's project board (boarded) — never silently dropped — and the returned taskId names it. " +

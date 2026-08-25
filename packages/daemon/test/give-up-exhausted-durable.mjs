@@ -406,8 +406,8 @@ try {
     const peerSent = pty.sent.filter((s) => s.id === peerMgr).map((s) => s.text);
     const parkedNote = peerSent.find((t) => t.includes("[loom:redelivery-parked]"));
     check("(8) PEER SENDER: got the parked notice", !!parkedNote);
-    check("(8) PEER SENDER: the honest 'no cross-session read' clause is present (this sender does not manage the recipient)",
-      !!parkedNote && parkedNote.includes("no cross-session") && parkedNote.includes("transcript/state read available"));
+    check("(8) PEER SENDER: the honest 'no known cross-session read' clause is present (this sender does not manage the recipient)",
+      !!parkedNote && parkedNote.includes("does not know of a cross-session transcript/state read") && parkedNote.includes("if you DO have one available"));
     check("(8) PEER SENDER: the impossible worker_list/worker_status instruction is NEVER offered to a sender who can't act on it",
       !!parkedNote && !parkedNote.includes("worker_list"));
     // Card 085d9422 CR follow-up: a REAL self-contradiction shipped here — the notice's own UNCONDITIONAL
@@ -536,6 +536,36 @@ try {
       gaveUpEventsFor(wkr).some((e) => e.detail?.outcome === "parked"));
     check("(10) BOUNDED: once parked, it stops dispatching (no longer sitting in the pending FIFO)",
       pty.getPending(wkr).length === 0);
+  }
+
+  // ===== (11) Card 0ab96d24 — PLATFORM-ROLE SENDER: `[loom:redelivery-parked]` used to tell EVERY sender, =====
+  // ===== including the platform Lead, "there is no cross-session read available to a sender in your ========
+  // ===== position" — FALSE for `platform`: the Lead's session_transcript reads ANY session cross-project, ===
+  // ===== unconditionally. The notice must never assert that false universal to a platform-role sender. ======
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const lead = `gue-h-lead-${sfx}`, otherProjMgr = `gue-h-othermgr-${sfx}`;
+    mkSession({ id: lead, role: "platform" });
+    // Not the Lead's own worker (no parentSessionId link) and not a peer_message cross_project_message
+    // event either — this is the shape a real session_message send from the Lead to an arbitrary session
+    // takes, and it's exactly the shape that used to fall into the false-universal else-branch.
+    mkSession({ id: otherProjMgr, role: "manager" });
+    pty.setLive(lead); pty.setLive(otherProjMgr);
+    pty.setBusy(otherProjMgr); pty.setBusy(lead, false); // sender idle+live → parked notice delivers as a live turn
+
+    sessions.enqueueDurableMessage(otherProjMgr, "PLATFORM_SENDER_NEVER_LANDS", { sender: lead, taskId: null, kind: "agent" });
+    for (let i = 0; i <= REMINT_LIMIT; i++) pty.giveUpOn(otherProjMgr);
+
+    const leadSent = pty.sent.filter((s) => s.id === lead).map((s) => s.text);
+    const parkedNote = leadSent.find((t) => t.includes("[loom:redelivery-parked]"));
+    check("(11) PLATFORM SENDER: got the parked notice", !!parkedNote);
+    check("(11) PLATFORM SENDER: the notice does NOT assert the false universal 'there is no cross-session ... read available to a sender in your position'",
+      !!parkedNote && !/there is no cross-session/.test(parkedNote));
+    check("(11) PLATFORM SENDER: the notice is phrased conditionally ('if you DO have one'), never as a flat absolute",
+      !!parkedNote && parkedNote.includes("if you DO have one available"));
+    check("(11) PLATFORM SENDER: names the Lead's own sanctioned read (session_transcript) as the example, rather than staying silent about it",
+      !!parkedNote && parkedNote.includes("session_transcript"));
   }
 
   db.close();

@@ -7272,8 +7272,8 @@ export class SessionService {
       const canCheckRecipient = recipient?.role === "worker" && recipient.parentSessionId === sender;
       // Card 085d9422 CR follow-up: the `parkedDirective`/`directive.state` pointer belongs ONLY in the
       // canCheckRecipient branch — those are worker_list/worker_status FIELDS, so naming them is naming
-      // the tools, and the negative branch already says plainly that no such read exists for this sender.
-      // An earlier draft put that pointer in the notice's UNCONDITIONAL prefix, one sentence before this
+      // the tools, and the negative branch already says, conditionally (card 0ab96d24), that it knows of
+      // no such read for this sender. An earlier draft put that pointer in the notice's UNCONDITIONAL prefix, one sentence before this
       // clause's own "no read exists" text — a self-contradiction shipped to exactly the peer-sender case
       // card 417cea0a fixed (the recipient may not even BE a worker — a peer manager reached via
       // peer_message — so asserting "this worker's" state in text a peer sender reads was ALSO wrong).
@@ -7291,23 +7291,40 @@ export class SessionService {
       // 0f693dea) — this `db.listEvents` read is otherwise wasted whenever `canCheckRecipient` already
       // short-circuits the ternary; the park path is rare, so this was never a hot-path cost, just a
       // pointless one.
+      // Card 0ab96d24 — this else-arm used to assert, as a flat universal, "there is no cross-session
+      // transcript/state read available to a sender in your position." FALSE for the `platform` role: the
+      // Lead's `session_transcript` (mcp/platform.ts) reads ANY session's transcript by id alone, cross-
+      // project, unconditionally — and in two live incidents that exact read is what resolved the
+      // situation in a single call. A wrong claim about the WORLD invites verification; a wrong claim about
+      // the READER'S OWN CAPABILITIES suppresses it — nobody goes looking for a tool they were just told
+      // doesn't exist. Reworded to a conditional ("if you have one, use it") rather than hard-coding a
+      // `sender`-role check here: that phrasing stays true for the platform Lead TODAY, and for whatever
+      // future role/read this file doesn't yet know about — the old absolute claim already rotted once
+      // without this file changing at all (the Lead's session_transcript predates this fix).
       const recipientCheckClause = canCheckRecipient
         ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status (parkedDirective/directive.state) before assuming it's gone.`
         : this.db.listEvents(sender).some((e) => e.kind === "cross_project_message" && e.detail?.msgId === rootMsgId)
         ? `Check ${rootMsgId.slice(0, 8)} via peer_message_status before assuming it's gone.`
-        : `Loom has no read you can use to check on ${recipientId.slice(0, 8)} from here — there is no cross-session ` +
-          `transcript/state read available to a sender in your position.`;
+        : `Loom does not know of a cross-session transcript/state read for your position here — if you DO ` +
+          `have one available (e.g. the platform Lead's session_transcript), use it on ${recipientId.slice(0, 8)} ` +
+          `before assuming this is gone.`;
       // Card 78e4b3f2: the head preview is taken from the tag-STRIPPED text — `text` here may already carry
       // our own possible-duplicate tag (a re-mint frames it at creation, before any further give-up), and
       // showing that as the "head" would push the sender's actually-identifying content out of the fixed
       // 60-char slice window instead of showing it clearly (see stripPossibleDuplicateFrame's own doc).
+      // Card 0ab96d24 (DoD-5) — both real incidents behind this card resolved to a THIRD option neither of
+      // the notice's two implied choices (resend / drop) would have produced: send something DIFFERENT, or
+      // board it durably instead of resending at all. The board is worth naming here specifically because
+      // it's the one option that OUTLIVES a recipient recycle, which a resend does not.
       const note =
         `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (root ${rootMsgId.slice(0, 8)}, head: ` +
         `${JSON.stringify(stripPossibleDuplicateFrame(text).slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
         `submission attempts, ~${PARK_ENTER_WRITES} Enter-key writes, across ${PARK_MESSAGE_OBJECTS} independent retry levels, ` +
         `spanning ${PARK_HOLDS} ${GIVE_UP_HOLD_MS / 1000}s hold(s) — at least ${PARK_MIN_HOLD_SECONDS}s) and has STOPPED ` +
         `retrying it automatically — this is NOT proof it was never received (see worker_message's own docs for the ` +
-        `resend auto-join caveats). ${recipientCheckClause}`;
+        `resend auto-join caveats). ${recipientCheckClause} A resend isn't your only option either: if the content is ` +
+        `now stale, send something DIFFERENT instead; if it's a standing or safety-critical message, consider boarding ` +
+        `it as a durable card rather than resending — a board survives the recipient's recycles, a resend does not.`;
       // CR follow-up (card ccb407eb): this notice is ITSELF a one-shot terminal signal — by the exact
       // criterion this card applied to the six settle-nudge sites above, it must not be a bare enqueueStdin
       // a give-up could silently swallow one level up. Routed through enqueueDurableMessage exactly like
