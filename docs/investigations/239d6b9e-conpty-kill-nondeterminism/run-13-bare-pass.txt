@@ -1,0 +1,76 @@
+PASS  psAlive detector: this test's own process reads ALIVE
+PASS  psAlive detector: an implausible pid reads GONE
+[pty] spawnShell conptydll-baseline-hard bin=C:\WINDOWS\system32\cmd.exe cwd=C:\Users\danie\AppData\Local\Temp\loom-conptydll-esN9Q4
+PASS  [baseline-hard] spawnShell produced a real parent pid
+PASS  [baseline-hard] parent pid is alive before kill
+PASS  [baseline-hard] child pid is alive before kill
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\1d90ff5b7ecf\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\1d90ff5b7ecf\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] shell exit conptydll-baseline-hard code=-1073741510
+PASS  [baseline-hard] conpty_console_list_agent fork count is >=1 (crash surface exercised, as expected)
+PASS  [baseline-hard] parent pid confirmed gone (no orphan)
+PASS  [baseline-hard] child pid confirmed gone (no orphan)
+[pty] spawnShell conptydll-dll-hard bin=C:\WINDOWS\system32\cmd.exe cwd=C:\Users\danie\AppData\Local\Temp\loom-conptydll-esN9Q4
+PASS  [dll-hard] spawnShell produced a real parent pid
+PASS  [dll-hard] parent pid is alive before kill
+PASS  [dll-hard] child pid is alive before kill
+[pty] shell exit conptydll-dll-hard code=1
+PASS  [dll-hard] conpty_console_list_agent fork count is 0 (DLL branch skips the fork entirely)
+PASS  [dll-hard] kill() raised nothing into this process (nothing should touch the fork path here)
+PASS  [dll-hard] parent pid confirmed gone (no orphan)
+PASS  [dll-hard] child pid confirmed gone (no orphan)
+[pty] spawnShell conptydll-baseline-graceful bin=C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe cwd=C:\Users\danie\AppData\Local\Temp\loom-conptydll-esN9Q4
+PASS  [baseline-graceful] spawnShell produced a real parent pid
+PASS  [baseline-graceful] parent pid is alive before kill
+[pty-write] conptydll-baseline-graceful seq=1 tag=stop-ctrl-c gen=1 len=1 h=060c5eb2
+[pty-write] conptydll-baseline-graceful seq=2 tag=stop-ctrl-c gen=1 len=1 h=060c5eb2
+[pty] conptydll-baseline-graceful graceful stop: still live after interrupt — re-sending exit sequence
+[pty-write] conptydll-baseline-graceful seq=3 tag=stop-escalate-ctrl-c gen=1 len=1 h=060c5eb2
+[pty-write] conptydll-baseline-graceful seq=4 tag=stop-escalate-ctrl-c gen=1 len=1 h=060c5eb2
+[pty] conptydll-baseline-graceful graceful stop: still live after 6000ms — escalating to hard kill
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\1d90ff5b7ecf\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\1d90ff5b7ecf\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] shell exit conptydll-baseline-graceful code=-1073741510
+PASS  [baseline-graceful] conpty_console_list_agent fork count is >=1 (crash surface exercised, as expected)
+PASS  [baseline-graceful] parent pid confirmed gone (no orphan)
+[pty] spawnShell conptydll-dll-graceful bin=C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe cwd=C:\Users\danie\AppData\Local\Temp\loom-conptydll-esN9Q4
+PASS  [dll-graceful] spawnShell produced a real parent pid
+PASS  [dll-graceful] parent pid is alive before kill
+[pty-write] conptydll-dll-graceful seq=1 tag=stop-ctrl-c gen=1 len=1 h=060c5eb2
+[pty-write] conptydll-dll-graceful seq=2 tag=stop-ctrl-c gen=1 len=1 h=060c5eb2
+[pty] conptydll-dll-graceful graceful stop: still live after interrupt — re-sending exit sequence
+[pty-write] conptydll-dll-graceful seq=3 tag=stop-escalate-ctrl-c gen=1 len=1 h=060c5eb2
+[pty] shell exit conptydll-dll-graceful code=-1073741510
+PASS  [dll-graceful] conpty_console_list_agent fork count is 0 (DLL branch skips the fork entirely)
+PASS  [dll-graceful] kill() raised nothing into this process (nothing should touch the fork path here)
+PASS  [dll-graceful] parent pid confirmed gone (no orphan)
+
+✅ ALL PASS — against a REAL node-pty@1.1.0, a REAL 2-process tree (cmd.exe + ping.exe), and REAL kill() calls, with the fork spy + catch-all guard held open across the FULL teardown wait (not just the synchronous stop() call — the graceful path's real kill() is timer-deferred): on BOTH hard and graceful stop, the baseline (flag unset, today's default) forks conpty_console_list_agent as expected, LOOM_PTY_USE_CONPTY_DLL=1 skips that fork entirely, and in every trial the whole process tree is genuinely gone afterward, not just that stop() returned.

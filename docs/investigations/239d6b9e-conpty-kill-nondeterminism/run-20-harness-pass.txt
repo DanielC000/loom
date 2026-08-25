@@ -1,0 +1,26 @@
+ℹ excluded-dir test-shaped files, declared (gate-exempt: 4, not-a-test: 8):
+   - [gate-exempt] census/lib-guards.test.mjs
+   - [gate-exempt] census/phase0-positive-control.mjs
+   - [gate-exempt] census/phase1-forced-probe.mjs
+   - [gate-exempt] census/phase2-baseline.mjs
+   - [not-a-test] census/fixtures/collide-a.mjs
+   - [not-a-test] census/fixtures/collide-b.mjs
+   - [not-a-test] census/fixtures/pc-fail.mjs
+   - [not-a-test] census/fixtures/pc-pass-1.mjs
+   - [not-a-test] census/fixtures/pc-pass-2.mjs
+   - [not-a-test] census/lib.mjs
+   - [not-a-test] fixtures/fake-claude-cli.mjs
+   - [not-a-test] fixtures/fake-codescape-cli.mjs
+ℹ selection active: running 1/723 discovered hermetic tests (--only/--exclude applied)
+PASS  pty-conpty-dll-kill
+
+1/1 hermetic daemon tests passed. (pool size 3)
+ℹ NOT_HERMETIC (excluded from this gate — needs a live daemon and/or real claude; run manually, see each file's header): autonomy-rails, board-consistency, busy-flag, integration-e2e, manager-live, mcp-scope, merge-confirm-slow-gate-pending, merge-gate, messaging, mgmt-surface, orch-scope, orch-spawn, orchestration-e2e, platform-scope, recycle, scheduler, scheduler-disabled, scheduler-drain, skills-e2e, usage-limit-detect, usage-limit-resume, web-build-no-orphans, worker-report
+# RSS FLOOR — highest OBSERVED, not a proven peak (runner process only, not the full test-child tree — no cheap, reliable cross-platform way to sum spawned test-child RSS without an added subprocess; 7 sample(s) @ 5000ms): 60.96 MB
+# max inter-event gap (stall watchdog input): 31421ms
+# host CPU busy — SAMPLED DELTA (not cumulative), 6 sample(s) @ 5000ms: min 27.3% / mean 45.1% / max 54.4%
+# disk probe write latency — AWAIT-TIME PROXY (not a true OS queue-depth counter), 7 sample(s) @ 5000ms: min 1.74ms / mean 2.90ms / max 3.37ms
+# per-file test timing — aggregate 31.4s across 1 file(s), wall-clock 31.4s
+# slowest 1 file(s):
+    1.  31.4s  pty-conpty-dll-kill
+✅ hermetic daemon suite green — never touched prod.

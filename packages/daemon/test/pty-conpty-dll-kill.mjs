@@ -218,15 +218,20 @@ async function runTrial(label, { useDllFlag, mode, expectForkAtLeastOne, failOnC
   process.on("unhandledRejection", onUncaught);
   forkCalls = [];
   child_process.fork = spyFork;
+  // CARD 239d6b9e: `parentGone`/`childGone` capture the bounded poll's OWN result — see the comment at
+  // their use below for why a SECOND, unpolled probe of the same fact (which used to sit right before the
+  // `check()` calls, run fresh immediately after this poll already succeeded) was a bug, not belt-and-braces.
+  let parentGone = false;
+  let childGone = true;
   try {
     host.stop(id, mode);
     stoppedIds.add(id);
 
     // ===== teardown: the process (and its real child, where one exists) genuinely gone, not just that
     // stop() returned =====
-    await waitUntil(async () => !(await psAlive(parentPid)), { label: `${label} parent pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
+    parentGone = await waitUntil(async () => !(await psAlive(parentPid)), { label: `${label} parent pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
     if (spec.hasChildTree) {
-      await waitUntil(async () => !(await psAlive(childPid)), { label: `${label} child pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
+      childGone = await waitUntil(async () => !(await psAlive(childPid)), { label: `${label} child pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
     }
   } finally {
     child_process.fork = realFork;
@@ -243,9 +248,26 @@ async function runTrial(label, { useDllFlag, mode, expectForkAtLeastOne, failOnC
     console.log(`   [expected, baseline arm] a forked-child failure surfaced here too: ${caught?.message || caught}`);
   }
 
-  check(`${label} parent pid confirmed gone (no orphan)`, !(await psAlive(parentPid)));
+  // CARD 239d6b9e (was: a fresh, UNPOLLED `!(await psAlive(parentPid))` probe run here, right after the
+  // waitUntil above had ALREADY established the process gone). That second probe was never protective — a
+  // process cannot come back alive under the SAME pid once it's genuinely dead, so the only way it could
+  // ever disagree with the poll it immediately followed was Windows recycling the just-freed pid number to
+  // an unrelated new process before this file's own next powershell.exe helper spawn (for the probe itself)
+  // landed — and this file spawns one of those for every single psAlive/psChildPids call, many per trial.
+  // That is a false-positive generator, not a stronger check: every one of the four known flakes in this
+  // card's specimen table is exactly this assertion going red, on the BASELINE arm specifically — the one
+  // arm whose kill() path (WindowsPtyAgent.prototype.kill, node-pty@1.1.0's windowsPtyAgent.js, the
+  // `_useConpty && !_useConptyDll` branch) forks `conpty_console_list_agent` to resolve the real
+  // process list before its own explicit `process.kill(pid)` loop — and that fork reliably crashes with
+  // `AttachConsole failed` (see file header) before it can ever call back, so that explicit kill loop only
+  // ever fires off `_getConsoleProcessList()`'s OWN 5000ms fallback timer. The DLL arm's kill() never
+  // touches any of this (a straight `_inSocket.destroy()` + native kill), which is exactly why every DLL-arm
+  // equivalent of this check has passed every time. Asserting on the poll's OWN already-proven result closes
+  // that race without widening any timeout, adding a sleep, or adding a retry — the poll is still the same
+  // bounded wait it always was; this only removes a redundant, race-prone duplicate of it.
+  check(`${label} parent pid confirmed gone (no orphan)`, parentGone);
   if (spec.hasChildTree) {
-    check(`${label} child pid confirmed gone (no orphan)`, !(await psAlive(childPid)));
+    check(`${label} child pid confirmed gone (no orphan)`, childGone);
   }
 }
 
