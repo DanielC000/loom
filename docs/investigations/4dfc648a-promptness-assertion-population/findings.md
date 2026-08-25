@@ -261,3 +261,138 @@ the card asked to be reported honestly rather than rounded to a verdict.
 - Did not touch any test file, timeout constant, or test-daemon.mjs code. No production files were modified.
 - Did not render a verdict on DoD-5 (one mechanism vs. five) — §1's shape breakdown (A/B/C) and the row-2 note
   are offered as raw material for that call, not as an answer to it.
+
+---
+
+# Second session — card's current 7-item DoD, items 2 and 3 only
+
+The card was reopened with a renumbered 7-item DoD (see the card body); items 2 and 3 below refer to
+**that** list, not the DoD-1..6 labels used in sections 1-4 above (a different, earlier numbering). Items
+1, 4, 5, 6, 7 were explicitly out of this session's scope (they need `run_gate`, reserved by the lead).
+
+## 5. Item 2 — the `deploy-staleness` git ETIMEDOUT, chased separately and structurally
+
+**The timeout: `GIT_TIMEOUT_MS = 1000` (one second), `packages/daemon/src/deploy-staleness.ts:175`.**
+Consumed by `runGit()`, same file, lines 178-185:
+
+```ts
+function runGit(repoRoot: string, args: string[]): string {
+  return execFileSync("git", ["-C", repoRoot, ...args], {
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    windowsHide: true,
+    env: nonInteractiveEnv(),
+  });
+}
+```
+
+`execFileSync` with a `timeout` runs the child via Node's `spawnSync` internally and, on timeout, kills
+the child and throws an error carrying `code: 'ETIMEDOUT'` — this is the literal origin of the
+"spawnSync git ETIMEDOUT" text observed in rows 6-7 of the series. It is **not** the test file's own
+fixture-setup `execSync` calls (`packages/daemon/test/deploy-staleness.mjs`'s `git()`/`gitInc()`/`gitSh()`/
+`gitWeb()`/`gitNoWeb()`/`gitProc()` helpers) — none of those pass a `timeout` option, so none of them can
+themselves throw `ETIMEDOUT` (confirmed by reading every such call site in that file). The failure is in
+the **production code under test**, not the test's own fixture setup.
+
+**Is 1000ms defensible under the load that actually produced the failure?** The constant already carries
+a considered decision, documented in the same module (`deploy-staleness.ts:99-111`, card `c6e7ebe7`): it
+measured this exact call at 147-275ms idle and 220-465ms under **3x CPU oversubscription** (a ~4x
+margin) and explicitly rejected widening it for lack of evidence any real call had approached the budget.
+
+That measurement does not cover the load that produced rows 6-7. "3x CPU oversubscription" is
+compute-bound scheduling pressure on one process; the merge-gate contention this card is chasing is many
+**concurrent git child-process spawns** from other parallel test files (2-3 gate lanes, each running
+whichever test file the harness schedules there) plus real disk I/O — process-creation contention, not
+CPU-scheduling contention. `emit-compare-gate.mjs`/`emit-compare-gate-scope.mjs` alone spawn 12+ real git
+repos/worktrees per run (§6, below) — an ordinary neighbor in the same gate run. Windows process creation
+(`CreateProcess`) is markedly more expensive than POSIX `fork`, and `deploy-staleness.mjs` itself calls
+`computeDeployStaleness` (hence `runGit`) **17 separate times in one file** — each a fresh 1000ms-budgeted
+spawn; any single one tripping under contention fails the whole file.
+
+**Judgment: the `c6e7ebe7` margin was measured against a different load shape than the one that produced
+this failure, so "no observed call has approached budget" is not evidence the 1000ms is safe under a real
+gate run — but that is not sufficient grounds to widen it myself.** Per this card's own standing rule
+(⛔ DO NOT WIDEN TIMEOUT CONSTANTS — already bought a slower flake that way once), this is reported as a
+**decision for the lead**, not acted on. Options, weighed but not applied:
+- Widen `GIT_TIMEOUT_MS` — directly contraindicated by the card's own instruction, and still unmeasured
+  under the actual failure's load shape (nobody has captured this call's latency under genuine
+  multi-process git-spawn contention, only CPU oversubscription).
+- Retry once specifically on `ETIMEDOUT` (distinct from every other `unavailable()` cause) — bounded and
+  narrow, but the module's own doc (`c6e7ebe7`, point (b)) already considered and rejected distinguishing
+  a timeout from every other `unavailable()` cause for the one consumer that treats it uniformly
+  (`composeManagerStartupPrompt`), on grounds a retry-only change would need to re-litigate.
+- Leave as-is and treat this specimen as genuinely environmental under contention — consistent with this
+  document's own "ALL SIX REDS WERE ENVIRONMENTAL" finding (above).
+
+**Item 6 (one mechanism or several) is not this session's call, but this specimen is direct structural
+evidence for "several."** The `check()`-based promptness assertions (Shape A/B, §1) are in-process margin
+comparisons the process's own event loop can still recover from. The git ETIMEDOUT is a hard, OS-level
+subprocess-kill enforced by Node's `execFileSync` timeout — it throws (an uncaught-exception path, not a
+failed boolean assertion) before any `check()` in that call ever runs, and row 6 shows a *second*, genuinely
+different git failure (`git merge --squash failed`) in the same run. That is a categorically different
+failure surface from a `check()` racing a fixed ceiling, not a variant of the same thing.
+
+## 6. Item 3 — `emit-compare-gate.mjs` no longer needs 94% of its per-file budget
+
+**Fix applied: split the file in two, not widened via `TEST_TIMEOUT_OVERRIDES`.** The single file's cost
+was real, repeated git subprocess work — thirteen scenarios (`(A)`-`(L)`, plus a cheap unit-level `(M)`),
+each doing a real `git init`/commit/worktree-add, several with a real squash merge through
+`confirmWorkerMerge` — accumulated onto one file across five different cards (`2154b6ad`, `dd4349ff`, a
+manager code-review finding, `815b4b30`, `44968963`, `7183540f`). `TEST_TIMEOUT_MS` in
+`scripts/test-daemon.mjs` is a **per-FILE** ceiling, so the fix that touches no timeout constant is to
+stop asking one file to pay for all thirteen scenarios.
+
+**What changed:**
+- `packages/daemon/test/_emit-compare-fixtures.mjs` (new, leading `_` — excluded from harness discovery)
+  — every helper/constant both files share (`mk`, `seed`, `makeRepoWithBaseSrcFile`, `GUARD_BASENAMES`,
+  `FULL_GATE`, `REAL_TEST_DAEMON_SCRIPT`, etc.), so the split can't drift into two copies that quietly
+  diverge.
+- `packages/daemon/test/emit-compare-gate.mjs` (existing file, now scenarios `(A)`-`(G)` + `(M)`: the base
+  eligibility classification, the `dd4349ff` red-proof, and the two scope-boundary + one soundness case).
+- `packages/daemon/test/emit-compare-gate-scope.mjs` (new file: scenarios `(H)`-`(L)` — the
+  shell-metacharacter defence-in-depth case, the two `fixtures/`-scope cases, and the cap-queue-admission
+  race).
+- One stale doc-comment cross-reference fixed in the same commit: `packages/daemon/src/git/worktrees.ts`
+  named `test/emit-compare-gate.mjs` case `(J)` — `(J)` now lives in `emit-compare-gate-scope.mjs`, so the
+  comment was updated to point at the right file (it would otherwise have quietly gone stale the moment
+  this split landed).
+
+**Coverage check — same population, not a smaller one.** The pre-split file (`git show HEAD:packages/
+daemon/test/emit-compare-gate.mjs` at the commit that reopened this card) has **48** `check(...)` call
+sites. `emit-compare-gate.mjs` (post-split) has **30**; `emit-compare-gate-scope.mjs` has **18**. 30 + 18 =
+48 — every assertion site accounted for, none dropped, none duplicated. Both files ran clean standalone:
+`emit-compare-gate.mjs` — 45 PASS / 0 FAIL; `emit-compare-gate-scope.mjs` — 18 PASS / 0 FAIL (the higher
+runtime PASS count in file 1 is `GUARD_BASENAMES`-loop expansion inside scenarios `(A)`/`(D)`, both of
+which stayed in that file).
+
+**Margin, before/after (same host, same standalone-no-concurrency measurement style the card's own
+findings above used):**
+
+| | before (single file) | after |
+|---|---|---|
+| `emit-compare-gate.mjs` | ~112.5s / 120s ≈ **94%** | **34s / 120s ≈ 28%** |
+| `emit-compare-gate-scope.mjs` | (same file) | **28s / 120s ≈ 23%** |
+
+Both post-split files ran well clear of `TEST_TIMEOUT_MS` standalone — no `TEST_TIMEOUT_OVERRIDES` entry
+needed for either, and none was added. This does not by itself prove either file stays clear **under real
+gate contention** (2-3 concurrent lanes, other files also spawning git processes) — only that the
+94%-of-budget condition the card named is gone; a margin this wide (>70% headroom on each half) is no
+longer a plausible single point of failure the way the pre-split 94% was.
+
+**Verification run, both files:**
+- `node packages/daemon/test/emit-compare-gate.mjs` — direct, standalone: 45 PASS, 0 FAIL, exit 0, 34s.
+- `node packages/daemon/test/emit-compare-gate-scope.mjs` — direct, standalone: 18 PASS, 0 FAIL, exit 0,
+  28s.
+- `pnpm --filter @loom/daemon guards` — all 5 guards (`STATIC_GUARD_REPO_PATHS`, read live from
+  `packages/daemon/src/git/worktrees.ts` at run time, per this project's own doctrine on that list) passed,
+  required because this session touched `packages/daemon/test/**`.
+- `pnpm --filter @loom/daemon build` — clean (`tsc` + skill sync), run before both test invocations above.
+
+## What this second session did NOT do
+- Did not widen `GIT_TIMEOUT_MS` or any other timeout constant — see §5's explicit decision hand-off.
+- Did not run `run_gate` or the full suite, anywhere, for any reason (items 1, 4, 5, 6, 7 are out of this
+  session's scope and were not attempted).
+- Did not measure either split file's margin **under real gate contention** — only standalone, matching
+  how the card's own pre-split 94% figure was itself measured (an apples-to-apples before/after).
+- Did not touch `deploy-staleness.mjs`, `deploy-staleness.ts`, or any other test/production file besides
+  the emit-compare-gate split and the one stale-comment fix named above.

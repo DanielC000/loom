@@ -2300,7 +2300,7 @@ export interface EmitCompareGateResult {
  * moment ANY excluded-dir path changes needs no resolver to trust, so it cannot have this failure mode.
  *
  * COST, NAMED: this also forces the full gate for the previously-reduced case where a fixture change ships
- * alongside a real test file change that has nothing to do with the fixture (`test/emit-compare-gate.mjs`
+ * alongside a real test file change that has nothing to do with the fixture (`test/emit-compare-gate-scope.mjs`
  * case (J) — see that test's own updated expectation). That diff shape is not provably safe to reduce
  * without exactly the resolver this decision rejects, so the regression is accepted, not overlooked.
  */
