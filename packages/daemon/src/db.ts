@@ -531,14 +531,20 @@ CREATE TABLE IF NOT EXISTS wakes (
   -- default (fires via plain enqueueStdin, exactly as before this column existed).
   route TEXT
 );
--- Durable record of a gate/merge PendingOpRegistry op — a queryable TOMBSTONE, not just a "surfaced
--- pending" marker (card e3e40167, superseding the original edc1ec12/7afa6ea9 shape below). A row is
--- INSERTED the moment a "gate"/"merge" op is MINTED (SessionService's onOpMinted hook — see
--- PendingOpRegistry.attach's own doc), covering BOTH a fast op that settles inline within the sync-attach
--- budget and a slow one that degrades to pending — the original shape only ever wrote a row for the LATTER
--- (via onSurfacedPending), which made a fast op's opId indistinguishable from "never existed" once settled
--- (card e3e40167's central defect). surfaced_pending flips to 1 the moment a caller is actually told
--- "pending" (mirrors the old row-existence signal); state starts "pending" and moves to exactly one
+-- Durable record of a gate/merge/deploy PendingOpRegistry-or-equivalent op — a queryable TOMBSTONE, not
+-- just a "surfaced pending" marker (card e3e40167, superseding the original edc1ec12/7afa6ea9 shape
+-- below). A row is INSERTED the moment a "gate"/"merge" op is MINTED (SessionService's onOpMinted hook —
+-- see PendingOpRegistry.attach's own doc), covering BOTH a fast op that settles inline within the
+-- sync-attach budget and a slow one that degrades to pending — the original shape only ever wrote a row
+-- for the LATTER (via onSurfacedPending), which made a fast op's opId indistinguishable from "never
+-- existed" once settled (card e3e40167's central defect). A "deploy" op (card bed91595) does NOT go
+-- through PendingOpRegistry at all — deployOwnProject is a single synchronous span (mint the opId, run
+-- the gate, settle) with no separate "surfaced pending" window a caller can observe — so its row is
+-- inserted (state:'pending') and immediately settled back-to-back, in the same synchronous call, never
+-- surfaced_pending=1; see deployOwnProject's own comment for why this still closes the restart/eviction
+-- gaps card 8052977a's in-process cache (removed by bed91595) could not. surfaced_pending flips to 1 the
+-- moment a caller is actually told "pending" (mirrors the old row-existence signal); state starts
+-- "pending" and moves to exactly one
 -- TERMINAL value — "settled" (a normal settle, fast or surfaced), "evicted-dead-owner" (force-removed by
 -- evictDeadOwner because its owning manager died — the run() may still be executing, unreachable; this is
 -- NOT a verdict), or "orphaned-by-restart" (reconcileOrphanedGateOps found it still surfaced_pending AND
@@ -572,9 +578,13 @@ CREATE TABLE IF NOT EXISTS wakes (
 -- nowhere at all. Both kinds share one payload shape today; see PendingGateOpVerdict's own doc.
 CREATE TABLE IF NOT EXISTS pending_gate_ops (
   op_id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,             -- "gate" | "merge"
+  kind TEXT NOT NULL,             -- "gate" | "merge" | "deploy" (card bed91595)
   key TEXT NOT NULL,               -- the PendingOpRegistry key ("gate:<workerSessionId>" / "merge:<workerSessionId>")
-  owner_session_id TEXT NOT NULL,  -- who gets the synthetic nudge: the worker for "gate", the manager for "merge"
+                                    -- — or, for "deploy" (which never goes through PendingOpRegistry),
+                                    -- the same "<kind>:<sessionId>" naming convention purely for legibility;
+                                    -- never queried against (see findPendingGateOpByOpId's own scoping)
+  owner_session_id TEXT NOT NULL,  -- who gets the synthetic nudge: the worker for "gate", the manager for
+                                    -- "merge"/"deploy"
   task_id TEXT,
   branch TEXT,
   started_at TEXT NOT NULL,
@@ -1979,7 +1989,10 @@ export interface PendingGateOpVerdict {
  *  SessionService.reconcileOrphanedGateOps (card edc1ec12, generalized by card e3e40167). */
 export interface PendingGateOp {
   opId: string;
-  kind: "gate" | "merge";
+  /** Card bed91595 widened this from "gate" | "merge" to also include "deploy" — a deploy op's row is
+   *  minted and settled back-to-back in one synchronous span (see the schema doc above), never left in a
+   *  caller-visible "pending" state, but is otherwise a real tombstone row like the other two kinds. */
+  kind: "gate" | "merge" | "deploy";
   key: string;
   ownerSessionId: string;
   /** The scope anchor gate_status's tombstone read filters on — null only for a legacy row written before
@@ -2008,7 +2021,7 @@ export interface PendingGateOp {
 }
 interface PendingGateOpRow {
   op_id: string;
-  kind: "gate" | "merge";
+  kind: "gate" | "merge" | "deploy";
   key: string;
   owner_session_id: string;
   project_id: string | null;

@@ -730,6 +730,36 @@ function deriveMergeGateVerdict(
 }
 
 /**
+ * Card bed91595 — the `deployOwnProject` analogue of {@link deriveWorkerGateVerdict}/
+ * {@link deriveMergeGateVerdict}. Unlike those two, `deployOwnProject` never goes through
+ * `PendingOpRegistry` — it is a single synchronous `await` of `gateSemaphore.runExclusive`, so there is no
+ * separate `onSettle` callback; this is called directly, once, right after that `await` resolves. `result`
+ * is the plain {@link GateSequentialResult} the deploy's gate run produced. `deployStartedAt` is the
+ * epoch-ms GATE START (post-admission) instant `GateSemaphore.runExclusive` itself stamped — the SAME
+ * clock the `deploy` audit event's own `durationMs` already reads, never a second, independently-computed
+ * one. No `cancelled` branch: `deploy` is the one `GateType` `GateSemaphore.cancelQueued` refuses to
+ * cancel (see that method's own exhaustive-switch doc), and this call site never threads a `cancelSignal`
+ * into `runGateSequential` either, so `result.cancelled` is structurally never true here.
+ */
+function deriveDeployGateVerdict(
+  result: GateSequentialResult, deployStartedAt: number,
+): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } {
+  return {
+    kind: result.passed ? "pass" : "fail",
+    payload: {
+      durationMs: Date.now() - deployStartedAt,
+      steps: result.steps,
+      outputTail: result.outputTail,
+      ...(result.passed ? {} : { gateDetail: {
+        failedStep: result.failedStep, failingTest: result.failingTest,
+        exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? undefined,
+        timedOut: result.failedTimedOut,
+      } }),
+    },
+  };
+}
+
+/**
  * Card 7d492f8b: recover a genuinely-settled gate/merge op's REAL verdict from its own durable audit
  * events ({@link Db.findGateOpEventsByOpId}, keyed off the `opId` every `evt()` closure now stamps onto
  * its detail) — the fix for `SessionService.reconcileOrphanedGateOps` misreporting a settled op as
@@ -3466,6 +3496,19 @@ export class SessionService {
     // is stamped onto the audit event below and the gate child's env (`gateOpIdEnvOverride`) so its own
     // NDJSON run-summary row is attributable too.
     const opId = randomUUID();
+    // DURABLE TOMBSTONE (card bed91595, closing DoD-2 of card 8052977a): mint the row THE MOMENT this op
+    // is created — same "onOpMinted" discipline merge/worker gate ops follow (see their own onOpMinted
+    // docs) — even though deploy never goes through PendingOpRegistry. Unlike those two, deploy is a
+    // single synchronous span with no caller-visible "pending" window, so this row is settled back-to-back
+    // with the insert below (right after `result` resolves), never left surfaced_pending — but it is
+    // written to disk (better-sqlite3 is synchronous) BEFORE this function returns the opId to its caller,
+    // so it survives a restart that happens after the response the same way a merge/worker tombstone does.
+    const opMintedAt = new Date().toISOString();
+    const deployTombstoneKey = `deploy:${managerSessionId}`;
+    this.db.insertPendingGateOp({
+      opId, kind: "deploy", key: deployTombstoneKey, ownerSessionId: managerSessionId, projectId: project.id,
+      taskId: null, branch: null, startedAt: opMintedAt, state: "pending", surfacedPending: false,
+    });
     // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
     // rather than running alongside it unbounded. See GateSemaphore's class doc. "high" priority (card
     // 24642c3d) — a deploy is a deliberate human-triggered action, not a worker self-check retry. The
@@ -3490,6 +3533,9 @@ export class SessionService {
       "high",
     );
     const deployConcurrentGatesMax = getDeployConcurrentGatesMax?.() ?? deployConcurrentAtStart;
+    // Settle the tombstone minted above — see that insert's own comment for why this fires unconditionally,
+    // back-to-back with the mint, rather than via a separate onSettle callback the way merge/worker do.
+    this.db.settlePendingGateOp(opId, deriveDeployGateVerdict(result, deployStartedAt));
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
@@ -3600,6 +3646,14 @@ export class SessionService {
    * candidate was ever filtered out, so a miss really does mean gone); `"unknown"` is the honest-ambiguity
    * sink for a SCOPED caller's miss — it covers BOTH "this id genuinely never existed" AND "this id exists
    * but isn't yours", and a scoped caller can never tell those apart (nor should it be able to).
+   *
+   * ⚠️ THIS POSITIVE ASSERTION HOLDS FOR `deploy` OPIDS TOO, as of card bed91595 (closing DoD-2 of card
+   * 8052977a, which shipped an in-process, restart-and-eviction-losing WORKAROUND instead — since removed
+   * from `mcp/orchestration.ts`): `deployOwnProject` now writes a `pending_gate_ops` row for every deploy
+   * it actually runs, the SAME table this unscoped scan already covers — so a `deploy` opId is no longer a
+   * silent third gate kind this positive assertion was blind to. The claim above was already true for
+   * "merge"/"gate" rows before this card; this closes the one remaining gap in "every manager call site",
+   * not a widening of the claim itself.
    *
    * `scopeSessionId`/`scopeProjectId` (card fc243a43 — the worker-facing `gate_status`, widened by
    * e3e40167 to also cover the tombstone fallback) are threaded straight to BOTH
@@ -3747,7 +3801,10 @@ export class SessionService {
     // Not live — fall back to the durable tombstone, scoped the identical way.
     const t = this.db.findPendingGateOpByOpId(opId, scopeSessionId, scopeProjectId);
     if (t.kind === "found") {
-      const gateType: GateType = t.record.kind === "merge" ? "merge" : "worker";
+      // Card bed91595: widened from a 2-way ternary to name all three tombstone kinds explicitly — a
+      // silent `: "worker"` fallback would have mis-typed a "deploy" row's gateType as "worker" the moment
+      // this card started writing deploy tombstones.
+      const gateType: GateType = t.record.kind === "merge" ? "merge" : t.record.kind === "deploy" ? "deploy" : "worker";
       // SETTLED VERDICT (card 4c5bf820, widened by 9f6598dd): populated for a "gate" row via
       // deriveWorkerGateVerdict, and — since 9f6598dd — for a "merge" row too, via deriveMergeGateVerdict
       // (previously a "merge" row's verdict/verdictPayload stayed NULL by construction; that was exactly
@@ -6382,6 +6439,13 @@ export class SessionService {
   reconcileOrphanedGateOps(): number {
     let cleared = 0;
     for (const row of this.db.listSurfacedPendingGateOps()) {
+      // STRUCTURALLY UNREACHABLE for "deploy" (card bed91595): `deployOwnProject`'s tombstone is minted
+      // and settled back-to-back in one synchronous span (see that insert's own comment) — it never calls
+      // `markPendingGateOpSurfaced`, so `surfaced_pending` stays 0 for every deploy row, and this method's
+      // own `listSurfacedPendingGateOps()` only ever selects `surfaced_pending=1` rows. Named explicitly
+      // (rather than silently folded into the `isMerge` ternary below, which would mis-describe a "deploy"
+      // row as a worker gate) so this narrows `row.kind` back to "gate" | "merge" for the rest of the loop.
+      if (row.kind === "deploy") continue;
       const isMerge = row.kind === "merge";
       // LINEAGE-RESOLVED (card 05c36bf4, CR Major 2): row.ownerSessionId is the raw id captured when the
       // op was surfaced pending — if that owner recycled before the daemon restart that orphaned this row,

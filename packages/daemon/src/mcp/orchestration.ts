@@ -158,100 +158,18 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * actually be killed. Both are documented on `gate_status`/`gate_queue` below; keep them in sync too.
  */
 /**
- * Card 8052977a: `deploy` (registered below) is SYNCHRONOUS and only ever hands the caller an `opId`
- * (card 720bb7ad) AFTER the run has already settled (`sessions.deployOwnProject`) — and unlike a merge/
- * worker gate op, a deploy never writes a `pending_gate_ops` tombstone (`Db.insertPendingGateOp` has
- * exactly two call sites, merge and worker — see that method's callers — deploy is a THIRD gate kind that
- * lives in neither registry). So `gate_status` on the very id `deploy` just returned fell through both
- * lookup layers (`GateSemaphore.findByOpId` — nothing live, it already settled; `Db.findPendingGateOpByOpId`
- * — no row was ever written) straight to the UNSCOPED `never_existed` branch: a POSITIVE "this id was never
- * minted" claim that is false for the exact id the caller was just handed.
- *
- * FIX: track every `opId` `deploy` actually returns, in-process, in a small bounded set (`noteDeployOpId`,
- * called from the `deploy` handler below) — NOT a durable tombstone (that's the DoD's costlier option-b;
- * this is option-a, extending the existing `"unknown"` vocabulary instead of overloading `never_existed`,
- * per the card). `gate_status`'s handler consults it ONLY when `sessions.gateStatus` already answered
- * `never_existed`: a hit means "a real deploy minted this id, we just don't retain its outcome here" —
- * reported as `"unknown"`, the SAME honest word the worker-scoped path already uses for its own "can't
- * positively assert absence" case (see `SessionService.gateStatus`'s doc). A miss (an id we never handed
- * out at all — the genuinely-bogus-id case) is untouched and still correctly reads `never_existed`; that
- * negative arm is load-bearing (see the card's DoD-3) and this cache can only ever ADD an `"unknown"`/
- * `"ambiguous"` result, never remove a real `never_existed` one.
- *
- * PREFIX RESOLUTION (manager review, this same card): `gate_status`'s OWN description promises the FULL id
- * OR an unambiguous 8-char PREFIX — the short id Loom displays everywhere — and `SessionService.gateStatus`
- * genuinely honours that for merge/worker ops (both `GateSemaphore.findByOpId` and
- * `Db.findPendingGateOpByOpId` prefix-resolve). A bare `Set.has(opId)` here would silently NOT: a prefix of
- * a tracked deploy opId falls through to `never_existed` exactly like a bogus one, half-covering the
- * headline case ("paste the id you were just handed") since Loom shows the SHORT form everywhere. Fixed by
- * resolving against the tracked set with the SAME `resolveIdPrefix` helper (`id-prefix.ts`) every other
- * id-prefix surface in this router already uses — full id or 8-char-plus unambiguous prefix wins `found`
- * (⇒ `unknown`), two-plus tracked ids sharing that prefix ⇒ `ambiguous` (naming them, same message shape
- * `SessionService.gateStatus`'s own ambiguous branches already produce), zero ⇒ untouched, still
- * `never_existed`.
- *
- * TWO REAL, ACKNOWLEDGED GAPS (manager review, this same card) — this fix is a genuine improvement for
- * the case the card's own trap describes (a manager pasting the opId it was JUST handed), not a complete
- * closure of the underlying "deploy has no durable record" gap. Both stem from the same root cause: this
- * cache is in-process, not a tombstone.
- *   (1) RESTART DURABILITY: `deployOwnProject` itself never restarts the daemon (verified by reading its
- *       full body — a plain synchronous `await` of a subprocess run of the project's OWN configured
- *       `deployCommand`, then an audit-event write and a return; no call to `requestDaemonRestart`/
- *       `daemon_restart`, no `process.exit`, no supervisor IPC anywhere in it or its callees). Since a
- *       DEAD process cannot deliver a synchronous MCP response, this cache is STRUCTURALLY guaranteed warm
- *       the instant the caller receives `{deployed,opId}`. But it does NOT survive a daemon restart that
- *       happens AFTER that response and BEFORE `gate_status` is queried — from ANY cause: this SAME
- *       deploy's own natural follow-up `daemon_restart` call (the documented, SEPARATE mechanism for
- *       bringing a merged daemon-src change live — see this project's CLAUDE.md "Self-hosting" section),
- *       an unrelated restart from a different merge on a busy fleet, or a crash. "Did my deploy land" is
- *       realistically a POST-restart question exactly when the deployed project IS this same daemon, so
- *       that workflow shape still falls through to `never_existed` — consistent with every other
- *       "live-only, doesn't survive restart" caveat already documented on this tool (the live GateSemaphore
- *       registry this same lookup already depends on has the identical limitation).
- *   (2) EVICTION: once more than `deployOpIdTrackMax` opIds have been tracked since the last restart,
- *       the oldest is evicted and a `gate_status` query for THAT (real, once-tracked) opId reverts to
- *       `never_existed` — the SAME conflation this card exists to fix, one layer out. Sized generously
- *       (500, not the original 50) precisely because there is no cheap way to make eviction itself honest
- *       here — a UUID string is ~36 bytes, so even 500 entries cost single-digit KB, and `deploy` is
- *       rate-limited to 5/manager/10min (a deliberate human action, never a retry loop), so 500 comfortably
- *       outlasts the realistic "check shortly after" window this fix targets, without pretending eviction
- *       can't still bite over a long-uptime, high-deploy-volume daemon.
- * A durable `pending_gate_ops` tombstone for `deploy` (the DoD's option-b) would close BOTH gaps for real;
- * that needs `sessions/service.ts`/`db.ts`, out of reach under this card's own constraint — worth carding
- * as a follow-up rather than treated as done here.
+ * Card 8052977a shipped an in-process, best-effort WORKAROUND here (`noteDeployOpId`/`recentDeployOpIds`/
+ * `resolveDeployOpId`) for `deploy`'s missing durable record — that card's own DoD-2 named the real fix
+ * ("a durable `pending_gate_ops` tombstone for deploy") as its costlier option-b and explicitly left it
+ * open. Card bed91595 ships that option-b (`SessionService.deployOwnProject` now writes a real
+ * `pending_gate_ops` row, mint-then-settle, for every deploy it runs — see that method's own comment) and
+ * REMOVES this workaround entirely: a `deploy` opId now resolves through `sessions.gateStatus`'s ordinary
+ * tombstone fallback, exactly like a merge/worker gate op, so it never reaches the `never_existed` branch
+ * below for a real id in the first place — there is nothing left for an in-process reclassification to
+ * catch. This also closes BOTH gaps the removed workaround's doc used to name as acknowledged limits: the
+ * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
+ * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
  */
-let deployOpIdTrackMax = 500;
-const recentDeployOpIds = new Set<string>();
-function noteDeployOpId(opId: string | undefined): void {
-  if (!opId) return;
-  recentDeployOpIds.delete(opId); // re-insert at the end so a repeat opId still counts as "most recent"
-  recentDeployOpIds.add(opId);
-  if (recentDeployOpIds.size > deployOpIdTrackMax) {
-    const oldest = recentDeployOpIds.values().next().value;
-    if (oldest !== undefined) recentDeployOpIds.delete(oldest);
-  }
-}
-/** TEST-ONLY (mirrors `deploy.ts`'s `__resetDeployRateLimitState`) — override the tracking bound and
- *  clear all tracked opIds, so a test can exercise the eviction path without 500 real deploys. */
-export function __setDeployOpIdTrackMaxForTest(max: number): void {
-  deployOpIdTrackMax = max;
-  recentDeployOpIds.clear();
-}
-
-/**
- * Resolve `ref` against the tracked deploy opIds as EITHER a full id OR an unambiguous prefix — same
- * `resolveIdPrefix` contract every other id-prefix surface in this router already uses (full id always
- * wins regardless of length; a shorter, non-exact ref is `"none"`, too short to resolve safely). Returns
- * the SINGLE tracked opId on `"found"` (not the caller's possibly-short `ref`) so the handler never has to
- * re-derive which real opId matched.
- */
-function resolveDeployOpId(ref: string): { kind: "found"; opId: string } | { kind: "ambiguous"; ids: string[] } | { kind: "none" } {
-  const r = resolveIdPrefix(Array.from(recentDeployOpIds, (id) => ({ id })), ref);
-  if (r.kind === "found") return { kind: "found", opId: r.record.id };
-  if (r.kind === "ambiguous") return { kind: "ambiguous", ids: r.ids };
-  return { kind: "none" };
-}
-
 function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
@@ -433,29 +351,10 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "live registry yet (a narrow just-started or post-restart window) — wait and re-check rather than " +
       "treating it as stuck. `never_existed` is a POSITIVE assertion the id was never minted at all — never " +
       "confuse it with `settled` (a real op DID run, you just don't have its outcome from this tool). " +
-      "`unknown` (card 8052977a) is the ONE narrow exception to that positive assertion: a `deploy` opId " +
-      "(from the `deploy` tool, if registered) never writes a durable tombstone the way a merge/worker gate " +
-      "op does, so `gate_status` can't tell it apart from a bogus id by the tombstone alone — this daemon " +
-      "process instead recognizes an opId it itself just handed you from `deploy` and reports the honest " +
-      "`unknown` (a real op, no verdict retained here — you already have its outcome from `deploy`'s own " +
-      "return) rather than a false `never_existed`. This recognition honours the SAME full-id-or-8-char-" +
-      "prefix contract as the rest of this tool — a short id-prefix of a tracked `deploy` opId ALSO reads " +
-      "`unknown`, not just the full id; a prefix matching more than one tracked `deploy` opId reads " +
-      "`ambiguous` (naming them), the identical shape an ambiguous merge/worker prefix already returns. " +
-      "That recognition is in-process, best-effort, and " +
-      "BOUNDED — it does NOT survive a daemon restart (from ANY cause, including this same deploy's own " +
-      "follow-up `daemon_restart` call to bring the change live — \"did my deploy land\" asked AFTER that " +
-      "restart still correctly falls through to `never_existed`, exactly like every other live-only, " +
-      "restart-sensitive signal this tool already documents), and only retains the most recent several " +
-      "hundred deploy opIds — an opId that ages out past that bound ALSO reverts to `never_existed` even " +
-      "though it was real. Neither gap is a defect in THIS tool so much as an inherent limit of an " +
-      "in-process record instead of a durable one. A `never_existed` you see IMMEDIATELY after `deploy` " +
-      "hands you an id is still fully reliable (this recognition is structurally guaranteed warm the " +
-      "instant you receive that id). Only treat `never_existed` as inconclusive rather than proof-of-bogus " +
-      "for a `deploy` opId you're re-checking SOME TIME LATER — across a daemon restart, or after many " +
-      "other deploys since — where it may just mean this recognition no longer covers it. Every OTHER id " +
-      "still gets the ordinary positive-assertion treatment above — a genuinely bogus id is never " +
-      "reclassified either way. " +
+      "A `deploy` opId (from the `deploy` tool, if registered) is resolved the SAME way as a merge/worker " +
+      "gate opId — it writes its own durable `pending_gate_ops` tombstone (card bed91595), so it reaches " +
+      "`settled` (with a real verdict — see below) rather than any special-cased `unknown`; a `deploy` " +
+      "opId never_existed only means genuinely bogus, exactly like every other kind. " +
       "`ambiguous` (with `error` naming the matching opIds) means your prefix matches more than one op — " +
       "pass more characters or the full id; it is a DISTINCT outcome from `never_existed`, never fold the " +
       "two together. `elapsedMs` is PHASE-SCOPED to `state` while `queued`/`running` (the SAME way " +
@@ -494,22 +393,10 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // .mjs's role:"worker" server build). Deferring to call time matches how every other db read in
         // this router already works, and costs nothing extra on the real path (a session row read).
         const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.());
-        // Card 8052977a: a `deploy` opId never mints a tombstone, so a genuine deploy op reads back here
-        // exactly like a bogus one — see `noteDeployOpId`'s doc just above `registerGateStatus`. Only
-        // ever RE-CLASSIFIES an already-`never_existed` result — via the FULL id or an unambiguous
-        // PREFIX (`resolveDeployOpId`, matching `gate_status`'s own documented "full id or 8-char prefix"
-        // contract) — into the honest `"unknown"` or `"ambiguous"`; every other state (including a real
-        // `never_existed` for an id/prefix we never handed out) is untouched.
-        if (result.state === "never_existed") {
-          const deployMatch = resolveDeployOpId(opId);
-          if (deployMatch.kind === "found") return ok({ ...result, state: "unknown" as const });
-          if (deployMatch.kind === "ambiguous") {
-            return ok({
-              state: "ambiguous", gateType: null, elapsedMs: null, idleMs: null,
-              error: `ambiguous opId prefix '${opId}' — it matches ${deployMatch.ids.join(", ")}; pass more characters or the full id`,
-            });
-          }
-        }
+        // Card bed91595: `deploy` now writes a real `pending_gate_ops` tombstone (see
+        // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
+        // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
+        // needed here any more (card 8052977a's in-process cache/reclassification is removed).
         return ok(result);
       } catch (e) {
         return ok({ error: (e as Error).message });
@@ -3765,16 +3652,16 @@ export class OrchestrationMcpRouter {
             "outputTail,opId} with a bounded stdout+stderr tail to diagnose from. `opId` (card 720bb7ad) " +
             "correlates this run to the daemon's own `deploy` audit event and, if the project's gate command " +
             "shells out to `pnpm --filter @loom/daemon test:daemon`, to that run's own gate-timing NDJSON " +
-            "row — absent only when refused before any host exec was attempted (unconfigured/rate-limited).",
+            "row — absent only when refused before any host exec was attempted (unconfigured/rate-limited). " +
+            "It also durably resolves via `gate_status(opId)` (card bed91595) — the same result this call " +
+            "already returned, recoverable later, across a restart, without having to have caught it here.",
           inputSchema: strictShape({ reason: z.string() }),
         },
         async ({ reason }) => {
           try {
             const r = await sessions.deployOwnProject(managerSessionId, reason);
-            // Card 8052977a: record every opId this tool actually hands out, so a manager pasting it
-            // straight into gate_status gets the honest "unknown" instead of a false "never_existed" —
-            // see noteDeployOpId's doc above registerGateStatus.
-            noteDeployOpId(r.opId);
+            // Card bed91595: `deployOwnProject` now writes its own durable `pending_gate_ops` tombstone —
+            // no in-process recording needed here any more (card 8052977a's cache is removed).
             return ok(r);
           } catch (e) {
             return ok({ error: (e as Error).message });
