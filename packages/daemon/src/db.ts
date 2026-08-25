@@ -1964,6 +1964,15 @@ export interface PendingGateOpVerdict {
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
   emitCompareNotHermeticExcluded?: string[];
+  /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
+   *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.
+   *  Undefined-means-not-determinable, same discipline as `emitCompareReduced` above: `undefined` means
+   *  either this op never reached a landed squash (a rejection, an error, or the ALREADY_MERGED path —
+   *  `finishAlreadyMerged` never sets `commitSubject`, since no NEW commit lands there) or the row predates
+   *  this card. Populated on the SAME `merged:true` outcome `confirmWorkerMerge` always sets
+   *  `commitSubject` on — broader than `gateCap`/`outputTail`'s two-dominant-paths scope, since the subject
+   *  is set unconditionally on every landed squash regardless of which return branch is taken. */
+  commitSubject?: string;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

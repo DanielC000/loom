@@ -16,7 +16,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -710,6 +710,10 @@ function deriveMergeGateVerdict(
       ...(v.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: v.emitCompareIdenticalCount } : {}),
       ...(v.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: v.emitCompareTestFiles } : {}),
       ...(v.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: v.emitCompareNotHermeticExcluded } : {}),
+      // Card 7a1a76e9 DoD-2: the landed squash subject — `merged:true` only (a rejection/error never lands
+      // a new commit, so `v.commitSubject` is never set there); see `PendingGateOpVerdict.commitSubject`'s
+      // own doc for the ALREADY_MERGED-path caveat (that path bypasses this function's onSettle entirely).
+      ...(v.merged && v.commitSubject !== undefined ? { commitSubject: v.commitSubject } : {}),
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -3713,6 +3717,14 @@ export class SessionService {
      *  `undefined` only when nothing was ever recorded (a legacy row, a not-yet-settled row). Purely
      *  additive: does not replace `passed`/`cancelled`, which stay exactly as before this card. */
     outcome?: PendingGateOpVerdictKind;
+    /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
+     *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
+     *  answer this at all (the subject existed only on the sync return and, before DoD-1, the async
+     *  `[loom:merge-done]` nudge). Same undefined-means-not-determinable discipline as `emitCompareReduced`
+     *  above: `undefined` means this op never landed a new squash (a rejection, an error, the ALREADY_MERGED
+     *  path, or a "gate" self-check row) or the row predates this card — never fabricated. Populated for
+     *  "merge" rows only, on a `passed:true` (merged) outcome only — a rejection/error never lands a commit. */
+    commitSubject?: string;
   } {
     const scoped = scopeSessionId != null || scopeProjectId != null;
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
@@ -3777,6 +3789,9 @@ export class SessionService {
           ...(payload?.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: payload.emitCompareIdenticalCount } : {}),
           ...(payload?.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: payload.emitCompareTestFiles } : {}),
           ...(payload?.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: payload.emitCompareNotHermeticExcluded } : {}),
+          // Card 7a1a76e9 DoD-2: same "written to verdict_payload_json but never read back" gap e2b6f900/
+          // 725dc89a already closed for the concurrency triple / reduced-gate facts, one field over.
+          ...(payload?.commitSubject !== undefined ? { commitSubject: payload.commitSubject } : {}),
           ...settleTimingFields,
         }
         : t.record.verdict === "cancelled"
@@ -10948,13 +10963,16 @@ export class SessionService {
   ): Promise<{
     filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
     patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
-    behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean;
+    behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean; tasklessSubjectPreview?: string;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
+    // Multi-repo epic (49136451) phase 2: resolved here (moved up from its original spot below, which
+    // still uses this same value) so the taskless subject preview below has it in scope too.
+    const repoPath = resolveRepoByKey(project, worker.repoKey).path;
     // Prospective commit subject (card b88704bb) — same derivation mergeBranch uses (task title's first
     // line, trimmed); absent entirely for a taskless worker rather than fabricated from the branch name.
     // FAIL SAFE (card cf60a32a): a missing/unreadable task must never break this review, so getTask's
@@ -10965,6 +10983,18 @@ export class SessionService {
     const subjectPreview = rawTitle
       ? { rawTitle, commitSubject: toConventionalSubject(rawTitle), coerced: toConventionalSubject(rawTitle) !== rawTitle }
       : undefined;
+    // Card 7a1a76e9 DoD-4: a taskless worker has no `rawTitle`/`commitSubject` to preview above (by
+    // design — see this method's own class doc) — NECESSARY but NOT SUFFICIENT on its own (the card's
+    // primary defect is that the QUEUED merge path goes silent at LANDING regardless of what this preview
+    // shows; see DoD-1/DoD-2). Still worth surfacing: mirrors `mergeBranchLocked`'s own DoD-3 derivation
+    // (`deriveTasklessSubject` — the branch's tip commit subject) so a reviewer sees what will actually
+    // land instead of discovering it only after confirming. `undefined` (never a fabricated placeholder)
+    // when the branch has no readable commit at all — the eventual merge falls back to the branch name in
+    // that case too, and this preview stays honestly silent rather than inventing one. Coerced through the
+    // SAME toConventionalSubject the eventual squash applies, so this is byte-for-byte what will land —
+    // the same "never drift from what actually lands" property `commitSubject` already carries above.
+    const tasklessRawSubject = rawTitle ? undefined : await deriveTasklessSubject(repoPath, worker.branch, { timeoutMs: this.gitOpMs });
+    const tasklessSubjectPreview = tasklessRawSubject ? toConventionalSubject(tasklessRawSubject) : undefined;
     // RETRACTED-PREMISE backstop (card cf60a32a — the mechanical half of `0fa32321`): a 4th warn-never-block
     // sibling, distinct from `coerced` above — `coerced` is blind to a title that's ALREADY valid
     // Conventional form (e.g. `fix(x): …`) whose BODY was since retracted, since toConventionalSubject is a
@@ -10980,7 +11010,7 @@ export class SessionService {
     // Multi-repo epic (49136451) phase 2: this manager-facing diff/review is against ONE worker's ONE
     // worktree — resolve against the SESSION's own stamped repoKey (see Session.repoKey's doc), not
     // project.repoPath, so a manager reviewing a secondary-repo worker's diff sees the actual branch.
-    const repoPath = resolveRepoByKey(project, worker.repoKey).path;
+    // (`repoPath` itself is now resolved earlier in this method — see the DoD-4 comment above.)
     // DEFAULT: a bounded diffstat (per-file ± + totals) so step-1 can't overflow the display on a big diff.
     // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag. An
     // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
@@ -11053,6 +11083,7 @@ export class SessionService {
       ...(diff.hint ? { hint: diff.hint } : {}),
       ...(behindMain ? { behindMain } : {}),
       ...(subjectPreview ?? {}),
+      ...(tasklessSubjectPreview ? { tasklessSubjectPreview } : {}),
     };
   }
 
@@ -13782,9 +13813,18 @@ export class SessionService {
         // the bare `reason` string, so this echo is never the empty "build gate failed" the card's two
         // incidents were about. Falls back to `reason` only for a return site that predates `detailText`
         // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
+        // Card 7a1a76e9 DoD-1: the landed squash subject (card b88704bb's `commitSubject`, already on the
+        // sync return above) was unreachable on the QUEUED path — this async nudge is the ONE surface every
+        // queued merge is guaranteed to reach, and it never carried it. Always set on a landed merge
+        // (`merge.subject` in confirmWorkerMerge's own return construction is unconditional on this path),
+        // so this is present on every ordinary green settle, not gated on a rarer condition like the notes
+        // above it.
+        const subjectNote = outcome.ok && outcome.value.merged && outcome.value.commitSubject
+          ? ` subject="${outcome.value.commitSubject}"`
+          : "";
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during

@@ -624,6 +624,12 @@ try {
     // this op settled under — proving the NDJSON run-summary row a real `pnpm --filter @loom/daemon
     // test:daemon` child would write is now attributable back to this exact op.
     check("(e2e merge verdict pass — 720bb7ad DoD-3) the gate child's envOverride carries LOOM_GATE_OP_ID matching this op's own opId", capturedEnvOverride?.LOOM_GATE_OP_ID === opId);
+    // Card 7a1a76e9 DoD-2 — THE FIX: the landed squash subject (card b88704bb's commitSubject — the task
+    // title "GST-MVERDICT-PASS-TASK" is bare prose, coerced to "chore: ...") now round-trips through the
+    // tombstone too — the documented "if you need the answer sooner" poll for a QUEUED merge, which
+    // previously could not answer this at all (gate_status carried no subject field whatsoever).
+    check("(e2e merge verdict pass — 7a1a76e9 DoD-2 FIX) commitSubject round-trips through the tombstone, past registry eviction, no nudge read anywhere in this test",
+      status.commitSubject === "chore: GST-MVERDICT-PASS-TASK");
   }
 
   // ── (e2e merge, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) the merge-gate analogue of the worker
@@ -736,6 +742,10 @@ try {
       check("(e2e merge verdict fail — 3407caad) sync result carries gateProximity on the fail path too", value.gateProximity?.nearBudget === false && value.gateProximity?.step === "pnpm gate");
     }
     check("(e2e merge verdict fail — 3407caad) gate_status ALSO round-trips proximity for a settled merge FAIL", status.proximity?.nearBudget === false);
+    // Card 7a1a76e9 DoD-2: a rejection never lands a new commit, so `commitSubject` must be ABSENT here —
+    // never a fabricated value — mirroring `emitCompareReduced`'s own scope (populated on a landed merge
+    // only, not merely "a gate ran").
+    check("(e2e merge verdict fail — 7a1a76e9 DoD-2) commitSubject is absent on a rejection (no new commit landed)", status.commitSubject === undefined);
   }
 
   // ── (e2e merge, card 9f6598dd — NEGATIVE CONTROL) a GATELESS project's merge never spawns a gate at

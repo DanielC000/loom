@@ -213,6 +213,12 @@ try {
     check("(1) pushed with kind:\"warning\" (a Loom operational nudge — same-route coalescing is correct)", nudges[0] && nudges[0].kind === "warning");
     check("(1) carries the task id AND the SAME opId the pending response returned (card 369d8824 correlation stamp)",
       nudges[0] && nudges[0].text.includes("task t1") && nudges[0].text.includes(pendingOpId1));
+    // Card 7a1a76e9 DoD-1: the landed squash subject (card b88704bb's commitSubject, "chore: t1" — task
+    // title "t1" is bare prose, coerced) is now carried on THIS async nudge — the ONE surface every QUEUED
+    // merge is guaranteed to reach. Before this card the subject was reachable only on the rare fast/
+    // synchronous settle, never here.
+    check("(1) carries the landed squash subject (card 7a1a76e9 DoD-1 — the queued path was previously silent on this)",
+      nudges[0] && nudges[0].text.includes('subject="chore: t1"'));
     check("(1) the merge actually landed on main (the underlying behavior is unchanged)", fs.existsSync(path.join(repo, "feat1.txt")));
     worktrees.push([repo, undefined]); // already merged/removed — no worktree left to clean up, kept for symmetry
   }

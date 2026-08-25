@@ -10,7 +10,7 @@ import { execSync, spawn } from "node:child_process";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
-const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
+const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, deriveTasklessSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -505,6 +505,54 @@ try {
       normP2(fs.readFileSync(path.join(repo, "README.md"), "utf8")) === "main version p2\n");
     await removeWorktree(repo, wtP2);
     await deleteBranch(repo, brP2);
+  }
+  // (q) card 7a1a76e9 DoD-3 — a TASKLESS merge (mergeBranch called with `taskTitle` omitted, the
+  //     `worker_spawn` ad-hoc no-card path) used to fall straight to the branch NAME as the squash
+  //     subject — the one string guaranteed unfindable on main after a squash (the successor-check
+  //     convention is `git log --grep "<subject>"`, and a squash discards the branch ref). It now derives
+  //     a real subject from the branch's own TIP (most recent) commit instead — see
+  //     deriveTasklessSubject's own doc for why TIP, not the first commit, was the explicit decision — and
+  //     falls back to the branch name only when that derivation itself comes up empty.
+  {
+    // (q1) a taskless branch whose tip commit is ALREADY Conventional Commits form → that exact subject
+    //      lands on main untouched (passthrough through toConventionalSubject, mirrors (n)'s plain-
+    //      conventional case, but reached via the taskless path instead of a task title).
+    const tQ1 = "taskless-conv-tip-1111";
+    const { worktreePath: wtQ1, branch: brQ1 } = await createWorktree(repo, "projWT", tQ1);
+    commitInto(wtQ1, "q1.txt", "q1\n", "feat(worktrees): add q1 file");
+    check("(q1) deriveTasklessSubject reads the branch's own tip commit subject",
+      (await deriveTasklessSubject(repo, brQ1)) === "feat(worktrees): add q1 file");
+    const mQ1 = await mergeBranch(repo, brQ1); // taskTitle omitted — the taskless path
+    check("(q1) e2e taskless squash ok", mQ1.ok === true && typeof mQ1.sha === "string");
+    check("(q1) e2e subject is the branch's OWN tip commit subject, NOT the branch name",
+      git(repo, "log -1 --format=%s") === "feat(worktrees): add q1 file");
+    await removeWorktree(repo, wtQ1);
+    await deleteBranch(repo, brQ1);
+
+    // (q2) a taskless branch whose tip commit is bare prose (not Conventional form) → coerced through
+    //      toConventionalSubject exactly like an uncoerced task title would be — never left raw and never
+    //      the branch name.
+    const tQ2 = "taskless-noconv-tip-2222";
+    const { worktreePath: wtQ2, branch: brQ2 } = await createWorktree(repo, "projWT", tQ2);
+    commitInto(wtQ2, "q2.txt", "q2\n", "add the q2 file");
+    const mQ2 = await mergeBranch(repo, brQ2);
+    check("(q2) e2e taskless squash ok", mQ2.ok === true && typeof mQ2.sha === "string");
+    check("(q2) e2e non-conventional tip commit is COERCED (chore: prefix), not left raw and not the branch name",
+      git(repo, "log -1 --format=%s") === "chore: add the q2 file");
+    await removeWorktree(repo, wtQ2);
+    await deleteBranch(repo, brQ2);
+
+    // (q3) FALLBACK PRESERVED: deriveTasklessSubject fails safe to `undefined` (never throws) against an
+    //      UNREADABLE BRANCH (one that doesn't exist in an otherwise perfectly real repo — `git log -1` on
+    //      a bogus ref fails cleanly, caught rather than propagated) — proving the derive step itself
+    //      degrades safely instead of blocking the merge — and the pre-existing branch-name fallback, run
+    //      through the SAME toConventionalSubject coercion every other path uses, still produces the
+    //      historical "chore: <branch>" shape (DEFECT 2's original fallback, preserved as the LAST resort,
+    //      not the default).
+    check("(q3) deriveTasklessSubject fails safe to undefined against a branch that doesn't exist (never throws)",
+      (await deriveTasklessSubject(repo, "loom/does-not-exist-at-all")) === undefined);
+    check("(q3) the branch-name fallback, once nothing else is available, still coerces to chore: <branch>",
+      toConventionalSubject("loom/deadbeef1234") === "chore: loom/deadbeef1234");
   }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });

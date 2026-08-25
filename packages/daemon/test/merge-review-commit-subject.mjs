@@ -140,6 +140,12 @@ try {
     check("(D) commitSubject is absent", review?.commitSubject === undefined);
     check("(D) coerced is absent", review?.coerced === undefined);
     check("(D) diff fields are still the real ones", review?.filesChanged === 1);
+    // Card 7a1a76e9 DoD-4: a taskless worker gets NO `commitSubject` (above) but DOES get
+    // `tasklessSubjectPreview` — the branch's own tip commit ("orphan change", bare prose) coerced through
+    // the SAME toConventionalSubject the eventual squash applies, so the preview is byte-for-byte what
+    // will actually land, not the branch name (DEFECT 2's original bug) and not a fabricated placeholder.
+    check("(D) tasklessSubjectPreview is the branch's tip commit, coerced (chore: prefix) — NOT the branch name",
+      review?.tasklessSubjectPreview === "chore: orphan change");
   }
 } finally {
   db.close();

@@ -3599,6 +3599,35 @@ export function toConventionalSubject(raw: string): string {
 }
 
 /**
+ * The taskless-merge counterpart to {@link mergeBranchLocked}'s subject derivation (card 7a1a76e9 DoD-3):
+ * a taskless worker (`worker_spawn`'s ad-hoc no-card path) has no `taskTitle` to fall back to, so the
+ * subject used to fall back to the branch NAME itself — `chore: loom/<branch>`, the one string guaranteed
+ * NOT findable on main after a squash (the successor-check convention is `git log --grep "<subject>"`,
+ * and a squash discards the branch ref). This derives a real subject from the branch's OWN history
+ * instead: `git log -1 --format=%s <branch>` — the branch's TIP (most recent) commit's subject line.
+ *
+ * DECISION (the card requires this be made explicitly and documented — there is no obviously-right answer
+ * for a multi-commit branch): TIP, not the first commit. A worker's tip commit is the one it most
+ * recently chose to write — closer to "what actually shipped" than an early commit an later one may have
+ * superseded — and it's also what a human skimming `git log <branch>` sees first. `-1` also needs no walk,
+ * so this is a single cheap ref read either way.
+ *
+ * FAILS SAFE to `undefined` (never throws) on any git error/timeout/empty-branch — mirrors {@link
+ * countCommitsBehind}'s own advisory-only discipline; every caller falls back to the branch name on
+ * `undefined`, exactly as before this card.
+ */
+export async function deriveTasklessSubject(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<string | undefined> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const raw = await withTimeout(git.raw(["log", "-1", "--format=%s", branch]), timeoutMs, "git log -1 --format=%s (taskless subject)");
+    const subject = raw.trim().split(/\r?\n/)[0]?.trim();
+    return subject ? subject : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
  * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
  * task = one clean commit on main (not a real-commit + a noise merge-commit). Returns the new squash
@@ -4112,7 +4141,13 @@ async function mergeBranchLocked(
     return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined };
   }
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
-  const rawSubject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
+  // Card 7a1a76e9 DoD-3: the task title still wins unconditionally when a task exists (⛔ do not regress
+  // the tasked path) — a taskless worker now derives a real subject from its own branch tip commit instead
+  // of falling back straight to the branch name; see deriveTasklessSubject's own doc for the tip-vs-first
+  // decision. The branch name stays the LAST-RESORT fallback (an empty/unreadable branch, or the derive
+  // call itself failing).
+  const taskSubject = taskTitle ? taskTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
+  const rawSubject = taskSubject || (await deriveTasklessSubject(repoPath, branch, deps)) || branch;
   const subject = toConventionalSubject(rawSubject);
   // Stamp a second trailer (card f621f185): the branch's own touched-path-set digest, computed HERE from
   // the branch ref directly (HEAD hasn't moved yet — `--squash` never advances it) so it reflects what the
