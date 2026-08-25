@@ -4,6 +4,24 @@ import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, PORT } from "../paths.js";
 
 /**
+ * Card cd0c7fee: matcher for the correlation-only `PreToolUse` hook below. Deliberately scoped to the
+ * exact `mcp__<server>__<tool>` names of the two tools `tool-attribution.ts`'s `WATCHED_TOOL_NAMES`
+ * tracks (`worker_report`, `memory_write`) — mirrors the existing vault-lint `PostToolUse` matcher's own
+ * narrow-scoping precedent (Write|Edit, not every tool) rather than firing this hook on every tool call
+ * in every turn.
+ *
+ * ⚠️ NOT hand-sync-only any more (round-2 review): if this ever drifts from `WATCHED_TOOL_NAMES` — e.g. a
+ * tool gets added to one and not the other — the failure is SILENT and fails toward the reassuring side:
+ * the un-matched tool's PreToolUse hook simply never fires, `consume()` reads "unknown" for it forever,
+ * and nothing breaks or logs. `test/tool-attribution.mjs` has a mechanical assertion (not just this
+ * comment) that derives this matcher's alternatives, strips the `mcp__<server>__` prefix from each, and
+ * asserts the resulting set equals `WATCHED_TOOL_NAMES` exactly — run it after editing either side.
+ * Exported for exactly that test to import; still no PRODUCTION-code coupling between the two files (the
+ * daemon itself never cross-references them at runtime — only the test does).
+ */
+export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = "mcp__loom-orchestration__worker_report|mcp__loom-tasks__memory_write";
+
+/**
  * Loom NEVER wants Claude Code's "resume from summary / as-is" gate (isResumeSummaryGate in host.ts) to
  * render at all — the DEFAULT option silently compacts a resumed session's full context, which is
  * exactly what happened to three managers simultaneously in the 2026-07-10 incident when the pty-side
@@ -55,6 +73,10 @@ const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as c
  * avoids the "Bypass Permissions mode" acceptance gate that --dangerously-skip-permissions
  * triggers. (All behaviors validated in the spike.)
  *
+ * PreToolUse (card cd0c7fee) is ALWAYS wired too, matcher-scoped to `worker_report`/`memory_write`
+ * only (see `PRE_TOOL_USE_ATTRIBUTION_MATCHER`) — feeds PtyHost's sub-agent-call correlation queue.
+ * Advisory/observational only, same as the vault-lint PostToolUse below — it never blocks or denies.
+ *
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
  *
@@ -79,6 +101,12 @@ export function writeSessionSettings(
     UserPromptSubmit: [hookCmd],
     Stop: [hookCmd],
     StopFailure: [hookCmd],
+    // Card cd0c7fee: correlation-only, narrowly matcher-scoped (see PRE_TOOL_USE_ATTRIBUTION_MATCHER's
+    // own doc) — reuses the SAME generic relay command as every other hook here (hook-relay.mjs forwards
+    // whatever JSON Claude Code hands it, unfiltered; no new relay script needed). This hook does NOT
+    // block/deny anything — it only lets PtyHost's ToolAttributionTracker observe `agent_id`/`agent_type`
+    // (present only for a subagent's own call) before the matched tool's own MCP request arrives.
+    PreToolUse: [{ matcher: PRE_TOOL_USE_ATTRIBUTION_MATCHER, hooks: [hookCmd] }],
   };
   const postToolUse: unknown[] = [];
   if (vaultPath) {

@@ -36,6 +36,14 @@ import { createHash } from "node:crypto";
  * periodic check nobody will actually run. That diagnosis is exactly what this instrument exists to make
  * decidable: cross-reference the `[mcp]` census against the suspect event to tell "delivered twice" from
  * "called twice."
+ *
+ * Card cd0c7fee's `attribute` param piggybacks the sub-agent-call correlation state onto this SAME line
+ * and SAME reader — no new surface, because there wasn't a reader for a new one. ⚠️ THIS IS STILL ONLY AN
+ * OBSERVATION, not enforcement: nothing refuses a sub-agent's call yet. The honest state today is "the
+ * Loom lead can see `attribution=confirmed-subagent` on this line if and when they go looking for a
+ * specific incident" — there is no periodic reader and no alert. Per
+ * `shipping-a-detector-is-not-someone-reading-it`: a card whose last step is an observation isn't closed
+ * by merging this — the follow-up enforcement card is what turns this from visible-but-inert into acted-on.
  */
 
 let mcpLogSeq = 0;
@@ -50,8 +58,28 @@ interface JsonRpcRequestLike {
   params?: { name?: unknown; arguments?: unknown };
 }
 
-/** Logs ONE line per JSON-RPC request in `body` (a streamable-HTTP body may be a single request or a batch array). */
-export function logInboundMcpRequest(router: string, sessionId: string, body: unknown): void {
+/** Card cd0c7fee: the sub-agent-call correlation classification for one tool call — see tool-attribution.ts. */
+interface ToolAttributionLike {
+  state: string;
+  agentId?: string;
+  agentType?: string;
+  candidateCount?: number;
+}
+
+/**
+ * Logs ONE line per JSON-RPC request in `body` (a streamable-HTTP body may be a single request or a batch
+ * array). `attribute` (card cd0c7fee) is an OPTIONAL per-entry callback — called with (sessionId, tool)
+ * for each entry that names a real tool, letting a caller piggyback its own correlation lookup onto the
+ * SAME line without this module knowing anything about PtyHost. Returning `undefined`/null appends
+ * nothing (byte-identical line to before this param existed) — the default for every existing call site
+ * that doesn't pass it.
+ */
+export function logInboundMcpRequest(
+  router: string,
+  sessionId: string,
+  body: unknown,
+  attribute?: (sessionId: string, tool: string) => ToolAttributionLike | null | undefined,
+): void {
   const at = new Date().toISOString();
   const entries = Array.isArray(body) ? body : [body];
   for (const entry of entries) {
@@ -65,6 +93,15 @@ export function logInboundMcpRequest(router: string, sessionId: string, body: un
       const argsText = JSON.stringify(rpc.params.arguments);
       shape = ` argsLen=${argsText.length} argsHash=${shortHash(argsText)}`;
     }
-    console.log(`[mcp] ${sessionId} router=${router} method=${method} tool=${tool} rpcId=${rpcId}${shape} seq=${seq} at=${at}`);
+    let attribution = "";
+    if (attribute && tool !== "-") {
+      const result = attribute(sessionId, tool);
+      if (result) {
+        const who = result.agentId ? ` agentId=${result.agentId}${result.agentType ? ` agentType=${result.agentType}` : ""}` : "";
+        const candidates = result.candidateCount !== undefined ? ` candidates=${result.candidateCount}` : "";
+        attribution = ` attribution=${result.state}${who}${candidates}`;
+      }
+    }
+    console.log(`[mcp] ${sessionId} router=${router} method=${method} tool=${tool} rpcId=${rpcId}${shape}${attribution} seq=${seq} at=${at}`);
   }
 }

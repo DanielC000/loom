@@ -12,6 +12,7 @@ import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
+import { ToolAttributionTracker, WATCHED_TOOL_NAMES, type ToolAttributionResult } from "./tool-attribution.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
@@ -4014,6 +4015,9 @@ function writeLog(live: Live, buf: Buffer): void {
  */
 export class PtyHost {
   private live = new Map<string, Live>();
+  /** Card cd0c7fee: correlates a PreToolUse hook's `agent_id`/`agent_type` to the MCP request it
+   *  precedes. Pure/dependency-free (see its own file doc) — no opts needed, so this is unconditional. */
+  private readonly toolAttribution = new ToolAttributionTracker();
   /**
    * M2 tripwire: true ONLY while deliverHook is finalizing a turn (between lowering busy and draining
    * the FIFO). deliverHook is fully synchronous, so an external `enqueueStdin` can NEVER observe this
@@ -4700,9 +4704,11 @@ export class PtyHost {
     // StopFailure also carries error/error_details (and a future claude may carry resetsAt) — the
     // relay + /internal/hook forward the whole hook object; we read them for §19c usage-limit detect.
     // `prompt` (card 7114838d): UserPromptSubmit's own report of what was actually submitted — read for
-    // the frame-splice detector below. Narrow BY CHOICE, same established pattern as the other extra
-    // fields here — extend, don't widen to `unknown`.
-    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string },
+    // the frame-splice detector below. `tool_name`/`agent_id`/`agent_type` (card cd0c7fee): PreToolUse's
+    // own common+conditional input fields — see tool-attribution.ts's doc for the exact source quotes.
+    // Narrow BY CHOICE, same established pattern as the other extra fields here — extend, don't widen to
+    // `unknown`.
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string; tool_name?: string; agent_id?: string; agent_type?: string; tool_use_id?: string },
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
@@ -4710,6 +4716,24 @@ export class PtyHost {
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
     switch (hook.hook_event_name) {
+      case "PreToolUse": {
+        // Card cd0c7fee: record-only — never blocks or denies anything, mirrors the vault-lint
+        // PostToolUse's advisory posture. Bare tool name: the hook reports `mcp__<server>__<tool>` (e.g.
+        // "mcp__loom-orchestration__worker_report"); strip the leading `mcp__<server>__` so the queue key
+        // matches the bare name gateway/server.ts's own consume call passes (the router's registered tool
+        // name, e.g. "worker_report") — split on "__" is safe here since the two server ids in play
+        // ("loom-orchestration", "loom-tasks") use hyphens, never a double underscore, as separators.
+        const parts = (hook.tool_name ?? "").split("__");
+        const bareToolName = parts.length >= 3 ? parts.slice(2).join("__") : hook.tool_name;
+        if (bareToolName && WATCHED_TOOL_NAMES.has(bareToolName)) {
+          this.toolAttribution.record(sessionId, bareToolName, {
+            agentId: hook.agent_id,
+            agentType: hook.agent_type,
+            toolUseId: hook.tool_use_id,
+          });
+        }
+        break;
+      }
       case "SessionStart":
         // SessionStart only fires once boot is past the (now-dismissed) MCP prompt — stop scanning.
         live.mcpPromptHandled = true; live.bootScan = "";
@@ -5999,6 +6023,19 @@ export class PtyHost {
     // to measure from).
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
     return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
+  }
+
+  /**
+   * Card cd0c7fee: consume this session's correlation queue for `toolName` — called from
+   * gateway/server.ts at MCP-request time, BEFORE the request is dispatched to its router (mirrors
+   * markMcpSeen's own "before dispatch" placement just below). Read-mostly: only the unambiguous
+   * single-candidate case actually removes an entry — see ToolAttributionTracker.consume's own doc.
+   * Correlation-only: this NEVER refuses or blocks a call, it only classifies for observability today
+   * (the `[mcp]` log line in gateway/server.ts). A tool name outside WATCHED_TOOL_NAMES always reads
+   * "unknown" (nothing was ever recorded for it) — cheap and harmless to call unconditionally.
+   */
+  consumeToolAttribution(sessionId: string, toolName: string): ToolAttributionResult {
+    return this.toolAttribution.consume(sessionId, toolName);
   }
 
   /**
