@@ -243,6 +243,43 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("a DIFFERENT session's watched-tool call is never flagged blind off session-A's live sub-agent", crossSession.blindEvent === false);
 }
 
+// --- Card aed28554: evict() bounds a Start-without-Stop leak to the session's own lifetime -------------
+// (DoD-2: a SubagentStart with no matching SubagentStop — a killed/crashed sub-agent, or a daemon restart
+// mid-flight — would otherwise strand `live > 0` for that session forever, so every later non-confirmed
+// watched call on it reads BLIND regardless of ground truth. `evict()` is what `pty/host.ts`'s pty onExit
+// calls on every exit path to bound that.)
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("leaky"); // no matching SubagentStop -> live would otherwise stay stuck at 1 forever
+  const beforeEvict = d.recordAttribution("leaky", "confirmed-main");
+  check("PRE-evict (the leak): a Start with no Stop leaves live stuck >0, so an unrelated later call reads BLIND",
+    beforeEvict.live === 1 && beforeEvict.blindEvent === true);
+
+  d.evict("leaky"); // the session exited — pty/host.ts's onExit handler calls this on every exit path
+  const afterEvict = d.recordAttribution("leaky", "confirmed-main");
+  check("POST-evict: the stale live count is gone — a call on a fresh bucket is no longer flagged blind",
+    afterEvict.live === 0 && afterEvict.blindEvent === false);
+  check("POST-evict: the whole bucket reset, not just live (stops/confirmedSubagent/blindWhileLive back to 0 pre-call)",
+    afterEvict.stops === 0 && afterEvict.confirmedSubagent === 0 && afterEvict.blindWhileLive === 0);
+}
+
+// --- Card aed28554: evict() on a session with NO recorded bucket yet is a harmless no-op ---------------
+{
+  const d = new SubagentDriftTracker();
+  d.evict("never-started"); // must not throw, must not create a phantom bucket
+  const r = d.recordAttribution("never-started", "confirmed-main");
+  check("evict() on an unknown session is a no-op — a later call still reads correctly (not blind, no crash)", r.blindEvent === false && r.live === 0);
+}
+
+// --- Card aed28554: evict() is per-session — never clears a DIFFERENT session's live sub-agent ---------
+{
+  const d = new SubagentDriftTracker();
+  d.recordStart("keep-me");
+  d.evict("someone-else"); // a different session exits
+  const stillLive = d.recordAttribution("keep-me", "confirmed-main");
+  check("evict() of one session never touches another session's live bucket", stillLive.live === 1 && stillLive.blindEvent === true);
+}
+
 // ====================================================================================================
 // --- Card 3cc3b726: two routers sharing a bare tool NAME must not share a queue KEY ------------------
 // `memory_write` is registered on BOTH the task router (project memory) and the orchestration router
@@ -291,6 +328,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
+  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; (card aed28554) evict() bounds a Start-without-Stop leak to the session's own lifetime, is a harmless no-op on an unknown session, and is strictly per-session; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

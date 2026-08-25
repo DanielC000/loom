@@ -162,15 +162,22 @@ export class ToolAttributionTracker {
    * watched-tool call happened during a live sub-agent's turn) — the SAME reading a genuinely blind session
    * produces. `SubagentDriftTracker` now wires BOTH `SubagentStart` and `SubagentStop` (per-session live
    * count, incremented/decremented on each) and correlates it against every watched-tool attribution
-   * result at CONSUME time: Claude Code blocks the invoking turn until its own Task-tool call returns (see
-   * this file's own ORDERING GUARANTEE above), so ANY watched-tool call observed while the live count is
-   * >0 is KNOWN, from the lifecycle hooks alone, to have originated inside that live sub-agent — regardless
-   * of what `consume()` returns for it. A result that is NOT "confirmed-subagent" under that condition
-   * (`confirmed-main`, `unknown`, or `ambiguous`) is therefore a genuine, per-event drift observation, not
-   * an inference from an aggregate count: `agent_id` failed to arrive on a call the lifecycle hooks
-   * independently prove was a sub-agent's. In the common case — no watched tool called while any sub-agent
-   * is live — the signal correctly stays silent in BOTH healthy and blind operation, because there is
-   * genuinely no data to discriminate on either way; it no longer reads that silence as an alarm.
+   * result at CONSUME time: the live count brackets each sub-agent's own start/stop, so a watched-tool call
+   * observed while it is >0 is CONSISTENT WITH having originated inside that live sub-agent — a real
+   * lifecycle-hook signal, not a guess. ⚠️ Card aed28554 — MEASURED, 2026-08-25: a main-turn watched call CAN
+   * land inside a live sub-agent window. This file's own ORDERING GUARANTEE (above) is a PER-INVOCATION
+   * guarantee — Claude Code blocks the invoking turn until ITS OWN Task-tool call returns — and says nothing
+   * about a Task call and a sibling watched-tool call dispatched as PARALLEL tool calls from the SAME
+   * assistant message; reproduced 1 of 4 attempts by doing exactly that (a Task call + a sibling
+   * `memory_write` from one message) — the sibling's PreToolUse/consume landed inside the live window on
+   * attempt 1, and after it on attempts 2-4; the relative order is a real race, observed both ways (full
+   * trace: project memory `subagent-drift-blind-false-positive-confirmed`). So "consistent with" is the
+   * honest strength of this signal, not "KNOWN"/"proven" — a result that is NOT
+   * "confirmed-subagent" under `live > 0` (`confirmed-main`, `unknown`, or `ambiguous`) is a genuine,
+   * per-event drift OBSERVATION worth surfacing, not a certified misattribution. In the common case — no
+   * watched tool called while any sub-agent is live — the signal correctly stays silent in BOTH healthy and
+   * blind operation, because there is genuinely no data to discriminate on either way; it no longer reads
+   * that silence as an alarm.
    */
   consume(sessionId: string, toolName: string, now = Date.now()): ToolAttributionResult {
     const key = keyFor(sessionId, toolName);
@@ -236,15 +243,24 @@ export function extractWatchedToolCalls(body: unknown, watched: ReadonlySet<stri
  * `SubagentStart` and `SubagentStop` (`claude-settings.ts`, dispatched in `pty/host.ts`'s `deliverHook`).
  *
  * `live` is a per-session count of currently in-flight sub-agent invocations — incremented on
- * `SubagentStart`, decremented (floored at 0) on `SubagentStop`. Because Claude Code blocks the invoking
- * turn until its own Task-tool call returns (this file's own ORDERING GUARANTEE, top of file), any
- * watched-tool call observed while `live > 0` is KNOWN — from the lifecycle hooks alone, independent of
- * whatever `agent_id` did or didn't ride the PreToolUse hook — to have originated inside that live
- * sub-agent. `recordAttribution` is the actual discriminator: called from `PtyHost.consumeToolAttribution`
- * with EVERY watched-tool result (not just "confirmed-subagent"), it counts `blindWhileLive` whenever the
- * result is NOT "confirmed-subagent" (i.e. `confirmed-main`/`unknown`/`ambiguous`) while `live > 0` at that
- * moment — a genuine, per-event drift observation, not an inference from an aggregate count. `stops` and
- * `confirmedSubagent` are kept as supporting context on the same log line, not as the tell itself.
+ * `SubagentStart`, decremented (floored at 0) on `SubagentStop`, and evicted entirely on session exit (see
+ * `evict()` below — card aed28554 bounds a `SubagentStart` with no matching `SubagentStop`, e.g. a
+ * killed/crashed sub-agent, to the session's own lifetime rather than leaving `live` stuck >0 forever).
+ * Any watched-tool call observed while `live > 0` is CONSISTENT WITH having originated inside that live
+ * sub-agent — a real lifecycle-hook signal, not a guess — but this is NOT a proof: card aed28554 MEASURED
+ * (2026-08-25) the boundary this file's own ORDERING GUARANTEE (top of file) does not close — that
+ * guarantee is PER-INVOCATION only, and says nothing about a Task call and a sibling watched-tool call
+ * dispatched as PARALLEL tool calls from the SAME assistant message. A main-turn watched call CAN land
+ * inside a live sub-agent window: reproduced 1 of 4 attempts by dispatching a Task call and a sibling
+ * `memory_write` from one message — the sibling's PreToolUse/consume landed inside the live window on
+ * attempt 1 and after it on attempts 2-4, so the relative order is a real race, observed both ways (full
+ * trace: project memory `subagent-drift-blind-false-positive-confirmed`). `recordAttribution` is the actual
+ * discriminator: called from `PtyHost.consumeToolAttribution` with EVERY watched-tool result (not just
+ * "confirmed-subagent"), it counts
+ * `blindWhileLive` whenever the result is NOT "confirmed-subagent" (i.e. `confirmed-main`/`unknown`/
+ * `ambiguous`) while `live > 0` at that moment — a genuine, per-event drift OBSERVATION worth surfacing, not
+ * a certified misattribution. `stops` and `confirmedSubagent` are kept as supporting context on the same
+ * log line, not as the tell itself.
  *
  * ⭐⭐ WHY THIS DISCRIMINATES WHERE THE ORIGINAL DIDN'T: the common case — a session running sub-agents that
  * never call a watched tool — now produces `blindWhileLive === 0` in BOTH healthy and blind operation
@@ -304,5 +320,21 @@ export class SubagentDriftTracker {
       return { ...b, blindEvent: true };
     }
     return { ...b, blindEvent: false };
+  }
+
+  /**
+   * Card aed28554: bounds the OTHER leak the merge gate for e6ef5062 flagged — a `SubagentStart` with no
+   * matching `SubagentStop` (a killed/interrupted/crashed sub-agent, or a daemon restart mid-flight) would
+   * otherwise leave `live > 0` for that session FOREVER, so every later non-confirmed watched call on that
+   * session logs `BLIND` regardless of ground truth. Called from `pty/host.ts`'s pty `onExit` handler —
+   * fires on EVERY exit path (a deliberate stop, a crash, a clean session end), the same "covers every
+   * exit path" precedent `Live.pending`/`mcpSeenWaiters` cleanup already uses there. This bounds the leak
+   * to the session's own lifetime (the same bound `e6ef5062`'s own skipped DoD-6 accepted for the
+   * analogous bucket-eviction case) rather than leaving it unbounded in time — a session that exits is a
+   * session no watched-tool call can ever arrive for again, so there is nothing left for a stale `live`
+   * count to mis-attribute.
+   */
+  evict(sessionId: string): void {
+    this.counts.delete(sessionId);
   }
 }

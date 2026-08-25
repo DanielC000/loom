@@ -4257,6 +4257,10 @@ export class PtyHost {
       // containment — the durable backstop for board card 621ef252. Fires on EVERY exit path, including
       // an unexpected crash that never went through stop().
       reapOrphanedDescendants(live.pid);
+      // Card aed28554: bound the subagent-drift `live` leak (a SubagentStart with no matching SubagentStop
+      // would otherwise strand `live > 0` for this session forever) to the session's own lifetime — see
+      // SubagentDriftTracker.evict's own doc. Fires on EVERY exit path, same as the cleanup above.
+      this.subagentDrift.evict(opts.sessionId);
       // eslint-disable-next-line no-console
       console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
       try { live.logStream.end(); } catch { /* ignore */ }
@@ -6091,7 +6095,7 @@ export class PtyHost {
     const drift = this.subagentDrift.recordAttribution(sessionId, result.state);
     if (drift.blindEvent) {
       // eslint-disable-next-line no-console
-      console.log(`[subagent-drift] ${sessionId} BLIND: watched tool "${toolName}" resolved "${result.state}" while a sub-agent was LIVE (live=${drift.live}) — agent_id did not arrive on a call the lifecycle hooks prove was a sub-agent's. stops=${drift.stops} confirmedSubagent=${drift.confirmedSubagent} blindWhileLive=${drift.blindWhileLive}`);
+      console.log(`[subagent-drift] ${sessionId} BLIND: watched tool "${toolName}" resolved "${result.state}" while a sub-agent was LIVE (live=${drift.live}) — agent_id did not arrive on a call made during that live window; NOT proof the call itself was the sub-agent's (card aed28554, measured: a main-turn call CAN land inside this window via parallel tool dispatch — reproduced 1 of 4 attempts; see project memory subagent-drift-blind-false-positive-confirmed). stops=${drift.stops} confirmedSubagent=${drift.confirmedSubagent} blindWhileLive=${drift.blindWhileLive}`);
     }
     return result;
   }
