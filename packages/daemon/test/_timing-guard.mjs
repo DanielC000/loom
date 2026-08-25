@@ -15,10 +15,10 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
  * before the timeout.
  */
 export async function pollUntil(predicate, { timeoutMs, intervalMs = 20 } = {}) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   for (;;) {
     if (await predicate()) return true;
-    if (Date.now() >= deadline) return false;
+    if (performance.now() >= deadline) return false;
     await wait(intervalMs);
   }
 }
@@ -32,10 +32,10 @@ export async function pollUntil(predicate, { timeoutMs, intervalMs = 20 } = {}) 
  */
 export async function observeOnce({ check, settle, windowMs, intervalMs = 20 }) {
   if (typeof settle === "function") { await settle(); return !!check(); }
-  const deadline = Date.now() + windowMs;
+  const deadline = performance.now() + windowMs;
   for (;;) {
     if (check()) return true;
-    if (Date.now() >= deadline) return false;
+    if (performance.now() >= deadline) return false;
     await wait(intervalMs);
   }
 }
