@@ -1012,7 +1012,13 @@ async function runOne(name, lane) {
   const timeoutMs = TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
   const r = await spawnWithTimeout(process.execPath, [file], {
     timeoutMs,
-    env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
+    // Card d1e10795: LOOM_REAL_HOME carries the harness's own (real) LOOM_HOME through to the spawned
+    // child ADDITIVELY — LOOM_HOME itself stays overridden to `home` (the per-test throwaway temp dir,
+    // load-bearing hermetic isolation, unchanged). A test file that writes its OWN diagnostic telemetry
+    // (mirroring this script's own appendGateTimingRow/GATE_TIMING_NDJSON pattern) needs the REAL home,
+    // not the isolated one, to produce anything durable — see memory
+    // `instrument-inside-test-reads-isolated-loom-home` for the bug this closes.
+    env: { ...process.env, LOOM_HOME: home, LOOM_REAL_HOME: LOOM_HOME, LOOM_PORT: String(port), LOOM_TEST: "1" },
   });
   const endTs = Date.now();
 
