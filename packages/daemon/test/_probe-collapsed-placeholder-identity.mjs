@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const PORT = 4404;
 const tmpHome = path.join(os.tmpdir(), `loom-placeholder-id-home-${Date.now()}-${process.pid}`);
@@ -97,13 +98,19 @@ const geometry = { cols: 120, rows: 40 };
 const sessionEnv = { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1", CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1" };
 const permission = { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 };
 
+// Retrofitted onto the shared _wait.mjs waitUntil (card c9bba0b2): same timeoutMs/250ms-interval budget,
+// still returns true/false (no fallback re-check) — only difference is the added [waitUntil-outcome]
+// diagnostic on a timeout. A throwing predicate would be a real bug here (the get() call can't throw),
+// but rethrow anything that isn't the shared helper's own timeout so a genuine error never silently reads
+// as "turn never stopped".
 async function waitForStop(id, sinceCount, timeoutMs) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if ((stoppedTurns.get(id) || 0) > sinceCount) return true;
-    await sleep(250);
+  try {
+    await sharedWaitUntil(() => (stoppedTurns.get(id) || 0) > sinceCount, { timeoutMs, intervalMs: 250, label: "_probe-collapsed-placeholder-identity: turn stopped" });
+    return true;
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 const MARKER = `SECRET_MARKER_${Math.floor(Math.random() * 1e6)}`;

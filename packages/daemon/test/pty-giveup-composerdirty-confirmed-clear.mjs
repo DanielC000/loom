@@ -37,6 +37,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -70,8 +71,18 @@ process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 // hops that routinely overshoots a hand-computed sum — poll for the OBSERVED busy=false transition.
 const GIVE_UP_POLL_MS = 20;
 const GIVE_UP_POLL_TIMEOUT_MS = 15_000;
+// Retrofitted onto the shared _wait.mjs waitUntil (card c9bba0b2): same GIVE_UP_POLL_TIMEOUT_MS budget,
+// anchored to the SAME external t0 (remaining budget = GIVE_UP_POLL_TIMEOUT_MS minus elapsed since t0,
+// never a fresh timer from this call). Never returns the observed value — every call site reads busyLog
+// directly afterward via its own check() — so a genuine timeout is swallowed exactly as before; only a
+// non-timeout error (a real bug) now propagates instead of being silently absorbed by the old while loop.
 async function waitForBusyFalse(busyLog, sessionId, t0) {
-  while (busyLog[sessionId]?.at(-1) !== false && Date.now() - t0 < GIVE_UP_POLL_TIMEOUT_MS) await sleep(GIVE_UP_POLL_MS);
+  const remainingMs = Math.max(0, GIVE_UP_POLL_TIMEOUT_MS - (Date.now() - t0));
+  try {
+    await sharedWaitUntil(() => busyLog[sessionId]?.at(-1) === false, { timeoutMs: remainingMs, intervalMs: GIVE_UP_POLL_MS, label: "pty-giveup-composerdirty-confirmed-clear: busy fell back to false" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+  }
 }
 
 const { PtyHost } = await import("../dist/pty/host.js");

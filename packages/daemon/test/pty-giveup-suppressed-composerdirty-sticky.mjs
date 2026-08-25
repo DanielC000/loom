@@ -35,6 +35,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -43,12 +44,11 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+// Retrofitted onto the shared _wait.mjs waitUntil (card c9bba0b2) — same timeoutMs default and 2ms
+// interval, still throws on timeout (its own single call site never catches, so the throw propagates
+// exactly as before); only difference is the added [waitUntil-outcome] diagnostic ahead of the throw.
 async function waitForCount(getCount, target, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (getCount() < target) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitForCount: timed out waiting for count to reach ${target} (stuck at ${getCount()})`);
-    await sleep(2);
-  }
+  await sharedWaitUntil(() => getCount() >= target, { timeoutMs, intervalMs: 2, label: `waitForCount: count reaching ${target}` });
 }
 // Card b64b3726 (see pty-giveup-false-negative.mjs's identical helper for the full reasoning): spin until
 // the real clock has genuinely ticked PAST an observed Enter-write timestamp before emitting synthetic

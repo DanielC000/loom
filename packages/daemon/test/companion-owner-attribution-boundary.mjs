@@ -42,6 +42,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const TMP = mkdtempManaged("loom-companion-owner-attrib-");
 process.env.LOOM_HOME = TMP;
@@ -62,13 +63,15 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 // Poll `cond` until true or `timeoutMs` elapses (mirrors ws-json-hardening.mjs's own helper) — used to
 // anchor a wait on an OBSERVABLE event rather than a fixed sleep before a negative assertion.
+// Retrofitted onto the shared _wait.mjs waitUntil (card c9bba0b2): same timeoutMs default and 20ms
+// interval, same "one last check, then give up honestly" fallback on timeout — only difference is the
+// added [waitUntil-outcome] diagnostic before that fallback check runs.
 async function waitFor(cond, timeoutMs = 1000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 20));
+  try {
+    return await sharedWaitUntil(cond, { timeoutMs, intervalMs: 20, label: "companion-owner-attribution-boundary: cond" });
+  } catch {
+    return cond(); // one last try, then give up honestly
   }
-  return cond();
 }
 
 // ---- temp Db + REAL PtyHost over a FAKE pty (no claude). Every scenario below gets its OWN freshly-
