@@ -75,49 +75,119 @@ function backdate(p, ageMs) {
 
 // ============ (4) the never-settling-`fs.rm` case — a hung removal must never become a hang or a crash ============
 // Simulates the exact shape `_tmp-fixture.mjs`'s own header calls out as unmitigated (a removal that never
-// succeeds): hold a REAL, OS-level lock on a file inside the target dir for the ENTIRE duration, so every
-// one of `cleanupPathSync`'s bounded retry attempts fails with a genuine, persistent EBUSY/EPERM — never
-// resolving within the call. (A plain `fs.openSync` fd does NOT reproduce this on Windows — Node's own
-// file opens set FILE_SHARE_DELETE, so a bare open fd does not block removal, confirmed empirically while
-// writing this test. An open better-sqlite3 handle does — same mechanism `skills-adopt-fastforward.mjs`
-// already relies on for its own "REST server + separate sqlite handle" fixture shape.) The reaper must
-// reuse the existing bounded retry VERBATIM (5 attempts, a real 100ms delay each — ~500ms total) rather
-// than looping on it itself, so this call must return promptly and without throwing even though the
-// removal itself never actually succeeds.
+// succeeds): hold a REAL, OS-level lock for the ENTIRE duration, so every one of `cleanupPathSync`'s
+// bounded retry attempts fails with a genuine, persistent error — never resolving within the call. The
+// LOCK MECHANISM IS PLATFORM-SPECIFIC — the property under test (no hang, no throw, no new retry loop) is
+// not:
+//   - win32: an open better-sqlite3 handle blocks deletion. (A plain `fs.openSync` fd does NOT reproduce
+//     this — Node's own file opens set FILE_SHARE_DELETE, so a bare open fd does not block removal,
+//     confirmed empirically while writing this test. An open better-sqlite3 handle does — same mechanism
+//     `skills-adopt-fastforward.mjs` already relies on for its own "REST server + separate sqlite handle"
+//     fixture shape.)
+//   - POSIX: `unlink` on an open file SUCCEEDS (the dirent goes away; the inode lives until the last fd
+//     closes), so an open handle proves nothing here — this is exactly why the prior Windows-only version
+//     of this scenario false-passed on `ubuntu-latest` (card f291c617). Instead, remove write permission
+//     from `locked` — the PARENT directory of the file we're protecting — so unlinking that entry inside
+//     it genuinely fails EACCES.
+// Either way, the reaper must reuse the existing bounded retry VERBATIM (5 attempts, a real 100ms delay
+// each — ~500ms total) rather than looping on it itself, so the call must return promptly and without
+// throwing even though the removal itself never actually succeeds.
 {
   const locked = path.join(scratchRoot, "loom-locked-old");
   fs.mkdirSync(locked);
-  const dbFile = path.join(locked, "inner-locked.db");
-  const db = new Db(dbFile); // kept open for the whole reap call below — never closed mid-call
   backdate(locked, REAP_AGE_MS + 60_000);
 
-  let threw = null;
-  const startedAt = Date.now();
-  let result;
-  try {
-    result = reapStaleLoomTempDirs(scratchRoot);
-  } catch (err) {
-    threw = err;
+  const isWin = process.platform === "win32";
+  let db = null;
+  let restoreMode = null;
+
+  if (isWin) {
+    const dbFile = path.join(locked, "inner-locked.db");
+    db = new Db(dbFile); // kept open for the whole reap call below — never closed mid-call
+  } else {
+    fs.writeFileSync(path.join(locked, "inner-locked.txt"), "x");
+    restoreMode = fs.statSync(locked).mode;
+    fs.chmodSync(locked, 0o555); // no write bit — unlinking anything inside `locked` now fails EACCES
   }
-  const elapsedMs = Date.now() - startedAt;
 
-  check("(4) a persistently-locked entry never throws out of the reaper", threw === null);
-  // Generous ceiling — the real bound is ~500ms (5 attempts x 100ms); this only guards against a runaway
-  // NEW retry loop being added later, not against ordinary scheduling jitter on a loaded host.
-  check(`(4) a persistently-locked entry does not hang the reaper (took ${elapsedMs}ms, bound 5000ms)`, elapsedMs < 5000);
-  check("(4) the locked entry is still present — removal genuinely failed, this isn't a false pass", fs.existsSync(locked));
+  try {
+    // 🔴🔴 POSITIVE-CONTROL THE LOCK BEFORE TRUSTING IT — chmod does NOT restrain root, and some CI images
+    // run as root, so without this an independent direct removal could silently succeed under the "locked"
+    // label and every assertion below would pass for the wrong reason (or reproduce this exact card's
+    // ubuntu-latest failure again, just for a different underlying reason). Prove removal genuinely fails
+    // for an INDEPENDENT actor — not the reaper — before trusting the reaper's non-removal means anything.
+    let controlErr = null;
+    try {
+      fs.rmSync(locked, { recursive: true, force: true });
+    } catch (err) {
+      controlErr = err;
+    }
 
-  db.close(); // release the lock — proves the failure above was the lock, not something else broken
-  // A negative ageMs here, deliberately — the failed attempt above partially removed this dir's sidecar
-  // files before hitting the still-locked one, and that partial progress bumps the dir's OWN mtime forward
-  // (see temp-reaper.mjs's own note on this) to within sub-millisecond clock-resolution noise of "now",
-  // which an ageMs of exactly 0 can't reliably clear. This assertion is about the REMOVAL mechanism
-  // succeeding once unlocked, not about the age gate, so the gate isn't re-exercised here — (1)/(2)/(3)
-  // above already cover it.
-  const secondAttempt = reapStaleLoomTempDirs(scratchRoot, { ageMs: -60_000 });
-  check("(4) ...and once unlocked, the SAME mechanism successfully removes it on a later pass", !fs.existsSync(locked));
-  void result;
-  void secondAttempt;
+    if (controlErr === null) {
+      console.log(
+        `SKIP  (4) the lock could not be established on this platform/user (isWin=${isWin}` +
+          `${isWin ? "" : `, uid=${process.getuid ? process.getuid() : "n/a"}`}) — an independent direct ` +
+          `removal succeeded, so this scenario would prove nothing here; skipping rather than asserting on ` +
+          `an unlocked directory`,
+      );
+    } else {
+      check("(4) positive control: an independent, direct removal genuinely fails while the lock is held", controlErr !== null);
+
+      // 🔴 The positive control above can itself partially succeed before hitting the locked file (e.g. on
+      // win32, unlocked WAL/SHM sidecars get removed before the still-open .db throws) — and that partial
+      // removal bumps `locked`'s OWN mtime forward to ~now. Left alone, the reaper below would then AGE-GATE
+      // the entry out (`skippedTooYoung`) instead of genuinely attempting and failing it — every assertion
+      // in this block would then pass VACUOUSLY (true of a call that never tried, not of a call that tried
+      // and failed). Re-establish the precondition the control just disturbed before trusting the reaper's
+      // behavior against it.
+      backdate(locked, REAP_AGE_MS + 60_000);
+
+      let threw = null;
+      const startedAt = Date.now();
+      let result;
+      try {
+        result = reapStaleLoomTempDirs(scratchRoot);
+      } catch (err) {
+        threw = err;
+      }
+      const elapsedMs = Date.now() - startedAt;
+
+      check("(4) a persistently-locked entry never throws out of the reaper", threw === null);
+      // Generous ceiling — the real bound is ~500ms (5 attempts x 100ms); this only guards against a runaway
+      // NEW retry loop being added later, not against ordinary scheduling jitter on a loaded host.
+      check(`(4) a persistently-locked entry does not hang the reaper (took ${elapsedMs}ms, bound 5000ms)`, elapsedMs < 5000);
+      // `fs.existsSync(locked)` alone can't tell "attempted and failed" from "never attempted" — the
+      // returned summary can. `reaped` counts ATTEMPTS (it increments right after `cleanupPathSync` is
+      // called, unconditionally of whether the removal actually succeeded), so asserting all three together
+      // makes this genuinely about a failed removal, not a skipped one.
+      check(
+        "(4) the reaper genuinely ATTEMPTED the locked entry (not age-gated out) and the removal genuinely failed — not a false pass",
+        result?.skippedTooYoung === 0 && result?.reaped === 1 && fs.existsSync(locked),
+      );
+
+      // release the lock — proves the failure above was the lock, not something else broken
+      if (isWin) db.close();
+      else fs.chmodSync(locked, restoreMode);
+
+      // A negative ageMs here, deliberately — on win32 a failed attempt can partially remove this dir's
+      // sidecar files before hitting the still-locked one, and that partial progress bumps the dir's OWN
+      // mtime forward (see temp-reaper.mjs's own note on this) to within sub-millisecond clock-resolution
+      // noise of "now", which an ageMs of exactly 0 can't reliably clear. This assertion is about the
+      // REMOVAL mechanism succeeding once unlocked, not about the age gate, so the gate isn't re-exercised
+      // here — (1)/(2)/(3) above already cover it.
+      const secondAttempt = reapStaleLoomTempDirs(scratchRoot, { ageMs: -60_000 });
+      check(
+        "(4) ...and once unlocked, the SAME mechanism genuinely reaps it (not merely absent for some other reason) on a later pass",
+        secondAttempt?.reaped === 1 && !fs.existsSync(locked),
+      );
+    }
+  } finally {
+    // Always release the lock and clean up, even on a SKIP or if an assertion above threw — never leave
+    // scratchRoot holding an unremovable entry for the fixture's own final cleanup to trip over.
+    if (isWin) { try { db.close(); } catch { /* already closed above, or never fully opened */ } }
+    else if (restoreMode !== null) { try { fs.chmodSync(locked, restoreMode); } catch { /* best-effort; ENOENT if already gone */ } }
+    try { fs.rmSync(locked, { recursive: true, force: true }); } catch { /* best-effort; scratchRoot cleanup covers stragglers */ }
+  }
 }
 
 console.log(failures === 0
