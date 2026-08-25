@@ -90,6 +90,47 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("a runaway burst never grows unbounded (capped at MAX_ENTRIES_PER_KEY=8, not 20)", r.state === "ambiguous" && r.candidateCount === 8);
 }
 
+// --- Card 7b8a3b25: forget(sessionId) drops a session's queued entries on its per-session cleanup path ---
+// (a PreToolUse hook fires and the matching MCP request never arrives — the session died mid-turn — and
+// nothing else would ever access, and thus lazily prune, that queued entry again). The negative arm is
+// the actual bar: a forget() that wrongly cleared every session's entries would pass a one-sided test.
+{
+  const t = new ToolAttributionTracker();
+  t.record("victim", "worker_report", { agentId: "sub-x" }, 1_000);
+  t.record("bystander", "worker_report", { agentId: "sub-y" }, 1_000);
+
+  t.forget("victim");
+
+  const forgotten = t.consume("victim", "worker_report", 1_010);
+  check("forget(sessionId) drops that session's recorded entry", forgotten.state === "unknown");
+  const survived = t.consume("bystander", "worker_report", 1_010);
+  check("forget(sessionId) leaves a DIFFERENT session's entry untouched (the negative arm)",
+    survived.state === "confirmed-subagent" && survived.agentId === "sub-y");
+}
+
+// --- forget() is prefix-safe: one session id being a literal prefix of another's can't cross-delete -----
+{
+  const t = new ToolAttributionTracker();
+  t.record("s1", "worker_report", { agentId: "sub-short" }, 1_000);
+  t.record("s10", "worker_report", { agentId: "sub-long" }, 1_000);
+
+  t.forget("s1");
+
+  const shortGone = t.consume("s1", "worker_report", 1_010);
+  check("forget(\"s1\") drops \"s1\"'s own entry", shortGone.state === "unknown");
+  const longSurvives = t.consume("s10", "worker_report", 1_010);
+  check("forget(\"s1\") does NOT also drop \"s10\"'s entry (space-joined keys prevent a prefix collision)",
+    longSurvives.state === "confirmed-subagent" && longSurvives.agentId === "sub-long");
+}
+
+// --- forget() on a session with no recorded entries at all is a harmless no-op ---------------------------
+{
+  const t = new ToolAttributionTracker();
+  t.forget("never-recorded"); // must not throw
+  const r = t.consume("never-recorded", "worker_report", 1_000);
+  check("forget() of a session with nothing recorded is a no-op — a later call still reads correctly", r.state === "unknown");
+}
+
 // --- WATCHED_TOOL_NAMES: the two DoD-2 tools, and only those (scope, not a behavior test of the set itself) --
 {
   check("WATCHED_TOOL_NAMES includes worker_report", WATCHED_TOOL_NAMES.has("worker_report"));
@@ -328,6 +369,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; (card aed28554) evict() bounds a Start-without-Stop leak to the session's own lifetime, is a harmless no-op on an unknown session, and is strictly per-session; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
+  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; (card 7b8a3b25) forget(sessionId) drops a session's own queued entries, leaves a different session's entries untouched, is prefix-safe against one session id being a literal prefix of another's, and is a harmless no-op on a session with nothing recorded; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; (card aed28554) evict() bounds a Start-without-Stop leak to the session's own lifetime, is a harmless no-op on an unknown session, and is strictly per-session; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

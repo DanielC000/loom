@@ -4261,6 +4261,11 @@ export class PtyHost {
       // would otherwise strand `live > 0` for this session forever) to the session's own lifetime — see
       // SubagentDriftTracker.evict's own doc. Fires on EVERY exit path, same as the cleanup above.
       this.subagentDrift.evict(opts.sessionId);
+      // Card 7b8a3b25: this is the actual leak site cd0c7fee's own tracker doc warns about — a
+      // PreToolUse hook fires and the matching MCP request never arrives because the session died
+      // mid-turn, and nothing else would ever access (and thus lazily prune) that queued entry again.
+      // Fires on EVERY exit path, same as the cleanup above.
+      this.toolAttribution.forget(opts.sessionId);
       // eslint-disable-next-line no-console
       console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
       try { live.logStream.end(); } catch { /* ignore */ }
@@ -4372,6 +4377,9 @@ export class PtyHost {
       // A shell is NOT a DB Session — do NOT call events.onExit (which persists Session/MCP state). It is
       // ephemeral with no resumable state, so just drop it from the live map; the web's list refetch
       // then removes its tile. (Explicitly excluded from boot-reconcile / restart-intent for the same reason.)
+      // Card 7b8a3b25: a shell never mounts the hook relay (hookToken:"" — unreachable, kind!=="claude"),
+      // so this is a no-op in practice; called anyway since this IS a per-session live-entry removal.
+      this.toolAttribution.forget(opts.id);
       this.live.delete(opts.id);
     });
   }
@@ -4443,6 +4451,9 @@ export class PtyHost {
     const live = this.live.get(id);
     if (!live || live.kind !== "canned") return;
     try { live.logStream.end(); } catch { /* ignore */ }
+    // Card 7b8a3b25: a canned entry never mounts the hook relay either — no-op in practice, called
+    // anyway since this IS a per-session live-entry removal.
+    this.toolAttribution.forget(id);
     this.live.delete(id);
   }
 

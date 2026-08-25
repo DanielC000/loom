@@ -192,6 +192,23 @@ export class ToolAttributionTracker {
       : { state: "confirmed-main" };
   }
 
+  /**
+   * Card 7b8a3b25: drops every queued entry for `sessionId`, regardless of tool name or staleness.
+   * `record`/`consume` only prune LAZILY, on access — the interrupted path (a `PreToolUse` hook fires
+   * and the matching MCP request never arrives because the session died mid-turn) never accesses that
+   * key again, so nothing would otherwise prune it for the rest of the daemon's process lifetime. Call
+   * this from every per-session cleanup point instead. Keys are `` `${sessionId} ${toolName}` `` — the
+   * space separator means a plain prefix match can't cross into another session's keys even when one
+   * session id is a literal prefix of another's (e.g. "s1" vs "s10": "s10 tool" does not start with
+   * "s1 ").
+   */
+  forget(sessionId: string): void {
+    const prefix = `${sessionId} `;
+    for (const key of this.queues.keys()) {
+      if (key.startsWith(prefix)) this.queues.delete(key);
+    }
+  }
+
   /** Filters stale entries (older than {@link ATTRIBUTION_TTL_MS}) and writes the pruned result straight
    *  back into the map (dropping the key entirely once empty) — every caller (record AND consume,
    *  including the ambiguous/read-only consume path) self-heals the stored state on every access, so a
