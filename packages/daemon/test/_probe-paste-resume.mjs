@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const PORT = 4399;
 const tmpHome = path.join(os.tmpdir(), `loom-pasteprobe-home-${Date.now()}-${process.pid}`);
@@ -91,12 +92,13 @@ PASTE_LINES.push("PASTE_TAIL_MARKER_Q7F3");
 const PASTE_TEXT = PASTE_LINES.join("\n");
 
 async function waitForStop(id, sinceCount, timeoutMs) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if ((stoppedTurns.get(id) || 0) > sinceCount) return true;
-    await sleep(250);
+  try {
+    await sharedWaitUntil(() => (stoppedTurns.get(id) || 0) > sinceCount, { timeoutMs, intervalMs: 250, label: "_probe-paste-resume: turn stopped" });
+    return true;
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 // Goes through the SAME production delivery path as a worker report / manager redirect / human Composer

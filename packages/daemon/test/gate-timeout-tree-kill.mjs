@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync, spawn as spawnProcess } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtk-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -35,13 +36,16 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same timeoutMs/stepMs budget. Preserves
+// the LOCAL "re-check cond() once more on timeout" shape (a race where the condition flips true exactly at
+// expiry is still caught) by re-evaluating cond() in the catch, rather than hardcoding false.
 const waitUntil = async (cond, timeoutMs, stepMs = 100) => {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (cond()) return true;
-    await sleep(stepMs);
+  try {
+    return !!(await sharedWaitUntil(cond, { timeoutMs, intervalMs: stepMs, label: "gate-timeout-tree-kill: cond" }));
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
   }
-  return cond();
 };
 const GIT_ID = "-c user.email=gtk@loom -c user.name=gtk";
 const now = new Date().toISOString();

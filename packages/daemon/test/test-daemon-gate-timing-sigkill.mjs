@@ -28,6 +28,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { neverCompletedFiles } from "../scripts/test-daemon.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DAEMON_SCRIPT = path.join(__dirname, "..", "scripts", "test-daemon.mjs");
@@ -54,13 +55,17 @@ function readRows(ndjsonPath) {
 // YET" (see this project's own fixed-wait-negative-guard doctrine). Here the events we anchor to are always
 // POSITIVE ("this row now exists" / "the process exited"), so polling to a bounded timeout is the correct
 // shape, not a workaround for it.
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): pure poll-until-predicate loop, no
+// externally-anchored budget — timeoutMs is computed fresh at call time, same as the shared helper's own
+// internal t0. Preserves the LOCAL return-null-on-timeout shape (call sites treat a timeout as a plain
+// "not yet" signal, not an exception) by catching the shared helper's timeout throw and folding it back to
+// null; a non-timeout throw (a real predicate bug) still propagates, never silently reading as a timeout.
 async function waitFor(predicate, { timeoutMs = 20_000, intervalMs = 20 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const result = predicate();
-    if (result) return result;
-    if (Date.now() > deadline) return null;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "test-daemon-gate-timing-sigkill: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return null;
   }
 }
 

@@ -48,6 +48,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const PORT = 4400;
 const ATTEMPTS = process.env.PROBE_ATTEMPTS !== undefined ? Number(process.env.PROBE_ATTEMPTS) : 3;
@@ -123,16 +124,27 @@ async function measureWindow(SID, windowLabel, windowMs, action) {
   return c.bytes;
 }
 
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): the predicate now returns a discriminated
+// outcome string instead of a bare boolean so BOTH terminal conditions (confirmed vs gave-up) route through
+// ONE shared poll — elapsedMs is stamped locally right after the wait settles (or in the catch, on timeout),
+// preserving the return shape callers already read. elapsedMs is diagnostic-only here (only ever printed to
+// the console, never asserted on), so the shared helper's grace-window retry-before-throw inflating it in
+// the genuine-timeout case is harmless.
 async function waitForStopOrGiveUp(SID, sinceStopped, sinceBusyLen, timeoutMs) {
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    const stoppedNow = stoppedTurns.get(SID) || 0;
-    if (stoppedNow > sinceStopped) return { outcome: "confirmed", elapsedMs: Date.now() - t0 };
-    const log = busyLog[SID] || [];
-    if (log.length > sinceBusyLen && log.at(-1) === false) return { outcome: "gave-up", elapsedMs: Date.now() - t0 };
-    await sleep(100);
+  try {
+    const outcome = await sharedWaitUntil(() => {
+      const stoppedNow = stoppedTurns.get(SID) || 0;
+      if (stoppedNow > sinceStopped) return "confirmed";
+      const log = busyLog[SID] || [];
+      if (log.length > sinceBusyLen && log.at(-1) === false) return "gave-up";
+      return false;
+    }, { timeoutMs, intervalMs: 100, label: "_probe-repaint-wedge: stop-or-give-up" });
+    return { outcome, elapsedMs: Date.now() - t0 };
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return { outcome: "timeout", elapsedMs: Date.now() - t0 };
   }
-  return { outcome: "timeout", elapsedMs: Date.now() - t0 };
 }
 
 const spawnedRepos = [];

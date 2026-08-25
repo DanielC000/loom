@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const PORT = 4401;
 const tmpHome = path.join(os.tmpdir(), `loom-pastecompanion-home-${Date.now()}-${process.pid}`);
@@ -104,12 +105,13 @@ const LARGE_TEXT = LARGE_LINES.join("\n");
 console.log(`[probe] SMALL_TEXT length=${SMALL_TEXT.length} bytes, LARGE_TEXT length=${LARGE_TEXT.length} bytes`);
 
 async function waitForStop(id, sinceCount, timeoutMs) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if ((stoppedTurns.get(id) || 0) > sinceCount) return true;
-    await sleep(250);
+  try {
+    await sharedWaitUntil(() => (stoppedTurns.get(id) || 0) > sinceCount, { timeoutMs, intervalMs: 250, label: "_probe-paste-companion: turn stopped" });
+    return true;
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 // The REAL companion/system delivery path: chat-gateway.ts's submitTurn calls exactly this.

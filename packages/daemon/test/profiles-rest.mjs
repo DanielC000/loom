@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -48,13 +49,18 @@ if (ownDaemon) {
     stdio: "ignore",
   });
 }
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): pure poll-until-predicate loop, no
+// externally-anchored budget — a thrown predicate is a real bug and should propagate, not fold into false.
 async function waitReady(timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { const r = await fetch(`${BASE}/api/profiles`); if (r.ok) return true; } catch { /* not up yet */ }
-    await new Promise((res) => setTimeout(res, 200));
+  try {
+    return !!(await sharedWaitUntil(
+      async () => { try { const r = await fetch(`${BASE}/api/profiles`); return r.ok; } catch { return false; } },
+      { timeoutMs, intervalMs: 200, label: "profiles-rest: daemon ready" },
+    ));
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 try {

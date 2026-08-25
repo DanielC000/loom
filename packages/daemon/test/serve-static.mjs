@@ -33,6 +33,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 requireHermeticEnv();
 
@@ -150,13 +151,15 @@ try {
 // (h) tracked-pid start/stop lifecycle — REAL child-process spawn/kill, per the repo's "mocking the
 // exec impl never exercises the actual cross-platform spawn/kill" rule.
 const isAlivePid = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same timeoutMs/stepMs budget, still
+// returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 const waitUntilLifecycle = async (predicate, timeoutMs = 5000, stepMs = 50) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return true;
-    await new Promise((r) => setTimeout(r, stepMs));
+  try {
+    return !!(await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "serve-static: lifecycle predicate" }));
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 };
 
 const ssDir = mkdtempManaged("loom-serve-static-lifecycle-");

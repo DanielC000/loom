@@ -43,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 requireHermeticEnv();
 
@@ -55,13 +56,15 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 check("(0) dev-server helper exists", fs.existsSync(HELPER));
 
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same timeoutMs/stepMs budget, still
+// returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 const waitUntil = async (predicate, timeoutMs = 5000, stepMs = 50) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return true;
-    await new Promise((r) => setTimeout(r, stepMs));
+  try {
+    return !!(await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "dev-server: predicate" }));
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 };
 
 // A tiny heartbeat fixture: writes the current time to `outFile` on an interval, forever, until killed.

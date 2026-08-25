@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const PORT = 4403;
 const tmpHome = path.join(os.tmpdir(), `loom-collapserepeat-home-${Date.now()}-${process.pid}`);
@@ -85,12 +86,13 @@ const permission = { mode: "acceptEdits", allow: [], deny: [], startupModeCycles
 const N = 15; // repeat count — pooled sample, mirrors card b64b3726's n=10 real-engine methodology
 
 async function waitForStop(id, sinceCount, timeoutMs) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    if ((stoppedTurns.get(id) || 0) > sinceCount) return true;
-    await sleep(250);
+  try {
+    await sharedWaitUntil(() => (stoppedTurns.get(id) || 0) > sinceCount, { timeoutMs, intervalMs: 250, label: "_probe-paste-collapse-production-repeat: turn stopped" });
+    return true;
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 // The REAL production delivery path — identical to a worker report / manager redirect / human Composer

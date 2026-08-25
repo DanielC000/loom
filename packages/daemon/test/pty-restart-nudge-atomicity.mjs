@@ -56,6 +56,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -63,10 +64,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Poll for `cond()` instead of a blind fixed sleep, bounded by a generous ceiling so a genuinely broken
 // case still fails loudly rather than hanging. See the (A) write-contiguity block below for WHY a fixed
 // sleep is wrong here (card 2b9adeed).
+// Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same ceilingMs/intervalMs budget.
+// Preserves the LOCAL "re-check cond() once more on timeout" shape (a race where the condition flips true
+// exactly at the ceiling is still caught) by re-evaluating cond() in the catch, rather than hardcoding
+// false. A thrown cond() is a real bug and should propagate, not fold into a timeout-shaped result.
 const waitUntil = async (cond, ceilingMs = 8000, intervalMs = 20) => {
-  const deadline = performance.now() + ceilingMs;
-  while (!cond() && performance.now() < deadline) await sleep(intervalMs);
-  return cond();
+  try {
+    return !!(await sharedWaitUntil(cond, { timeoutMs: ceilingMs, intervalMs, label: "pty-restart-nudge-atomicity: cond" }));
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
+  }
 };
 
 // Hermetic LOOM_HOME + tight, test-only timing windows — all read at MODULE IMPORT time (host.ts), so
