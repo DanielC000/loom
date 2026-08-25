@@ -18,14 +18,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/25ms-interval budget,
+// still returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 async function waitFor(fn, timeoutMs = 3000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) { if (fn()) return true; await new Promise((r) => setTimeout(r, 25)); }
-  return false;
+  try {
+    return await sharedWaitUntil(fn, { timeoutMs, intervalMs: 25, label: "pty-log-stream-error: fn" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
+  }
 }
 
 // Hermetic LOOM_HOME, set BEFORE import. Deliberately make `logs` a FILE (not a directory) so the real

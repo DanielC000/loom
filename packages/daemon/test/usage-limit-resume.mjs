@@ -19,6 +19,7 @@ import { recordClaudeRateLimit, isLikelyNearClaudeUsageLimit } from "../dist/orc
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -174,15 +175,19 @@ function seed(e, id, o = {}) {
 }
 
 // ===================== PART 2 — live: synthetic short park → always-on watcher resumes ============
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): `last` is updated as a side effect on
+// every poll (unchanged), so a timeout still returns the last-observed row (not null) exactly as before.
 async function waitForSession(sessionId, pred, timeoutMs, intervalMs = 120) {
-  const deadline = Date.now() + timeoutMs;
   let last = null;
-  while (Date.now() < deadline) {
-    last = (await get("/api/sessions")).find((s) => s.id === sessionId) ?? last;
-    if (last && pred(last)) return last;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(async () => {
+      last = (await get("/api/sessions")).find((s) => s.id === sessionId) ?? last;
+      return last && pred(last) ? last : false;
+    }, { timeoutMs, intervalMs, label: "usage-limit-resume: session state" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return last;
   }
-  return last;
 }
 
 const dir = path.join(os.tmpdir(), `loom-resume-live-${Date.now()}-${process.pid}`);

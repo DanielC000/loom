@@ -24,6 +24,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -38,13 +39,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // regardless of how much contention the host is under, without changing what it discriminates: if
 // suppression fired instead of recovery, `predicate` never turns true (nothing in this fake pty ever
 // confirms a hook to flip `enterConfirmed`), so this still fails — just after `timeoutMs` elapses.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/pollMs budget, still
+// does a final `predicate()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(predicate, { timeoutMs, pollMs = 20 }) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await sleep(pollMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs: pollMs, label: "pty-reassert-settle: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return predicate();
   }
-  return predicate();
 }
 
 const tmpHome = path.join(os.tmpdir(), `loom-reassertsettle-${Date.now()}-${process.pid}`);

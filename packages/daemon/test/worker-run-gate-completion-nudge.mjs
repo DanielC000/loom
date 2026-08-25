@@ -44,6 +44,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 // Disables runGateStep's one-time auto-extend (card 24642c3d) for the WHOLE file — a module-load-time
 // constant, so this must be set before gate-runner.js is ever imported (transitively, via service.js
@@ -85,13 +86,16 @@ const SLOW_GATE_MS = 1500;
 const TIMEOUT_KILL_MS = 1500;
 // Poll for the async completion nudge instead of a fixed sleep — under CPU contention the gate process
 // (spawn + setTimeout) and the terminal callback can land well past any hardcoded wait.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/intervalMs budget
+// (still monotonic — the shared helper uses performance.now() internally too), still does a final
+// `predicate()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
-  const start = performance.now();
-  while (performance.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "worker-run-gate-completion-nudge: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return predicate();
   }
-  return predicate();
 }
 
 const tmpHome = mkdtempManaged("loom-wgn-");

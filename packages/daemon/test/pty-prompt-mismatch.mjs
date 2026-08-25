@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -55,13 +56,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // guard's own header names this shape as its documented blind spot ("a locally-reimplemented waitUntil/
 // poll-loop... usually safe"), because it IS a genuinely different shape from a blind sleep: it retries
 // against an observed condition rather than assuming a fixed duration was enough.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/stepMs budget, still
+// returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return true;
-    await sleep(stepMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "pty-prompt-mismatch: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 };
 // Whether ANY pending entry for `sid` is the prompt-mismatch notice — reads PtyHost's own queue state
 // directly (host.getPendingEntries), not an indirect symptom like pty writes.

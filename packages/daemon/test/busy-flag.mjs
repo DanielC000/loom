@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -33,15 +34,19 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Poll GET /api/sessions until our session matches `pred`, or time out. Returns the row (or last seen).
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): `last` is updated as a side effect on
+// every poll (unchanged), so a timeout still returns the last-observed row (not null) exactly as before.
 async function waitForSession(sessionId, pred, timeoutMs, intervalMs = 250) {
-  const deadline = Date.now() + timeoutMs;
   let last = null;
-  while (Date.now() < deadline) {
-    last = (await get("/api/sessions")).find((s) => s.id === sessionId) ?? last;
-    if (last && pred(last)) return last;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(async () => {
+      last = (await get("/api/sessions")).find((s) => s.id === sessionId) ?? last;
+      return last && pred(last) ? last : false;
+    }, { timeoutMs, intervalMs, label: "busy-flag: session state" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return last;
   }
-  return last;
 }
 
 // --- a real git repo to point the session at ---

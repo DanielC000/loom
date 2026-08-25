@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const TMP = mkdtempManaged("loom-ws-json-hardening-");
 process.env.LOOM_HOME = TMP;
@@ -38,13 +39,15 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Poll `cond` until it's true or `timeoutMs` elapses.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/20ms-interval budget,
+// still does a final `cond()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitFor(cond, timeoutMs = 1000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 20));
+  try {
+    return await sharedWaitUntil(cond, { timeoutMs, intervalMs: 20, label: "ws-json-hardening: cond" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
   }
-  return cond();
 }
 
 const db = new Db(path.join(TMP, "loom.db"));

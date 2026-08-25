@@ -11,17 +11,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/pollMs budget, still
+// does a final `pred()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(pred, timeoutMs = 3000, pollMs = 20) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pred()) return true;
-    await sleep(pollMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs: pollMs, label: "mcp-ready-gate: pred" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return pred();
   }
-  return pred();
 }
 
 // Guardrail (manager review, card df5e37e7): the deferred-nudge chain

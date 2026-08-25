@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -59,13 +60,18 @@ if (ownDaemon) {
     stdio: "ignore",
   });
 }
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/200ms-interval budget;
+// the predicate keeps swallowing a not-up-yet fetch failure internally (unchanged), only a genuine
+// non-timeout error from the shared helper itself would propagate.
 async function waitReady(timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { const r = await fetch(`${BASE}/api/projects`); if (r.ok) return true; } catch { /* not up yet */ }
-    await sleep(200);
+  try {
+    return await sharedWaitUntil(async () => {
+      try { const r = await fetch(`${BASE}/api/projects`); return r.ok; } catch { return false; }
+    }, { timeoutMs, intervalMs: 200, label: "board-consistency: daemon ready" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 let session = null;

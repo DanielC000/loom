@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const TMP = mkdtempManaged("loom-ws-fleet-");
 process.env.LOOM_HOME = TMP;
@@ -66,13 +67,15 @@ function makeInbox() {
 
 // Poll `cond` until it's true or `timeoutMs` elapses — used instead of a fixed sleep for hub-state
 // assertions that depend on the server having processed an already-sent message.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/20ms-interval budget,
+// still does a final `cond()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitFor(cond, timeoutMs = 1000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 20));
+  try {
+    return await sharedWaitUntil(cond, { timeoutMs, intervalMs: 20, label: "ws-fleet: cond" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
   }
-  return cond();
 }
 
 const db = new Db(path.join(TMP, "loom.db"));

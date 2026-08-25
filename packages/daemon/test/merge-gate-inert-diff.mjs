@@ -50,6 +50,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgid-home-${Date.now()}-${process.pid}`);
@@ -85,14 +86,18 @@ async function confirmWithTimeout(sessions, mgrId, workerId, timeoutMs) {
 // git subprocess, the sibling could land BEFORE the waiting op ever reaches its own guard acquisition,
 // making it hit an entirely different, pre-existing code path than the one under test. This poll makes the
 // synchronization point exact regardless of git subprocess speed.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/10ms-interval budget,
+// still returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 async function waitUntilRepoGuardQueued(sessions, projId, repoPath, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const snap = sessions.gateQueueForManager(projId);
-    if (snap.repoGuardOnly.some((e) => e.phase === "queued" && e.repoPath === repoPath)) return true;
-    await sleep(10);
+  try {
+    return await sharedWaitUntil(() => {
+      const snap = sessions.gateQueueForManager(projId);
+      return snap.repoGuardOnly.some((e) => e.phase === "queued" && e.repoPath === repoPath);
+    }, { timeoutMs, intervalMs: 10, label: "merge-gate-inert-diff: repo guard queued" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 const eventsOfKind = (db, mgrId, kind) => db.listEvents(mgrId).filter((e) => e.kind === kind);

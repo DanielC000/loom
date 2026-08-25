@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-vv-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -45,10 +46,15 @@ function plantObsidianGitMarker(repoRoot) {
 }
 // `git rev-list --all --count` is 0 (clean exit) on a fresh repo with no commits — unlike `git log`.
 const commitCount = (dir) => parseInt(git(dir, "rev-list --all --count").trim() || "0", 10);
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/50ms-interval budget,
+// still returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 async function waitFor(fn, timeoutMs = 5000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) { if (fn()) return true; await new Promise((r) => setTimeout(r, 50)); }
-  return false;
+  try {
+    return await sharedWaitUntil(fn, { timeoutMs, intervalMs: 50, label: "vault-versioner-wiring: fn" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
+  }
 }
 
 const vaultA = path.join(root, "vaultA");

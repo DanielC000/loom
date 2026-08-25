@@ -54,6 +54,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -80,13 +81,15 @@ const host = new TestPtyHost(events);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Card 1addef27 (fixed-wait-negative-guard): a bounded POLL on the actual completion signal (the notice's
 // own enqueue), not a fixed clock — mirrors pty-prompt-mismatch.mjs's own waitUntil.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/stepMs budget, still
+// returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return true;
-    await sleep(stepMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "pty-composer-accumulation-diverged-prior: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 };
 const hasPendingMismatchNotice = (sid) => host.getPendingEntries(sid).some((e) => e.text.includes("[loom:prompt-mismatch]"));
 

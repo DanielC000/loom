@@ -26,6 +26,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -38,13 +39,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // flake inside the full daemon suite that 5+ standalone reruns and 14 artificially-loaded reruns couldn't
 // reproduce — the loaded-scheduler theory, not a logic bug). Polling with a generous bound is robust to
 // that delay while still failing fast (and clearly) if the condition is genuinely never met.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/pollMs budget, still
+// does a final `pred()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(pred, timeoutMs = 3000, pollMs = 20) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pred()) return true;
-    await sleep(pollMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs: pollMs, label: "pty-resume-readiness: pred" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return pred();
   }
-  return pred();
 }
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn). Set the

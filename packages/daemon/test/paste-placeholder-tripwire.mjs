@@ -27,6 +27,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -35,13 +36,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // clock — mirrors dev-server.mjs's own `waitUntil`. Used ONLY where a negative-polarity assertion needs
 // to know a write genuinely happened (positive signal) before inspecting its content, so a too-short
 // window fails loudly (timeout) instead of passing vacuously on the negative check for the wrong reason.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/stepMs budget, still
+// returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
 const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 20) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return true;
-    await sleep(stepMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "paste-placeholder-tripwire: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 };
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Set BEFORE any

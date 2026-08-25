@@ -54,6 +54,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 // Both read LIVE (per-call, via resolveConfig) — not module-load-time constants — so setting them here
 // affects every scenario in this file uniformly; harmless for (1)-(5), which never reach a timeout-kill
@@ -107,13 +108,16 @@ const TIMEOUT_KILL_MS = 1500;
 // Poll for the async completion nudge instead of a fixed sleep — under CPU contention the gate process
 // (spawn + setTimeout) and the terminal callback can land well past any hardcoded wait; polling with a
 // generous ceiling waits exactly as long as actually needed instead of gambling on a fixed delay.
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/intervalMs budget
+// (still monotonic — the shared helper uses performance.now() internally too), still does a final
+// `predicate()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
-  const start = performance.now();
-  while (performance.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "merge-confirm-completion-nudge: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return predicate();
   }
-  return predicate();
 }
 
 const tmpHome = path.join(os.tmpdir(), `loom-mcn-${Date.now()}-${process.pid}`);

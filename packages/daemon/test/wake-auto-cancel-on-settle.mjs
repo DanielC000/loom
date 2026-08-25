@@ -31,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -59,13 +60,16 @@ function printFailureDiagnosticIfAny() {
     ? `captured settle-wake log line(s):\n  ${capturedSettleLogLines.join("\n  ")}`
     : "NO settle-wake log line was emitted for the fallback wake at all — it was silently excluded by the createdAt >= opStartedAt comparison (not the fail-safe branch, which always logs 'auto-cancel-on-nudge skipped').");
 }
+// Retrofitted onto the shared _wait.mjs waitUntil (card 24d2e0ac): same timeoutMs/intervalMs budget
+// (still monotonic — the shared helper uses performance.now() internally too), still does a final
+// `predicate()` re-check on timeout (unchanged) instead of hardcoding false.
 async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
-  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
-  while (performance.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "wake-auto-cancel-on-settle: predicate" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return predicate();
   }
-  return predicate();
 }
 
 const tmpHome = path.join(os.tmpdir(), `loom-wacs-${Date.now()}-${process.pid}`);
