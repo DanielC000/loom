@@ -1,0 +1,65 @@
+Raw captured stdout from each trial, verbatim, as printed by the harness scripts in ./scripts/.
+No output has been edited, summarized, or reordered — see README.md for the interpretation.
+
+=== TRIAL 1 — node scripts/repro-makerepo-race.mjs 3 20 (idle host) ===
+root=C:\Users\danie\AppData\Local\Temp\loom-repro-makerepo-1787698627182 N=3 ROUNDS=20
+round 0: 3/3 ok
+round 1: 3/3 ok
+round 2: 3/3 ok
+round 3: 3/3 ok
+round 4: 3/3 ok
+round 5: 3/3 ok
+round 6: 3/3 ok
+round 7: 3/3 ok
+round 8: 3/3 ok
+round 9: 3/3 ok
+round 10: 3/3 ok
+round 11: 3/3 ok
+round 12: 3/3 ok
+round 13: 3/3 ok
+round 14: 3/3 ok
+round 15: 3/3 ok
+round 16: 3/3 ok
+round 17: 3/3 ok
+round 18: 3/3 ok
+round 19: 3/3 ok
+TOTAL: 60/60 ok, 0 failed
+
+=== TRIAL 2 — node scripts/repro-makerepo-race.mjs 15 10 (idle host) ===
+root=C:\Users\danie\AppData\Local\Temp\loom-repro-makerepo-1787698640780 N=15 ROUNDS=10
+round 0: 15/15 ok
+round 1: 15/15 ok
+round 2: 15/15 ok
+round 3: 15/15 ok
+round 4: 15/15 ok
+round 5: 15/15 ok
+round 6: 15/15 ok
+round 7: 15/15 ok
+round 8: 15/15 ok
+round 9: 15/15 ok
+TOTAL: 150/150 ok, 0 failed
+
+=== TRIAL 3 — node scripts/repro-makerepo-race.mjs 20 8, under 20 concurrent `node scripts/cpu-hog.mjs 90000`
+    background processes (oversubscribing this host's 16 logical cores) ===
+root=C:\Users\danie\AppData\Local\Temp\loom-repro-makerepo-1787698678447 N=20 ROUNDS=8
+round 0: 20/20 ok
+round 1: 20/20 ok
+round 2: 20/20 ok
+round 3: 20/20 ok
+round 4: 20/20 ok
+round 5: 20/20 ok
+round 6: 20/20 ok
+round 7: 20/20 ok
+TOTAL: 160/160 ok, 0 failed
+
+=== TRIAL 4 — node scripts/repro-lifecycle-race.mjs 25 6, under 24 concurrent `node scripts/cpu-hog.mjs 240000`
+    background processes (oversubscribing this host's 16 logical cores for 240s) ===
+N=25 rounds=6 (each round = init+commit + 2x worktree-add+commit)
+elapsed=67934ms totalOpGroups~=750 failures=0
+
+=== TRIAL 5 — bash scripts/bash-race.sh 60 <tmp-root> (idle host; N truly-simultaneous
+    bash-backgrounded processes, bypassing Node's own child_process.spawn overhead) ===
+[60x `warning: in the working copy of 'README.md', LF will be replaced by CRLF the next
+ time Git touches it` — one per repo, from `git add .` on a CRLF-configured Windows git
+ install (core.autocrlf=true at the system gitconfig level); expected noise, not a failure]
+DONE: 0 non-zero exits out of 60
