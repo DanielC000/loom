@@ -20,6 +20,13 @@
 // is not event-complete. The presence checks below assert the expected event KEYS actually show up
 // (Array.isArray + length > 0), independent of the shape checker.
 //
+// Card ea2fbcca (the CLASS fix): `hooksShapeViolations` now ALSO backs a real WRITE-TIME + read-back
+// guard in production (`assertValidHooksShape` in claude-settings.ts), not just this regression test —
+// both import the SAME function from `dist/` (no hand-duplicated second copy to drift, exactly the risk
+// PRE_TOOL_USE_ATTRIBUTION_MATCHER's own doc comment warns about). The RED-PROOF section below now also
+// exercises `assertValidHooksShape` directly — the actual wired throw-and-log guard, not just the bare
+// checker function — against both the known-bad specimen and the real emitted object.
+//
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   pnpm build (repo root) then `node test/settings-hooks-shape.mjs` from packages/daemon.
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
@@ -30,43 +37,11 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// The assertion under test: iterates the WHOLE hooks object (not per-entry), returns a list of shape
-// violations (empty ⇒ valid). This exact function is what both the real emitted object and the
-// negative-control (synthetic double-wrap, below) are checked against — a single definition, so a future
-// hook event added to claude-settings.ts is covered automatically without touching this test.
-function hooksShapeViolations(hooksObj) {
-  const errors = [];
-  if (typeof hooksObj !== "object" || hooksObj === null) return ["settings.hooks is not an object"];
-  for (const [event, groups] of Object.entries(hooksObj)) {
-    if (!Array.isArray(groups)) { errors.push(`${event}: not an array of groups (got ${typeof groups})`); continue; }
-    groups.forEach((group, gi) => {
-      if (typeof group !== "object" || group === null) {
-        errors.push(`${event}[${gi}]: group is not an object`);
-        return;
-      }
-      if ("matcher" in group && typeof group.matcher !== "string") {
-        errors.push(`${event}[${gi}]: matcher present but not a string`);
-      }
-      if (!Array.isArray(group.hooks)) {
-        errors.push(`${event}[${gi}]: group.hooks is not an array (got ${JSON.stringify(group.hooks)})`);
-        return;
-      }
-      group.hooks.forEach((h, hi) => {
-        const shapeOk = typeof h === "object" && h !== null && h.type === "command" && typeof h.command === "string";
-        if (!shapeOk) {
-          errors.push(`${event}[${gi}].hooks[${hi}]: not { type: "command", command: <string> } (got ${JSON.stringify(h)})`);
-        }
-      });
-    });
-  }
-  return errors;
-}
-
 const tmpHome = path.join(os.tmpdir(), `loom-settings-hooks-shape-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "tmp", "settings"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { writeSessionSettings } = await import("../dist/pty/claude-settings.js");
+const { writeSessionSettings, hooksShapeViolations, assertValidHooksShape } = await import("../dist/pty/claude-settings.js");
 
 try {
   const perm = { mode: "acceptEdits", allow: ["mcp__loom-tasks"], deny: [], startupModeCycles: 2 };
@@ -145,6 +120,22 @@ try {
   // --- Positive control on the checker itself: a well-formed object must NOT be flagged as broken.
   check("negative-control sanity: a well-formed hooks object is NOT flagged",
     hooksShapeViolations({ SessionStart: [hookCmd] }).length === 0);
+
+  // --- Card ea2fbcca: prove the WIRED guard (assertValidHooksShape — the exact function
+  // writeSessionSettings calls pre-write AND on read-back), not just the bare checker, actually fails on
+  // the known-bad specimen and passes on the real generated object (verification posture: an instrument
+  // never shown failing is not evidence).
+  let threwOnBad = null;
+  try { assertValidHooksShape(doubleWrapped, "test"); } catch (e) { threwOnBad = e; }
+  check(
+    "assertValidHooksShape (the wired write-time/read-back guard) THROWS on the exact double-wrap defect, "
+      + "naming the violation in its message",
+    threwOnBad instanceof Error && threwOnBad.message.includes("PreToolUse")
+      && threwOnBad.message.includes("generated settings.hooks is invalid"),
+  );
+  let threwOnReal = null;
+  try { assertValidHooksShape(withVault.hooks, "test"); } catch (e) { threwOnReal = e; }
+  check("assertValidHooksShape does NOT throw on the real emitted (valid) hooks object", threwOnReal === null);
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
