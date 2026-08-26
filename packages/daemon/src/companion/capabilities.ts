@@ -927,7 +927,7 @@ const BOARD_REACH_SLUG = "board-reach";
 type PendingBoardWrite =
   | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority; grantBacked: boolean }
   | {
-      action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean; grantBacked: boolean;
+      action: "update"; taskId: string; title?: string; body?: string; appendBody?: string; columnKey?: string; priority?: TaskPriority; held?: boolean; grantBacked: boolean;
       /**
        * Card 0b36702e — the task's `version` at PROPOSE time, captured here so the eventual CONFIRM call
        * (a separate handler invocation, possibly minutes later) gates its title/body write against the
@@ -1355,10 +1355,14 @@ const BOARD_REACH: CompanionCapability = {
           "is your ONLY card-update tool, on any of your act-granted projects, including your own. " +
           "Move its column (`columnKey`), change its `priority`, set `held` (the owner-gated 'don't nag' " +
           "flag), and/or rewrite its `title`/`body`. At least one field must be given. By default, `title`/ " +
-          "`body` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said — this turn or " +
-          "one of your last few recent owner turns (a same-exchange correction still counts) — " +
+          "`body`/`appendBody` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said — " +
+          "this turn or one of your last few recent owner turns (a same-exchange correction still counts) — " +
           "you may never author card content yourself; if this project has been opted into authored " +
-          "content, you may instead write real, well-formed text yourself. This applies the " +
+          "content, you may instead write real, well-formed text yourself. " +
+          "`body` is a FULL REPLACE of the card's body — if you only mean to add a note (e.g. \"add a note " +
+          "saying we're delaying this\"), use `appendBody` instead: it appends a timestamped section to " +
+          "whatever body is already there, so the existing content is never lost. Passing both `body` and " +
+          "`appendBody` is rejected — they're different intents; pick one. This applies the " +
           "update IMMEDIATELY ({status:'updated'}) once the owner has recently confirmed something in " +
           "this chat — no per-action code needed while that trust window stays warm. Otherwise (a cold " +
           "window, or this grant configured to always confirm) it does NOT apply the update on the first " +
@@ -1375,20 +1379,24 @@ const BOARD_REACH: CompanionCapability = {
           "to — a proactive/heartbeat turn is always rejected. There is no delete tool — card removal " +
           "stays human-only.",
         inputSchema: {
-          id: z.string(), title: z.string().optional(), body: z.string().optional(),
+          id: z.string(), title: z.string().optional(), body: z.string().optional(), appendBody: z.string().optional(),
           columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
           held: z.boolean().optional(),
         },
       },
-      async ({ id, title, body, columnKey, priority, held }) => {
-        // A whitespace-only title/body is not a meaningful edit — treat it as absent (mirrors
+      async ({ id, title, body, appendBody, columnKey, priority, held }) => {
+        // A whitespace-only title/body/appendBody is not a meaningful edit — treat it as absent (mirrors
         // board_create's own whitespace-body fold), so a raw undefined check below stays the ONLY thing
-        // that decides "was a real title/body change even requested".
+        // that decides "was a real title/body/appendBody change even requested".
         const hasTitle = title !== undefined && title.trim() !== "";
         const hasBody = body !== undefined && body.trim() !== "";
-        if (columnKey === undefined && priority === undefined && held === undefined && !hasTitle && !hasBody) {
-          return ok({ error: "at least one of title, body, columnKey, priority, or held must be given" });
+        const hasAppendBody = appendBody !== undefined && appendBody.trim() !== "";
+        if (columnKey === undefined && priority === undefined && held === undefined && !hasTitle && !hasBody && !hasAppendBody) {
+          return ok({ error: "at least one of title, body, appendBody, columnKey, priority, or held must be given" });
         }
+        // Card e2756e47 — the same exclusivity contract updateProjectTask enforces server-side, checked
+        // early here so a doomed call fails BEFORE the owner-confirmation round-trip below, not after.
+        if (hasBody && hasAppendBody) return ok({ error: "pass either body or appendBody, not both" });
         // Resolve the card GLOBALLY first (mirrors decision_resolve's db.getQuestion(questionId) — the
         // only way to learn which project a bare card id belongs to), THEN apply the belt-and-suspenders
         // per-project scope check.
@@ -1424,6 +1432,7 @@ const BOARD_REACH: CompanionCapability = {
         const key = pendingBoardKey(ctx.sessionId, route);
         const normalizedTitle = hasTitle ? (title as string) : undefined;
         const normalizedBody = hasBody ? (body as string) : undefined;
+        const normalizedAppendBody = hasAppendBody ? (appendBody as string) : undefined;
         // Primitive B applies to `title`/`body` on EVERY path that can actually commit them THIS call (the
         // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
         // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc), OR
@@ -1433,7 +1442,8 @@ const BOARD_REACH: CompanionCapability = {
         // `grantAllows` doc for why `verbatimOk` is checked first.
         const cfgAllows = authoredContentAllowed(cfg);
         const verbatimOk = (!hasTitle || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedTitle as string))
-          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string));
+          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string))
+          && (!hasAppendBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedAppendBody as string));
         const grantAllows = !cfgAllows && !verbatimOk && ctx.attest.hasAuthoredContentGrant(ctx.sessionId, task.projectId);
         const contentIsVerbatim = cfgAllows || verbatimOk || grantAllows;
         // Card 0b36702e (closes d0978321's own §COMPANION residual — see this function's `PendingBoardWrite`
@@ -1454,8 +1464,10 @@ const BOARD_REACH: CompanionCapability = {
           if (priority !== undefined) patch.priority = priority;
           if (held !== undefined) patch.held = held;
           // Threaded unconditionally (harmless when title/body are both absent, since that patch is never
-          // gated — see updateProjectTask's own touchesContent check).
-          const result = await updateProjectTask(db, task.projectId, id, patch, undefined, versionForGate);
+          // gated — see updateProjectTask's own touchesContent check). `appendBody` (card e2756e47) rides
+          // its OWN param, never `patch.body` — mutually exclusive with `hasBody` above, so at most one of
+          // `patch.body`/the trailing arg here is ever set.
+          const result = await updateProjectTask(db, task.projectId, id, patch, undefined, versionForGate, undefined, normalizedAppendBody);
           return "error" in result ? { error: result.error } : { updated: result };
         };
 
@@ -1463,7 +1475,7 @@ const BOARD_REACH: CompanionCapability = {
         // propose/confirm round-trip at all.
         if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
           if (!contentIsVerbatim) {
-            return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
+            return ok({ error: "title/body/appendBody must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
           const result = await applyPatch(task.version);
           if ("error" in result) return ok({ error: result.error });
@@ -1483,6 +1495,7 @@ const BOARD_REACH: CompanionCapability = {
           if (
             !pending || pending.action !== "update" || pending.taskId !== id
             || pending.title !== normalizedTitle || pending.body !== normalizedBody
+            || pending.appendBody !== normalizedAppendBody
             || pending.columnKey !== columnKey || pending.priority !== priority || pending.held !== held
           ) {
             return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
@@ -1509,14 +1522,15 @@ const BOARD_REACH: CompanionCapability = {
         pendingBoardWrites.delete(key);
 
         // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B
-        // applies here (title/body only — see above); columnKey/priority/held are closed-vocabulary,
-        // validated above, so Primitive B never applies to them.
+        // applies here (title/body/appendBody only — see above); columnKey/priority/held are
+        // closed-vocabulary, validated above, so Primitive B never applies to them.
         if (!contentIsVerbatim) {
-          return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
+          return ok({ error: "title/body/appendBody must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
         }
         const changes: string[] = [];
         if (hasTitle) changes.push(`change title to "${normalizedTitle}"`);
         if (hasBody) changes.push(`change body to "${normalizedBody}"`);
+        if (hasAppendBody) changes.push(`append a note to body: "${normalizedAppendBody}"`);
         if (columnKey !== undefined) changes.push(`move to column "${columnKey}"`);
         if (priority !== undefined) changes.push(`set priority to ${priority}`);
         if (held !== undefined) changes.push(`set held to ${held}`);
@@ -1532,7 +1546,7 @@ const BOARD_REACH: CompanionCapability = {
         }
         // baseVersion captured HERE, at propose time (card 0b36702e) — see PendingBoardWrite's own doc for
         // why the confirm branch reads this back instead of re-reading `task.version` fresh.
-        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held, grantBacked: grantAllows, baseVersion: task.version });
+        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, appendBody: normalizedAppendBody, columnKey, priority, held, grantBacked: grantAllows, baseVersion: task.version });
         return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
