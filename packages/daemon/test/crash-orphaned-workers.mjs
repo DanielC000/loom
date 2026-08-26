@@ -12,7 +12,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       in_progress) and excludes: archived pre-crash, recycled (has a successor), and a task already on
 //       the terminal lane (done/merged).
 //   (2) DONE-BUT-UNMERGED — a worker that reported `done` but whose task hasn't landed IS still
-//       recovered (reportedDone:true) — recovery ADDS worktree protection + worker_list visibility even
+//       recovered (reportedState:'done', awaitingReview:true) — recovery ADDS worktree protection +
+//       worker_list visibility even
 //       though worker_merge/worker_merge_confirm can already merge a dead/archived worker's branch
 //       directly (they never check session liveness/archivedAt — only Pass B's worktreeHasWork
 //       branch-ahead guard, independent of session state, is what actually keeps the worktree on disk
@@ -31,9 +32,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       isParked/skippedParked handling; a crash must never force a held turn back into a usage cap.
 //   (6) MANAGER-ALL-FAILED — a manager whose EVERY candidate worker individually fails to resume still
 //       gets a summary nudge (it was already silently resumed with no other signal a crash happened).
-//   (7) STALE reportedDone — a worker_report(done) event superseded by a LATER merge_rejected (the
-//       manager sent it back to fix a failed gate/conflict) is NOT treated as reportedDone, so it still
-//       gets the continue-your-task nudge instead of being silently parked as "awaiting review".
+//   (7) MERGE_REJECTED DOES NOT RESOLVE (card db05e657 ruling, OVERTURNS this test's old assertion) — a
+//       worker_report(done) followed by a LATER merge_rejected event is STILL awaitingReview:true: a bare
+//       merge_rejected is fired by the merge/gate machinery, not by any action directed at the worker, so
+//       treating it as "the manager sent the worker back to fix something" assumed a follow-up that may
+//       never have been sent. This unifies with worker_list's own projection, which never carved out
+//       merge_rejected either (test/worker-reported-state.mjs case (g)).
 //   (8) STALE-DEAD-FLAG RACE (the inconsistently-partial-recovery bug): a worker whose `resumability`
 //       column was already stamped 'dead' BEFORE this crash — e.g. by liveness.ts's debounced
 //       chokidar watcher misreading a transient TOCTOU gap on an UNRELATED session's transcript rewrite
@@ -186,8 +190,8 @@ try {
   check("(1) candidate count is exactly 3 (ok, successor, doneUnmerged)", derived.length === 3);
 
   // ============================ (2) DONE-BUT-UNMERGED — recovered, not nudged-to-continue ==========
-  check("(2) a done-but-unmerged worker IS recovered (reportedDone:true)", byId.get(id.doneUnmerged)?.reportedDone === true);
-  check("(2) the crash-shaped OK worker is NOT marked reportedDone", byId.get(id.ok)?.reportedDone === false);
+  check("(2) a done-but-unmerged worker IS recovered (reportedState:'done', awaitingReview:true)", byId.get(id.doneUnmerged)?.reportedState === "done" && byId.get(id.doneUnmerged)?.awaitingReview === true);
+  check("(2) the crash-shaped OK worker (never reported) has no reportedState/awaitingReview", byId.get(id.ok)?.reportedState === null && byId.get(id.ok)?.awaitingReview === false);
 
   // ============================ (3) ORDERING — survives archive + Pass B GC, reappears in worker_list ===
   // A REAL repo + REAL engine transcripts for the manager and worker, so recoverCrashOrphanedWorkers can
@@ -326,7 +330,7 @@ try {
   check("(6) the manager STILL gets a summary nudge even though recoveredCount is 0",
     pty.getPending(id6.mgr).some((m) => m.includes("[loom:crash-recovered]") && /none of your 2/i.test(m)));
 
-  // ============================ (7) STALE reportedDone — a later merge_rejected supersedes it =========
+  // ============================ (7) MERGE_REJECTED DOES NOT RESOLVE — card db05e657 ruling ============
   const id7 = { mgr: `cow-mgr7-${sfx}`, wkr: `cow-wkr7-${sfx}` };
   const t7 = mkTask(`cow-t7-${sfx}`, P.proj);
   mkSession({ id: id7.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
@@ -335,11 +339,13 @@ try {
   db.appendEvent({ id: `evt-${sfx}-7b`, ts: now, managerSessionId: id7.mgr, workerSessionId: id7.wkr, taskId: t7, kind: "merge_rejected", detail: { reason: "gate" } });
   const derived7 = deriveCrashOrphanedWorkers(db, [db.getSession(id7.mgr), db.getSession(id7.wkr)]);
   const c7 = derived7.find((c) => c.workerSessionId === id7.wkr);
-  check("(7) a worker_report(done) SUPERSEDED by a later merge_rejected is NOT treated as reportedDone", c7?.reportedDone === false);
+  check("(7) THE OVERTURNED ASSERTION, corrected: a bare merge_rejected does NOT resolve awaitingReview — matches worker_list's own projection for the identical shape (test/worker-reported-state.mjs case (g))", c7?.reportedState === "done" && c7?.awaitingReview === true);
   sessions.recoverCrashOrphanedWorkers(derived7, { resumeOne: () => true });
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
-  check("(7) it therefore STILL gets the continue-your-task nudge (it's actually mid-fix, not awaiting review)",
-    pty.getPending(id7.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+  check("(7) it does NOT get the continue-your-task nudge — it's genuinely still awaiting review, not mid-fix",
+    !pty.getPending(id7.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+  check("(7) the manager's summary nudge DOES announce it as awaiting review/merge",
+    pty.getPending(id7.mgr).some((m) => m.includes("[loom:crash-recovered]") && /awaiting your review\/merge/i.test(m)));
 
   // ============================ (8) STALE-DEAD-FLAG RACE — re-verified live, not trusted ==============
   const id8 = { mgr: `cow-mgr8-${sfx}`, staleDead: `cow-wkr8-staledead-${sfx}`, genuinelyDead: `cow-wkr8-gendead-${sfx}` };
@@ -835,8 +841,7 @@ try {
   db.appendEvent({ id: `evt-${sfx}-14a-consumed`, ts: now, managerSessionId: id14a.mgr, workerSessionId: id14a.wkr, taskId: t14a, kind: "message_worker", detail: { text: "fix the blocking finding" } });
   const derived14a = deriveCrashOrphanedWorkers(db, [db.getSession(id14a.mgr), db.getSession(id14a.wkr)]);
   const c14a = derived14a.find((c) => c.workerSessionId === id14a.wkr);
-  check("(14a) reportedDone is still true (a done report exists) — the two questions are genuinely different", c14a?.reportedDone === true);
-  check("(14a) THE RED-CATCHING CASE: awaitingReview is false — the report was already CONSUMED by a follow-up directive", c14a?.awaitingReview === false);
+  check("(14a) THE RED-CATCHING CASE: reportedState is null + awaitingReview is false — the report was already CONSUMED by a follow-up directive", c14a?.reportedState === null && c14a?.awaitingReview === false);
   sessions.recoverCrashOrphanedWorkers(derived14a, { resumeOne: () => true });
   await flush();
   check("(14a) the manager's summary nudge does NOT claim this worker is awaiting review/merge",
@@ -875,6 +880,51 @@ try {
   check("(14c) the awaiting-review clause points the manager at worker_report_get as the authoritative read",
     pty.getPending(id14b.mgr).some((m) => /worker_report_get/i.test(m) && /authoritative/i.test(m)));
 
+  // ============================ (15) BLOCKED — card db05e657 ruling ==================================
+  // A worker whose LAST report is worker_report(blocked), never since resolved: RED under the pre-fix
+  // code (deriveCrashOrphanedWorkers used to set awaitingReview true ONLY for status==="done" — a blocked
+  // report always read awaitingReview:false, so it was BOTH omitted from the summary's "awaiting your
+  // review/merge" count AND handed the generic "continue your assigned task" nudge it structurally cannot
+  // act on). GREEN after: announced in the summary (ruling 1 — blocked counts like done) but NOT the
+  // continue-nudge (ruling 2 — it can't continue); instead a distinct nudge reminding it to re-state its
+  // blocker to its manager.
+  const id15 = { mgr: `cow-mgr15-${sfx}`, wkr: `cow-wkr15-${sfx}` };
+  const t15 = mkTask(`cow-t15-${sfx}`, P.proj);
+  mkSession({ id: id15.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id15.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id15.mgr, taskId: t15, processState: "live" });
+  db.appendEvent({ id: `evt-${sfx}-15`, ts: now, managerSessionId: id15.mgr, workerSessionId: id15.wkr, taskId: t15, kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
+  const derived15 = deriveCrashOrphanedWorkers(db, [db.getSession(id15.mgr), db.getSession(id15.wkr)]);
+  const c15 = derived15.find((c) => c.workerSessionId === id15.wkr);
+  check("(15) reportedState is 'blocked' + awaitingReview true", c15?.reportedState === "blocked" && c15?.awaitingReview === true);
+  sessions.recoverCrashOrphanedWorkers(derived15, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
+  // MAJOR 1 (review round): the summary sentence must NOT call a blocked-only recovery "reported done ...
+  // awaiting your review/merge" — nothing was reported done, there is nothing to merge. It must instead
+  // say the worker reported BLOCKED and is awaiting an ANSWER, in its own distinct clause.
+  check("(15) the manager's summary nudge announces it as reported BLOCKED, awaiting an answer (its own clause, not the done/merge one)",
+    pty.getPending(id15.mgr).some((m) => m.includes("[loom:crash-recovered]") && /reported BLOCKED/.test(m) && /waiting on an answer from you/i.test(m)));
+  check("(15) THE MAJOR-1 REGRESSION GUARD: the summary nudge does NOT say 'reported done' or 'awaiting your review/merge' — nothing was reported done, nothing to merge",
+    !pty.getPending(id15.mgr).some((m) => m.includes("[loom:crash-recovered]") && (/reported done/i.test(m) || /awaiting your review\/merge/i.test(m))));
+  check("(15) the worker does NOT get the generic continue-your-task nudge — it structurally cannot continue",
+    !pty.getPending(id15.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+  check("(15) the worker DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
+    pty.getPending(id15.wkr).some((m) => m.includes("[loom:crash-recovered]") && /blocked/i.test(m) && /re-state your blocker/i.test(m)));
+
+  // (15b) ALSO FIX (review round): the clean-stop variant of the blocked nudge was unexercised — every
+  // sibling branch (generic continue-nudge) has a clean-stop/[loom:daemon-restarted] test, this one didn't.
+  const id15b = { mgr: `cow-mgr15b-${sfx}`, wkr: `cow-wkr15b-${sfx}` };
+  const t15b = mkTask(`cow-t15b-${sfx}`, P.proj);
+  mkSession({ id: id15b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id15b.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id15b.mgr, taskId: t15b, processState: "live" });
+  db.appendEvent({ id: `evt-${sfx}-15b`, ts: now, managerSessionId: id15b.mgr, workerSessionId: id15b.wkr, taskId: t15b, kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
+  const derived15b = deriveCrashOrphanedWorkers(db, [db.getSession(id15b.mgr), db.getSession(id15b.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived15b, { resumeOne: () => true, shutdownMarker: cleanMarker });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
+  check("(15b) CLEAN-STOP variant: the blocked worker's nudge uses [loom:daemon-restarted], NOT [loom:crash-recovered]",
+    pty.getPending(id15b.wkr).some((m) => m.includes("[loom:daemon-restarted]") && /blocked/i.test(m) && /re-state your blocker/i.test(m)));
+  check("(15b) CLEAN-STOP variant: it still does NOT get the generic continue-your-task nudge",
+    !pty.getPending(id15b.wkr).some((m) => /continue your assigned task/i.test(m)));
+
 } finally {
   console.log = realLog;
   console.warn = realWarn;
@@ -889,6 +939,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (unless a later merge_rejected supersedes that report, in which case it DOES get the nudge); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed; a worker wrongly stale-flagged 'dead' by an earlier watcher race is re-verified live and recovered (healing the flag) instead of silently stranding its manager, while a genuinely-dead sibling is still excluded WITH a logged reason; and a manager with zero surviving worker candidates still gets an independent resume attempt, with any genuine failure logged instead of swallowed."
+  ? "\n✅ ALL PASS — a crash-orphaned worker (exited+resumable+parented+task in_progress) is derived from the pre-archive recoverStaleSessions snapshot, survives the boot-backstop auto-archive AND Pass B worktree-GC (via protectedSessionIds), and reappears in its manager's worker_list once resumed for real; a done-but-unmerged worker is recovered for visibility without a stray 'continue' nudge (a LATER merge_rejected does NOT supersede that report — card db05e657 unified this with worker_list's own projection); a landed/recycled/pre-archived worker is never resurrected; a parked worker/manager is resumed but never nudged (usage hold honored); a manager whose workers ALL fail to resume still gets a summary nudge; an unprotected control worker's worktree IS reclaimed (proving protection mattered); a worker whose manager can't be resumed is left untouched in its clean exited+archived state, not half-resumed; a worker wrongly stale-flagged 'dead' by an earlier watcher race is re-verified live and recovered (healing the flag) instead of silently stranding its manager, while a genuinely-dead sibling is still excluded WITH a logged reason; a manager with zero surviving worker candidates still gets an independent resume attempt, with any genuine failure logged instead of swallowed; and a BLOCKED report is announced in the summary like a done one but gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it cannot act on."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

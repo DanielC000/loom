@@ -114,6 +114,31 @@ ev("w-merged", "MGR", "worker_report", at(10), { status: "done", summary: "ready
 ev("w-merged", "MGR", "merge_request", at(20), {});
 ev("w-merged", "MGR", "merge_done", at(30), {});
 
+// (i1) card db05e657 review round: MULTIPLE reports, done then blocked, nothing since → the LAST report
+//      (blocked) must win, not the first. Nothing previously pinned that deriveAwaitingReview scans for
+//      the LAST worker_report — a refactor that scanned forward from the start (or just took `events[0]`
+//      of matching kind) would silently pass every other case here (all of which have exactly one report).
+seedWorker("w-multi-db", "MGR");
+ev("w-multi-db", "MGR", "spawn_worker", at(0));
+ev("w-multi-db", "MGR", "worker_report", at(10), { status: "done", summary: "first pass" });
+ev("w-multi-db", "MGR", "worker_report", at(20), { status: "blocked", summary: "actually stuck", needs: "creds" });
+
+// (i2) the mirror: blocked then done, nothing since → the LAST report (done) must win.
+seedWorker("w-multi-bd", "MGR");
+ev("w-multi-bd", "MGR", "spawn_worker", at(0));
+ev("w-multi-bd", "MGR", "worker_report", at(10), { status: "blocked", summary: "stuck first" });
+ev("w-multi-bd", "MGR", "worker_report", at(20), { status: "done", summary: "unstuck, shipped" });
+
+// (ii) card db05e657 review round: a resolving event BEFORE the report must NOT resolve it — only an event
+//      STRICTLY AFTER the last worker_report counts. `message_worker` here predates the report entirely
+//      (e.g. a manager's earlier, unrelated direction, or a stale event from a prior task on this same
+//      worker row) — nothing pins the `events.slice(lastReportIdx + 1)` bound; rewriting it as a bare
+//      `events.some(...)` over the WHOLE array would pass everything, including this case, incorrectly.
+seedWorker("w-early-resolve", "MGR");
+ev("w-early-resolve", "MGR", "spawn_worker", at(0));
+ev("w-early-resolve", "MGR", "message_worker", at(5), { text: "earlier, unrelated direction" });
+ev("w-early-resolve", "MGR", "worker_report", at(10), { status: "done", summary: "ready" });
+
 // MGR2's worker — only to keep the scope honest (must not leak into MGR's worker_list).
 seedWorker("w-other", "MGR2");
 ev("w-other", "MGR2", "worker_report", at(10), { status: "done", summary: "not yours" });
@@ -166,6 +191,12 @@ check("(g) POSITIVE CONTROL — reported-then-rejected (merge_request + merge_re
   byId["w-rejected"]?.reportedState === "done" && byId["w-rejected"]?.awaitingReview === true);
 check("(h) reported-then-actually-merged (merge_request + merge_done) → reportedState null + awaitingReview false",
   byId["w-merged"]?.reportedState === null && byId["w-merged"]?.awaitingReview === false);
+check("(i1) MULTIPLE reports done→blocked: the LAST report (blocked) wins, not the first",
+  byId["w-multi-db"]?.reportedState === "blocked" && byId["w-multi-db"]?.awaitingReview === true);
+check("(i2) MULTIPLE reports blocked→done: the LAST report (done) wins, not the first",
+  byId["w-multi-bd"]?.reportedState === "done" && byId["w-multi-bd"]?.awaitingReview === true);
+check("(ii) a resolving event BEFORE the report does NOT resolve it — only strictly-after counts",
+  byId["w-early-resolve"]?.reportedState === "done" && byId["w-early-resolve"]?.awaitingReview === true);
 
 // ============================ worker_status (full record + projection) ============================
 const sDone = await status("w-done");

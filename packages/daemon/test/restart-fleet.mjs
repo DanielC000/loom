@@ -129,9 +129,18 @@ try {
   // workerA1, and resume with managerA as the requester.
   const deadW = `rf-dead-${sfx}`;
   mkSession({ id: deadW, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB });
+  // Card db05e657 (MAJOR 2 review fix): daemon_restart is the OTHER, mutually-exclusive boot-resume path
+  // (index.ts picks resumeFleetOnBoot XOR recoverCrashOrphanedWorkers) — until this fix it never consulted
+  // report state, so a `blocked` worker got the SAME generic "Continue your assigned task" text the crash
+  // path was fixed to withhold from it. RED under the pre-fix code: this worker's nudge would say "Continue
+  // your assigned task" instead of naming its blocked report.
+  const blockedW = `rf-blocked-${sfx}`;
+  mkSession({ id: blockedW, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, taskId: `rf-blocked-task-${sfx}` });
+  db.appendEvent({ id: `rf-blocked-evt-${sfx}`, ts: now, managerSessionId: id.mgrB, workerSessionId: blockedW, kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
   const resumeSet = [
     ...fleet,
     { sessionId: deadW, role: "worker", parentSessionId: id.mgrB },
+    { sessionId: blockedW, role: "worker", parentSessionId: id.mgrB },
   ];
   const pendingSnap = { [id.wkrA1]: ["wkrA1 pending #1 (worker_report frame)", "wkrA1 pending #2"] };
   const intent = { reason: "deploy merged daemon code", managerSessionId: id.mgrA, resume: resumeSet, pending: pendingSnap, requestedAt: now };
@@ -141,10 +150,10 @@ try {
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
   await flush(); // let every deferred (manager/worker) continuation nudge's waitForMcpSeen().then(...) settle
 
-  check("(2) every non-dead session resumed (6)", result.resumed.length === 6 && !result.resumed.includes(deadW));
+  check("(2) every non-dead session resumed (7)", result.resumed.length === 7 && !result.resumed.includes(deadW));
   check("(2) the dead worker is in `failed`", result.failed.includes(deadW) && result.failed.length === 1);
   check("(2) the parked worker is reported skippedParked", result.skippedParked.includes(id.wkrA2) && result.skippedParked.length === 1);
-  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 7);
+  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 8);
 
   // Requester managerA: ONE message — its "code is now LIVE" re-prompt.
   const mgrAq = pty.getPending(id.mgrA);
@@ -173,6 +182,14 @@ try {
     !pty.getPending(id.wkrB1)[0].includes("WIP is intact"));
   check("(2) it instead points the worker at re-checking its worktree's state",
     /re-check your worktree's state/i.test(pty.getPending(id.wkrB1)[0]));
+  // Card db05e657 (MAJOR 2 review fix): a worker whose LAST report is worker_report(blocked) must NOT get
+  // this same generic "Continue your assigned task" nudge on the daemon_restart path either — it gets a
+  // distinct nudge naming its blocked report, exactly like the crash-recovery path (crash-orphaned-workers.mjs).
+  const blockedWq = pty.getPending(blockedW);
+  check("(2) a BLOCKED worker does NOT get the generic 'Continue your assigned task' nudge on daemon_restart",
+    blockedWq.length === 1 && !/continue your assigned task/i.test(blockedWq[0]));
+  check("(2) it DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
+    /worker_report\(blocked\)/.test(blockedWq[0]) && /re-state your blocker/i.test(blockedWq[0]) && blockedWq[0].includes("[loom:daemon-restarted]"));
 
   // ============================ (3) PROTECTION — full set keeps every project's worktree ===========
   // Two real repos, each with a CLEAN (0-commit, safe-to-discard) worktree of an EXITED worker — i.e.

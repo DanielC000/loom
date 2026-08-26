@@ -45,6 +45,7 @@ import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
+import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
@@ -4695,11 +4696,26 @@ export class SessionService {
       // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
       const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
       if (e.role === "worker") {
+        // Card db05e657 (MAJOR 2 review fix): this daemon_restart path is the OTHER, mutually-exclusive
+        // boot-resume branch (index.ts picks EXACTLY ONE of resumeFleetOnBoot / recoverCrashOrphanedWorkers
+        // per boot) — until this fix it never consulted report state at all, so a `blocked` worker got this
+        // SAME generic "continue your assigned task" text ruling 2 says it must not get. Apply ruling 2 here
+        // too, via the SAME shared `deriveAwaitingReview` the crash path calls, so both boot paths give a
+        // blocked worker identical treatment. Deliberately NOT also silencing the `done`-awaiting-review
+        // case on this path (the crash path does — card 959a5fb7) — that asymmetry PRE-DATES this card
+        // (959a5fb7 only ever touched the crash path either) and is being carded separately as the broader
+        // two-path convergence; widening this fix to cover it too would exceed this card's scope.
+        const { reportedState } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
         this.enqueueNudge(
           e.sessionId, e.role,
-          `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
-          `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
-          `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
+          reportedState === "blocked"
+            ? `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed. Your last ` +
+              `report to your manager was worker_report(blocked) — you are still waiting on an answer, not ` +
+              `mid-work. Re-state your blocker to your manager (worker_report again) rather than resuming the ` +
+              `task as if nothing happened.` + RESUME_NUDGE_TAIL + draftNote
+            : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
+              `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
+              `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
         );
       } else if (e.role === "manager" || e.role === "platform") {
         const impact = wakeImpact(e.sessionId, e.role);
@@ -4949,10 +4965,15 @@ export class SessionService {
    * `archived_at IS NULL`, so that's the whole "re-parent": parentSessionId was never touched.
    *
    * A worker that is still genuinely `awaitingReview` (card 959a5fb7 — a done/blocked report the manager
-   * has NOT yet acted on; see {@link CrashOrphanedWorker} for how this differs from the wider
-   * `reportedDone`) is recovered for VISIBILITY (it reappears in worker_list so the manager notices it's
-   * awaiting merge review) but does NOT get the "continue your task" nudge — it isn't mid-work. A done
-   * report the manager already CONSUMED (a subsequent directive delivered against it) reads as NOT
+   * has NOT yet acted on; see {@link CrashOrphanedWorker}) is recovered for VISIBILITY (it reappears in
+   * worker_list so the manager notices it's awaiting review) but does NOT get the generic "continue your
+   * task" nudge — it isn't mid-work. Card
+   * db05e657 (DoD-1) rules the two done/blocked sub-cases differently on top of that shared exclusion: a
+   * `done` report gets NO nudge at all (silence is correct — it's genuinely just awaiting merge review), but
+   * a `blocked` report gets a DISTINCT nudge reminding it to re-state its blocker to its manager — the
+   * generic nudge would tell a worker that structurally CANNOT continue to do exactly that, and staying
+   * silent would leave the worker that most needs its manager indistinguishable from one correctly waiting.
+   * A done report the manager already CONSUMED (a subsequent directive delivered against it) reads as NOT
    * `awaitingReview` and gets the ordinary continue-nudge below like any other recovered worker — it's
    * presumably mid-fix on whatever that directive assigned. Every other recovered worker gets the same
    * "re-check your worktree's state, continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited)
@@ -5058,7 +5079,13 @@ export class SessionService {
         continue;
       }
       let recoveredCount = 0;
-      let awaitingReviewCount = 0;
+      // Card db05e657 (MAJOR 1 review fix): split by `reportedState` — a `blocked` worker is folded into
+      // `awaitingReview` (ruling 1) but is NOT "done and awaiting merge"; the old single `awaitingReviewCount`
+      // fed a summary sentence that unconditionally said "reported done ... awaiting your review/merge" for
+      // BOTH, telling a manager a blocked-only recovery had something to merge when nothing was reported
+      // done and there is nothing to merge — the exact 959a5fb7 failure class, reintroduced on this new input.
+      let awaitingReviewDoneCount = 0;
+      let awaitingReviewBlockedCount = 0;
       let failedCount = 0;
       // Card ab8b2cc6: THE THING AT RISK, measured — a recovered SESSION says nothing about whether its
       // WORKTREE survived (the motivating incident: three workers all live/busy throughout a restart,
@@ -5080,12 +5107,38 @@ export class SessionService {
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
         if (integrity.status !== "intact") worktreeAtRiskCount++;
         if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
-        // Card 959a5fb7: gated on `awaitingReview`, NOT the wider `reportedDone` — a done report the
+        // Card 959a5fb7: gated on `awaitingReview` — a done report the
         // manager already consumed (a subsequent directive delivered against it) must not be counted as
         // "awaiting your review/merge" below, and this worker should get the SAME continue-nudge as any
         // other still-working worker (the manager's follow-up is presumably what it's now mid-fix on).
         if (w.awaitingReview) {
-          awaitingReviewCount++;
+          // Card db05e657 (DoD-1, ruling 2): a `blocked` report is counted like `done` (ruling 1) for
+          // whether it's announced at all, but tallied SEPARATELY — the summary sentence below must not
+          // call a blocked worker "reported done ... awaiting your review/merge" (MAJOR 1 review fix).
+          if (w.reportedState === "blocked") { awaitingReviewBlockedCount++; } else { awaitingReviewDoneCount++; }
+          // A worker that reported `blocked` stopped because it needs something from its manager, and
+          // telling it nothing leaves it indistinguishable from one that's quietly, correctly waiting. It
+          // also must NOT get the generic "continue your assigned task" nudge below (ruling 2): it CAN'T
+          // continue — that's what blocked means — and telling it to would invite it to resume against a
+          // stale plan without the answer it asked for. So: a distinct nudge that reminds it to re-state
+          // its blocker, not to carry on.
+          if (w.reportedState === "blocked") {
+            try {
+              this.enqueueDurableNudge(
+                w.workerSessionId, "worker",
+                cleanStop
+                  ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash). Your last ` +
+                    `report to your manager was worker_report(blocked) — you are still waiting on an answer, ` +
+                    `not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
+                    `resuming the task as if nothing happened.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
+                  : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch. Your last ` +
+                    `report to your manager was worker_report(blocked) — you are still waiting on an answer, ` +
+                    `not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
+                    `resuming the task as if nothing happened.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL,
+                this.db.getSession(w.workerSessionId)?.taskId ?? null,
+              );
+            } catch { /* not ready yet — the resume stands */ }
+          }
         } else {
           // Card 597903fc: durable (this.enqueueDurableNudge — see its own doc), NOT the plain
           // enqueueNudge this used to call — a `[loom:crash-recovered]`/`[loom:daemon-restarted]` notice
@@ -5146,7 +5199,7 @@ export class SessionService {
           // Card ab8b2cc6: reported ONLY relative to `recoveredCount` (a session that never resumed has
           // nothing to check) — and worded to make what was actually verified UNAMBIGUOUS either way, so
           // a reader can tell "checked, none flagged" apart from "no check ran" (never silently absent on
-          // the healthy case, unlike awaitingReviewCount/failedCount above — this is a deliberately
+          // the healthy case, unlike awaitingReviewDoneCount/awaitingReviewBlockedCount/failedCount above — this is a deliberately
           // different choice for THIS clause, because the whole point of DoD-1 is that "nothing to
           // report" must not be confusable with "nothing was checked"). NEVER claims prevention (DoD-3) —
           // "could not be confirmed intact" is the honest, weaker claim; branch state is explicitly out
@@ -5165,7 +5218,8 @@ export class SessionService {
               ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
               : `none of your ${workers.length} in-flight worker(s) could be recovered`,
             worktreeNote,
-            awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge (worker_report_get is the durable, authoritative read — re-check there before merging)` : null,
+            awaitingReviewDoneCount > 0 ? `${awaitingReviewDoneCount} of those already reported done and are awaiting your review/merge (worker_report_get is the durable, authoritative read — re-check there before merging)` : null,
+            awaitingReviewBlockedCount > 0 ? `${awaitingReviewBlockedCount} of those reported BLOCKED and are waiting on an answer from you (worker_report_get is the durable, authoritative read — re-check there before replying)` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
           ].filter(Boolean).join("; ");
           return isPlatform

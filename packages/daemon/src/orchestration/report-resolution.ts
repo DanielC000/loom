@@ -4,29 +4,26 @@ import type { OrchestrationEvent } from "@loom/shared";
  * Event kinds that genuinely CLOSE a standing `worker_report(done|blocked)` — i.e. actually move the
  * manager past "this worker needs my review", not merely "some worker-keyed row landed after it."
  *
- * SHARED ALLOWLIST, not a shared predicate — read that distinction carefully before trusting this as more
- * than it is. Two independent consumers read this SAME set: `worker_list`'s own `reportedState`/
- * `awaitingReview` projection (`mcp/orchestration.ts`) and the boot-time crash/restart-recovery notice's
- * `awaitingReview` derivation (`orchestration/crash-orphaned-workers.ts`, card 959a5fb7 — filed after
- * that notice claimed an ALREADY-CONSUMED report was "awaiting your review/merge" purely because a report
- * event existed, not because anyone was actually still waiting on it). Sharing this set means the two can
- * never diverge on WHICH EVENTS COUNT AS RESOLVING. It does NOT mean the two agree on the full predicate —
- * each still runs its OWN separately-written scan around this allowlist, and as of card 959a5fb7's review
- * round they deliberately (or at least knowingly) diverge on two inputs, each pinned by its own tests:
- *   - **`blocked` reports**: `mcp/orchestration.ts`'s projection treats `done` and `blocked` alike
- *     (`status !== "done" && status !== "blocked"` short-circuits) — a blocked report can be
- *     `awaitingReview:true` (see `test/worker-reported-state.mjs`). `deriveCrashOrphanedWorkers` only
- *     ever sets `reportedDone`/`awaitingReview` true for `status === "done"` — a `blocked` report is
- *     currently NEVER counted as awaiting review by the crash/restart notice, and (a real, PRE-EXISTING
- *     gap, not introduced by 959a5fb7 — tracked separately, not fixed here) that same blocked worker still
- *     gets the ordinary "continue your task" nudge instead of one reflecting that it's actually stuck.
- *   - **`merge_rejected`**: `deriveCrashOrphanedWorkers` treats a `merge_rejected` AFTER a done report as
- *     SUPERSEDING it (an early `break` — the worker is back to mid-fix, not awaiting review).
- *     `worker_list`'s projection has no such carve-out — `merge_rejected` isn't in this allowlist, so by
- *     itself it does NOT resolve `awaitingReview` there. `test/crash-orphaned-workers.mjs` and
- *     `test/worker-reported-state.mjs` pin these two opposite answers for the same underlying shape,
- *     deliberately — see each file's own case for why. Do not assume reading this constant is enough to
- *     predict either consumer's actual `awaitingReview` value; read the consumer's own scan too.
+ * Card db05e657 (DoD-1..3): this used to be a SHARED ALLOWLIST feeding two independently-written
+ * predicates — `worker_list`'s own `reportedState`/`awaitingReview` projection (`mcp/orchestration.ts`)
+ * and the boot-time crash/restart-recovery notice's `awaitingReview` derivation
+ * (`orchestration/crash-orphaned-workers.ts`, card 959a5fb7) — and the two disagreed on two inputs, each
+ * pinned by its own tests. {@link deriveAwaitingReview} below is now the ONE predicate BOTH consumers call;
+ * they can no longer independently decide "resolved" in different ways. The two former divergences, and
+ * the ruling that closed each:
+ *   - **`blocked` reports**: RULED to count exactly like `done` (mcp/orchestration.ts's pre-existing
+ *     answer). A worker that reported `blocked` stopped and asked its manager for something — it is the
+ *     worker that most needs to be seen, not the one a restart notice should stay silent about. See
+ *     `test/worker-reported-state.mjs` and `test/crash-orphaned-workers.mjs` for the pinned case.
+ *   - **`merge_rejected`**: RULED to NOT resolve a report, in either caller. It is an event kind — never a
+ *     `worker_report` status — fired by the merge/gate machinery itself, not by any action directed at the
+ *     worker; treating it as a resolution assumes a follow-up (a redirect telling the worker what to fix)
+ *     that may never have actually been sent. A genuine follow-up already resolves the report through its
+ *     OWN allowlisted event (`message_worker`/`redirect_worker`); a bare `merge_rejected` with no such
+ *     follow-up is exactly the "worker silently un-flagged, nobody actually told it anything" shape this
+ *     allowlist exists to prevent. This OVERTURNED `crash-orphaned-workers.ts`'s old early-break-on-
+ *     `merge_rejected` special case (and the test pinning it) — `worker_list`'s answer is the one that
+ *     survived, not a new third answer.
  *
  * An ALLOWLIST, not a denylist, and deliberately so (card 6641c3ab): `orchestration_events.
  * worker_session_id` is reused across this codebase as a generic "subject of this event" column by
@@ -48,6 +45,16 @@ import type { OrchestrationEvent } from "@loom/shared";
  * a manager is least equipped to notice the gap itself. Adding a new resolving event kind here should be
  * checked against BOTH consumers' actual failure directions, not just the original one.
  *
+ * A THIRD site reads a related-but-narrower shape and deliberately does NOT call {@link deriveAwaitingReview}
+ * or this allowlist: `SessionService.classifyIdleWorker`'s `ackedSince` local (sessions/service.ts) — it
+ * answers "has this worker's report been directly acknowledged", for STRANDED-worker detection, not "is a
+ * manager still awaiting review". Two real differences, not an oversight: it also treats `progress` as a
+ * reportable status (this allowlist's callers only ever care about `done`/`blocked`), and its ack check is
+ * a 2-kind subset (`message_worker`/`redirect_worker` only) — no `merge_done`/`recycle_begin`/`stop_worker`,
+ * since a worker that's about to be merged/recycled/stopped isn't the "still working, still stranded" case
+ * this classifier is asking about. Don't fold it into `deriveAwaitingReview` — it is a genuinely different
+ * question — but a change to what "resolves" a report here is worth a glance at that site too.
+ *
  * `message_worker`/`redirect_worker` are a PROXY for the doc's actual stated condition ("resumes a
  * turn"), not the thing itself — Loom records the SEND here, not a confirmed turn resumption. Right in
  * the common case, but a message that gets durably queued and then PARKED (never delivered — see memory
@@ -67,3 +74,42 @@ import type { OrchestrationEvent } from "@loom/shared";
 export const REPORT_RESOLVED_EVENT_KINDS: ReadonlySet<OrchestrationEvent["kind"]> = new Set<OrchestrationEvent["kind"]>([
   "merge_done", "message_worker", "redirect_worker", "recycle_begin", "stop_worker",
 ]);
+
+export interface AwaitingReviewResult {
+  /** The worker's most recent `worker_report` status, but ONLY when it's still genuinely awaiting review
+   * — null whenever `awaitingReview` is false (no report, a non-done/blocked status, or already resolved),
+   * so a non-null value always means "waiting on my review right now" (mirrors the old `reportedState`
+   * field's contract in `mcp/orchestration.ts`, unchanged by this card). */
+  reportedState: "done" | "blocked" | null;
+  awaitingReview: boolean;
+  /** The report event `reportedState` describes (present iff `reportedState` is non-null) — returned so a
+   * caller needing its `ts`/`detail` (e.g. `mcp/orchestration.ts`'s `staleReport`, keyed on
+   * `managerTurnSeqAtReport`) doesn't have to re-scan `events` for it. */
+  reportEvent: OrchestrationEvent | null;
+}
+
+/**
+ * THE unified predicate (card db05e657) — see this file's header doc above for the two rulings
+ * (`blocked` counts like `done`; `merge_rejected` never resolves) that let `worker_list`'s
+ * `reportedProjection` (`mcp/orchestration.ts`) and the crash/restart notice's `deriveCrashOrphanedWorkers`
+ * (`orchestration/crash-orphaned-workers.ts`) both call this SAME function instead of each running its own
+ * separately-written scan. Given one worker's chronological `orchestration_events`, answers exactly one
+ * question: is a manager still genuinely waiting on this worker's last done/blocked report?
+ *
+ * No `opts` param: after the two rulings above, the two callers have no remaining intentional delta to
+ * express — if a future caller needs one, add it as an explicit named option here rather than
+ * reimplementing this scan (see the header doc's whole point).
+ */
+export function deriveAwaitingReview(events: readonly OrchestrationEvent[]): AwaitingReviewResult {
+  let lastReportIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]!.kind === "worker_report") { lastReportIdx = i; break; }
+  }
+  if (lastReportIdx === -1) return { reportedState: null, awaitingReview: false, reportEvent: null };
+  const reportEvent = events[lastReportIdx]!;
+  const status = reportEvent.detail?.status as string | undefined;
+  if (status !== "done" && status !== "blocked") return { reportedState: null, awaitingReview: false, reportEvent: null };
+  const resolvedSince = events.slice(lastReportIdx + 1).some((e) => REPORT_RESOLVED_EVENT_KINDS.has(e.kind));
+  if (resolvedSince) return { reportedState: null, awaitingReview: false, reportEvent: null };
+  return { reportedState: status, awaitingReview: true, reportEvent };
+}

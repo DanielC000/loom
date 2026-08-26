@@ -19,7 +19,7 @@ import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
-import { REPORT_RESOLVED_EVENT_KINDS } from "../orchestration/report-resolution.js";
+import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
@@ -598,11 +598,11 @@ export interface CompanionHooks {
   rearmReminders?: (sessionId: string) => Promise<void>;
 }
 
-// REPORT_RESOLVED_EVENT_KINDS (what genuinely closes a standing worker_report) now lives in
-// orchestration/report-resolution.ts — read there for the full doc. It's the SOLE source of truth,
-// shared with the boot-time crash/restart-recovery notice's own `awaitingReview` derivation
-// (orchestration/crash-orphaned-workers.ts, card 959a5fb7) so the two surfaces can never independently
-// decide "resolved" in different ways again. Read by `reportedProjection` below.
+// `deriveAwaitingReview` (what decides whether a worker's last done/blocked report is still genuinely
+// awaiting its manager) now lives in orchestration/report-resolution.ts — read there for the full doc. It's
+// the SOLE source of truth, shared with the boot-time crash/restart-recovery notice's own `awaitingReview`
+// derivation (orchestration/crash-orphaned-workers.ts, card 959a5fb7/db05e657) so the two surfaces can never
+// independently decide "resolved" in different ways. Called by `reportedProjection` below.
 
 /**
  * Card 3c39be30 — `resolveDirectiveOutcome` (below) has an UNDOCUMENTED, UNENFORCED precondition: the
@@ -1945,7 +1945,10 @@ export class OrchestrationMcpRouter {
     // ever deciding whether to merge — the actual cause of this card's false negatives on a LIVE,
     // unmerged, never-messaged worker. reportedState carries the live state when awaiting, else null
     // (kept consistent with awaitingReview so a non-null reportedState always means "waiting on my
-    // review right now").
+    // review right now"). Card db05e657: this scan itself now lives in the shared
+    // `deriveAwaitingReview` (orchestration/report-resolution.ts) — the crash/restart-recovery notice
+    // (`deriveCrashOrphanedWorkers`) calls the SAME function so the two can no longer independently decide
+    // "resolved" in different ways; this closure only adds the `staleReport` layer on top.
     //
     // `staleReport` (card 4491bd3b, DoD-1 — the reconciliation detector): the reverse-direction sibling
     // of `staleDirective` below. While `awaitingReview` is true, compares the MANAGER's own turnSeq NOW
@@ -1982,16 +1985,8 @@ export class OrchestrationMcpRouter {
       staleReport: { reportedAt: string; managerTurnsSinceReport: number } | null;
     } => {
       const events = db.listEventsForWorker(workerSessionId); // chronological (ts, rowid)
-      let lastReportIdx = -1;
-      for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i]!.kind === "worker_report") { lastReportIdx = i; break; }
-      }
-      if (lastReportIdx === -1) return { reportedState: null, awaitingReview: false, staleReport: null };
-      const reportEvent = events[lastReportIdx]!;
-      const status = reportEvent.detail?.status as string | undefined;
-      if (status !== "done" && status !== "blocked") return { reportedState: null, awaitingReview: false, staleReport: null };
-      const resolvedSince = events.slice(lastReportIdx + 1).some((e) => REPORT_RESOLVED_EVENT_KINDS.has(e.kind));
-      if (resolvedSince) return { reportedState: null, awaitingReview: false, staleReport: null };
+      const { reportedState, awaitingReview, reportEvent } = deriveAwaitingReview(events);
+      if (!awaitingReview || !reportEvent) return { reportedState: null, awaitingReview: false, staleReport: null };
       let staleReport: { reportedAt: string; managerTurnsSinceReport: number } | null = null;
       const stampedAt = reportEvent.detail?.managerTurnSeqAtReport as number | undefined;
       if (stampedAt !== undefined && pendingMerge?.state !== "running") {
@@ -2001,7 +1996,7 @@ export class OrchestrationMcpRouter {
           staleReport = { reportedAt: reportEvent.ts, managerTurnsSinceReport: turnsSinceReport };
         }
       }
-      return { reportedState: status, awaitingReview: true, staleReport };
+      return { reportedState, awaitingReview: true, staleReport };
     };
 
     // Card 343441bd: "delivered vs. apparently acted upon" — a manager-facing signal, distinct from the
