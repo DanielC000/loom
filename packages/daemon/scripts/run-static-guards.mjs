@@ -20,10 +20,10 @@
 // looks older than `src/git/worktrees.ts` — see the freshness check below for why: this script's whole
 // job is catching a silent skip, so it must never BE one itself.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { requireFreshDist } from "./lib/dist-freshness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const daemonRoot = path.resolve(here, "..");
@@ -37,19 +37,14 @@ const distPath = path.join(daemonRoot, "dist", "git", "worktrees.js");
 // warn-and-continue: a warning above a green summary is exactly what gets read past. This is a heuristic,
 // not a build-correctness proof — a touched file, clock skew, or an unrelated edit to worktrees.ts can
 // all trip it — but it fails toward VISIBLE, which is the property that matters here.
-let distMtimeMs;
-try {
-  distMtimeMs = fs.statSync(distPath).mtimeMs;
-} catch (err) {
-  if (err.code !== "ENOENT") throw err;
-  console.error(`[guards] ${distPath} does not exist — run \`pnpm --filter @loom/daemon build\` first, then re-run \`pnpm --filter @loom/daemon guards\`.`);
-  process.exit(1);
-}
-const srcMtimeMs = fs.statSync(srcPath).mtimeMs;
-if (srcMtimeMs > distMtimeMs) {
-  console.error(`[guards] ${srcPath} is newer than ${distPath} — dist/ may not reflect the current guard list. Run \`pnpm --filter @loom/daemon build\` first, then re-run \`pnpm --filter @loom/daemon guards\`.`);
-  process.exit(1);
-}
+requireFreshDist({
+  label: "guards",
+  srcPath,
+  distPath,
+  buildCommand: "pnpm --filter @loom/daemon build",
+  staleDetail: "dist/ may not reflect the current guard list",
+  rerunCommand: "pnpm --filter @loom/daemon guards",
+});
 
 // file:// URL required for a dynamic import() on Windows — a bare drive-letter absolute path throws
 // ERR_UNSUPPORTED_ESM_URL_SCHEME (same gotcha `backfill-transcripts.mjs` already works around).

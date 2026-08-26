@@ -21,20 +21,24 @@
 // and found zero of them). A `matched: []` result is NOT evidence the host — or even this
 // project — is idle; pair with host-quiet-check.mjs for that question.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { requireFreshDist, requireExport } from "./lib/dist-freshness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const daemonRoot = path.resolve(here, "..");
+const srcPath = path.join(daemonRoot, "src", "pty", "host.ts");
 const distPath = path.join(daemonRoot, "dist", "pty", "host.js");
+const buildCommand = "pnpm --filter @loom/daemon build";
 
-if (!fs.existsSync(distPath)) {
-  console.error(`[host-attribution-check] ${distPath} does not exist — run \`pnpm --filter @loom/daemon build\` first, then re-run this script.`);
-  process.exit(1);
-}
+// REFUSE before importing a stale dist — see lib/dist-freshness.mjs for why: without this, a stale
+// build silently surfaces as "attributeProcessesToWorktree is not a function", a symbol name with no
+// cause, the same failure shape card 11995e5f found in host-quiet-check.mjs.
+requireFreshDist({ label: "host-attribution-check", srcPath, distPath, buildCommand });
 
-const { attributeProcessesToWorktree } = await import(pathToFileURL(distPath).href);
+const mod = await import(pathToFileURL(distPath).href);
+requireExport(mod, "attributeProcessesToWorktree", { label: "host-attribution-check", distPath, buildCommand });
+const { attributeProcessesToWorktree } = mod;
 
 const worktreePath = path.resolve(process.argv[2] || process.cwd());
 
