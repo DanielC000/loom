@@ -215,9 +215,15 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
   // `finally` BEFORE db.close() — a session left live (never merged/recycled) carries its own pending
   // readiness-fallback/kickoff-guarantee timer (pty/host.ts) that fires `Db.setBusy` on whatever `Db`
   // instance its `events.onBusy` closure still references; under load this block's real wall-clock (many
-  // real git worktree ops) can outlast those timers' ~30s combined window, well past this block's own
-  // db.close(). A redundant stop() on an already-retired session (e.g. one confirmWorkerMerge or
-  // recycleWorker already stopped) is a safe no-op (PtyHost.stop guards on live.alive).
+  // real git worktree ops) can outlast those timers' window — READY_FALLBACK_MS (20s, spawn-anchored,
+  // the missed-hook path) or, once SessionStart dispatches, MODE_CYCLE_FALLBACK_MS (20s, re-armed from
+  // that dispatch) bounded by READY_FALLBACK_ABSOLUTE_CEILING_MS (45s from spawn) — well past this
+  // block's own db.close(). (Card 0050a17e later removed the separate STARTUP_PROMPT_GRACE_MS grace
+  // window this comment originally cited alongside READY_FALLBACK_MS as a combined ~30s figure — the
+  // kickoff-delivery timer now chains on the next tick after markReady instead, so the live windows are
+  // the three named above, not that stale sum.) A redundant stop() on an already-retired session (e.g.
+  // one confirmWorkerMerge or recycleWorker already stopped) is a safe no-op (PtyHost.stop guards on
+  // live.alive).
   const liveIds = [];
   try {
     const mgr = sessions.startManager(P.mgrAgentId);
