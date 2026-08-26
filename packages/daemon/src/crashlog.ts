@@ -157,6 +157,66 @@ export function rotateCrashlog(): void {
 }
 
 /**
+ * card 43b232ff: node-pty@1.1.0's `WindowsPtyAgent.prototype.kill()` (lib/windowsPtyAgent.js:140,
+ * upstream microsoft/node-pty#952, OPEN as of 2026-08-26) calls
+ * `this._getConsoleProcessList().then(list => list.forEach(...))` with NO `.catch()`, then
+ * SYNCHRONOUSLY calls `this._ptyNative.kill(...)` — racing its own ConPTY teardown against that promise.
+ * Lose the race and `list` resolves `undefined` after teardown, so `.forEach` throws a `TypeError`
+ * INSIDE the uncaught `.then` ⇒ unhandled rejection on every hard session teardown that loses the race.
+ * A local reproducer (project memory `nodepty-952-conpty-kill-race-reproducer`) hit this 9/9 under load;
+ * upstream's own rate is ~5/12.
+ *
+ * We tolerate ONLY this exact shape rather than fixing it upstream (no `pnpm patch` precedent in this
+ * repo, and `windowsPtyAgent.js` is documented elsewhere as an unsupported internal surface we already
+ * accept coupling risk against — see `test/node-pty-quoting-parity.mjs`). The only work skipped when this
+ * fires is the leftover-console-process sweep (the `forEach` that never ran); `reapOrphanedDescendants`
+ * (pty/host.ts) independently sweeps orphaned descendants too, so tolerating this costs nothing in the
+ * COMMON case — but that backstop is PARTIAL, not total: its pty-tree walk misses a survivor that has
+ * detached/re-parented away from the pty's process tree entirely (see `pty/host.ts:3991`'s own doc on
+ * `processRootedInWorktree`, the known gap it exists to close for the worktree-removal case specifically).
+ * A future reader re-weighing the pnpm-patch option should treat this as "backstops the common case, not
+ * every case" rather than a blanket guarantee.
+ *
+ * The match is deliberately narrow and requires BOTH conditions — matching either alone is unsafe:
+ * the message alone could originate from an unrelated bug anywhere in OUR code that happens to
+ * `.forEach` an undefined value; the stack-frame alone could be a legitimate, different exception from
+ * some other line in that same node-pty module. Matches on the exact Node 22 V8 wording ("Cannot read
+ * properties of undefined ...", not the older pre-v16 "Cannot read property 'x' of undefined" form) —
+ * this is what our runtime actually produces, not a hypothetical broader family.
+ *
+ * ⚠️ THIS MESSAGE STRING IS A V8 IMPLEMENTATION DETAIL, NOT A STABLE CONTRACT — it has already changed
+ * once (Node <16 produced "Cannot read property 'forEach' of undefined") and a future Node upgrade could
+ * change it again. The failure direction if that happens is SAFE (no match ⇒ falls through to today's
+ * crash-and-log, never to a silent swallow of something else) but SILENT (the tolerance quietly stops
+ * firing and every existing test still passes, because nothing here re-derives the string from a live
+ * throw). `test/crashlog.mjs`'s "nodepty-race" scenario is the check on THIS constant: it triggers a
+ * genuine `undefined.forEach(...)` so V8 authors the message, rather than asserting our own literal back
+ * at itself — a Node upgrade that changes the wording fails that test loudly, which is the signal to
+ * update the pattern above.
+ *
+ * ⚠️ THE STACK CONDITION IS ALSO AN IMPLEMENTATION DETAIL, in a DIFFERENT axis: which FILENAME a frame
+ * carries depends on whether the running process resolves source maps. `node-pty` ships
+ * `windowsPtyAgent.js.map` (`sources: ["../src/windowsPtyAgent.ts"]`), so under `node
+ * --enable-source-maps` or `tsx` (`pnpm daemon`'s own dev runner) the SAME real frame renders as
+ * `...\node-pty\src\windowsPtyAgent.ts:NNN:MM`, not `lib\windowsPtyAgent.js:NNN:MM` — a regex anchored to
+ * the `.js` extension matches under plain `node`/`pnpm daemon:stable` but silently NEVER matches under
+ * `pnpm daemon`, the daemon's own first-class dev run command. The pattern below drops the extension
+ * (module IDENTITY is what we mean, not build-output detail) and requires an actual stack FRAME line
+ * (`\n` + indentation + `at `) rather than a bare substring search, so a message that happens to mention
+ * "windowsPtyAgent" cannot satisfy this condition on its own — the two conditions stay independent, as
+ * claimed above. Verified against three real, runtime-rendered stacks (not reasoned about): plain
+ * `node`, `node --enable-source-maps`, and `tsx` — `test/crashlog.mjs`'s "nodepty-race" scenario is the
+ * live control on this axis (run once under plain node, once under `--enable-source-maps`), deriving its
+ * frame from an actual thrown error rather than a hand-typed literal, so it is automatically correct
+ * under either rendering with no scenario duplication.
+ */
+function isNodePtyConsoleListRace(reason: unknown): boolean {
+  if (!(reason instanceof TypeError)) return false;
+  if (!/Cannot read properties of undefined \(reading 'forEach'\)/.test(reason.message)) return false;
+  return /\n\s*at .*windowsPtyAgent\./.test(reason.stack ?? "");
+}
+
+/**
  * Install the top-level fatal-exit handlers. Wired ONCE at the daemon entrypoint:
  * - `uncaughtException` / `unhandledRejection` — write the crashlog, then `process.exit(1)`. With a
  *   handler attached Node no longer self-terminates, so we MUST exit to preserve the default fatal code.
@@ -182,6 +242,16 @@ export function installCrashHandlers(): void {
     process.exit(1);
   });
   process.on("unhandledRejection", (reason) => {
+    if (isNodePtyConsoleListRace(reason)) {
+      // Recognized, expected, non-fatal — see isNodePtyConsoleListRace's doc. Log loudly (this is a
+      // tolerance, not a silence) and keep running; do NOT write a crashlog or exit.
+      console.error(
+        "[crashlog] tolerated known node-pty ConPTY kill() race (microsoft/node-pty#952) — " +
+          "console-process sweep skipped this teardown, reapOrphanedDescendants backstops it; daemon continues:",
+        reason,
+      );
+      return;
+    }
     console.error("[crashlog] fatal unhandledRejection:", reason);
     writeCrashlog({ kind: "unhandledRejection", error: reason });
     process.exit(1);
