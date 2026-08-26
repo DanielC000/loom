@@ -7931,6 +7931,42 @@ export class SessionService {
   }
 
   /**
+   * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
+   * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
+   * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no
+   * later generation's own submission fused that gen's content back in whole. THE GAP THIS CLOSES: that
+   * original notice promised its reader a follow-up EITHER WAY ("wait one generation and re-check ... if
+   * that happens you will see a separate, later notice saying plainly that nothing was lost") — until this
+   * card, only the SUCCESS half of that promise had a mechanism behind it (the `confirmedFusion` branch,
+   * same file); the failure half emitted nothing at all, so "no second notice arrived" was structurally
+   * indistinguishable from "not yet, still waiting". Deliberately reuses `handlePasteLengthLoss`'s
+   * established shape (same two recipients, same durable `db.appendEvent` audit trail, just above) — this
+   * card's own board body records an independent worker, on a completely different specimen, converging on
+   * the SAME diagnosis: `paste_length_loss` persists an event AND fails loud to the sender;
+   * `prompt_mismatch` did neither, until now.
+   *   - RECIPIENT: `sessionId` itself — the session that experienced the mismatch and was told to wait.
+   *   - SENDER: for a worker, that's its manager (`parentSessionId`) — the one party who could actually
+   *     have sent (or relayed) the content and can resend it. A session with no `parentSessionId` (a
+   *     manager, a `run`/plain session, the platform lead) has no programmatic sender Loom can identify —
+   *     the durable event below still records the gap for a human auditing the log, but there is no live
+   *     party to nudge, the same structural limit `handlePasteLengthLoss`'s own doc names above.
+   */
+  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "prompt_mismatch_unresolved", detail: { gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen },
+    });
+    const recipientMsg = `[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mismatch] notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No confirming later generation ever arrived — that content is now the best available evidence of a genuine loss, not merely a possible one. If you are a Loom-driven session, say so in your next report up.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:prompt-mismatch-unresolved] your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a [loom:prompt-mismatch] replay detected (gen=${info.gen}, ${info.intendedLen} chars) that never resolved — the text Loom intended for that turn most likely never reached it, and Loom has no copy of it to resend automatically. If you (or the owner, relayed through you) sent that content, please resend it.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card 47c11741 — consumes `PtyHostEvents.onPasteTripwireGiveUp`: the bare-placeholder tripwire's own
    * one-shot RECOVERY re-injection ALSO collapsed, and Loom will not retry a second time (one-shot by
    * design — see the call site's own doc). Until this card, the give-up terminated in a bare

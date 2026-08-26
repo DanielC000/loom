@@ -620,6 +620,48 @@ export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_00
 export const HUMAN_SUBMIT_CONFIRM_HOLD_MS = Number(process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS) || 20_000;
 
 /**
+ * Card f9b1ea00 — the bounded window a `[loom:prompt-mismatch]` "recognized replay" notice's own "wait
+ * one generation and re-check before treating this as a confirmed loss" promise gets to actually resolve
+ * (a LATER generation's own submission fusing this one's content back in whole — see
+ * `Live.mismatchResolvedGens`' own doc) before Loom stops waiting and fails loud instead of staying
+ * silent forever (the gap this card exists to close — see `checkPromptMismatchUnresolved`'s own doc).
+ *
+ * SIZING (DoD-4: "pick the window deliberately and say why" — too short false-alarms on a late fusion,
+ * too long lets the recipient act on a wrong premise for that much longer): there is no direct measured
+ * distribution for "how long until a composer-accumulation fusion resolves a pending replay" specifically
+ * — the closest real data this fleet has is `confirmationLatencyProportionalityClause`'s own n=177
+ * give-up-driven engine-confirmation-latency pool (sessions/service.ts, card 518d0305): p50=8.5s,
+ * p90=45.9s, p95=342s (~5.7min), p99=675s (~11.25min), max=970s (~16min) — see pinned memory
+ * `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`. That's a different signal (a single
+ * turn's own hook confirmation, not "does a LATER turn ever arrive at all"), but it's the best available
+ * evidence for the order of magnitude a genuinely slow-but-healthy engine round-trip can take on this
+ * fleet, and a resolving fusion needs a full extra turn on top of that. 10 minutes sits between the
+ * measured p95 and p99 — closer to the tail than the median on purpose, because a false "this is now a
+ * confirmed loss" alarm sends its reader chasing a loss that never happened (the exact false-alarm
+ * regression DoD-3 guards against), which is a worse failure than this notice landing a few minutes later
+ * than it could have. Env-overridable so a hermetic test can shrink it instead of waiting real minutes.
+ *
+ * Code Review MINOR (confirmed), later found INCOMPLETE by a second pass and completed here: unlike this
+ * file's sibling `Number(env) || default` constants — where a bad override degrades to a benign no-op or a
+ * slightly-off timing — a bad value here is not benign in EITHER direction. `Number(x) || default` only
+ * falls back on `0`/`NaN`/unset, so a negative override (e.g. `-1`, still truthy) would pass straight
+ * through, and `setTimeout` treats a negative delay as `0` — arming this follow-up to fire on the very next
+ * tick. The FIRST fix rejected that (and `NaN`/zero) via `Number.isFinite(...) && > 0`, but left the
+ * opposite hole open: Node clamps any `setTimeout` delay ABOVE `2_147_483_647` (2^31-1 ms, `setTimeout`'s
+ * own signed-32-bit ceiling) to fire almost immediately instead — MEASURED, not theorized (a delay of
+ * 3_000_000_000 fires in ~3ms with a `TimeoutOverflowWarning`) — so an override like
+ * `LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS=3000000000` reproduces the EXACT same instant-false-alarm failure
+ * as the negative case, just from the other side of the valid range. Bounding on BOTH sides
+ * (`0 < x <= 2_147_483_647`) rejects every value that would either fire the mechanism this constant guards
+ * on the wrong tick — the class of failure this whole card exists to prevent, now closed at BOTH ends
+ * rather than reintroduced at the other one.
+ */
+const rawPromptMismatchResolveWindowMs = Number(process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
+export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
+  Number.isFinite(rawPromptMismatchResolveWindowMs) && rawPromptMismatchResolveWindowMs > 0 && rawPromptMismatchResolveWindowMs <= 2_147_483_647
+    ? rawPromptMismatchResolveWindowMs : 600_000;
+
+/**
  * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
  * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
  * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
@@ -2754,6 +2796,35 @@ interface Live {
   // — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
   // chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note above for why.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // Card f9b1ea00 — CONSUMED by `checkPromptMismatchUnresolved`'s bounded-window follow-up, NOT a reader-
+  // facing pull surface like its siblings above. Every gen a CONFIRMED fusion's own `spanGens` has ever
+  // named (i.e. every gen `lastMismatchFusion` above has ever explained, across the session's whole life —
+  // not just the MOST RECENT fusion) is added here the instant that fusion is detected. A "recognized
+  // replay" mismatch (the `lastMismatchReplay` branch above, whose own session-facing notice promises
+  // "wait one generation and re-check") schedules a `PROMPT_MISMATCH_RESOLVE_WINDOW_MS`-later check keyed
+  // on ITS OWN gen; that check's only question is membership here. Deliberately a growing SET across the
+  // session's life, not a "last one wins" struct like its siblings — a later, UNRELATED fusion must never
+  // be able to make an earlier, already-resolved gen's own resolution invisible to a check that hasn't
+  // fired yet. Never shrinks; a session's own generation count bounds its practical size.
+  mismatchResolvedGens: Set<number>;
+  // Card f9b1ea00 — Code Review (HIGH, confirmed): mirrors `readyFallbackTimer`'s own established fix
+  // (card c469d54e, this file's `spawn()`) for the SAME race class, applied to `checkPromptMismatchUnresolved`'s
+  // scheduled follow-up timers instead of a single readiness timer. `checkPromptMismatchUnresolved` re-looks-up
+  // its `Live` by sessionId at fire time (same shape as `readyFallbackTimer`'s own callback) rather than
+  // closing over the `Live` object itself — so a timer left over from a PREVIOUS spawn of this SAME sessionId
+  // (a resume/recycle/`daemon_restart` that overwrites the map entry below before the outgoing entry's own
+  // timers ever fire) would find the NEW `Live` instead of a dead one when it eventually fires, read the NEW
+  // instance's OWN `mismatchResolvedGens`, and could find an unrelated later mismatch's resolution
+  // coincidentally satisfying the OLD generation number — silently swallowing the very follow-up this card
+  // exists to guarantee, reproducing this card's own gap via a different trigger. `spawn()` clears every
+  // handle in this set (mirrors the `readyFallbackTimer` clear immediately above it) before the map entry is
+  // overwritten, so a stale timer can never fire against a new incarnation. A `Set`, not a single handle like
+  // `readyFallbackTimer`, because a session can have MULTIPLE mismatches pending resolution at once (one per
+  // detected recognized-replay, each on its own independent window) — unlike the readiness timer, which is
+  // singular per spawn. Each timer removes its own handle on normal firing (see the scheduling call site,
+  // `UserPromptSubmit`'s mismatch detector) so this never grows past the session's own count of currently
+  // still-unresolved mismatches.
+  pendingMismatchUnresolvedTimers: Set<NodeJS.Timeout>;
   // Card 59757189 DoD-1/3 — the UNMATCHABLE counterpart to `lastMismatchReplay`/`lastMismatchFusion` above:
   // set the instant a mismatch matches NONE of the recognized/confirmed shapes above (not a single-entry
   // replay, not a confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip
@@ -3096,6 +3167,27 @@ export interface PtyHostEvents {
    * existing `PtyHostEvents` test double is unaffected until it opts in.
    */
   onPasteTripwireGiveUp?(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void;
+  /**
+   * Card f9b1ea00 — `checkPromptMismatchUnresolved` fired: a "recognized replay" `[loom:prompt-mismatch]`
+   * detection (the `replayedEntry !== undefined` branch of the `UserPromptSubmit` mismatch detector) never
+   * resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no later generation's own submission fused this
+   * gen's content back in whole (see `Live.mismatchResolvedGens`' own doc). That original notice promised
+   * its reader a SEPARATE follow-up either way ("wait one generation and re-check ... if that happens you
+   * will see a separate, later notice saying plainly that nothing was lost"); until this card, only the
+   * SUCCESS half of that promise had a mechanism behind it — the failure half emitted nothing at all, so
+   * "no second notice arrived" was structurally indistinguishable from "not yet". PtyHost itself cannot
+   * notify beyond the session (no DB, no manager lookup — same layering boundary as `onPasteLengthLoss`/
+   * `onKickoffGiveUpExhausted` above); the implementer (sessions/service.ts, via index.ts) decides how to
+   * fail loud to both the recipient and — where one exists — the sender, reusing `handlePasteLengthLoss`'s
+   * established two-recipient, durable-event shape rather than inventing a second one (this card's own
+   * board body: an independent worker, on a different specimen, converged on the SAME sibling-asymmetry
+   * diagnosis — `paste_length_loss` persists an event and fails loud to the sender; `prompt_mismatch` did
+   * neither, until now). `gen`/`writtenHash`/`reportedHash`/`intendedLen` are the ORIGINAL detection's own
+   * captured values (see the `UserPromptSubmit` call site's own doc for why they're captured in a closure
+   * rather than re-read off `live` at fire time). OPTIONAL, same rationale as its siblings above: every
+   * existing `PtyHostEvents` test double is unaffected until it opts in.
+   */
+  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number }): void;
   /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
@@ -4340,6 +4432,15 @@ export class PtyHost {
     // to close, since the handle now exists on Live. Clear it before the overwrite.
     const outgoing = this.live.get(opts.sessionId);
     if (outgoing?.readyFallbackTimer) clearTimeout(outgoing.readyFallbackTimer);
+    // Card f9b1ea00 — Code Review (HIGH, confirmed): the SAME race as the readyFallbackTimer clear just
+    // above, for `checkPromptMismatchUnresolved`'s own scheduled follow-up timers (see
+    // `Live.pendingMismatchUnresolvedTimers`' own doc for the full mechanism) — a stale timer from THIS
+    // outgoing entry must never be allowed to fire against the NEW entry the map is about to hold, since
+    // `checkPromptMismatchUnresolved` (like the readiness callback) re-looks-up its Live by sessionId at
+    // fire time rather than closing over the outgoing object. Clear every pending handle before the
+    // overwrite — a Set, not a single handle, because unlike readiness a session can have multiple
+    // mismatches pending resolution at once.
+    if (outgoing) { for (const t of outgoing.pendingMismatchUnresolvedTimers) clearTimeout(t); outgoing.pendingMismatchUnresolvedTimers.clear(); }
     // Card a2407ed4: minted HERE, before createPty — createPty is what actually calls
     // writeSessionSettings (it builds the settings.json the fresh pty boots from), so the token baked
     // into that file and the token stored on `Live` below must be the SAME value, not two independent
@@ -4419,7 +4520,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
@@ -4489,6 +4590,23 @@ export class PtyHost {
       // the overwrite-on-resume case); this handles every OTHER exit path (a deliberate stop, a crash) so
       // a stale timer never outlives the Live it was armed for, even if this sessionId is never respawned.
       if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
+      // Card f9b1ea00 — Code Review MAJOR (confirmed, board card f9b1ea00): the SAME belt-and-suspenders
+      // clear as `readyFallbackTimer` just above, for `checkPromptMismatchUnresolved`'s own pending timers
+      // (see `Live.pendingMismatchUnresolvedTimers`' own doc). `spawn()`'s own clear (mirroring
+      // `readyFallbackTimer`'s TOP-of-spawn clear) only handles the overwrite-on-resume case; a claude
+      // session's own live entry is NEVER removed from `this.live` on exit — `this.live.delete()` has only
+      // two call sites in this file, `spawnShell`'s own `onExit` and `dropCanned`, neither reachable for
+      // `kind:"claude"` — it survives in the map with `alive:false` instead. Without this clear, a still-
+      // pending timer from BEFORE a deliberate stop or a crash would fire against that same dead-but-present
+      // Live later, find it truthy, find its own gen never resolved (nothing can resolve it post-exit — no
+      // more turns will ever run), and fail loud with a "please resend" nudge for a session that no longer
+      // exists to be nudged. DECIDED (manager, not a default): a dead session's own genuinely-unresolved
+      // mismatch is simply NOT reported — `enqueueSystemNudge` on a non-live recipient persists a durable
+      // inbox record the boot scan re-drives on resume (sessions/service.ts), so failing loud here would
+      // manufacture a zombie notice that outlives the session it describes. Reporting a dead session's own
+      // mismatch, if ever wanted, is a separate card and an owner call, not a default behavior of this one.
+      for (const t of live.pendingMismatchUnresolvedTimers) clearTimeout(t);
+      live.pendingMismatchUnresolvedTimers.clear();
       // The pty is gone → empty the held queue so a stale "Queued (N)" can't linger after exit (the
       // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
@@ -4598,7 +4716,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -4683,7 +4801,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -5611,6 +5729,10 @@ export class PtyHost {
                 const confirmedFusion = (replayedEntry === undefined && accumulation?.confirmed) ? accumulation : null;
                 if (confirmedFusion) {
                   live.lastMismatchFusion = { gen: live.submitGeneration, spanGens: confirmedFusion.spanGens, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
+                  // Card f9b1ea00: this fusion just ESTABLISHED that every gen in its own span arrived —
+                  // record each one as resolved so a still-pending `checkPromptMismatchUnresolved` timer for
+                  // any of them (see `Live.mismatchResolvedGens`' own doc) finds it and stays silent.
+                  for (const g of confirmedFusion.spanGens) live.mismatchResolvedGens.add(g);
                 }
                 // Card d005f55b DoD-2: same posture as `confirmedFusion` above, for the diverged-prior
                 // candidate — already computed once, alongside `accumulation`, and reused here for the
@@ -5782,6 +5904,59 @@ export class PtyHost {
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
+                // Card f9b1ea00 — Code Review CRITICAL (confirmed, board card f9b1ea00): arm the follow-up
+                // timer iff `mismatchText` just above ACTUALLY made the "wait one generation and re-check"
+                // promise — i.e. iff `lossClause` took its `replayedEntry !== undefined` branch, which only
+                // happens in `mismatchText`'s own FINAL fallback arm (none of the four confirmed/benign
+                // shapes above matched: `confirmedFusion`/`confirmedDivergedPrior`/`confirmedWrapperDeficit`/
+                // `confirmedAnsiStripDeficit`). The ORIGINAL cut of this card armed on the broader
+                // `replayedEntry !== undefined` alone, at the point `live.lastMismatchReplay` is set, well
+                // BEFORE `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are even computed — but both of
+                // those are, by construction (see each's own doc above), ALSO `replayedEntry !== undefined`
+                // cases, and their own notice text says the OPPOSITE: "NOT A LOSS ... every byte did arrive."
+                // Worse, their gens are UNSATISFIABLE by construction: `Live.mismatchResolvedGens` is
+                // populated ONLY by a CONFIRMED fusion (`confirmedFusion`, above), which itself REQUIRES
+                // `replayedEntry === undefined` — mutually exclusive with the wrapper/ANSI-strip shapes. Left
+                // as originally shipped, 100% of that population armed a timer that could NEVER resolve, and
+                // fired a false "confirmed loss, please resend" 10 minutes after Loom had told the session
+                // the exact opposite.
+                //
+                // This condition is deliberately `isUnmatchableMismatch`'s own structural TWIN, above — the
+                // SAME four negations with the OPPOSITE `replayedEntry` polarity — rather than a fresh
+                // "exclude the current benign shapes" redraw: a future 6th benign shape only needs its own
+                // `confirmed<X>` local threaded into BOTH twins (the same way `confirmedWrapperDeficit`/
+                // `confirmedAnsiStripDeficit` already are here) to stay correct on both sides, instead of this
+                // arming condition needing its own independently-driftable update.
+                const isRecognizedReplayAwaitingResolution = replayedEntry !== undefined
+                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit;
+                if (isRecognizedReplayAwaitingResolution) {
+                  // Schedule the follow-up: after `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (see that constant's
+                  // own sizing doc), `checkPromptMismatchUnresolved` re-checks whether THIS gen has since been
+                  // marked resolved (a later fusion naming it in `Live.mismatchResolvedGens` — see that
+                  // field's own doc) and fails loud, once, if not. Captured in locals rather than read off
+                  // `live`/`intended` again inside the closure: `live.submitGeneration`/`live.lastPrompt` will
+                  // have moved on by the time this fires, and this must describe THIS mismatch, not whatever
+                  // happens to be current at check time.
+                  const pendingGen = live.submitGeneration;
+                  const pendingWrittenHash = sigWritten.hash;
+                  const pendingReportedHash = sigReported.hash;
+                  const pendingIntendedLen = intended.length;
+                  // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
+                  // pendingMismatchUnresolvedTimers` (see that field's own doc) so `spawn()`/`onExit` can
+                  // clear it before a resume/recycle/restart/exit invalidates this session's own tracking —
+                  // otherwise this exact timer could fire AFTER that boundary, re-look-up a NEW (or dead)
+                  // Live inside `checkPromptMismatchUnresolved`, and be silently satisfied by an unrelated
+                  // later mismatch's resolution that happens to reuse this same gen number, reproducing this
+                  // card's own gap via a different trigger. Removed from the set on normal firing too (the
+                  // `else` case never applies — `clearTimeout` prevents the callback from running at all once
+                  // cleared) so this only ever holds handles for mismatches genuinely still pending
+                  // resolution.
+                  const timer: NodeJS.Timeout = setTimeout(() => {
+                    live.pendingMismatchUnresolvedTimers.delete(timer);
+                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen);
+                  }, PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
+                  live.pendingMismatchUnresolvedTimers.add(timer);
+                }
                 // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
                 // this must land as the notice's OWN pty submission, never appended to another payload — the
                 // standing rule this very finding established, since the whole point is that a payload can
@@ -9363,6 +9538,54 @@ export class PtyHost {
    *  occurrence overwrites rather than accumulates, so this always reflects the LATEST replay only. */
   getLastMismatchReplay(sessionId: string): Live["lastMismatchReplay"] | undefined {
     return this.live.get(sessionId)?.lastMismatchReplay;
+  }
+
+  /**
+   * Card f9b1ea00 — the bounded-window follow-up scheduled by the `UserPromptSubmit` mismatch detector's
+   * own `replayedEntry !== undefined` branch (see that call site's own doc), fired `PROMPT_MISMATCH_
+   * RESOLVE_WINDOW_MS` after a "recognized replay" mismatch was first detected. THE GAP THIS CLOSES: that
+   * detection's own session-facing notice tells its reader "wait one generation and re-check ... if that
+   * happens you will see a SEPARATE, later notice" — until now, the "if that DOESN'T happen" branch of
+   * that promise had no mechanism behind it at all; a genuine loss and "not yet, still waiting" were
+   * permanently indistinguishable to the recipient.
+   *
+   * `gen`/`writtenHash`/`reportedHash`/`intendedLen` are the ORIGINAL detection's own values, captured in
+   * the caller's closure — this method never re-derives them from `live`'s current state (which has moved
+   * on by the time this fires).
+   *
+   * RESOLUTION CHECK: `live.mismatchResolvedGens.has(gen)` — true iff some CONFIRMED fusion, at any point
+   * between detection and now, named this exact gen in its own `spanGens` (see that field's own doc).
+   * `true` here is the POSITIVE CONTROL this card's own DoD-3 requires: a mismatch that DID resolve must
+   * produce NO follow-up signal, on pain of a false-alarm regression (the DoD names `854d1632` v3's own
+   * catch of exactly this trap).
+   *
+   * ⚠️ CORRECTED (Code Review MAJOR, confirmed): this method used to claim the `!live` branch below covers
+   * "session no longer live" for every exit. FALSE for `kind:"claude"` — the only kind this whole detector
+   * ever runs for. `this.live.delete()` has exactly two call sites in this file (`spawnShell`'s own
+   * `onExit`, `dropCanned`), neither reachable for a claude session; a claude session's own `onExit` sets
+   * `alive:false` and KEEPS the map entry. So `!live` here is genuinely unreachable for the population this
+   * method actually serves — it is a defensive fallback for the OTHER kinds, not what protects a claude
+   * session from a post-exit false alarm. That protection is `onExit`'s OWN clear of
+   * `live.pendingMismatchUnresolvedTimers` (mirrors `readyFallbackTimer`'s belt-and-suspenders exit clear,
+   * card c469d54e) — it stops this callback from ever running again once the session has exited, so by the
+   * time (if ever) this method's body runs, `live` is either a still-alive claude session or one of the
+   * genuinely-deletable other kinds.
+   *
+   * UNRESOLVED: fires `PtyHostEvents.onPromptMismatchUnresolved` exactly once (this method is only ever
+   * scheduled once per detection — see the `setTimeout` call site) so the implementer (sessions/service.ts,
+   * via index.ts) can fail loud to both the recipient and, where one exists, the sender — mirroring
+   * `handlePasteLengthLoss`'s established two-recipient, durable-event shape (see that method's own doc;
+   * the independent worker confirmation on this card's own board body names this exact sibling asymmetry
+   * as the real defect). PtyHost itself has no DB/manager lookup (same layering boundary as
+   * `onPasteLengthLoss`/`onKickoffGiveUpExhausted`), so it only ever hands off the raw facts.
+   */
+  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number): void {
+    const live = this.live.get(sessionId);
+    if (!live) return;
+    if (live.mismatchResolvedGens.has(gen)) return;
+    // eslint-disable-next-line no-console
+    console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
+    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen });
   }
 
   /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s

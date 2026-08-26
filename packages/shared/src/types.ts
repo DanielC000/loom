@@ -1297,7 +1297,20 @@ export type OrchestrationEventKind =
   // own id — same "notify whoever can act" convention as `paste_length_loss`), workerSessionId = the
   // affected session itself; `detail` carries { token, engineSessionId }. The durable audit trail for a
   // give-up that used to terminate in a bare console.warn with no queryable record at all.
-  | "paste_tripwire_give_up";
+  | "paste_tripwire_give_up"
+  // Card f9b1ea00 — `PtyHostEvents.onPromptMismatchUnresolved` fired: a "recognized replay"
+  // `[loom:prompt-mismatch]` detection (packages/daemon/src/pty/host.ts, the `UserPromptSubmit` mismatch
+  // detector's `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_
+  // WINDOW_MS` — no later generation's own submission fused that gen's content back in whole. Distinct
+  // from `paste_length_loss` above (that one fires when Loom never wrote the lost text at all — the
+  // human/raw-paste gap; this one fires when Loom DID write it and the engine's own echo mismatched it,
+  // and the follow-up window to prove it recovered has now elapsed). Filed under the AFFECTED session
+  // (managerSessionId = its parent session's id if one exists, else its own id — same "notify whoever can
+  // act" convention as `paste_length_loss`/`paste_tripwire_give_up`), workerSessionId = the affected
+  // session itself; `detail` carries { gen, writtenHash, reportedHash, intendedLen }. The durable audit
+  // trail for a mismatch whose own notice promised a follow-up either way but, until this card, only ever
+  // delivered on the SUCCESS half of that promise.
+  | "prompt_mismatch_unresolved";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1331,7 +1344,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
-  paste_tripwire_give_up: true,
+  paste_tripwire_give_up: true, prompt_mismatch_unresolved: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 
