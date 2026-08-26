@@ -1,0 +1,48 @@
+Card 6a9f4178 — reproduction summary. All runs are `node packages/daemon/test/merge-gate-concurrency-verdict.mjs`
+run locally, built from source first (`pnpm build`). NEVER via `run_gate` — see the card's own instruction.
+
+=== Batch 1: 40 runs (4 parallel lanes x 10 rounds), light background load, ORIGINAL (pre-fix) file ===
+0/40 failed. Not committed (nothing to show — all clean, no fix in play yet).
+
+=== Batch 2: 120 runs (6 parallel lanes x 20 rounds), 16-way CPU saturation (one CPU-burn worker per core
+on a 16-core host), spanning the moment the fix landed mid-batch ===
+
+PRE-FIX (rounds 1-9, 11 = 60 runs, the ORIGINAL file — the fix edit had not yet landed on disk):
+  37/60 runs hit a real failure or crash (~61.7% under this artificial, extreme 16-way saturation load —
+  NOT a production reproduction rate; this load is far heavier than anything in the daemon's own gate
+  telemetry, deliberately, to make the mechanism reproducible in a reasonable number of trials).
+  Committed: all 37 failing logs under `pre-fix-failing/`, plus 3 representative CLEAN pre-fix logs
+  under `pre-fix-sample-passing/` for contrast (round1-d, round3-a, round6-a — chosen as the first three
+  file-order matches with no failure/crash, not cherry-picked for outcome).
+
+POST-FIX (round 10, rounds 12-20 = 60 runs, the file AFTER the `confirmWorkerMergeUntilSettled` swap):
+  0/60 runs failed — a clean break exactly at the file-edit boundary (round 11 still failing, round 12
+  clean, with round 10 — before round 11 — already clean, most likely file-read timing/statistical
+  variance rather than an earlier partial edit; the edit was made as one atomic set of Edit tool calls).
+  Committed: 3 representative logs under `post-fix-sample-passing/` (round12-a, round15-c, round20-f).
+
+  This is "0/60 under continued extreme load post-fix" — read as strong, not proof-by-exhaustion:
+  rule-of-three on 0/60 gives a 95%-CI upper bound of ~5% at this (still extreme, non-representative)
+  load level, not "impossible." The mechanism fix (poll until genuinely settled, bounded by a real
+  production ceiling) directly addresses the identified cause; this batch corroborates it under the same
+  load that produced the 37 pre-fix failures, not a formal proof of elimination.
+
+  Full raw log set (all 120 files, ~964KB) was generated locally but is NOT committed in full — only the
+  failing specimens + 6 representative passing samples are, to keep the corpus focused. The generating
+  script is committed (`../reproduce-cpu-saturation.sh`), so the full population is exactly reproducible.
+
+=== Batch 3: targeted — kickoff-real-spawn.mjs run immediately before the verdict test, sequentially,
+under the same 16-way CPU saturation (informed by the co-occurrence lead — see co-occurrence-analysis) ===
+
+Trial 1 (ORIGINAL file, pre-fix): kickoff-real-spawn FAILED, verdict FAILED — reproduced the exact
+`!rP0.settled` throw at scenario (A). See `targeted-kickoff-then-verdict/kickoff-1.txt` / `verdict-1.txt`.
+
+Trials 2-8 (FIXED file, post-fix): committed as kickoff-2..8.txt / verdict-2..8.txt. ALL 7 of trials 2-8
+PASSED (verdict exit 0, all checks PASS, full "✅ ALL PASS" summary each time). Trial 2's kickoff-real-spawn
+itself still failed (a real stress signal) but the verdict test passed anyway. NOTE: this batch's own
+16-way CPU burn (a SEPARATE background job, Batch 2) finished and killed its burn workers partway through
+this batch's trials — trials 3+ ran under lighter ambient load, not the same saturation as trial 1 or
+trial 2's own kickoff failure. This is a genuine confound for trials 3-7 specifically (see README) — they
+corroborate but do not, alone, prove the fix holds under the SAME load level as trial 1. Batch 2's clean
+60/0 before-after split at a HELD-CONSTANT load level is the stronger evidence; this batch is corroborating,
+not primary.

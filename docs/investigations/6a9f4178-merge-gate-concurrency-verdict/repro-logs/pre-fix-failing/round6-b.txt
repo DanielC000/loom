@@ -1,0 +1,14 @@
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'p.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864682-1cufb opId=91600ecd-1016-48dc-b294-271e4877c23b site=admit t=13640.460 iso=2026-08-26T00:57:56.701Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864682-1cufb opId=91600ecd-1016-48dc-b294-271e4877c23b site=beginSquash t=13932.653 iso=2026-08-26T00:57:56.993Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864682-1cufb opId=91600ecd-1016-48dc-b294-271e4877c23b site=releaseMergeRepoGuard t=17450.875 iso=2026-08-26T00:58:00.511Z
+file:///C:/Users/danie/.loom-worktrees/c36e8691-44d8-44ae-91ed-1bae3c632b33/cebad96bb7a3/packages/daemon/test/merge-gate-concurrency-verdict.mjs:109
+    if (!rP0.settled) throw new Error("expected P to settle synchronously (hermetic fake gate, no hold)");
+                            ^
+
+Error: expected P to settle synchronously (hermetic fake gate, no hold)
+    at file:///C:/Users/danie/.loom-worktrees/c36e8691-44d8-44ae-91ed-1bae3c632b33/cebad96bb7a3/packages/daemon/test/merge-gate-concurrency-verdict.mjs:109:29
+
+Node.js v22.16.0

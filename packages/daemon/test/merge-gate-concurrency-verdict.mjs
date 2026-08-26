@@ -105,8 +105,15 @@ try {
     // row this test's whole "readable after the fact" claim depends on; a bare confirmWorkerMerge call
     // never touches that store at all.
     const sessionsP = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGatePass });
-    const rP0 = await sessionsP.confirmWorkerMergeTracked(P.mgrId, P.workerId);
-    if (!rP0.settled) throw new Error("expected P to settle synchronously (hermetic fake gate, no hold)");
+    // Card 6a9f4178: `confirmWorkerMergeTracked` degrades to `{settled:false}` once the REAL merge work
+    // (createWorktree/git merge/squash — only `runGate` is faked here) runs past `SYNC_ATTACH_BUDGET_MS`
+    // (12s) — an ordinary, documented daemon behavior under host contention, not a bug. Under artificial
+    // load this test reproducibly hit exactly that: `!rP0.settled` firing with NO merge-code defect
+    // involved. `confirmWorkerMergeUntilSettled` is the existing production helper built for this —
+    // it polls the SAME already-running op (attach()'s own dedupe) until it genuinely settles, bounded by
+    // the project's configured gate timeout × 6, never a fixed sleep/retry.
+    const rP0 = await sessionsP.confirmWorkerMergeUntilSettled(P.mgrId, P.workerId);
+    if (!rP0.settled) throw new Error("P did not settle within confirmWorkerMergeUntilSettled's own bounded ceiling — a genuine stall, not the sync-attach-budget race this test now waits out");
     const confirmP = rP0.value;
 
     const wtF = await createWorktree(F.repo, F.projId, F.taskId);
@@ -115,8 +122,9 @@ try {
     execSync(`git add . && git ${GIT_ID} commit -q -m f`, { cwd: wtF.worktreePath });
     seed(db, F, "pnpm gate");
     const sessionsF = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGateFail });
-    const rF0 = await sessionsF.confirmWorkerMergeTracked(F.mgrId, F.workerId);
-    if (!rF0.settled) throw new Error("expected F to settle synchronously (hermetic fake gate, no hold)");
+    // Card 6a9f4178 — same reasoning as the P call above.
+    const rF0 = await sessionsF.confirmWorkerMergeUntilSettled(F.mgrId, F.workerId);
+    if (!rF0.settled) throw new Error("F did not settle within confirmWorkerMergeUntilSettled's own bounded ceiling — a genuine stall, not the sync-attach-budget race this test now waits out");
     const confirmF = rF0.value;
 
     check("(A precondition) P merged:true, F merged:false — a real pass and a real rejection", confirmP.merged === true && confirmF.merged === false);
@@ -177,8 +185,12 @@ try {
     holds.set(P.worktreePath, mkHold());
     holds.set(F.worktreePath, mkHold());
 
-    const pP = sessions.confirmWorkerMergeTracked(P.mgrId, P.workerId);
-    const pF = sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId);
+    // Card 6a9f4178: `confirmWorkerMergeUntilSettled`, not the raw `confirmWorkerMergeTracked` — see the
+    // scenario (A) call sites above for why. The FIRST internal call it makes IS `confirmWorkerMergeTracked`
+    // (same mint, same `runGate` invocation `calls.push` below observes), so this changes nothing about the
+    // "both children co-live" precondition below — it only adds a bounded poll-until-settled AFTER that.
+    const pP = sessions.confirmWorkerMergeUntilSettled(P.mgrId, P.workerId);
+    const pF = sessions.confirmWorkerMergeUntilSettled(F.mgrId, F.workerId);
     // Wait until BOTH gate children have genuinely started — the precondition that makes this a real
     // concurrency proof (both admitted while the other is still live) rather than an accidentally
     // serialized run.

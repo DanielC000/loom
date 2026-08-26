@@ -1,0 +1,45 @@
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'p.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705815330-8f8m5 opId=11daaa0e-8c0d-4ce5-a464-2b11f8e2f4e2 site=admit t=10886.993 iso=2026-08-26T00:57:04.645Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705815330-8f8m5 opId=11daaa0e-8c0d-4ce5-a464-2b11f8e2f4e2 site=beginSquash t=11045.158 iso=2026-08-26T00:57:04.804Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705815330-8f8m5 opId=11daaa0e-8c0d-4ce5-a464-2b11f8e2f4e2 site=releaseMergeRepoGuard t=14062.015 iso=2026-08-26T00:57:07.820Z
+warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705815330-8f8m5 opId=880bfb6b-6469-48a2-ba4d-d02e81b34732 site=admit t=23591.370 iso=2026-08-26T00:57:17.350Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705815330-8f8m5 opId=880bfb6b-6469-48a2-ba4d-d02e81b34732 site=release t=23796.568 iso=2026-08-26T00:57:17.555Z
+[give-up] this.pty does not implement hasAmbiguousMatch — auto-join (card 4a0af485, Requirement A) is DISABLED for every dispatch from this process; a manual resend after a give-up/PARKED notice can now duplicate. Expected only in a test harness using a hermetic PtyStub, never in production (this.pty is statically typed as the concrete PtyHost).
+[gate opId=880bfb6b-6469-48a2-ba4d-d02e81b34732] branch=loom/1f7dd0f3314a task=concstamp-seq-f-task-1787705815330-8f8m5 passed=false step: pnpm gate; exit 1; cap=2 concurrentGates=1 concurrentGatesMax=1; failing: some_test.mjs
+--- gate output tail ---
+FAIL some_test.mjs
+[gate:repo-guard] refused-not-owner repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705815330-8f8m5 presentedId=880bfb6b-6469-48a2-ba4d-d02e81b34732 actualId=none opId=880bfb6b-6469-48a2-ba4d-d02e81b34732 site=releaseMergeRepoGuard t=24295.840 iso=2026-08-26T00:57:18.054Z
+PASS  (A precondition) P merged:true, F merged:false — a real pass and a real rejection
+PASS  (A — THE FIX) PASS carries the triple on ConfirmMergeResult — before this card a passing merge carried NONE of this
+PASS  (A) FAIL carries the triple structurally too (not just baked into detailText)
+PASS  (A — DoD-2 LOAD-BEARING) PASS and FAIL, run under the IDENTICAL condition, report BYTE-IDENTICAL gateCap/concurrentGates/concurrentGatesMax
+PASS  (A gate_status — THE FIX, DoD-1) gate_status(opId) itself reports the triple for the PASS op — 'readable after the fact' means through THIS call, not just the DB row
+PASS  (A gate_status) gate_status(opId) reports the triple for the FAIL op too
+PASS  (A gate_status — DoD-2 LOAD-BEARING) gate_status(opId) on the settled PASS op and the settled FAIL op agree byte-for-byte on the triple
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'p.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705815330-8f8m5 opId=b9830e74-b0e0-4aa6-9c65-284cb5951430 site=admit t=35123.462 iso=2026-08-26T00:57:28.882Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705815330-8f8m5 opId=54da3eb0-fa2e-4397-aeaa-55c52bcbcbbc site=admit t=35668.802 iso=2026-08-26T00:57:29.427Z
+PASS  (B precondition) both children are genuinely CO-LIVE at the same instant (cap raised to 2)
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705815330-8f8m5 opId=b9830e74-b0e0-4aa6-9c65-284cb5951430 site=release t=35822.335 iso=2026-08-26T00:57:29.581Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705815330-8f8m5 opId=54da3eb0-fa2e-4397-aeaa-55c52bcbcbbc site=beginSquash t=35823.168 iso=2026-08-26T00:57:29.582Z
+[gate opId=b9830e74-b0e0-4aa6-9c65-284cb5951430] branch=loom/7f01baea03d2 task=concstamp-con-f-task-1787705815330-8f8m5 passed=false step: pnpm gate; exit 1; cap=2 concurrentGates=1 concurrentGatesMax=2; failing: some_test.mjs
+--- gate output tail ---
+FAIL some_test.mjs
+[gate:repo-guard] refused-not-owner repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705815330-8f8m5 presentedId=b9830e74-b0e0-4aa6-9c65-284cb5951430 actualId=none opId=b9830e74-b0e0-4aa6-9c65-284cb5951430 site=releaseMergeRepoGuard t=36390.624 iso=2026-08-26T00:57:30.149Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705815330-8f8m5 opId=54da3eb0-fa2e-4397-aeaa-55c52bcbcbbc site=releaseMergeRepoGuard t=40125.899 iso=2026-08-26T00:57:33.884Z
+FAIL  (B precondition) P settled merged:true
+PASS  (B precondition) F settled merged:false (a real gate rejection)
+file:///C:/Users/danie/.loom-worktrees/c36e8691-44d8-44ae-91ed-1bae3c632b33/cebad96bb7a3/packages/daemon/test/merge-gate-concurrency-verdict.mjs:196
+    check("(B) gateCap is populated and equal on BOTH outcomes (a plain config echo, order-independent)", rP.value.gateCap === 2 && rF.value.gateCap === 2);
+                                                                                                                   ^
+
+TypeError: Cannot read properties of undefined (reading 'gateCap')
+    at file:///C:/Users/danie/.loom-worktrees/c36e8691-44d8-44ae-91ed-1bae3c632b33/cebad96bb7a3/packages/daemon/test/merge-gate-concurrency-verdict.mjs:196:116
+
+Node.js v22.16.0

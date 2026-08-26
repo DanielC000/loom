@@ -1,0 +1,487 @@
+[measured] real CLAUDE.md=44837 chars, real worker SKILL.md=52430 chars
+PASS  [worker] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-worker bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-worker.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-worker\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-worker\"}}}"]
+[busy] real-worker -> true (spawn-startup-prompt)
+PASS  [worker] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [worker]] spawn()→FIXTURE_READY: 362ms (budget 20000ms)
+PASS  [worker] the real child process never reported an extra positional argv entry
+[hook] real-worker SessionStart session_id=-
+[resume-mode] real-worker kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-worker ready with no turn started — submitting the kickoff
+[submit-write] real-worker reason=kickoff-guarantee busyBefore=true len=7121 head="[role:worker] # Loom\r\n\r\nLocal-first AI project workspace tha"
+[pty-write] real-worker seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-worker seq=2 tag=chunk gen=1 len=1024 h=ccf9d94c
+[busy] real-worker -> true (kickoff-guarantee)
+[pty-write] real-worker seq=3 tag=chunk gen=1 len=1024 h=24bc9312
+[pty-write] real-worker seq=4 tag=chunk gen=1 len=1024 h=4a04b1e2
+[pty-write] real-worker seq=5 tag=chunk gen=1 len=1024 h=8a4ca1d7
+[pty-write] real-worker seq=6 tag=chunk gen=1 len=1024 h=1d1bdbc0
+[pty-write] real-worker seq=7 tag=chunk gen=1 len=1024 h=b0e316d2
+[pty-write] real-worker seq=8 tag=chunk gen=1 len=977 h=d9d76a51
+[pty-write] real-worker seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-worker seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-worker Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-worker Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-worker seq=11 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-worker seq=12 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-worker Enter attempt 2/4 written gen=1 — awaiting confirmation
+   [measured [worker]] SessionStart→FIXTURE_RECEIVED: 6147ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7121 chars)
+   [measured [worker]] spawn()→kickoff-landed (total): 6699ms (kickoff 7121 chars)
+PASS  [worker] the kickoff was received exactly once (no duplicate delivery)
+PASS  [worker] the fixture's output file was written
+PASS  [worker] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-worker code=-1073741510 intended=true
+PASS  [manager] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-manager bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-manager.json","--permission-mode","acceptEdits","--disallowedTools","TaskCreate","TaskGet","TaskList","TaskOutput","TaskStop","TaskUpdate","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-manager\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-manager\"}}}"]
+[busy] real-manager -> true (spawn-startup-prompt)
+PASS  [manager] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [manager]] spawn()→FIXTURE_READY: 152ms (budget 20000ms)
+PASS  [manager] the real child process never reported an extra positional argv entry
+[hook] real-manager SessionStart session_id=-
+[resume-mode] real-manager kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-manager ready with no turn started — submitting the kickoff
+[submit-write] real-manager reason=kickoff-guarantee busyBefore=true len=7123 head="[role:manager] # Loom\r\n\r\nLocal-first AI project workspace th"
+[pty-write] real-manager seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-manager seq=2 tag=chunk gen=1 len=1024 h=b7bd6484
+[busy] real-manager -> true (kickoff-guarantee)
+[pty-write] real-manager seq=3 tag=chunk gen=1 len=1024 h=b913d563
+[pty-write] real-manager seq=4 tag=chunk gen=1 len=1024 h=17a614f1
+[pty-write] real-manager seq=5 tag=chunk gen=1 len=1024 h=1e72dc25
+[pty-write] real-manager seq=6 tag=chunk gen=1 len=1024 h=55de1c52
+[pty-write] real-manager seq=7 tag=chunk gen=1 len=1024 h=e4d6929f
+[pty-write] real-manager seq=8 tag=chunk gen=1 len=979 h=3c21292c
+[pty-write] real-manager seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-manager seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-manager Enter attempt 1/4 written gen=1 — awaiting confirmation
+   [measured [manager]] SessionStart→FIXTURE_RECEIVED: 4861ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7123 chars)
+   [measured [manager]] spawn()→kickoff-landed (total): 5107ms (kickoff 7123 chars)
+PASS  [manager] the kickoff was received exactly once (no duplicate delivery)
+PASS  [manager] the fixture's output file was written
+PASS  [manager] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-manager code=-1073741510 intended=true
+PASS  [platform] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-platform bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-platform.json","--permission-mode","acceptEdits","--disallowedTools","TaskCreate","TaskGet","TaskList","TaskOutput","TaskStop","TaskUpdate","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-platform\"},\"loom-platform\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-platform/real-platform\"}}}"]
+[busy] real-platform -> true (spawn-startup-prompt)
+PASS  [platform] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [platform]] spawn()→FIXTURE_READY: 182ms (budget 20000ms)
+PASS  [platform] the real child process never reported an extra positional argv entry
+[hook] real-platform SessionStart session_id=-
+[resume-mode] real-platform kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-platform ready with no turn started — submitting the kickoff
+[submit-write] real-platform reason=kickoff-guarantee busyBefore=true len=7125 head="[role:platform] # Loom\r\n\r\nLocal-first AI project workspace t"
+[pty-write] real-platform seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-platform seq=2 tag=chunk gen=1 len=1024 h=93e18d29
+[busy] real-platform -> true (kickoff-guarantee)
+[pty-write] real-platform seq=3 tag=chunk gen=1 len=1024 h=47008207
+[pty-write] real-platform seq=4 tag=chunk gen=1 len=1024 h=11d9173b
+[pty-write] real-platform seq=5 tag=chunk gen=1 len=1024 h=80fa0a79
+[pty-write] real-platform seq=6 tag=chunk gen=1 len=1024 h=06332a0b
+[pty-write] real-platform seq=7 tag=chunk gen=1 len=1024 h=682646f9
+[pty-write] real-platform seq=8 tag=chunk gen=1 len=981 h=bd2dc696
+[pty-write] real-platform seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-platform seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-platform Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-platform Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-platform seq=11 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-platform seq=12 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-platform Enter attempt 2/4 written gen=1 — awaiting confirmation
+   [measured [platform]] SessionStart→FIXTURE_RECEIVED: 5652ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7125 chars)
+   [measured [platform]] spawn()→kickoff-landed (total): 5921ms (kickoff 7125 chars)
+PASS  [platform] the kickoff was received exactly once (no duplicate delivery)
+PASS  [platform] the fixture's output file was written
+PASS  [platform] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+[pty] exit real-platform code=-1073741510 intended=true
+PASS  [setup] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-setup bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-setup.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-setup\"},\"loom-setup\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-setup/real-setup\"}}}"]
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[busy] real-setup -> true (spawn-startup-prompt)
+PASS  [setup] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [setup]] spawn()→FIXTURE_READY: 328ms (budget 20000ms)
+PASS  [setup] the real child process never reported an extra positional argv entry
+[hook] real-setup SessionStart session_id=-
+[resume-mode] real-setup kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-setup ready with no turn started — submitting the kickoff
+[submit-write] real-setup reason=kickoff-guarantee busyBefore=true len=7119 head="[role:setup] # Loom\r\n\r\nLocal-first AI project workspace that"
+[pty-write] real-setup seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-setup seq=2 tag=chunk gen=1 len=1024 h=713a3565
+[busy] real-setup -> true (kickoff-guarantee)
+[pty-write] real-setup seq=3 tag=chunk gen=1 len=1024 h=55aeeda0
+[pty-write] real-setup seq=4 tag=chunk gen=1 len=1024 h=fb001cf0
+[pty-write] real-setup seq=5 tag=chunk gen=1 len=1024 h=c16749cc
+[pty-write] real-setup seq=6 tag=chunk gen=1 len=1024 h=45478dcb
+[pty-write] real-setup seq=7 tag=chunk gen=1 len=1024 h=e525de94
+[pty-write] real-setup seq=8 tag=chunk gen=1 len=975 h=cb81dff4
+[pty-write] real-setup seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-setup seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-setup Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-setup Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-setup seq=11 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-setup seq=12 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-setup Enter attempt 2/4 written gen=1 — awaiting confirmation
+[submit] real-setup Enter attempt 2 NOT confirmed within 900ms — retrying
+[pty-write] real-setup seq=13 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-setup seq=14 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-setup Enter attempt 3/4 written gen=1 — awaiting confirmation
+[submit] real-setup Enter attempt 3 NOT confirmed within 900ms — retrying
+[pty-write] real-setup seq=15 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-setup seq=16 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-setup Enter attempt 4/4 written gen=1 — awaiting confirmation
+[submit] real-setup GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge
+[busy] real-setup -> false (give-up-recovery) afterMs=5045
+[submit] real-setup GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld
+   [measured [setup]] SessionStart→FIXTURE_RECEIVED: 9681ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7119 chars)
+   [measured [setup]] spawn()→kickoff-landed (total): 10117ms (kickoff 7119 chars)
+PASS  [setup] the kickoff was received exactly once (no duplicate delivery)
+PASS  [setup] the fixture's output file was written
+PASS  [setup] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+[pty] exit real-setup code=-1073741510 intended=true
+PASS  [assistant] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-assistant bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-assistant.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-assistant\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-assistant\"}}}"]
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[busy] real-assistant -> true (spawn-startup-prompt)
+PASS  [assistant] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [assistant]] spawn()→FIXTURE_READY: 149ms (budget 20000ms)
+PASS  [assistant] the real child process never reported an extra positional argv entry
+[hook] real-assistant SessionStart session_id=-
+[resume-mode] real-assistant kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-assistant ready with no turn started — submitting the kickoff
+[submit-write] real-assistant reason=kickoff-guarantee busyBefore=true len=7127 head="[role:assistant] # Loom\r\n\r\nLocal-first AI project workspace "
+[pty-write] real-assistant seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-assistant seq=2 tag=chunk gen=1 len=1024 h=58b84464
+[busy] real-assistant -> true (kickoff-guarantee)
+[pty-write] real-assistant seq=3 tag=chunk gen=1 len=1024 h=9333eb50
+[pty-write] real-assistant seq=4 tag=chunk gen=1 len=1024 h=f1dbf9a6
+[pty-write] real-assistant seq=5 tag=chunk gen=1 len=1024 h=49d0a2b0
+[pty-write] real-assistant seq=6 tag=chunk gen=1 len=1024 h=1cc8cbca
+[pty-write] real-assistant seq=7 tag=chunk gen=1 len=1024 h=b4e47d13
+[pty-write] real-assistant seq=8 tag=chunk gen=1 len=983 h=3edb913b
+[pty-write] real-assistant seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-assistant seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-assistant Enter attempt 1/4 written gen=1 — awaiting confirmation
+   [measured [assistant]] SessionStart→FIXTURE_RECEIVED: 4853ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7127 chars)
+   [measured [assistant]] spawn()→kickoff-landed (total): 5160ms (kickoff 7127 chars)
+PASS  [assistant] the kickoff was received exactly once (no duplicate delivery)
+PASS  [assistant] the fixture's output file was written
+PASS  [assistant] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+[pty] exit real-assistant code=-1073741510 intended=true
+PASS  [auditor] buildSpawnArgs never emits the kickoff into argv
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] spawn real-auditor bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-auditor.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","TaskCreate","TaskGet","TaskList","TaskOutput","TaskStop","TaskUpdate","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-auditor\"},\"loom-audit\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-audit/real-auditor\"}}}"]
+[busy] real-auditor -> true (spawn-startup-prompt)
+PASS  [auditor] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [auditor]] spawn()→FIXTURE_READY: 127ms (budget 20000ms)
+PASS  [auditor] the real child process never reported an extra positional argv entry
+[hook] real-auditor SessionStart session_id=-
+[resume-mode] real-auditor kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-auditor ready with no turn started — submitting the kickoff
+[submit-write] real-auditor reason=kickoff-guarantee busyBefore=true len=7123 head="[role:auditor] # Loom\r\n\r\nLocal-first AI project workspace th"
+[pty-write] real-auditor seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-auditor seq=2 tag=chunk gen=1 len=1024 h=39686bab
+[busy] real-auditor -> true (kickoff-guarantee)
+[pty-write] real-auditor seq=3 tag=chunk gen=1 len=1024 h=b913d563
+[pty-write] real-auditor seq=4 tag=chunk gen=1 len=1024 h=17a614f1
+[pty-write] real-auditor seq=5 tag=chunk gen=1 len=1024 h=1e72dc25
+[pty-write] real-auditor seq=6 tag=chunk gen=1 len=1024 h=55de1c52
+[pty-write] real-auditor seq=7 tag=chunk gen=1 len=1024 h=e4d6929f
+[pty-write] real-auditor seq=8 tag=chunk gen=1 len=979 h=dc7d93d1
+[pty-write] real-auditor seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-auditor seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-auditor Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-auditor Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-auditor seq=11 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-auditor seq=12 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-auditor Enter attempt 2/4 written gen=1 — awaiting confirmation
+   [measured [auditor]] SessionStart→FIXTURE_RECEIVED: 5843ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7123 chars)
+   [measured [auditor]] spawn()→kickoff-landed (total): 6053ms (kickoff 7123 chars)
+PASS  [auditor] the kickoff was received exactly once (no duplicate delivery)
+PASS  [auditor] the fixture's output file was written
+PASS  [auditor] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-auditor code=-1073741510 intended=true
+PASS  [large 10000] fixture is actually built to the target scale
+PASS  [large 10000] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-large-10000 bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-large-10000.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-large-10000\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-large-10000\"}}}"]
+[busy] real-large-10000 -> true (spawn-startup-prompt)
+PASS  [large 10000] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [large 10000]] spawn()→FIXTURE_READY: 139ms (budget 20000ms)
+PASS  [large 10000] the real child process never reported an extra positional argv entry
+[hook] real-large-10000 SessionStart session_id=-
+[resume-mode] real-large-10000 kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-large-10000 ready with no turn started — submitting the kickoff
+[submit-write] real-large-10000 reason=kickoff-guarantee busyBefore=true len=10000 head="[role:worker] # Loom\r\n\r\nLocal-first AI project workspace tha"
+[pty-write] real-large-10000 seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-large-10000 seq=2 tag=chunk gen=1 len=1024 h=ccf9d94c
+[busy] real-large-10000 -> true (kickoff-guarantee)
+[pty-write] real-large-10000 seq=3 tag=chunk gen=1 len=1024 h=24bc9312
+[pty-write] real-large-10000 seq=4 tag=chunk gen=1 len=1024 h=4a04b1e2
+[pty-write] real-large-10000 seq=5 tag=chunk gen=1 len=1024 h=8a4ca1d7
+[pty-write] real-large-10000 seq=6 tag=chunk gen=1 len=1024 h=1d1bdbc0
+[pty-write] real-large-10000 seq=7 tag=chunk gen=1 len=1024 h=b0e316d2
+[pty-write] real-large-10000 seq=8 tag=chunk gen=1 len=1024 h=2d94f09a
+[pty-write] real-large-10000 seq=9 tag=chunk gen=1 len=1024 h=7af907a7
+[pty-write] real-large-10000 seq=10 tag=chunk gen=1 len=1024 h=cd36b0d4
+[pty-write] real-large-10000 seq=11 tag=chunk gen=1 len=784 h=4fd71aef
+[pty-write] real-large-10000 seq=12 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-large-10000 seq=13 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-10000 Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-large-10000 Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-large-10000 seq=14 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-large-10000 seq=15 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-10000 Enter attempt 2/4 written gen=1 — awaiting confirmation
+[submit] real-large-10000 Enter attempt 2 NOT confirmed within 900ms — retrying
+[pty-write] real-large-10000 seq=16 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-large-10000 seq=17 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-10000 Enter attempt 3/4 written gen=1 — awaiting confirmation
+[submit] real-large-10000 Enter attempt 3 NOT confirmed within 900ms — retrying
+[pty-write] real-large-10000 seq=18 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-large-10000 seq=19 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-10000 Enter attempt 4/4 written gen=1 — awaiting confirmation
+[submit] real-large-10000 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge
+[busy] real-large-10000 -> false (give-up-recovery) afterMs=5027
+[submit] real-large-10000 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld
+   [measured [large 10000]] SessionStart→FIXTURE_RECEIVED: 9238ms (stall budget 15000ms, absolute backstop 48000ms, kickoff 10000 chars)
+   [measured [large 10000]] spawn()→kickoff-landed (total): 9465ms (kickoff 10000 chars)
+PASS  [large 10000] the kickoff was received exactly once (no duplicate delivery)
+PASS  [large 10000] the fixture's output file was written
+PASS  [large 10000] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-large-10000 code=-1073741510 intended=true
+PASS  [large 40000] fixture is actually built to the target scale
+PASS  [large 40000] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-large-40000 bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-large-40000.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-large-40000\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-large-40000\"}}}"]
+[busy] real-large-40000 -> true (spawn-startup-prompt)
+PASS  [large 40000] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [large 40000]] spawn()→FIXTURE_READY: 125ms (budget 20000ms)
+PASS  [large 40000] the real child process never reported an extra positional argv entry
+[hook] real-large-40000 SessionStart session_id=-
+[resume-mode] real-large-40000 kind=fresh mode=unknown matched=- footer="FIXTURE_READY\u001b]0;C:\\WINDOWS\\system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-large-40000 ready with no turn started — submitting the kickoff
+[submit-write] real-large-40000 reason=kickoff-guarantee busyBefore=true len=40000 head="[role:worker] # Loom\r\n\r\nLocal-first AI project workspace tha"
+[pty-write] real-large-40000 seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-large-40000 seq=2 tag=chunk gen=1 len=1024 h=ccf9d94c
+[busy] real-large-40000 -> true (kickoff-guarantee)
+[pty-write] real-large-40000 seq=3 tag=chunk gen=1 len=1024 h=24bc9312
+[pty-write] real-large-40000 seq=4 tag=chunk gen=1 len=1024 h=4a04b1e2
+[pty-write] real-large-40000 seq=5 tag=chunk gen=1 len=1024 h=8a4ca1d7
+[pty-write] real-large-40000 seq=6 tag=chunk gen=1 len=1024 h=1d1bdbc0
+[pty-write] real-large-40000 seq=7 tag=chunk gen=1 len=1024 h=b0e316d2
+[pty-write] real-large-40000 seq=8 tag=chunk gen=1 len=1024 h=2d94f09a
+[pty-write] real-large-40000 seq=9 tag=chunk gen=1 len=1024 h=7af907a7
+[pty-write] real-large-40000 seq=10 tag=chunk gen=1 len=1024 h=cd36b0d4
+[pty-write] real-large-40000 seq=11 tag=chunk gen=1 len=1024 h=566686c8
+[pty-write] real-large-40000 seq=12 tag=chunk gen=1 len=1024 h=f634ad57
+[pty-write] real-large-40000 seq=13 tag=chunk gen=1 len=1024 h=939bb969
+[pty-write] real-large-40000 seq=14 tag=chunk gen=1 len=1024 h=c9259f51
+[pty-write] real-large-40000 seq=15 tag=chunk gen=1 len=1024 h=b9b056fc
+[pty-write] real-large-40000 seq=16 tag=chunk gen=1 len=1024 h=eee605eb
+[pty-write] real-large-40000 seq=17 tag=chunk gen=1 len=1024 h=26e85861
+[pty-write] real-large-40000 seq=18 tag=chunk gen=1 len=1024 h=f7b4907f
+[pty-write] real-large-40000 seq=19 tag=chunk gen=1 len=1024 h=4fd55b80
+[pty-write] real-large-40000 seq=20 tag=chunk gen=1 len=1024 h=7bd92c66
+[pty-write] real-large-40000 seq=21 tag=chunk gen=1 len=1024 h=2343d3b4
+[pty-write] real-large-40000 seq=22 tag=chunk gen=1 len=1024 h=5da7ef4e
+[pty-write] real-large-40000 seq=23 tag=chunk gen=1 len=1024 h=0f987980
+[pty-write] real-large-40000 seq=24 tag=chunk gen=1 len=1024 h=1552b001
+[pty-write] real-large-40000 seq=25 tag=chunk gen=1 len=1024 h=465d9d80
+[pty-write] real-large-40000 seq=26 tag=chunk gen=1 len=1024 h=934bd345
+[pty-write] real-large-40000 seq=27 tag=chunk gen=1 len=1024 h=46041a4a
+[pty-write] real-large-40000 seq=28 tag=chunk gen=1 len=1024 h=d93487b2
+[pty-write] real-large-40000 seq=29 tag=chunk gen=1 len=1024 h=cb7d559e
+[pty-write] real-large-40000 seq=30 tag=chunk gen=1 len=1024 h=c15ad655
+[pty-write] real-large-40000 seq=31 tag=chunk gen=1 len=1024 h=04cbe2fe
+[pty-write] real-large-40000 seq=32 tag=chunk gen=1 len=1024 h=1a907aa7
+[pty-write] real-large-40000 seq=33 tag=chunk gen=1 len=1024 h=cc6d6210
+[pty-write] real-large-40000 seq=34 tag=chunk gen=1 len=1024 h=08e35fdf
+[pty-write] real-large-40000 seq=35 tag=chunk gen=1 len=1024 h=84a01737
+[pty-write] real-large-40000 seq=36 tag=chunk gen=1 len=1024 h=8732463a
+[pty-write] real-large-40000 seq=37 tag=chunk gen=1 len=1024 h=8e7ad712
+[pty-write] real-large-40000 seq=38 tag=chunk gen=1 len=1024 h=ecd7839c
+[pty-write] real-large-40000 seq=39 tag=chunk gen=1 len=1024 h=93e9c9e1
+[pty-write] real-large-40000 seq=40 tag=chunk gen=1 len=1024 h=73a5e5f4
+[pty-write] real-large-40000 seq=41 tag=chunk gen=1 len=64 h=dab90581
+[pty-write] real-large-40000 seq=42 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-large-40000 seq=43 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-40000 Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-large-40000 Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-large-40000 seq=44 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-large-40000 seq=45 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-large-40000 Enter attempt 2/4 written gen=1 — awaiting confirmation
+   [measured [large 40000]] SessionStart→FIXTURE_RECEIVED: 7329ms (stall budget 15000ms, absolute backstop 168000ms, kickoff 40000 chars)
+   [measured [large 40000]] spawn()→kickoff-landed (total): 7558ms (kickoff 40000 chars)
+PASS  [large 40000] the kickoff was received exactly once (no duplicate delivery)
+PASS  [large 40000] the fixture's output file was written
+PASS  [large 40000] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-large-40000 code=-1073741510 intended=true
+PASS  [late-ready] buildSpawnArgs never emits the kickoff into argv
+[pty] spawn real-late-ready bin=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE\fake-claude.cmd cwd=C:\Users\danie\AppData\Local\Temp\loom-kickoff-real-JBBjfE resume=none args=["--settings","C:\\Users\\danie\\AppData\\Local\\Temp\\loom-kickoff-real-JBBjfE\\tmp\\settings\\real-late-ready.json","--permission-mode","acceptEdits","--disallowedTools","AskUserQuestion","ExitPlanMode","EnterPlanMode","--strict-mcp-config","--mcp-config","{\"mcpServers\":{\"loom-tasks\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp/real-late-ready\"},\"loom-orchestration\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:4317/mcp-orch/real-late-ready\"}}}"]
+[busy] real-late-ready -> true (spawn-startup-prompt)
+PASS  [late-ready] live.lastPrompt seeded synchronously at spawn(), before ready/submit ever ran
+   [measured [late-ready]] spawn()→FIXTURE_READY: 2153ms (budget 20000ms)
+PASS  [late-ready] the real child process never reported an extra positional argv entry
+[hook] real-late-ready SessionStart session_id=-
+[resume-mode] real-late-ready kind=fresh mode=unknown matched=- footer="system32\\cmd.exe\u0007FIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_READYFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVEFIXTURE_ALIVE"
+[pty] real-late-ready ready with no turn started — submitting the kickoff
+[submit-write] real-late-ready reason=kickoff-guarantee busyBefore=true len=7121 head="[role:worker] # Loom\r\n\r\nLocal-first AI project workspace tha"
+[pty-write] real-late-ready seq=1 tag=bracket-start gen=1 len=6 h=23a3336f
+[pty-write] real-late-ready seq=2 tag=chunk gen=1 len=1024 h=ccf9d94c
+[busy] real-late-ready -> true (kickoff-guarantee)
+[pty-write] real-late-ready seq=3 tag=chunk gen=1 len=1024 h=24bc9312
+[pty-write] real-late-ready seq=4 tag=chunk gen=1 len=1024 h=4a04b1e2
+[pty-write] real-late-ready seq=5 tag=chunk gen=1 len=1024 h=8a4ca1d7
+[pty-write] real-late-ready seq=6 tag=chunk gen=1 len=1024 h=1d1bdbc0
+[pty-write] real-late-ready seq=7 tag=chunk gen=1 len=1024 h=b0e316d2
+[pty-write] real-late-ready seq=8 tag=chunk gen=1 len=977 h=d9d76a51
+[pty-write] real-late-ready seq=9 tag=bracket-end gen=1 len=6 h=21a0f1b2
+[pty-write] real-late-ready seq=10 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-late-ready Enter attempt 1/4 written gen=1 — awaiting confirmation
+[submit] real-late-ready Enter attempt 1 NOT confirmed within 900ms — retrying
+[pty-write] real-late-ready seq=11 tag=reassert-paste gen=1 len=12 h=7e94fadc
+[pty-write] real-late-ready seq=12 tag=enter gen=1 len=1 h=080c61d8
+[submit] real-late-ready Enter attempt 2/4 written gen=1 — awaiting confirmation
+   [measured [late-ready]] SessionStart→FIXTURE_RECEIVED: 6045ms (stall budget 15000ms, absolute backstop 38000ms, kickoff 7121 chars)
+   [measured [late-ready]] spawn()→kickoff-landed (total): 8289ms (kickoff 7121 chars)
+PASS  [late-ready] the kickoff was received exactly once (no duplicate delivery)
+PASS  [late-ready] the fixture's output file was written
+PASS  [late-ready] the kickoff text arrived on the real child's real stdin, byte-for-byte intact (file compare)
+C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13
+var consoleProcessList = getConsoleProcessList(shellPid);
+                         ^
+
+Error: AttachConsole failed
+    at Object.<anonymous> (C:\Users\danie\.loom-worktrees\c36e8691-44d8-44ae-91ed-1bae3c632b33\cebad96bb7a3\node_modules\.pnpm\node-pty@1.1.0\node_modules\node-pty\lib\conpty_console_list_agent.js:13:26)
+    at Module._compile (node:internal/modules/cjs/loader:1730:14)
+    at Object..js (node:internal/modules/cjs/loader:1895:10)
+    at Module.load (node:internal/modules/cjs/loader:1465:32)
+    at Function._load (node:internal/modules/cjs/loader:1282:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)
+    at node:internal/main/run_main_module:36:49
+
+Node.js v22.16.0
+[pty] exit real-late-ready code=-1073741510 intended=true
+
+✅ ALL PASS — across every checked role (worker, manager, platform, setup, assistant, auditor), at large scale (10KB, 40KB), AND when the real child's own readiness signal arrives 2s late, a REAL child process substituted for claude (real node-pty, real OS process, real bidirectional pty I/O) receives NO positional startup-prompt argv entry, has its Live.lastPrompt seeded synchronously at spawn() (closing the crash-before-first-submit window before the fixture even boots), and receives the kickoff text — embedded quotes/backticks and all — byte-for-byte intact over its real stdin (verified via a plain file the fixture writes, never via pty output), exactly once, after signaling readiness.

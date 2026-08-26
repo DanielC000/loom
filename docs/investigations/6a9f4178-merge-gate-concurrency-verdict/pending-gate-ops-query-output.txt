@@ -1,0 +1,120 @@
+Total settled rows with a verdict payload: 969
+Rows with an outputTail string: 761
+Rows whose tail contains "AttachConsole": 12
+[
+  {
+    "op_id": "ea29d025-7511-4173-a860-74bf53440dc8",
+    "kind": "merge",
+    "branch": "loom/609c533bc4f3",
+    "task_id": "15c4dad6-8214-4604-90a9-ecf32f3aae25",
+    "started_at": "2026-08-02T08:04:33.671Z",
+    "verdict": "fail",
+    "occurrences": 3
+  },
+  {
+    "op_id": "d966058f-ab73-48db-8fe4-0cf8a32abf41",
+    "kind": "merge",
+    "branch": "loom/59c0749022bb",
+    "task_id": "f17c5a76-e522-42fc-a8a1-2b766482c9b4",
+    "started_at": "2026-08-04T17:53:11.613Z",
+    "verdict": "fail",
+    "occurrences": 3
+  },
+  {
+    "op_id": "8c2ea937-0dd7-40ae-b02e-e38fedbcb6df",
+    "kind": "merge",
+    "branch": "loom/b598845c70c0",
+    "task_id": "ae476ab1-bf84-4e5e-b1b3-dfabe3fe9549",
+    "started_at": "2026-08-06T11:17:39.429Z",
+    "verdict": "pass",
+    "occurrences": 1
+  },
+  {
+    "op_id": "d4859d2f-5611-4654-8459-16b560d0a12d",
+    "kind": "gate",
+    "branch": "loom/b8fdfa6eef5f",
+    "task_id": "5e51e778-c12b-49b0-8776-e64e863bcfe3",
+    "started_at": "2026-08-06T18:14:14.784Z",
+    "verdict": "fail",
+    "occurrences": 2
+  },
+  {
+    "op_id": "98569ca7-a2f9-4311-95ba-651732a53cb4",
+    "kind": "gate",
+    "branch": "loom/f2ab1d3bafff",
+    "task_id": "318ac7b2-ba85-4f45-a50f-ec1044da16f0",
+    "started_at": "2026-08-06T20:42:56.400Z",
+    "verdict": "fail",
+    "occurrences": 2
+  },
+  {
+    "op_id": "bca2b818-ffe6-4232-bebe-9a3761638624",
+    "kind": "gate",
+    "branch": "loom/4bc825288615",
+    "task_id": "9ccedbee-86ae-4b56-a0ff-403cffc0f165",
+    "started_at": "2026-08-06T23:38:30.076Z",
+    "verdict": "fail",
+    "occurrences": 2
+  },
+  {
+    "op_id": "caef6f77-68ac-4fd0-8938-e4fb8b1cfa05",
+    "kind": "merge",
+    "branch": "loom/bdff94d1cf39",
+    "task_id": "40b63f1c-8207-4dd9-b553-ba41c9e9231d",
+    "started_at": "2026-08-24T09:28:54.521Z",
+    "verdict": "fail",
+    "occurrences": 3
+  },
+  {
+    "op_id": "114cdb50-fb63-4fb9-bdd9-d40e623a9b95",
+    "kind": "merge",
+    "branch": "loom/7c6eb03c2333",
+    "task_id": "fe07beef-9506-46b1-a820-880bc8b252ac",
+    "started_at": "2026-08-24T09:48:05.601Z",
+    "verdict": "fail",
+    "occurrences": 1
+  },
+  {
+    "op_id": "b81e037d-4b15-4470-86f3-48020f397aab",
+    "kind": "merge",
+    "branch": "loom/8ea5773344c5",
+    "task_id": "652d312f-de2f-499f-b9bd-510246ebdb58",
+    "started_at": "2026-08-24T13:13:58.066Z",
+    "verdict": "pass",
+    "occurrences": 1
+  },
+  {
+    "op_id": "61a6a9fe-831b-4d76-9596-e6607237e7d8",
+    "kind": "merge",
+    "branch": "loom/469b2130ee84",
+    "task_id": "cd0c7fee-5653-46ae-aa9b-1fad8c04444d",
+    "started_at": "2026-08-24T22:45:45.877Z",
+    "verdict": "fail",
+    "occurrences": 2
+  },
+  {
+    "op_id": "a8455637-8842-4e98-b726-3b3bc8acb498",
+    "kind": "merge",
+    "branch": "loom/bd6b17d1bc26",
+    "task_id": "7a5948bd-cdfd-40a7-97bc-59e37af083c1",
+    "started_at": "2026-08-25T15:10:24.155Z",
+    "verdict": "fail",
+    "occurrences": 2
+  },
+  {
+    "op_id": "82ab9b08-cbf6-477c-9d26-04ccb6e031a4",
+    "kind": "merge",
+    "branch": "loom/1d90ff5b7ecf",
+    "task_id": "239d6b9e-ebe8-40a4-b8fa-889aab810ec7",
+    "started_at": "2026-08-25T20:57:17.762Z",
+    "verdict": "fail",
+    "occurrences": 2
+  }
+]
+
+--- attempt history for task 239d6b9e / branch 1d90ff5b7ecf ---
+b537b3f5-77d3-471d-895a-4108ffd6ff9f kind=merge verdict=fail started=2026-08-25T20:36:52.463Z totalDurationMs=1179742 gateCap=2 concurrentGates=1 concurrentGatesMax=2
+  failedStep="pnpm --filter @loom/daemon test:daemon" failingTest="💥 UNCAUGHT — Error: [large 40000] real fixture reports FIXTURE_RECEIVED — STALLED: no new output (heartbeat included) for 15013ms (budget 15000ms), 22371ms total elapsed" exitCode=1 timedOut=false
+82ab9b08-cbf6-477c-9d26-04ccb6e031a4 kind=merge verdict=fail started=2026-08-25T20:57:17.762Z totalDurationMs=2447573 gateCap=2 concurrentGates=2 concurrentGatesMax=2
+  failedStep="pnpm --filter @loom/daemon test:daemon" failingTest="FAIL  (B precondition) P settled merged:true" exitCode=1 timedOut=false
+fd60af04-7a7a-45be-a022-2787b7ed9ccf kind=merge verdict=pass started=2026-08-25T22:30:42.679Z totalDurationMs=1085669 gateCap=2 concurrentGates=2 concurrentGatesMax=2

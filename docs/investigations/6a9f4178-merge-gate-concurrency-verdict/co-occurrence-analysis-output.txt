@@ -1,0 +1,14 @@
+merge-gate-concurrency-verdict: 175 total runs, 2 failed
+kickoff-real-spawn: 29 failed runs (of 488 total distinct runUids in the corpus)
+
+co-occurrence check — for each verdict failure, did kickoff-real-spawn ALSO fail in that SAME runUid?
+  1787690219923-37384 (2026-08-25T20:43:32.658Z, durationMs=36855, lane=2) — kickoff-real-spawn also failed: true
+    kickoff-real-spawn: lane=1 2026-08-25T20:41:30.359Z -> 2026-08-25T20:42:58.584Z durationMs=88225
+    verdict started 34.074s after kickoff-real-spawn ended
+  1787692587336-26900 (2026-08-25T21:26:48.241Z, durationMs=40539, lane=2) — kickoff-real-spawn also failed: true
+    kickoff-real-spawn: lane=2 2026-08-25T21:23:04.231Z -> 2026-08-25T21:25:04.369Z durationMs=120138
+    verdict started 103.872s after kickoff-real-spawn ended
+
+SUMMARY: 2/2 verdict failures co-occurred with a kickoff-real-spawn failure in the same run.
+For contrast: kickoff-real-spawn fails in 29/488 runs overall (~5.9%) — so most kickoff-real-spawn failures do NOT co-occur with a verdict failure (P(verdict fails | kickoff fails) = 2/29).
+This is a correlation lead, NOT a proven mechanism — n=2 is thin, and the verdict test itself uses a PTY STUB (no real node-pty/conpty spawn), so any causal link would have to run through a HOST-level side effect of kickoff-real-spawn's real spawn/teardown activity (e.g. leaked processes/handles), not a shared in-process resource.

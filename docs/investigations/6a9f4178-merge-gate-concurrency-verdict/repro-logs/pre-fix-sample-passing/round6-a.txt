@@ -1,0 +1,47 @@
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'p.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864310-rbxym opId=21143faa-e9d5-45ae-9ab5-a3e97cda5d29 site=admit t=12327.471 iso=2026-08-26T00:57:55.343Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864310-rbxym opId=21143faa-e9d5-45ae-9ab5-a3e97cda5d29 site=beginSquash t=12628.279 iso=2026-08-26T00:57:55.644Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-p-1787705864310-rbxym opId=21143faa-e9d5-45ae-9ab5-a3e97cda5d29 site=releaseMergeRepoGuard t=15871.020 iso=2026-08-26T00:57:58.886Z
+warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705864310-rbxym opId=cdfec253-960d-4a74-bda4-96409652ec78 site=admit t=25591.328 iso=2026-08-26T00:58:08.607Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705864310-rbxym opId=cdfec253-960d-4a74-bda4-96409652ec78 site=release t=25718.646 iso=2026-08-26T00:58:08.734Z
+[give-up] this.pty does not implement hasAmbiguousMatch — auto-join (card 4a0af485, Requirement A) is DISABLED for every dispatch from this process; a manual resend after a give-up/PARKED notice can now duplicate. Expected only in a test harness using a hermetic PtyStub, never in production (this.pty is statically typed as the concrete PtyHost).
+[gate opId=cdfec253-960d-4a74-bda4-96409652ec78] branch=loom/332c16721a15 task=concstamp-seq-f-task-1787705864310-rbxym passed=false step: pnpm gate; exit 1; cap=2 concurrentGates=1 concurrentGatesMax=1; failing: some_test.mjs
+--- gate output tail ---
+FAIL some_test.mjs
+[gate:repo-guard] refused-not-owner repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-seq-f-1787705864310-rbxym presentedId=cdfec253-960d-4a74-bda4-96409652ec78 actualId=none opId=cdfec253-960d-4a74-bda4-96409652ec78 site=releaseMergeRepoGuard t=26129.946 iso=2026-08-26T00:58:09.145Z
+PASS  (A precondition) P merged:true, F merged:false — a real pass and a real rejection
+PASS  (A — THE FIX) PASS carries the triple on ConfirmMergeResult — before this card a passing merge carried NONE of this
+PASS  (A) FAIL carries the triple structurally too (not just baked into detailText)
+PASS  (A — DoD-2 LOAD-BEARING) PASS and FAIL, run under the IDENTICAL condition, report BYTE-IDENTICAL gateCap/concurrentGates/concurrentGatesMax
+PASS  (A gate_status — THE FIX, DoD-1) gate_status(opId) itself reports the triple for the PASS op — 'readable after the fact' means through THIS call, not just the DB row
+PASS  (A gate_status) gate_status(opId) reports the triple for the FAIL op too
+PASS  (A gate_status — DoD-2 LOAD-BEARING) gate_status(opId) on the settled PASS op and the settled FAIL op agree byte-for-byte on the triple
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'p.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705864310-rbxym opId=fcd3a897-b0af-4ef6-9855-23c4912e168c site=admit t=35414.806 iso=2026-08-26T00:58:18.430Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705864310-rbxym opId=0feef985-7623-4037-93ef-7070be863caa site=admit t=35446.513 iso=2026-08-26T00:58:18.462Z
+PASS  (B precondition) both children are genuinely CO-LIVE at the same instant (cap raised to 2)
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705864310-rbxym opId=0feef985-7623-4037-93ef-7070be863caa site=release t=35660.779 iso=2026-08-26T00:58:18.676Z
+[gate:repo-guard] add repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705864310-rbxym opId=fcd3a897-b0af-4ef6-9855-23c4912e168c site=beginSquash t=35661.645 iso=2026-08-26T00:58:18.677Z
+[gate opId=0feef985-7623-4037-93ef-7070be863caa] branch=loom/aca73abddd31 task=concstamp-con-f-task-1787705864310-rbxym passed=false step: pnpm gate; exit 1; cap=2 concurrentGates=2 concurrentGatesMax=2; failing: some_test.mjs
+--- gate output tail ---
+FAIL some_test.mjs
+[gate:repo-guard] refused-not-owner repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-f-1787705864310-rbxym presentedId=0feef985-7623-4037-93ef-7070be863caa actualId=none opId=0feef985-7623-4037-93ef-7070be863caa site=releaseMergeRepoGuard t=35998.998 iso=2026-08-26T00:58:19.014Z
+[gate:repo-guard] delete repoPath=C:\Users\danie\AppData\Local\Temp\loom-concstamp-con-p-1787705864310-rbxym opId=fcd3a897-b0af-4ef6-9855-23c4912e168c site=releaseMergeRepoGuard t=38461.041 iso=2026-08-26T00:58:21.476Z
+PASS  (B precondition) P settled merged:true
+PASS  (B precondition) F settled merged:false (a real gate rejection)
+PASS  (B) gateCap is populated and equal on BOTH outcomes (a plain config echo, order-independent)
+PASS  (B — THE FIX, discriminating) at least one of PASS/FAIL genuinely observed BOTH ops admitted (max(concurrentGates) === 2) — not just "a number was present"
+PASS  (B — DoD-2) concurrentGatesMax reaches the SAME true max-over-run (2) on BOTH the PASS and the FAIL, regardless of admission order
+PASS  (B gate_status — THE FIX) gate_status(opId) round-trips the triple for BOTH outcomes, matching the sync return exactly
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'g.txt', LF will be replaced by CRLF the next time Git touches it
+PASS  (negative control — precondition) gateless merge still succeeds
+PASS  (negative control — THE DISCRIMINATOR) gateCap/concurrentGates/concurrentGatesMax are ALL undefined for a gateless project — never a fabricated 0/cap, distinguishing "no gate ran" from "ran with cap 0"
+
+✅ ALL PASS — card e2b6f900: a PASSING merge gate's settled verdict now persists the SAME `gateCap`/`concurrentGates`/`concurrentGatesMax` triple a FAILING one does — both on the synchronous ConfirmMergeResult and, load-bearingly, in the durable `verdict_payload_json` store `gate_status(opId)` reads after the fact. (A) Two sequential, uncontended merges (cap=2 configured, neither actually overlapping the other) — one PASS, one FAIL — settle with BYTE-IDENTICAL stamps under the identical condition, closing the asymmetry where only a rejection ever surfaced this (as unstructured text, never durably). (B) Two merges admitted TOGETHER under real contention reach the same true concurrentGatesMax (2) on both outcomes regardless of admission order, and neither leaves the triple undefined. A gateless project still reports none of it — undefined, not a fabricated 0.
