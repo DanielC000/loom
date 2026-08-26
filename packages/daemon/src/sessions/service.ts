@@ -997,7 +997,19 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
  *  together at `maxConcurrentGates>=2` were indistinguishable by timestamp alone — see the card's own
  *  §ATTRIBUTION). Merges ADDITIVELY on top of any base override a call site already needs (e.g. the
  *  worker self-gate's own `WORKER_GATE_ENV_OVERRIDE`) — `LOOM_GATE_OP_ID` always wins if `base` somehow
- *  already set it, since object spread order below places it last. */
+ *  already set it, since object spread order below places it last.
+ *
+ *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): `LOOM_GATE_OP_ID` is not purely internal — Codescape reads
+ *  it in production, from inside the gate child (`scripts/runTests.mjs` reads `process.env.LOOM_GATE_OP_ID`
+ *  and stamps its own `gate-measurements.ndjson` rows with it). Renaming this env var, or dropping it from
+ *  any `runGateSeq(` call site, is a BREAKING CHANGE for that external consumer — tell them first (a
+ *  manager reaches them via `peer_message`) before doing either.
+ *
+ *  The `{ ...base, ... }` spread is ALSO load-bearing for a second, unrelated reason: at the worker
+ *  self-gate call site, `base` is `WORKER_GATE_ENV_OVERRIDE`, which carries the `LOOM_GATE_TEST_CONCURRENCY:
+ *  "3"` host-starvation pin (see that const's own doc above — one unpinned gate at 8 lanes starved the host
+ *  on 2026-07-15). Replacing this spread with a plain `{ LOOM_GATE_OP_ID: opId }` assignment would silently
+ *  drop that pin for every caller that passes a `base`. */
 function gateOpIdEnvOverride(opId: string, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...base, LOOM_GATE_OP_ID: opId };
 }
