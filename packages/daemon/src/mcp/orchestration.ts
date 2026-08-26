@@ -19,6 +19,7 @@ import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
+import { REPORT_RESOLVED_EVENT_KINDS } from "../orchestration/report-resolution.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
@@ -597,32 +598,11 @@ export interface CompanionHooks {
   rearmReminders?: (sessionId: string) => Promise<void>;
 }
 
-/**
- * Event kinds that genuinely CLOSE a standing `worker_report(done|blocked)` — i.e. actually move the
- * manager past "this worker needs my review", not merely "some worker-keyed row landed after it." Read
- * by `reportedProjection` below. An ALLOWLIST, not a denylist, and deliberately so (card 6641c3ab):
- * `orchestration_events.worker_session_id` is reused across this codebase as a generic "subject of this
- * event" column by plenty of things that are NOT a review being resolved — `merge_request`
- * (reviewWorkerMerge, fired at REVIEW-START, before any merge decision is even made — this is what
- * actually caused the bug: a manager merely looking at a worker's diff via `worker_merge` cleared
- * `awaitingReview` before `worker_merge_confirm` was ever called), `merge_rejected`/`merge_cancelled` (a
- * decision was made, but not the "merged" the doc promises clears this), `worker_stuck` (a watchdog
- * advisory), crash-recovery triggers, etc. A denylist would have to name every one of those AND every
- * future one — missing just one silently reintroduces this exact bug, which is how `merge_request` did,
- * undetected, before this card. An allowlist fails in the SAFE direction instead: a kind missing from
- * this set just means a manager looks at a worker that didn't actually need looking at (self-correcting
- * the instant they look), never a finished worker sitting unnoticed indefinitely (the bug this fixes).
- *
- * `message_worker`/`redirect_worker` are a PROXY for the doc's actual stated condition ("resumes a
- * turn"), not the thing itself — Loom records the SEND here, not a confirmed turn resumption. Right in
- * the common case, but a message that gets durably queued and then PARKED (never delivered — see memory
- * `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`) breaks the proxy: the worker never
- * actually resumed, yet this would still read as resolved. Known, accepted gap — building
- * parked-message detection into this projection is out of scope here.
- */
-const REPORT_RESOLVED_EVENT_KINDS: ReadonlySet<OrchestrationEvent["kind"]> = new Set<OrchestrationEvent["kind"]>([
-  "merge_done", "message_worker", "redirect_worker", "recycle_begin", "stop_worker",
-]);
+// REPORT_RESOLVED_EVENT_KINDS (what genuinely closes a standing worker_report) now lives in
+// orchestration/report-resolution.ts — read there for the full doc. It's the SOLE source of truth,
+// shared with the boot-time crash/restart-recovery notice's own `awaitingReview` derivation
+// (orchestration/crash-orphaned-workers.ts, card 959a5fb7) so the two surfaces can never independently
+// decide "resolved" in different ways again. Read by `reportedProjection` below.
 
 /**
  * Card 3c39be30 — `resolveDirectiveOutcome` (below) has an UNDOCUMENTED, UNENFORCED precondition: the

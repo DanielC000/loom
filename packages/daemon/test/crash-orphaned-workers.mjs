@@ -814,6 +814,67 @@ try {
     pty.getPending(id13d.wkr).some((m) => /Boot started \d{4}-\d\d-\d\dT/i.test(m)));
   check("(13d) clean-stop nudge withholds the iteration clause even when supervisorIteration is passed",
     !pty.getPending(id13d.wkr).some((m) => /iteration/i.test(m)));
+  // ============================ (14) CONSUMED REPORT — card 959a5fb7 =================================
+  // A `worker_report(done)` that the manager has ALREADY consumed (a subsequent directive delivered
+  // against it) must NOT be announced by the restart/crash notice as "awaiting your review/merge" — the
+  // notice must derive that claim from the SAME state worker_list's own awaitingReview projection uses
+  // (a subsequent event in REPORT_RESOLVED_EVENT_KINDS), not from report EXISTENCE alone. The specimen:
+  // a report the lead had already read and answered with a follow-up directive 68 minutes before a real
+  // owner-fired restart — the notice still claimed it was "awaiting your review/merge", which would have
+  // led a manager straight to `worker_merge_confirm` on a branch known to still carry a blocking defect.
+
+  // (14a) CONSUMED — worker_report(done) followed by a message_worker event (the manager delivering a
+  // follow-up directive) must read as NOT awaitingReview: excluded from the notice's "awaiting your
+  // review/merge" count, and the worker gets the ordinary continue-nudge (it's presumably mid-fix on
+  // whatever that directive assigned) instead of being silently parked as "awaiting merge".
+  const id14a = { mgr: `cow-mgr14a-${sfx}`, wkr: `cow-wkr14a-${sfx}` };
+  const t14a = mkTask(`cow-t14a-${sfx}`, P.proj);
+  mkSession({ id: id14a.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id14a.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id14a.mgr, taskId: t14a, processState: "live" });
+  db.appendEvent({ id: `evt-${sfx}-14a-report`, ts: now, managerSessionId: id14a.mgr, workerSessionId: id14a.wkr, taskId: t14a, kind: "worker_report", detail: { status: "done" } });
+  db.appendEvent({ id: `evt-${sfx}-14a-consumed`, ts: now, managerSessionId: id14a.mgr, workerSessionId: id14a.wkr, taskId: t14a, kind: "message_worker", detail: { text: "fix the blocking finding" } });
+  const derived14a = deriveCrashOrphanedWorkers(db, [db.getSession(id14a.mgr), db.getSession(id14a.wkr)]);
+  const c14a = derived14a.find((c) => c.workerSessionId === id14a.wkr);
+  check("(14a) reportedDone is still true (a done report exists) — the two questions are genuinely different", c14a?.reportedDone === true);
+  check("(14a) THE RED-CATCHING CASE: awaitingReview is false — the report was already CONSUMED by a follow-up directive", c14a?.awaitingReview === false);
+  sessions.recoverCrashOrphanedWorkers(derived14a, { resumeOne: () => true });
+  await flush();
+  check("(14a) the manager's summary nudge does NOT claim this worker is awaiting review/merge",
+    !pty.getPending(id14a.mgr).some((m) => m.includes("[loom:crash-recovered]") && /awaiting your review\/merge/i.test(m)));
+  // Closes a vacuous-pass hole (code-review round, card 959a5fb7): the absence check above would ALSO
+  // pass if the manager's summary nudge were suppressed entirely for this shape — proving nothing about
+  // the actual fix. Pin that the manager DID receive its ordinary recovered-count summary alongside the
+  // absent clause, so this test can only pass because the awaiting-review clause was specifically omitted.
+  check("(14a) the manager DID receive its ordinary summary nudge (the absence above isn't from a suppressed nudge)",
+    pty.getPending(id14a.mgr).some((m) => m.includes("[loom:crash-recovered]") && /1 of your 1 in-flight worker\(s\) were recovered/i.test(m)));
+  check("(14a) the worker gets the ordinary continue-your-task nudge instead of being silently parked as awaiting review",
+    pty.getPending(id14a.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+
+  // (14b) NEGATIVE CONTROL — a genuinely UNCONSUMED worker_report(done) (same shape as (14a) minus the
+  // message_worker event) still IS announced as awaiting review/merge. Proves (14a)'s green result comes
+  // from the consumption check specifically, not from some unrelated change that suppresses the clause
+  // for every worker unconditionally.
+  const id14b = { mgr: `cow-mgr14b-${sfx}`, wkr: `cow-wkr14b-${sfx}` };
+  const t14b = mkTask(`cow-t14b-${sfx}`, P.proj);
+  mkSession({ id: id14b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id14b.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id14b.mgr, taskId: t14b, processState: "live" });
+  db.appendEvent({ id: `evt-${sfx}-14b-report`, ts: now, managerSessionId: id14b.mgr, workerSessionId: id14b.wkr, taskId: t14b, kind: "worker_report", detail: { status: "done" } });
+  const derived14b = deriveCrashOrphanedWorkers(db, [db.getSession(id14b.mgr), db.getSession(id14b.wkr)]);
+  const c14b = derived14b.find((c) => c.workerSessionId === id14b.wkr);
+  check("(14b) NEGATIVE CONTROL: an unconsumed report still reads awaitingReview:true", c14b?.awaitingReview === true);
+  sessions.recoverCrashOrphanedWorkers(derived14b, { resumeOne: () => true });
+  await flush();
+  check("(14b) NEGATIVE CONTROL: the manager's summary nudge STILL announces this genuinely-pending report as awaiting review/merge",
+    pty.getPending(id14b.mgr).some((m) => m.includes("[loom:crash-recovered]") && /awaiting your review\/merge/i.test(m)));
+  check("(14b) NEGATIVE CONTROL: the worker does NOT get the continue-nudge (it's genuinely just awaiting merge)",
+    !pty.getPending(id14b.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
+
+  // (14c) the awaiting-review clause now points at worker_report_get as the durable, authoritative read
+  // (DoD-5) — corroborated by a second, independent specimen the same day (a notice that arrived AFTER
+  // its durable report was already superseded).
+  check("(14c) the awaiting-review clause points the manager at worker_report_get as the authoritative read",
+    pty.getPending(id14b.mgr).some((m) => /worker_report_get/i.test(m) && /authoritative/i.test(m)));
+
 } finally {
   console.log = realLog;
   console.warn = realWarn;

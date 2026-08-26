@@ -4948,17 +4948,22 @@ export class SessionService {
    * effect `resume()` already performs — `listWorkers` (what `worker_list` reads) filters only
    * `archived_at IS NULL`, so that's the whole "re-parent": parentSessionId was never touched.
    *
-   * A worker that had already reported `done` (`reportedDone`) is recovered for VISIBILITY (it reappears
-   * in worker_list so the manager notices it's awaiting merge review) but does NOT get the "continue your
-   * task" nudge — it isn't mid-work. Every other recovered worker gets the same "re-check your worktree's
-   * state, continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited) manager or worker is resumed live
-   * (so the rate-limit watcher can recover it in its own time) but its nudge is WITHHELD — mirrors
-   * resumeFleetOnBoot's `isParked`/`skippedParked` handling; a crash must never push a held turn back
-   * into a usage-limit cap. Each affected (non-parked) manager gets ONE summary nudge naming how many of
-   * its candidate workers were recovered (and how many of those are awaiting review, and how many
-   * couldn't be resumed at all) — sent even when EVERY candidate worker failed to resume, so the manager
-   * (already silently resumed with no other signal) still learns a crash happened and its workers didn't
-   * come back, rather than sitting there with no orientation at all.
+   * A worker that is still genuinely `awaitingReview` (card 959a5fb7 — a done/blocked report the manager
+   * has NOT yet acted on; see {@link CrashOrphanedWorker} for how this differs from the wider
+   * `reportedDone`) is recovered for VISIBILITY (it reappears in worker_list so the manager notices it's
+   * awaiting merge review) but does NOT get the "continue your task" nudge — it isn't mid-work. A done
+   * report the manager already CONSUMED (a subsequent directive delivered against it) reads as NOT
+   * `awaitingReview` and gets the ordinary continue-nudge below like any other recovered worker — it's
+   * presumably mid-fix on whatever that directive assigned. Every other recovered worker gets the same
+   * "re-check your worktree's state, continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited)
+   * manager or worker is resumed live (so the rate-limit watcher can recover it in its own time) but its
+   * nudge is WITHHELD — mirrors resumeFleetOnBoot's `isParked`/`skippedParked` handling; a crash must
+   * never push a held turn back into a usage-limit cap. Each affected (non-parked) manager gets ONE
+   * summary nudge naming how many of its candidate workers were recovered (and how many of those are
+   * genuinely awaiting review, and how many couldn't be resumed at all) — sent even when EVERY candidate
+   * worker failed to resume, so the manager (already silently resumed with no other signal) still learns
+   * a crash happened and its workers didn't come back, rather than sitting there with no orientation at
+   * all.
    *
    * `opts.shutdownMarker` (card be79aea2): the caller reads+consumes `last-shutdown.json` ONCE per boot,
    * unconditionally, and passes the result here. When it's a fresh clean-stop record (an OS signal or an
@@ -5075,7 +5080,11 @@ export class SessionService {
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
         if (integrity.status !== "intact") worktreeAtRiskCount++;
         if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
-        if (w.reportedDone) {
+        // Card 959a5fb7: gated on `awaitingReview`, NOT the wider `reportedDone` — a done report the
+        // manager already consumed (a subsequent directive delivered against it) must not be counted as
+        // "awaiting your review/merge" below, and this worker should get the SAME continue-nudge as any
+        // other still-working worker (the manager's follow-up is presumably what it's now mid-fix on).
+        if (w.awaitingReview) {
           awaitingReviewCount++;
         } else {
           // Card 597903fc: durable (this.enqueueDurableNudge — see its own doc), NOT the plain
@@ -5156,7 +5165,7 @@ export class SessionService {
               ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
               : `none of your ${workers.length} in-flight worker(s) could be recovered`,
             worktreeNote,
-            awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
+            awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge (worker_report_get is the durable, authoritative read — re-check there before merging)` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
           ].filter(Boolean).join("; ");
           return isPlatform

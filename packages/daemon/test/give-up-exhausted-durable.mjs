@@ -510,7 +510,7 @@ try {
     // never a bare immediate push — the precondition for onGiveUpExhausted to ever matter.
     pty.setBusy(wkr); pty.setBusy(mgr);
 
-    const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedDone: false }];
+    const candidates = [{ workerSessionId: wkr, managerSessionId: mgr, reportedDone: false, awaitingReview: false }];
     const result = sessions.recoverCrashOrphanedWorkers(candidates, { resumeOne: () => true });
     check("(10) setup: recoverCrashOrphanedWorkers resumed both", result.resumed.includes(wkr));
     await flush(); // enqueueDurableNudge defers behind waitForMcpSeen for worker/manager roles

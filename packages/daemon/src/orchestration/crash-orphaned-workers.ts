@@ -1,16 +1,33 @@
 import { resolveConfig, columnKeyForRole, type Session } from "@loom/shared";
 import type { Db } from "../db.js";
 import { engineTranscriptExists } from "../sessions/transcript.js";
+import { REPORT_RESOLVED_EVENT_KINDS } from "./report-resolution.js";
 
 /**
  * A worker session identified as crash-orphaned at boot — see {@link deriveCrashOrphanedWorkers}.
- * `reportedDone` lets the resume action (SessionService.recoverCrashOrphanedWorkers) withhold the
- * "continue your task" nudge for a worker that's actually just awaiting merge review.
+ * `reportedDone` says a `worker_report(done)` exists and isn't superseded by a later `merge_rejected`
+ * (see the field's own computation for that half); it does NOT say whether the manager is still
+ * genuinely waiting on it.
+ *
+ * `awaitingReview` (card 959a5fb7) is that narrower question, and is what
+ * `SessionService.recoverCrashOrphanedWorkers` actually gates on — both for withholding the "continue
+ * your task" nudge AND for the summary notice's "N of those already reported done and are awaiting your
+ * review/merge" count. A near-miss on a real owner-fired restart motivated the split: the restart notice
+ * told a manager "1 of your workers already reported done and are awaiting your review/merge" from
+ * `reportedDone` alone (report EXISTENCE) — but that same report had already been read and answered with
+ * a follow-up directive 68 minutes earlier, and the worker was actively mid-fix on a BLOCKING code-review
+ * finding. A manager who trusted the notice would have merged a branch still carrying that defect.
+ * `awaitingReview` is `reportedDone` further narrowed to "and no subsequent event in
+ * REPORT_RESOLVED_EVENT_KINDS — the SAME allowlist worker_list's own awaitingReview projection uses —
+ * has consumed it yet"; a consumed report reads as NOT awaiting review, so the worker gets the ordinary
+ * continue-nudge (it's presumably mid-fix on whatever the directive assigned) instead of being silently
+ * parked as "awaiting merge".
  */
 export interface CrashOrphanedWorker {
   workerSessionId: string;
   managerSessionId: string;
   reportedDone: boolean;
+  awaitingReview: boolean;
 }
 
 /**
@@ -101,13 +118,26 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
     // and must NOT withhold the continue-nudge (the worker is actually still mid-fix, not awaiting
     // review). Scanning backward, the first of either kind we hit settles it.
     let reportedDone = false;
+    let reportEventIdx = -1;
     const events = db.listEventsForWorker(w.id);
     for (let i = events.length - 1; i >= 0; i--) {
       const kind = events[i]!.kind;
       if (kind === "merge_rejected") break; // a rejection after any prior report supersedes it
-      if (kind === "worker_report") { reportedDone = events[i]!.detail?.status === "done"; break; }
+      if (kind === "worker_report") { reportedDone = events[i]!.detail?.status === "done"; reportEventIdx = i; break; }
     }
-    out.push({ workerSessionId: w.id, managerSessionId: w.parentSessionId, reportedDone });
+    // awaitingReview (card 959a5fb7): reportedDone alone answers "does a done report exist", not "is the
+    // manager still actually waiting on it". A manager who already consumed that report — a subsequent
+    // event in REPORT_RESOLVED_EVENT_KINDS (the SAME allowlist worker_list's own awaitingReview projection
+    // uses, orchestration/report-resolution.ts) landed after it — has already acted, so the restart/crash
+    // notice must not re-announce it as "awaiting your review/merge". Only checked when reportedDone is
+    // true: the merge-rejected-supersedes branch above already means "not awaiting review" for a
+    // different, already-handled reason (mid-fix, not idle), so awaitingReview is false there too without
+    // needing this check.
+    let awaitingReview = reportedDone;
+    if (reportedDone && events.slice(reportEventIdx + 1).some((e) => REPORT_RESOLVED_EVENT_KINDS.has(e.kind))) {
+      awaitingReview = false;
+    }
+    out.push({ workerSessionId: w.id, managerSessionId: w.parentSessionId, reportedDone, awaitingReview });
   }
   return out;
 }
