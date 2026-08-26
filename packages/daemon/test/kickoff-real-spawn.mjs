@@ -70,7 +70,7 @@ fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`)
 process.env.LOOM_CLAUDE_BIN = wrapperPath;
 process.env.FIXTURE_DEBOUNCE_MS = "250"; // generous quiet-period so a paced writeChunked chain fully lands first
 
-const { PtyHost, buildSpawnArgs, MODE_LOG_POLL_MS, MODE_LOG_MAX_ATTEMPTS, READY_FALLBACK_MS } = await import("../dist/pty/host.js");
+const { PtyHost, buildSpawnArgs, MODE_LOG_POLL_MS, MODE_LOG_MAX_ATTEMPTS, READY_FALLBACK_MS, GIVE_UP_HOLD_MS } = await import("../dist/pty/host.js");
 const { ensureDirs, WORKTREES_DIR } = await import("../dist/paths.js");
 ensureDirs();
 registerForCleanup(WORKTREES_DIR);
@@ -121,7 +121,22 @@ const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 // `absoluteCeilingMs` argument (computed per call site below, from the OLD fixed-ceiling formula x2) is a
 // backstop only — sized generously so it never fires on genuine jitter, existing purely to fail a
 // truly-wedged child instead of hanging the whole gate.
-const HEARTBEAT_STALL_MS = 15000;
+// Card 31f6081e: recurred in a real gate at 18764ms against this then-15000ms budget — 25% over, while the
+// absolute backstop below (never approached in any known specimen, incl. that one) did its job untouched.
+// WHY 15000 undersold a NORMAL give-up-and-recover cycle against THIS fixture specifically: against a real
+// claude, a give-up is usually SUPPRESSED cheaply (`lastOutputAt > enterWrittenAt` — see fireEnterAndVerify's
+// own doc) because a confirming hook or fresh output lands quickly. This fixture never emits
+// UserPromptSubmit/Stop, so `enterConfirmed` can never flip true for the kickoff submission — meaning
+// whenever a give-up genuinely fires here (heartbeat delivery already lagged past one SUBMIT_VERIFY_TIMEOUT_MS
+// window), the requeued message falls fully into GIVE_UP_HOLD_MS's own documented worst case: held,
+// ineligible for drainPending, until a confirming hook purges it (never, against this fixture) OR the full
+// hold — GIVE_UP_HOLD_MS itself, a real production constant, not a test-only number — elapses. The OLD
+// 15000ms sat BELOW that 20000ms production floor; this derives the budget from it (plus
+// KICKOFF_PRE_DELIVERY_FLOOR_MS margin for the mode-log floor's own jitter riding on top) instead of
+// guessing a bigger round number or matching the one observed value (18764ms) — see this card's own DoD-4
+// fence against exactly that move. Still comfortably clear of the absolute backstop below (2x this formula
+// at role-sweep kickoff size), preserving that as the real hang detector.
+const HEARTBEAT_STALL_MS = GIVE_UP_HOLD_MS + KICKOFF_PRE_DELIVERY_FLOOR_MS;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
