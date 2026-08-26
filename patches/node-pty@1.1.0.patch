@@ -1,0 +1,23 @@
+diff --git a/lib/windowsPtyAgent.js b/lib/windowsPtyAgent.js
+index a358ffb177357e177661033c1b092f9c9d0e5f5a..bb030b3cbc4048fb52f02d5f168f93ad1dcb2f92 100644
+--- a/lib/windowsPtyAgent.js
++++ b/lib/windowsPtyAgent.js
+@@ -154,9 +154,16 @@ var WindowsPtyAgent = /** @class */ (function () {
+                 // Close the input write handle to signal the end of session.
+                 this._inSocket.destroy();
+                 this._ptyNative.kill(this._pty, this._useConptyDll);
+-                this._outSocket.on('data', function () {
++                // Dispose the conout worker once there is nothing left to drain. 'data' resets
++                // the drain timer as more output arrives; 'end'/'close' cover the case where the
++                // socket ends with no further output at all, which 'data' alone would never see
++                // (this used to leak the worker_thread backing the conout socket forever).
++                var disposeConoutSocketWorker_1 = function () {
+                     _this._conoutSocketWorker.dispose();
+-                });
++                };
++                this._outSocket.on('data', disposeConoutSocketWorker_1);
++                this._outSocket.once('end', disposeConoutSocketWorker_1);
++                this._outSocket.once('close', disposeConoutSocketWorker_1);
+             }
+         }
+         else {

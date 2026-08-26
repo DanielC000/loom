@@ -91,9 +91,28 @@ async function psAlive(pid) {
   } catch { return false; }
 }
 
+// ===== HOST-WIDE conpty.dll console-host count (card 42b868ba DoD-3) =====
+// useConptyDll:true loads the BUNDLED conpty.dll (LoadConptyDll in conpty.cc), whose
+// ConptyCreatePseudoConsole spawns the bundled `OpenConsole.exe` as the real console-host process — a
+// DIFFERENT binary from the SYSTEM conhost.exe the non-DLL branch's kernel32 CreatePseudoConsole spawns.
+// That process is a child of THIS (the daemon/soak) process, never of the pty's own shell root — so
+// 03016805's own test (parentPid + its direct child only) structurally cannot see it, per the card.
+// Counting by (name, parent pid) rather than truly host-wide avoids false positives from an unrelated
+// Windows Terminal/VS Code OpenConsole.exe already running on a shared dev machine.
+async function psChildProcessCountByName(parentPid, exeName) {
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-CimInstance Win32_Process -Filter "Name='${exeName}' AND ParentProcessId=${parentPid}" | Measure-Object).Count`],
+      { timeout: 5000 });
+    return Number(stdout.trim()) || 0;
+  } catch { return 0; }
+}
+
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 
-/** One spawn→wait-for-real-output→hard-kill→settle cycle. Returns nothing; side effect is on `host`'s
+/** One spawn→wait-for-real-output→hard-kill→settle cycle. Returns the host-wide OpenConsole.exe count
+ *  observed WHILE the pty was alive (positive control — see soakArm) and AFTER settle (straggler check),
+ *  both scoped to children of THIS process (see psChildProcessCountByName). Side effect is on `host`'s
  *  live map and (for the DLL arm) node-pty's own deferred worker cleanup. */
 async function runCycle(host, id) {
   host.spawnShell({
@@ -108,6 +127,9 @@ async function runCycle(host, id) {
   const dataDeadline = Date.now() + 8000;
   while (sawData.length === 0 && Date.now() < dataDeadline) await sleep(20);
   unsub();
+  // Sample WHILE the pty is still alive, before kill — the positive control proving the query can see
+  // OpenConsole.exe at all (only relevant/expected non-zero on the DLL arm; see soakArm's self-check).
+  const openConsoleWhileAlive = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
   host.stop(id, "hard"); // TerminateProcess — the DLL arm's kill() defers worker dispose to a 'data' event that (Start-Sleep) should never come
   const deadline = Date.now() + 15000;
   while (await psAlive(pid) && Date.now() < deadline) await sleep(50);
@@ -116,6 +138,8 @@ async function runCycle(host, id) {
   // right after psAlive-gone would misclassify "hasn't drained yet" as "leaked" on the baseline arm too.
   // Wait comfortably past that known constant so only a GENUINE (never-draining) leak still shows live.
   await sleep(1500);
+  const openConsoleAfterSettle = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
+  return { openConsoleWhileAlive, openConsoleAfterSettle };
 }
 
 async function soakArm(label, useDllFlag) {
@@ -126,21 +150,32 @@ async function soakArm(label, useDllFlag) {
   const startWorkers = liveWorkers;
   const startRss = process.memoryUsage().rss;
   const rows = [];
+  let openConsoleSeenAliveCycles = 0;
+  let openConsoleStragglerCycles = 0;
   for (let i = 0; i < N; i++) {
-    await runCycle(host, `soak-${label}-${i}`);
+    const { openConsoleWhileAlive, openConsoleAfterSettle } = await runCycle(host, `soak-${label}-${i}`);
+    if (openConsoleWhileAlive > 0) openConsoleSeenAliveCycles++;
+    if (openConsoleAfterSettle > 0) openConsoleStragglerCycles++;
     if (global.gc) global.gc();
-    const row = { i, liveWorkers, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) };
+    const row = { i, liveWorkers, rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024), openConsoleWhileAlive, openConsoleAfterSettle };
     rows.push(row);
     if (i === 0 || (i + 1) % 10 === 0 || i === N - 1) {
-      console.log(`  [${label}] cycle ${i + 1}/${N}: liveWorkers=${row.liveWorkers} rssMb=${row.rssMb}`);
+      console.log(`  [${label}] cycle ${i + 1}/${N}: liveWorkers=${row.liveWorkers} rssMb=${row.rssMb} openConsoleWhileAlive=${openConsoleWhileAlive} openConsoleAfterSettle=${openConsoleAfterSettle}`);
     }
   }
   const endWorkers = liveWorkers;
   const endRss = process.memoryUsage().rss;
+  // Final straggler check AFTER the whole arm, past every cycle's own settle wait — catches any
+  // OpenConsole.exe that stuck around past its OWN cycle's window but died before the arm ended (which
+  // per-cycle openConsoleAfterSettle already would have caught) as well as anything still alive right now.
+  const openConsoleFinal = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
   return {
     label, N,
     workerDelta: endWorkers - startWorkers,
     rssDeltaMb: Math.round((endRss - startRss) / 1024 / 1024),
+    openConsoleSeenAliveCycles,
+    openConsoleStragglerCycles,
+    openConsoleFinal,
     rows,
   };
 }
@@ -162,6 +197,18 @@ if (dllResult.workerDelta > 0) {
   console.log(`\n⚠️  CONFIRMED: DLL mode leaked ${dllResult.workerDelta} worker_threads over ${N} cycles (~${(dllResult.rssDeltaMb / Math.max(1, dllResult.workerDelta)).toFixed(2)} MB/leaked worker, RSS-delta-derived — not an isolated per-thread measurement).`);
 } else {
   console.log(`\n✅ No worker_thread leak observed in this run's ${N} cycles (0 net growth) — see file header for why the trigger (no output after kill) is expected but not guaranteed every cycle.`);
+}
+
+// ===== HOST-WIDE conpty.dll console-host result (card 42b868ba DoD-3) =====
+console.log(`\n===== OpenConsole.exe (bundled conpty.dll console-host) — card 42b868ba DoD-3 =====`);
+console.log(`DLL arm:      seen-alive in ${dllResult.openConsoleSeenAliveCycles}/${N} cycles (positive control — proves the query CAN see it)  |  straggled past settle in ${dllResult.openConsoleStragglerCycles}/${N} cycles  |  still present after the whole arm: ${dllResult.openConsoleFinal}`);
+console.log(`Baseline arm: seen-alive in ${baselineResult.openConsoleSeenAliveCycles}/${N} cycles (expect 0 — non-DLL uses the SYSTEM conhost.exe, not the bundled OpenConsole.exe)  |  straggled past settle in ${baselineResult.openConsoleStragglerCycles}/${N} cycles  |  still present after the whole arm: ${baselineResult.openConsoleFinal}`);
+if (dllResult.openConsoleSeenAliveCycles === 0) {
+  console.log(`\n⚠️  UNVERIFIED: the DLL arm never observed OpenConsole.exe as a child of this process while a pty was alive — the positive control did not fire, so the straggler counts above are NOT trustworthy evidence of absence (the query itself is unproven for this run). Do not read "0 stragglers" as "no leak" without this control firing.`);
+} else if (dllResult.openConsoleStragglerCycles > 0 || dllResult.openConsoleFinal > 0) {
+  console.log(`\n⚠️  CONFIRMED-CONCERN: OpenConsole.exe (the bundled conpty.dll console-host) outlived its own pty's kill+settle window in ${dllResult.openConsoleStragglerCycles}/${N} DLL-arm cycles, with ${dllResult.openConsoleFinal} still present after the whole arm — a SEPARATE, UNFIXED surface from the worker_thread leak this card fixes. Do not fold this into the worker_thread fix's own result.`);
+} else {
+  console.log(`\n✅ No OpenConsole.exe straggler observed host-wide (scoped to children of this process) across ${N} DLL-arm cycles, and the positive control confirms the query can see it when present.`);
 }
 
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
