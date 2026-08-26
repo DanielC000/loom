@@ -126,6 +126,21 @@ export interface CompanionConfigRow {
   provisioned: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Zero-reply detector (card 48e8d289): the session's `turn_seq` (sessions.turn_seq — the same
+   * completed-turn counter `onTurnCompleted` bumps) as of the last successful `chat_reply` delivery, or
+   * as of the first health-check observation for a session that has never (yet) had one — see
+   * companion/reply-watch.ts's lazy-baseline doc. NULL means "not yet observed" (a brand-new row before
+   * its first onTurnCompleted tick, or a pre-migration legacy row).
+   */
+  lastChatReplyTurnSeq: number | null;
+  /**
+   * The `turn_seq` at which a zero-reply alert was last emitted for the CURRENT streak, or NULL when no
+   * alert is currently active. Cleared back to NULL whenever `lastChatReplyTurnSeq` advances (a reply
+   * landed, ending the streak) — see `recordCompanionChatReply`. Dedupes `companion_zero_reply_detected`
+   * to at most one emission per streak, mirroring `companion_heartbeat_deferred`'s once-per-streak rule.
+   */
+  zeroReplyAlertTurnSeq: number | null;
 }
 
 /**
@@ -898,7 +913,14 @@ CREATE TABLE IF NOT EXISTS companion_config (
   provisioned INTEGER NOT NULL DEFAULT 0,     -- 1 ⇒ the provision endpoint minted the session (delete retires it)
   name TEXT NOT NULL DEFAULT '',              -- the companion's given name (baked into its startup prompt at creation)
   created_at TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  -- Zero-reply detector (card 48e8d289): see CompanionConfigRow.lastChatReplyTurnSeq/zeroReplyAlertTurnSeq
+  -- for the full contract. Both nullable, no NOT NULL/DEFAULT/index/FK referencing either — a legacy row
+  -- backfills to NULL on the ADD COLUMN migration below, which reply-watch.ts's lazy-baseline path treats
+  -- as "not yet observed" (never as an instant zero-turn streak), so an upgraded long-lived companion can
+  -- never trip the alert on its very first post-migration turn.
+  last_chat_reply_turn_seq INTEGER,
+  zero_reply_alert_turn_seq INTEGER
 );
 -- Companion RECURRING reminders (Companion Memory & Reminders Design, Surface 2 s3): N named cron jobs
 -- that fire a proactive turn into the companion's OWN long-lived session — generalizes the single
@@ -1679,6 +1701,12 @@ const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
   // The companion's given name. NOT NULL + constant DEFAULT '' backfills every legacy row to unnamed,
   // matching a fresh CREATE TABLE — an existing companion's prompt stays byte-identical until re-named.
   name: "TEXT NOT NULL DEFAULT ''",
+  // Zero-reply detector (card 48e8d289). Nullable, no DEFAULT — every legacy row backfills to NULL,
+  // which reply-watch.ts's lazy-baseline path reads as "not yet observed" and seeds from the session's
+  // CURRENT turn_seq on its first post-migration check, never as an instant zero-turn streak.
+  last_chat_reply_turn_seq: "INTEGER",
+  // Nullable, no DEFAULT — every legacy row backfills to NULL (no alert active), matching a fresh row.
+  zero_reply_alert_turn_seq: "INTEGER",
 };
 
 /** Columns added to `wakes` after its initial ship (route-aware wake engine); applied to existing DBs
@@ -3373,7 +3401,9 @@ export class Db {
      *  defaulting to "" (unnamed) on first insert. */
     name?: string;
   }): CompanionConfigRow {
-    const existing = this.db.prepare("SELECT created_at, provisioned, name FROM companion_config WHERE session_id = ?").get(input.sessionId) as Row | undefined;
+    const existing = this.db.prepare(
+      "SELECT created_at, provisioned, name, last_chat_reply_turn_seq, zero_reply_alert_turn_seq FROM companion_config WHERE session_id = ?",
+    ).get(input.sessionId) as Row | undefined;
     const now = new Date().toISOString();
     const row: CompanionConfigRow = {
       sessionId: input.sessionId, botTokenBlob: input.botTokenBlob, channel: input.channel,
@@ -3385,6 +3415,11 @@ export class Db {
       // Same preserve-on-omit pattern as provisioned: a config write that doesn't mention name never clears it.
       name: input.name ?? (existing?.name as string | undefined) ?? "",
       createdAt: (existing?.created_at as string) ?? now, updatedAt: now,
+      // Zero-reply detector (card 48e8d289): NOT part of the SQL INSERT/UPDATE below (this method never
+      // touches them — they're driven exclusively by recordCompanionChatReply/markCompanionZeroReplyAlert),
+      // so the RETURNED row just reads back whatever is currently stored (null on a fresh insert).
+      lastChatReplyTurnSeq: (existing?.last_chat_reply_turn_seq as number | null) ?? null,
+      zeroReplyAlertTurnSeq: (existing?.zero_reply_alert_turn_seq as number | null) ?? null,
     };
     this.db.prepare(
       `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, created_at, updated_at)
@@ -3420,6 +3455,45 @@ export class Db {
       this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM app_meta WHERE key = ?").run(COMPANION_HOME_KEY_PREFIX + sessionId);
     })();
+  }
+
+  /**
+   * Zero-reply detector (card 48e8d289) — the LOW-LEVEL setter: record `turnSeq` as the baseline a
+   * zero-reply streak is measured from, and clear any active alert for the streak that just ended (a
+   * reply landing, or the lazy-baseline first observation, both end whatever streak was in progress).
+   * Called from `companion/reply-watch.ts`'s lazy-baseline path (with the session's CURRENT turn_seq) and
+   * from `recordChatReplyDelivered` below (a genuine successful `chat_reply`). A missing row is a no-op
+   * (idempotent — mirrors setRateLimitedUntil's shape on an unknown id).
+   */
+  recordCompanionChatReply(sessionId: string, turnSeq: number): void {
+    this.db.prepare(
+      "UPDATE companion_config SET last_chat_reply_turn_seq = ?, zero_reply_alert_turn_seq = NULL, updated_at = ? WHERE session_id = ?",
+    ).run(turnSeq, new Date().toISOString(), sessionId);
+  }
+
+  /**
+   * Zero-reply detector (card 48e8d289) — called by `chat-gateway.ts`'s `deliverReply` on a genuine
+   * successful delivery (never on a `no-target`/`no-adapter`/`send-failed` result). Resolves the
+   * session's CURRENT `turn_seq` itself (ChatGateway is deliberately db-free — see its own class doc —
+   * so this keeps that turn-counter mechanic entirely inside db.ts rather than leaking it into the
+   * gateway/factory wiring). A missing session is a no-op.
+   */
+  recordChatReplyDelivered(sessionId: string): void {
+    const session = this.getSession(sessionId);
+    if (!session) return;
+    this.recordCompanionChatReply(sessionId, session.turnSeq ?? 0);
+  }
+
+  /**
+   * Zero-reply detector (card 48e8d289) — marks a `companion_zero_reply_detected` alert as emitted for
+   * the CURRENT streak, at `turnSeq` (the turn_seq the alert fired at). `checkCompanionReplyHealth`
+   * dedupes on this: it only re-alerts once `zero_reply_alert_turn_seq` has been cleared by a fresh
+   * `recordCompanionChatReply` (a reply landing ends the streak and re-arms the next one) — mirrors
+   * `CompanionHeartbeatWatcher`'s once-per-streak `deferredSinceLastFire` discipline, persisted instead
+   * of in-memory since this fires from a stateless per-turn hook, not a long-lived watcher instance.
+   */
+  markCompanionZeroReplyAlert(sessionId: string, turnSeq: number): void {
+    this.db.prepare("UPDATE companion_config SET zero_reply_alert_turn_seq = ? WHERE session_id = ?").run(turnSeq, sessionId);
   }
 
   // --- companion capability grants (Companion Capability & Permission-Lever Framework §1) — the ONE
@@ -7687,6 +7761,8 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     provisioned: (r.provisioned as number) === 1,
     name: (r.name as string | null) ?? "",
     createdAt: (r.created_at as string) ?? "", updatedAt: (r.updated_at as string) ?? "",
+    lastChatReplyTurnSeq: (r.last_chat_reply_turn_seq as number | null) ?? null,
+    zeroReplyAlertTurnSeq: (r.zero_reply_alert_turn_seq as number | null) ?? null,
   };
 }
 function toConnectionRow(r0: unknown): ConnectionRow {

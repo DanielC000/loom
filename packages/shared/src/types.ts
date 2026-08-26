@@ -1087,6 +1087,19 @@ export type OrchestrationEventKind =
   // still queued/unconsumed). `detail.reminderId` discriminates which reminder deferred. Emitted at most
   // once per defer streak per reminder (bounded log growth, mirroring the heartbeat).
   | "companion_reminder_deferred"
+  // ── Companion zero-reply detector (card 48e8d289, split from dbba993f's DoD-4) ─────────────────────
+  // CAUSE-AGNOSTIC detectability half of the 113-turns-silent-companion incident: an ENABLED companion
+  // session completed `detail.turnsSinceLastReply` turns (>= `detail.threshold`) with no successful
+  // `chat_reply` delivery in between — checked from `pty/host.ts`'s `onTurnCompleted` hook, scoped to
+  // companion sessions (companion/reply-watch.ts `checkCompanionReplyHealth`). Filed under the companion
+  // session (managerSessionId = sessionId); `detail` carries { turnsSinceLastReply, threshold, turnSeq }.
+  // Emitted AT MOST ONCE per zero-reply streak (mirrors companion_heartbeat_deferred's once-per-streak
+  // discipline) — a successful chat_reply resets the streak and re-arms the next one. Deliberately
+  // excluded from EVENT_TRIGGER_EVENT_KINDS below (companion-internal mechanics, not general
+  // orchestration lifecycle — same reasoning as heartbeat/reminder/alert-push) and carries NO owner-
+  // facing delivery of its own (no chat_reply, no attention-push) — it is a durable log signal + a daemon
+  // console warning only; surfacing it to the owner directly is a separate, human/manager decision.
+  | "companion_zero_reply_detected"
   // Manager-driven ABSOLUTE permission-mode override (orchestration `worker_set_mode`, card 610abe29) —
   // the manual belt-and-suspenders recovery affordance above the spawn/resume auto-convergence
   // (cycleToMode) and the plan auto-heal (logLandedMode): a worker can never change its own mode
@@ -1309,7 +1322,8 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   session_recovery_abandoned: true, worker_report_undelivered: true, worker_exited_without_report: true,
   manager_exited_with_live_workers: true, session_message_queued: true, session_message_delivered: true,
   session_message_gave_up: true, companion_heartbeat_fired: true, companion_heartbeat_deferred: true,
-  companion_reminder_fired: true, companion_reminder_deferred: true, set_worker_mode: true,
+  companion_reminder_fired: true, companion_reminder_deferred: true, companion_zero_reply_detected: true,
+  set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
   poll_id_guard_tripped: true, event_trigger_fired: true, event_trigger_throttled: true,
   end_me_refused: true, end_me_complete: true, question_asked: true, task_held_cleared: true,

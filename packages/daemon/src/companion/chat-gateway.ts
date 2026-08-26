@@ -186,6 +186,11 @@ export class ChatGateway {
      *  construction stays byte-identical (no-op). The daemon injects `(sid) =>
      *  orchMcp.closeCompanionTrustWindow(sid)` (index.ts, via CompanionControllerDeps). */
     private readonly closeTrustWindow: ((sessionId: string) => void) | undefined = undefined,
+    /** Zero-reply detector (card 48e8d289): fired on a GENUINE successful `deliverReply` (never on
+     *  `no-target`/`no-adapter`/`send-failed`) so the detector's baseline resets on every real chat_reply,
+     *  not just proactive ones. Default undefined ⇒ every existing/test construction stays byte-identical
+     *  (no-op). The daemon injects `(sid) => db.recordChatReplyDelivered(sid)` (companion/factory.ts). */
+    private readonly onReplyDelivered: ((sessionId: string) => void) | undefined = undefined,
   ) {
     for (const b of bindings) this.addBinding(b);
   }
@@ -674,6 +679,7 @@ export class ChatGateway {
       const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice, proactive);
       if (voiceResult) {
         this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive, true);
+        this.onReplyDelivered?.(sessionId);
         return voiceResult;
       }
     }
@@ -695,6 +701,7 @@ export class ChatGateway {
     // that echoes an ALREADY-recorded user message with a disclaimer — recording it again here would
     // misattribute it as a companion reply.
     this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive);
+    this.onReplyDelivered?.(sessionId);
     return { delivered: true, chunks: result.chunks };
   }
 

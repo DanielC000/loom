@@ -179,6 +179,11 @@ const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatI
     getCompanionHome: () => null,
     isSenderAllowed: () => false,
     redeemPairingCode: () => ({ outcome: "rejected" }),
+    // Zero-reply detector (card 48e8d289): required on CompanionBindingStore — this block's deliverReply
+    // call succeeds, so the gateway's onReplyDelivered hook fires; a no-op is fine here (this test proves
+    // adapter registration/framing, not the detector's own streak-tracking — see companion-zero-reply.mjs
+    // for that).
+    recordChatReplyDelivered: () => {},
   };
   const cfg = {
     // A shaped (non-empty) token so the factory's real grammY Bot(cfg.botToken) constructs — no network is

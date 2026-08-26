@@ -40,6 +40,9 @@ export interface CompanionBindingStore extends AllowlistReader, PairingStore, Vo
    *  (open) conversation's stored messages across every channel, chronological — respects the "/new"
    *  conversation boundary (mirrors the human-only chat-history REST read). */
   listCurrentCompanionMessages(sessionId: string): CompanionMessage[];
+  /** Zero-reply detector (card 48e8d289): record that a `chat_reply` was just successfully delivered for
+   *  `sessionId`, resetting its zero-reply streak. Threaded to the gateway's `onReplyDelivered` hook. */
+  recordChatReplyDelivered(sessionId: string): void;
 }
 
 /** Drop the db-only createdAt — the gateway's routing map wants just the SessionBinding shape. */
@@ -134,7 +137,10 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Per-turn ORIGIN resolver (multi-channel reply routing): deliverReply targets the in-flight turn's
   // originating route (pty.getActiveTurnOrigin, injected). NOT the old home fallback — a proactive/heartbeat
   // turn now carries the home route ON its submit, so its chat_reply flows through the SAME per-turn path.
-  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow);
+  // Zero-reply detector (card 48e8d289): reset THIS companion's zero-reply streak on every genuine
+  // successful chat_reply delivery — see ChatGateway's onReplyDelivered doc.
+  const onReplyDelivered = (sessionId: string) => db.recordChatReplyDelivered(sessionId);
+  const gateway = new ChatGateway(submitTurn, bindings.map(toSessionBinding), createDbCompanionAuth(db), pairing, originResolver, createDbCompanionVoicePrefs(db), transcribe, synthesize, historyReset, recorder, reinjectPersona, livePush, historyExport, proactiveResolver, closeTrustWindow, onReplyDelivered);
   // Telegram adapter — registered ONLY when a bot token exists. An IN-APP-ONLY companion (cfg.botToken null)
   // arms NO Telegram long-poll: the gateway comes up with the in-app adapter alone (registered below), so no
   // external network transport is started and default-OFF stays byte-identical. The adapter normalizes each

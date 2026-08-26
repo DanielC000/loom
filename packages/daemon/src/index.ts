@@ -23,6 +23,7 @@ import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js"
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
 import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
+import { checkCompanionReplyHealth } from "./companion/reply-watch.js";
 import { PtyHost } from "./pty/host.js";
 import { SessionService } from "./sessions/service.js";
 import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
@@ -307,7 +308,25 @@ async function main(): Promise<void> {
     },
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }),
     // Card 343441bd: persist the completed-turn counter — see PtyHostEvents.onTurnCompleted's doc for scope.
-    onTurnCompleted: (sessionId) => db.incrementTurnSeq(sessionId),
+    // Card 48e8d289: the zero-reply detector's check, scoped to companion sessions (a no-op for every
+    // other session — see checkCompanionReplyHealth's own doc). Runs AFTER incrementTurnSeq so it reads
+    // this turn's own bumped turnSeq. `onTurnCompleted` is invoked from inside pty/host.ts's turn-
+    // completion chokepoint inside a `try { ... } finally { this.finalizingTurn = false; }` with NO
+    // `catch` — the `finally` only resets that flag (the session does not wedge), but a throw still
+    // propagates PAST the very next line, `drainPending(sessionId)`, skipping that session's queued-
+    // message drain (a manager/owner message would never land). `incrementTurnSeq` is a single UPDATE that
+    // genuinely SHOULD be fatal if it fails, so it stays unguarded; `checkCompanionReplyHealth`
+    // additionally does a write (`markCompanionZeroReplyAlert`/`appendEvent`) on its alert path that can
+    // throw on e.g. SQLITE_BUSY — a diagnostic must never be able to suppress the very drain it sits in
+    // front of, so it's isolated.
+    onTurnCompleted: (sessionId) => {
+      db.incrementTurnSeq(sessionId);
+      try {
+        checkCompanionReplyHealth(db, sessionId);
+      } catch (err) {
+        console.error(`[companion] zero-reply health check threw for session ${sessionId} (swallowed — must never block the turn's message drain):`, err);
+      }
+    },
     // Card 417cea0a: a give-up-tracked message was confirmed by content match — `sessions` (forward
     // reference, same pattern as onBusy/onExit above) decides whether it was ever actually PARKED and, if
     // so, retracts that notice to the original sender. See PtyHostEvents.onGiveUpConfirmed's own doc.
