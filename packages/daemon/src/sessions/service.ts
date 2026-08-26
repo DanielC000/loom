@@ -6085,6 +6085,10 @@ export class SessionService {
         taskId,
         worktreePath,
         branch,
+        // Card b866ab64: review-spawn fork point (the reviewed branch's tip, NOT mainline HEAD) — stamped
+        // once so the done-report ahead-of-base precheck can compare against the worker's REAL base
+        // instead of mainline. null for every normal (non-review) spawn — see Session.reviewBaseSha's doc.
+        reviewBaseSha: reviewForkFrom?.headSha ?? null,
         repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
@@ -9279,7 +9283,16 @@ export class SessionService {
         // Multi-repo epic (49136451) phase 2: this worktree may be rooted in a registry repo — resolve
         // against the SESSION's own stamped repoKey (see Session.repoKey's doc), not project.repoPath.
         const precheckRepoPath = resolveRepoByKey(project, worker.repoKey).path;
-        const precheck = await precheckWorkerDone(precheckRepoPath, worktreePath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        // Card b866ab64: a REVIEW spawn's branch is cut from the REVIEWED branch's tip, not mainline —
+        // its worktree starts out already carrying every commit the reviewed branch had at fork time,
+        // none of which the reviewer authored. Comparing against mainline `HEAD` (the old, unconditional
+        // base) made `noChanges:true` structurally unreachable for a reviewer that authored nothing: the
+        // inherited commit(s) always counted as "ahead of base". Compare against the worker's REAL base —
+        // `worker.reviewBaseSha` (the reviewed branch's tip at spawn time) for a review spawn, mainline
+        // `HEAD` for every other worker (byte-identical to before this fix for the non-review case).
+        const reviewSpawn = typeof worker.reviewBaseSha === "string" && worker.reviewBaseSha.length > 0;
+        const doneBase = worker.reviewBaseSha ?? "HEAD";
+        const precheck = await precheckWorkerDone(precheckRepoPath, worktreePath, worker.branch, doneBase, { timeoutMs: this.gitOpMs });
         if (precheck.uncommitted) {
           // REFUSE: do NOT move the task — the worker stays in_progress to commit + re-report. Name the
           // uncommitted files so the worker knows exactly what to commit.
@@ -9307,11 +9320,25 @@ export class SessionService {
         // POSITIVE number (not merely `!zeroAhead`) so this can never fire on the fail-safe degrade — a git
         // error/timeout leaves `aheadCount` undefined, and `typeof x === "number"` excludes that case.
         if (report.noChanges && typeof precheck.aheadCount === "number" && precheck.aheadCount > 0) {
-          const error =
-            `worker_report(done) REFUSED — you reported noChanges:true, but your assigned branch '${worker.branch}' ` +
-            `has ${precheck.aheadCount} commit(s) actually ahead of base. A done claiming no changes cannot be reconciled ` +
-            `with real commits already on the branch. Either drop noChanges and report the work you actually did, or ` +
-            `explain the discrepancy in your report. Your task stays in_progress.`;
+          // Card b866ab64, DoD item 3: name the base explicitly for a review spawn, and say plainly these
+          // are commits the REVIEWER itself added since the reviewed tip (not inherited, not something to
+          // go hunt for as "uncommitted work" — the working tree is already clean, or the uncommitted
+          // branch above would have fired first) — so the refusal reads as "you did author something" and
+          // never nudges an honestly-empty reviewer toward believing its branch should be merged.
+          const baseDesc = reviewSpawn
+            ? `the reviewed branch's tip ('${doneBase}') — your branch's real base as a REVIEW spawn, not mainline`
+            : "base";
+          const error = reviewSpawn
+            ? `worker_report(done) REFUSED — you reported noChanges:true, but your assigned branch '${worker.branch}' ` +
+              `has ${precheck.aheadCount} commit(s) ahead of ${baseDesc}. Your working tree is already clean, so ` +
+              `there is nothing left in it to find or stage — these are commit(s) YOU already made during this ` +
+              `review, on top of the reviewed tip, not commits inherited from the reviewed branch. Either drop ` +
+              `noChanges and report what you actually changed, or explain the discrepancy. Your task stays ` +
+              `in_progress. (This branch must never be merged.)`
+            : `worker_report(done) REFUSED — you reported noChanges:true, but your assigned branch '${worker.branch}' ` +
+              `has ${precheck.aheadCount} commit(s) actually ahead of base. A done claiming no changes cannot be reconciled ` +
+              `with real commits already on the branch. Either drop noChanges and report the work you actually did, or ` +
+              `explain the discrepancy in your report. Your task stays in_progress.`;
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
@@ -10225,6 +10252,7 @@ export class SessionService {
         taskId,
         worktreePath,
         branch,
+        reviewBaseSha: old.reviewBaseSha ?? null, // SAME worktree ⇒ SAME fork point — carried forward like repoKey
         repoKey: old.repoKey ?? null, // SAME worktree, SAME repo — carried forward like browserTesting/skills
         gen: newGen,
         recycledFrom: old.id,

@@ -650,6 +650,21 @@ export interface Session {
   worktreePath?: string | null;     // a worker's isolated git worktree cwd
   branch?: string | null;           // the worker's branch
   /**
+   * Card b866ab64: for a REVIEW spawn only (`worker_spawn` with `reviewOfWorkerSessionId`/
+   * `reviewOfTaskId`), the sha this worker's branch was actually forked FROM — the reviewed branch's
+   * tip at spawn time, NOT the project's mainline HEAD. Stamped ONCE at spawn (mirrors `repoKey`);
+   * `null`/absent on every non-review spawn (the overwhelming majority), which must keep comparing
+   * against mainline HEAD exactly as before.
+   *
+   * A review worktree's branch is cut via `git worktree add -b <branch> <reviewed-branch>` (see
+   * `createWorktree`'s `forkFrom` param), so it starts out already carrying every commit the reviewed
+   * branch had at that moment — commits the reviewer never authored. The `worker_report(done)`
+   * ahead-of-base precheck (`precheckWorkerDone`) MUST compare against THIS sha for a review spawn,
+   * never mainline HEAD, or a reviewer that authors nothing is unconditionally refused the very
+   * `noChanges:true` report its role exists to file.
+   */
+  reviewBaseSha?: string | null;
+  /**
    * Multi-repo epic (49136451) phase 2: which `project.repos` entry this worker's worktree was cut
    * from, stamped ONCE at spawn/recycle time (never re-derived from `task.repoKey` afterward) — the
    * worktree is physically rooted in ONE repo, so every later op on it (gate, merge, finalize,
