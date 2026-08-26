@@ -4487,6 +4487,29 @@ export class SessionService {
     const resumed: string[] = [];
     const skippedParked: string[] = [];
     const failed: string[] = [];
+    // Card 5a9a963b: identity for each fleet-wide resume failure, captured alongside `failed` itself so
+    // the Platform Lead (the one recipient with cross-project reach — `list_all_sessions` — to actually
+    // investigate one) can be told WHICH session, not just a count. Read from the captured
+    // RestartResumeEntry (role/busy — pre-restart state) plus a live DB lookup (projectId/taskId — the
+    // session row survives even when its pty failed to resume).
+    interface FleetResumeFailure {
+      sessionId: string;
+      role: SessionRole | null;
+      projectId: string | null;
+      taskId: string | null;
+      wasBusy: boolean;
+    }
+    const failedDetail: FleetResumeFailure[] = [];
+    const captureFailureDetail = (e: RestartResumeEntry): FleetResumeFailure => {
+      const row = this.db.getSession(e.sessionId);
+      return {
+        sessionId: e.sessionId,
+        role: e.role,
+        projectId: row?.projectId ?? null,
+        taskId: row?.taskId ?? null,
+        wasBusy: e.busy === true,
+      };
+    };
 
     // Replay a session's pre-restart pending inbound FIFO (snapshotted into the intent) onto the freshly
     // resumed pty, IN ORDER and BEFORE its continuation nudge. These predate the restart, so FIFO order
@@ -4662,7 +4685,7 @@ export class SessionService {
     for (const e of entries) {
       if (e.sessionId === reqId) continue;
       const parked = isParked(e.sessionId);
-      if (!resumeOne(e.sessionId)) { failed.push(e.sessionId); continue; }
+      if (!resumeOne(e.sessionId)) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e)); continue; }
       resumed.push(e.sessionId);
       if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
       replayPending(e.sessionId);
@@ -4824,12 +4847,56 @@ export class SessionService {
         // flatly false. Render it from `failed.length` instead: true in the (overwhelmingly common)
         // zero-failure case, keeping today's wording byte-identical; named otherwise.
         const fleetOk = failed.length === 0;
+        // Card 5a9a963b: the old wording here told the REQUESTER to "check worker_list across
+        // projects" — an instrument `worker_list` (scoped server-side to the caller's own direct
+        // children) can NEVER run cross-project, and the platform Lead has no `worker_list` either (it
+        // isn't on PLATFORM_TOOLS). The one recipient told to investigate was structurally unable to.
+        //
+        // ⭐ DELIBERATE BOUNDARY DECISION (settle this once, don't re-derive it): a cross-project
+        // session identity (project id, session id, task) must NEVER appear in a PROJECT MANAGER's own
+        // notice — `fleetParenthetical`/`fleetSentence` below. That would leak another project's
+        // internals across an isolation boundary a project manager has no standing to see (the
+        // specimen behind this card would have disclosed a private Codescape session to a Loom
+        // manager). So a manager requester gets, at most, an accurate COUNT plus "the Lead has been
+        // notified" — never identity, and never an instruction it can't run.
+        //
+        // The platform Lead is NOT bound by that same restriction — `list_all_sessions` already grants
+        // it cross-project visibility, so it's the correct, sole owner of the identifying detail. It is
+        // notified with the full detail (project/session/role/task/in-flight state) via `enqueueNudge`
+        // below, using the SAME role-branching (`reqRole === "platform"` vs. not) this site already
+        // uses elsewhere.
+        let leadNotified = false;
+        let leadOwnFailureDetail: string | null = null;
+        if (!fleetOk) {
+          const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
+          if (liveLead) {
+            const detailLines = failedDetail.map((d) =>
+              `project ${d.projectId ?? "unknown"} / session ${d.sessionId} / role ${d.role ?? "plain"}` +
+              `${d.taskId ? ` / task ${d.taskId}` : ""} — ${d.wasBusy ? "BUSY at capture (work may have been in flight)" : "idle at capture"}`,
+            );
+            const failureNoticeText =
+              `${failed.length} session(s) elsewhere in the fleet failed to resume after this restart. You are ` +
+              `the only party with cross-project reach (list_all_sessions) to investigate: ${detailLines.join("; ")}.`;
+            if (liveLead.id === reqId) {
+              // The Lead IS the requester — fold the detail straight into its own reqText below instead
+              // of sending it a redundant second nudge.
+              leadOwnFailureDetail = failureNoticeText;
+            } else {
+              this.enqueueNudge(liveLead.id, "platform", `[loom:fleet-resume-failure] ${failureNoticeText}`);
+            }
+            leadNotified = true;
+          }
+        }
         const fleetParenthetical = fleetOk
           ? `the rest of the fleet across all projects was resumed too`
-          : `${failed.length} session(s) elsewhere in the fleet failed to resume — check worker_list across projects`;
+          : leadNotified
+            ? `${failed.length} session(s) elsewhere in the fleet failed to resume — the Lead has been notified`
+            : `${failed.length} session(s) elsewhere in the fleet failed to resume`;
         const fleetSentence = fleetOk
           ? `The whole fleet across all projects was resumed too.`
-          : `${failed.length} session(s) elsewhere in the fleet failed to resume — check worker_list across projects.`;
+          : leadNotified
+            ? `${failed.length} session(s) elsewhere in the fleet failed to resume. The Lead has been notified.`
+            : `${failed.length} session(s) elsewhere in the fleet failed to resume.`;
         // Card db2179f6: "your merged daemon code is now LIVE" is unconditional today, but false for the
         // one case this restart path already detects and returns from requestDaemonRestart —
         // `intent.supervisorChanged` (see its own doc) — a deploy touching the supervisor script leaves
@@ -4847,9 +4914,11 @@ export class SessionService {
         const reqWorktreeNote = worktreeNoteFor(reqId);
         const reqText = reqRole === "platform"
           // Lead-appropriate framing (mirrors the non-requester Lead branch above): no worktrees/workers
-          // of its own to report a resumed-count for.
+          // of its own to report a resumed-count for. Card 5a9a963b: when the Lead IS the requester,
+          // `fleetSentence`'s "the Lead has been notified" wording would be talking to itself about
+          // itself — use `leadOwnFailureDetail` (the full identified detail) instead, when set.
           ? `[loom:daemon-restarted] Rebuild + restart complete — ${liveClaim} (reason: ${intent.reason}). ` +
-            `${fleetSentence} ` +
+            `${leadOwnFailureDetail ?? fleetSentence} ` +
             `Re-orient from your home board and your living resume doc, then end-to-end verify the live ` +
             `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote
           : `[loom:daemon-restarted] Rebuild + restart complete — ${liveClaim} (reason: ${intent.reason}). ` +

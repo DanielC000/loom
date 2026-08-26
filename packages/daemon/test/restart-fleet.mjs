@@ -529,6 +529,103 @@ try {
     }
   }
   try { fs.rmSync(gitFile7f, { recursive: true, force: true }); fs.writeFileSync(gitFile7f, gitFileContent7f); } catch { /* best-effort */ }
+
+  // ============================ (8) FLEET-RESUME-FAILURE ROUTING (card 5a9a963b) =====================
+  // The OLD notice told the REQUESTER "check worker_list across projects" — an instrument scoped to the
+  // caller's own direct children that structurally cannot see a failure in ANOTHER project (worker_list
+  // has no cross-project variant). This exercises a REAL fleet-resume failure — a worker BUSY at capture
+  // (work genuinely in flight, not the benign case) in a DIFFERENT project than the requester, mirroring
+  // the real Loom-manager/Codescape-worker specimen — and asserts what EACH role actually receives.
+  //
+  // (8i) NO live Platform Lead at all: the requester's notice must drop the un-runnable instruction but
+  // must NEVER fabricate a false "the Lead has been notified" claim (nobody was notified).
+  const D1 = { proj: `rf-D1-${sfx}`, agent: `rf-D1-ag-${sfx}` };
+  mkProject(D1.proj, "/tmp/rf-D1"); mkAgent(D1.agent, D1.proj);
+  const d1 = { mgr: `rf-D1-mgr-${sfx}`, dead: `rf-D1-dead-${sfx}` };
+  mkSession({ id: d1.mgr, projId: D1.proj, agentId: D1.agent, role: "manager" });
+  mkSession({ id: d1.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: true });
+  const pty8i = new PtyStub();
+  const sessions8i = new SessionService(db, pty8i, new OrchestrationControl());
+  sessions8i.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d1.mgr, requestedAt: now, resume: [
+      { sessionId: d1.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d1.dead, role: "worker", parentSessionId: id.mgrB, busy: true },
+    ] },
+    { resumeOne: (sid) => sid !== d1.dead },
+  );
+  await flush();
+  const msg8i = pty8i.getPending(d1.mgr);
+  check("(8i) no live Lead: requester gets exactly one notice", msg8i.length === 1);
+  check("(8i) no live Lead: requester's notice does NOT prescribe the un-runnable worker_list check",
+    msg8i.length === 1 && !/check worker_list/i.test(msg8i[0]));
+  check("(8i) no live Lead: requester's notice states the accurate failed count",
+    msg8i.length === 1 && /1 session\(s\) elsewhere in the fleet failed to resume/i.test(msg8i[0]));
+  check("(8i) no live Lead: it never fabricates a false 'Lead has been notified' claim",
+    msg8i.length === 1 && !/the Lead has been notified/i.test(msg8i[0]));
+
+  // (8ii) A LIVE Platform Lead exists, and the REQUESTER IS NOT the Lead. The requester's own notice
+  // gets an accurate count + "the Lead has been notified" — never the failed session's identity (the
+  // deliberate boundary decision: a cross-project session id must never appear in a PROJECT MANAGER's
+  // own notice). The Lead gets a SEPARATE `[loom:fleet-resume-failure]` nudge naming the real identity.
+  const D2 = { proj: `rf-D2-${sfx}`, agent: `rf-D2-ag-${sfx}` };
+  mkProject(D2.proj, "/tmp/rf-D2"); mkAgent(D2.agent, D2.proj);
+  mkProject("rf-platform-home", "/tmp/rf-platform-home");
+  mkAgent(`rf-lead-ag-${sfx}`, "rf-platform-home");
+  const d2 = { mgr: `rf-D2-mgr-${sfx}`, dead: `rf-D2-dead-${sfx}`, lead: `rf-lead-${sfx}` };
+  mkSession({ id: d2.mgr, projId: D2.proj, agentId: D2.agent, role: "manager" });
+  mkSession({ id: d2.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: true });
+  mkSession({ id: d2.lead, projId: "rf-platform-home", agentId: `rf-lead-ag-${sfx}`, role: "platform" });
+  const pty8ii = new PtyStub();
+  const sessions8ii = new SessionService(db, pty8ii, new OrchestrationControl());
+  sessions8ii.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d2.mgr, requestedAt: now, resume: [
+      { sessionId: d2.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d2.dead, role: "worker", parentSessionId: id.mgrB, busy: true },
+      { sessionId: d2.lead, role: "platform", parentSessionId: null },
+    ] },
+    { resumeOne: (sid) => sid !== d2.dead },
+  );
+  await flush();
+  const msg8ii = pty8ii.getPending(d2.mgr);
+  check("(8ii) requester gets exactly one 'code is live' notice", msg8ii.length === 1);
+  check("(8ii) requester's notice does NOT prescribe the un-runnable worker_list check",
+    msg8ii.length === 1 && !/check worker_list/i.test(msg8ii[0]));
+  check("(8ii) requester's notice states the accurate failed count AND that the Lead has been notified",
+    msg8ii.length === 1 && /1 session\(s\) elsewhere in the fleet failed to resume/i.test(msg8ii[0]) && /the Lead has been notified/i.test(msg8ii[0]));
+  check("(8ii) requester's notice does NOT leak the failed session's cross-project identity (boundary decision)",
+    msg8ii.length === 1 && !msg8ii[0].includes(d2.dead) && !msg8ii[0].includes(B.proj));
+  const leadMsgs8ii = pty8ii.getPending(d2.lead);
+  const failureMsg8ii = leadMsgs8ii.find((m) => m.includes("[loom:fleet-resume-failure]"));
+  check("(8ii) the Lead receives a SEPARATE fleet-resume-failure notice", !!failureMsg8ii);
+  check("(8ii) it names the failed session's id", !!failureMsg8ii && failureMsg8ii.includes(d2.dead));
+  check("(8ii) it names the failed session's project", !!failureMsg8ii && failureMsg8ii.includes(B.proj));
+  check("(8ii) it names the failed session's role", !!failureMsg8ii && /role worker/i.test(failureMsg8ii));
+  check("(8ii) it flags the in-flight (busy-at-capture) state — not just presence/absence",
+    !!failureMsg8ii && /BUSY at capture/i.test(failureMsg8ii));
+
+  // (8iii) The Platform Lead itself is the REQUESTER. It has no `worker_list` either (not on
+  // PLATFORM_TOOLS) — so it must get the full identified detail directly in its own reqText, not the
+  // generic (and here nonsensical, self-referential) "the Lead has been notified" wording.
+  const d3dead = `rf-D3-dead-${sfx}`;
+  mkSession({ id: d3dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const pty8iii = new PtyStub();
+  const sessions8iii = new SessionService(db, pty8iii, new OrchestrationControl());
+  sessions8iii.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d2.lead, requestedAt: now, resume: [
+      { sessionId: d2.lead, role: "platform", parentSessionId: null },
+      { sessionId: d3dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: (sid) => sid !== d3dead },
+  );
+  await flush();
+  const msg8iii = pty8iii.getPending(d2.lead);
+  check("(8iii) Lead-as-requester gets exactly one notice", msg8iii.length === 1);
+  check("(8iii) Lead-as-requester's own notice does NOT prescribe the un-runnable worker_list check",
+    msg8iii.length === 1 && !/check worker_list/i.test(msg8iii[0]));
+  check("(8iii) Lead-as-requester's own notice carries the full identity directly (it IS the investigator)",
+    msg8iii.length === 1 && msg8iii[0].includes(d3dead) && msg8iii[0].includes(B.proj));
+  check("(8iii) Lead-as-requester's own notice names the idle (not busy) state accurately",
+    msg8iii.length === 1 && /idle at capture/i.test(msg8iii[0]));
 } finally {
   db.close();
   for (const repo of repoRoots) {
