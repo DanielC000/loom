@@ -8203,10 +8203,16 @@ export class SessionService {
       // reopened-ness visible IN the card body (the distinct heading below) lets the Lead decide
       // whether to move it, rather than Loom silently deciding for them.
       const reusedTask = this.db.getTask(taskId);
-      if (reusedTask) {
-        this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now, targetWasTerminal);
-        appended = true;
-      }
+      // Code Review Minor B (dffd5534): `outcome` below is derived as `created ? "created" : "appended"`
+      // — unconditional on `created` alone — while `appended` only ever flips true in this branch. A task
+      // deleted between the resolution read above and this re-read would otherwise fall through to a
+      // false "appended" success: no body write, no `appended` flag, a taskId for a deleted card. Make
+      // that case an explicit error instead of a silent success. UNREACHABLE today — this function takes
+      // no `await`, so nothing can delete the task in between — but latent and cheap to close now rather
+      // than leaving two fields that can silently disagree.
+      if (!reusedTask) throw new Error(`escalation target task ${taskId} no longer exists (deleted concurrently)`);
+      this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now, targetWasTerminal);
+      appended = true;
     } else {
       // Mode B fix (card 9315ddf9): no still-open escalation matches this title, so we're about to mint
       // a brand-new card — the shape that silently forked a finding when a reporter reasonably retitled

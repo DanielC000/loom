@@ -4176,8 +4176,10 @@ export class OrchestrationMcpRouter {
           "appending, with nothing in the response telling you that happened differently than you intended. " +
           "Pass `followUpOn:<taskId>` (the Platform task id THIS escalation returned, full id or an " +
           "unambiguous 8-char prefix) instead whenever you specifically mean 'append this to that thread' " +
-          "— it appends UNCONDITIONALLY (even to a card the Lead has already closed) and always notifies the " +
-          "Lead, and is rejected with {error} if the id doesn't resolve to one of YOUR OWN project's " +
+          "— it appends UNCONDITIONALLY (even to a card the Lead has already closed) and always files a " +
+          "durable board task; unless the completion-SHA de-dup suppresses it, it also nudges a live Lead — " +
+          "read `deliveryStatus` (it's the honest signal, never assume a live nudge happened). Rejected with " +
+          "{error} if the id doesn't resolve to one of YOUR OWN project's " +
           "previously filed escalations. Check the response's `outcome` (\"created\" | \"appended\") to know " +
           "for certain which happened either way — don't infer it from the title you sent. When `followUpOn` " +
           "was honored, the response also carries `followedUp:true`, and `targetWasTerminal:true` if the " +

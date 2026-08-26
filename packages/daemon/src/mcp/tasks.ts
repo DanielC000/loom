@@ -1199,6 +1199,20 @@ export async function updateProjectTask(
     const result = db.updateTaskChecked(owned.id, dbPatch, baseVersion);
     if (!result.ok) {
       if ("notFound" in result) return { error: "task not found (deleted concurrently)" };
+      // Code Review Minor A (dffd5534): an `appendBody` caller never supplies `baseVersion` — it's
+      // computed from a fresh re-read above (`:982`) and overwritten internally on every call — so the
+      // generic "retry with baseVersion, merging into the current body" advice is inert for it, and
+      // "merging into the current body" steers straight at the full-replace `body` write this feature
+      // exists to eliminate. A bare retry of the identical `appendBody` call re-reads the body itself and
+      // simply succeeds.
+      if (appendBody !== undefined) {
+        return {
+          error: "this task's body changed since the append was composed — retry the same appendBody call " +
+            "unchanged; it re-reads the current body and version itself, so there is nothing to merge",
+          conflict: true,
+          current: result.current,
+        };
+      }
       return {
         error: "this task's title/body changed since you last read it (or you never read it) — re-read it " +
           "(tasks_get) and retry with the current version as baseVersion, merging your change into the current body",
