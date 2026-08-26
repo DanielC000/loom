@@ -755,11 +755,32 @@ export function resolveSelection(hermetic, { only, exclude } = {}) {
 // didn't. Observation only (DoD-5: zero change to selection/ordering/concurrency/exit codes) — cheap
 // `process.memoryUsage`-class reads on a timer, no per-test synchronisation, no added subprocess (DoD-6).
 //
-// SCOPE CAVEAT (kickoff-mandated, not decoration): there is no cheap, reliable, cross-platform way to sum
-// a spawned test child's RSS without an added subprocess (no `/proc` on win32; a `tasklist`/`ps` shell-out
-// would itself be the added subprocess DoD-6 forbids). So this tracks the RUNNER process only — this
-// coordinating script, not its spawned test children — and the printed line says so explicitly rather than
-// claiming "process tree" for what is really one process.
+// SCOPE: this tracks the RUNNER process only — this coordinating script, not its spawned test children —
+// and the printed line says so explicitly rather than claiming "process tree" for what is really one
+// process. That scope is now a CHECKED, EVIDENCED, PERMANENT decision (card f1043732), not the original
+// speculative "no cheap way" claim it replaces — read the full history before re-attempting this:
+//
+// A `--import`-injected preload + an 'ipc' stdio channel CAN reach a spawned test child's own
+// `process.memoryUsage().rss` without any `/proc` read or `tasklist`/`ps` shell-out (no added subprocess
+// — DoD-6 respected) — that part of the original speculative comment was WRONG, and it was implemented,
+// merge-gated locally, and re-verified against the real harness. It was then REVERTED after it was found
+// to reproduce a real, structurally daemon-fatal upstream bug: node-pty issue #952 (WindowsPtyAgent's
+// ConPTY `kill()` races an uncaught `_getConsoleProcessList().then(...)` against a synchronous
+// `_ptyNative.kill(...)`) — confirmed via a controlled A/B/C/D/E experiment that merely attaching an IPC
+// channel + sending ANY `process.send()` (even a single one, at load, with no periodic timer and no exit
+// handler) is sufficient to crash `test/kickoff-real-spawn.mjs` deterministically (5/5+ across bundled and
+// solo runs), while the SAME channel attached with zero sends stayed clean (0/9). Two other PTY-spawning
+// files (boot-mode-settings-argv-coupling, spawn-command-line-preflight) were NOT similarly sensitive once
+// a periodic timer was removed, ruling out "IPC channel presence alone" as the trigger for those two — but
+// not for kickoff-real-spawn, which is uniquely and reliably sensitive to this file's OWN PTY-teardown
+// timing (not explained by `createPty` call count — it calls fewer than either of the other two).
+//
+// The full reproduction recipe (exact crash signature, exact configs tried, exact counts) is preserved in
+// this project's shared memory as `nodepty-952-conpty-kill-race-reproducer` — read that before trying this
+// again, and before assuming any future node-pty upgrade has fixed the underlying race (it names the
+// minimal config to re-test against). Do NOT re-attempt this by excluding kickoff-real-spawn (or any other
+// PTY-spawning file) by name — a name-list would pass today and silently regress the instant a new
+// PTY-spawning test is added, with nothing left to catch it.
 //
 // `readRssBytes` is injectable so a hermetic test can drive this with synthetic readings instead of
 // asserting real, non-deterministic process memory.
