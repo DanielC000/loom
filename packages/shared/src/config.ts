@@ -71,6 +71,16 @@ export function columnKeyForRole(
 
 /** §9 permission policy. Default is acceptEdits + a warmup/read allowlist (NOT blanket skip). */
 export interface PermissionPolicy {
+  /**
+   * Card 016ee373: `"default"` here is Loom's OWN config-facing name for the CLI's unlabeled normal
+   * mode — the real `claude` CLI has no `"default"` `--permission-mode` choice; its own name for it is
+   * `"manual"` (probe-verified against the installed CLI, `claude --help`). Kept in this union rather
+   * than removed: a config-contract change here could refuse a spawn for an existing stored config, and
+   * a live agent-facing write path (`packages/daemon/src/mcp/platform.ts`'s `permissionOverride` zod
+   * schema) already accepts `"default"` today, so its absence from any stored config can't be assumed.
+   * `packages/daemon/src/pty/claude-settings.ts`'s `toCliPermissionMode` maps it to `"manual"` at the
+   * spawn boundary instead — see that function's own doc.
+   */
   mode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
   /** Allowlist patterns, e.g. "Bash(git status:*)". Auto-approved so warmup never blocks. */
   allow: string[];

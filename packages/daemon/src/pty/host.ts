@@ -11,7 +11,7 @@ import { resolveProfileCapabilities } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
-import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
+import { writeSessionSettings, writeSessionMcpConfig, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { injectSkills } from "../skills/inject.js";
@@ -1064,8 +1064,24 @@ const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", 
  * off this list defensively, matching {@link HEALABLE_MODES}'s style) and `default`/`unknown` (not
  * confirmed as accepted flag values — booting those still climbs off `acceptEdits` via the unchanged
  * Shift+Tab convergence below).
+ *
+ * Card 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` (not bare `ReadonlySet<LandedMode>`)
+ * so the initializer itself is a compile-time guard: a value that is a `LandedMode` but NOT a CLI-accepted
+ * `--permission-mode` value (e.g. `"default"`) — or vice versa — can no longer be added here without a
+ * `tsc` failure (proof: adding `"default"` to this initializer was shown to fail with TS2769 — see this
+ * card's worker_report for the pasted compiler output; not committed here as a permanent fixture since
+ * `tsc` itself IS the regression test for a type-level invariant).
  */
-const DIRECT_BOOT_MODES: ReadonlySet<LandedMode> = new Set(["acceptEdits", "plan", "auto"]);
+const DIRECT_BOOT_MODES: ReadonlySet<LandedMode & CliPermissionMode> = new Set<LandedMode & CliPermissionMode>(["acceptEdits", "plan", "auto"]);
+/**
+ * Bridges a plain `LandedMode` read (e.g. `resolveModeTarget`'s output) to the `LandedMode & CliPermissionMode`
+ * DIRECT_BOOT_MODES actually stores — `Set<T>.has` requires its argument to already be of type `T`, which a
+ * bare `LandedMode` (a strict superset) is not, so this is the one place that bridges the two via a type
+ * predicate instead of loosening DIRECT_BOOT_MODES's own declared type back to `LandedMode`.
+ */
+function isDirectBootMode(mode: LandedMode): mode is LandedMode & CliPermissionMode {
+  return (DIRECT_BOOT_MODES as ReadonlySet<LandedMode>).has(mode);
+}
 /**
  * Card 5d4a4d02 — THE single owner of the target-mode derivation: an explicit `resumeModeTarget` wins;
  * otherwise, if `startupModeCycles` is set, the target it derives via {@link modeAfterCyclesFromAcceptEdits};
@@ -1081,13 +1097,17 @@ export function resolveModeTarget(o: { resumeModeTarget?: LandedMode | null; sta
  * Card 51926260 — PURE decision for the boot `--permission-mode` VALUE createPty passes to
  * buildSpawnArgs: this session's actual target mode directly (from {@link resolveModeTarget}, the SAME
  * derivation the post-SessionStart convergence block and `logLandedMode`'s heal call), when that target is
- * itself one of DIRECT_BOOT_MODES; otherwise the raw `permission.mode` (today always `acceptEdits`)
- * unchanged. Exported so a hermetic test can assert this decision with no real claude — mirrors why
- * `nextCycleAction` is exported.
+ * itself one of DIRECT_BOOT_MODES; otherwise the raw `permission.mode` (today always `acceptEdits`),
+ * normalized through {@link toCliPermissionMode} in case it's the config-facing `"default"` alias. Exported
+ * so a hermetic test can assert this decision with no real claude — mirrors why `nextCycleAction` is
+ * exported.
+ *
+ * Card 016ee373 — return type is now `CliPermissionMode` (not bare `string`): every path out of this
+ * function is now a value the real CLI actually accepts as `--permission-mode`, compile-time enforced.
  */
-export function computeBootMode(permission: { mode: string; startupModeCycles?: number }, resumeModeTarget?: LandedMode | null): string {
+export function computeBootMode(permission: { mode: PermissionPolicy["mode"]; startupModeCycles?: number }, resumeModeTarget?: LandedMode | null): CliPermissionMode {
   const bootTarget = resolveModeTarget({ resumeModeTarget, startupModeCycles: permission.startupModeCycles });
-  return bootTarget && DIRECT_BOOT_MODES.has(bootTarget) ? bootTarget : permission.mode;
+  return bootTarget && isDirectBootMode(bootTarget) ? bootTarget : toCliPermissionMode(permission.mode);
 }
 /**
  * `setPermissionMode` (worker_set_mode) outer retry bound (card 9c03f5a6) — how many FULL cycleToMode
@@ -4792,7 +4812,13 @@ export class PtyHost {
     // or the two boot-mode mechanisms could disagree about where this session actually lands. See
     // computeBootMode's own doc for what/why.
     const bootMode = computeBootMode(permission, opts.resumeModeTarget);
-    const settingsPath = writeSessionSettings(opts.sessionId, bootMode === permission.mode ? permission : { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath);
+    // Card 016ee373: always spread (dropping the prior `bootMode === permission.mode` reuse-`permission`
+    // optimization) — `permission.mode` is `PermissionPolicy["mode"]` (still permits "default"), which is
+    // no longer assignable to writeSessionSettings's now-narrower `CliPermissionMode` param even when the
+    // two happen to be runtime-equal; `bootMode` (already a `CliPermissionMode`) is the only value that
+    // type-checks here. Byte-identical output for every currently-reachable config: `bootMode` was already
+    // written into `.mode` on both branches of the old ternary.
+    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion

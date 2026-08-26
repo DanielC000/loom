@@ -201,15 +201,44 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `PtyHost.verifyHookToken`'s doc for exactly what this does and does not close. Placed BEFORE the
  * optional `vaultPath` — TypeScript disallows a required param after an optional one.
  */
+/**
+ * Card 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values (and, byte-for-byte, the only
+ * values `settings.json`'s `permissions.defaultMode` may carry, since the CLI reads both against the same
+ * vocabulary). Probe-verified: `claude --help` on the installed `claude` (2.1.246) lists exactly these six
+ * as `--permission-mode`'s choices. VERSION-PINNED, not derived — re-run `claude --help` and read
+ * `--permission-mode`'s choices list to re-verify this set against a newer CLI; do NOT hand-copy this list
+ * anywhere else — this file's own `writeSessionSettings` below and host.ts's `DIRECT_BOOT_MODES`/
+ * `computeBootMode` both import this type rather than re-declaring it.
+ */
+export type CliPermissionMode = "acceptEdits" | "auto" | "bypassPermissions" | "manual" | "dontAsk" | "plan";
+
+/**
+ * Card 016ee373 — `PermissionPolicy["mode"]` still permits `"default"` (Loom's own config-facing name for
+ * the CLI's unlabeled normal mode), but the CLI itself has no `"default"` choice — its own name for that
+ * mode is `"manual"` (confirmed via `claude --help`, see {@link CliPermissionMode}'s own doc). Decision
+ * recorded here (card 016ee373 DoD-2, option (a)): map at THIS boundary rather than removing `"default"`
+ * from `PermissionPolicy["mode"]` — removing it would be a config-contract change, and a live write path
+ * already accepts `"default"` today (`packages/daemon/src/mcp/platform.ts`'s `permissionOverride` zod
+ * schema), so a stored project config carrying `"default"` cannot be ruled out. Every other
+ * `PermissionPolicy["mode"]` value already IS a {@link CliPermissionMode} member and passes through
+ * unchanged.
+ */
+export function toCliPermissionMode(mode: PermissionPolicy["mode"]): CliPermissionMode {
+  return mode === "default" ? "manual" : mode;
+}
+
 export function writeSessionSettings(
   sessionId: string,
-  // Card 51926260: `mode` is `string`, not the narrower `PermissionPolicy["mode"]` — the caller may pass
-  // the session's DIRECTLY-computed boot target (e.g. "auto", not one of PermissionPolicy.mode's 4
-  // literals) here, and this must stay byte-consistent with whatever `--permission-mode` value the same
-  // call's `buildSpawnArgs` receives (see host.ts's createPty, computeBootMode). This function only ever
-  // reads `.mode`/`.allow`/`.deny` off it (see `defaultMode`/`allow`/`deny` below), so narrowing to
-  // exactly those three fields — rather than requiring the full `PermissionPolicy` — costs nothing.
-  permission: { mode: string; allow: PermissionPolicy["allow"]; deny: PermissionPolicy["deny"] },
+  // Card 51926260: `mode` is the CLI-accepted `CliPermissionMode`, not the narrower `PermissionPolicy["mode"]`
+  // — the caller may pass the session's DIRECTLY-computed boot target (e.g. "auto", not one of
+  // PermissionPolicy.mode's literals) here, and this must stay byte-consistent with whatever
+  // `--permission-mode` value the same call's `buildSpawnArgs` receives (see host.ts's createPty,
+  // computeBootMode). Card 016ee373 narrowed this from a bare `string` to `CliPermissionMode` so an
+  // unaccepted value is now a compile-time error, not just a documented invariant — callers normalize a
+  // raw `PermissionPolicy["mode"]` through {@link toCliPermissionMode} first. This function only ever reads
+  // `.mode`/`.allow`/`.deny` off it (see `defaultMode`/`allow`/`deny` below), so narrowing to exactly those
+  // three fields — rather than requiring the full `PermissionPolicy` — costs nothing.
+  permission: { mode: CliPermissionMode; allow: PermissionPolicy["allow"]; deny: PermissionPolicy["deny"] },
   hookToken: string,
   vaultPath?: string,
 ): string {
