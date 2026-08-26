@@ -2814,6 +2814,21 @@ interface Live {
    * signature have been suppressed", never a lifetime total across unrelated events.
    */
   lastMismatchNoticeSuppressed: { gen: number; writtenHash: string; reportedHash: string; count: number; detectedAt: number } | null;
+  /**
+   * Card 72cab648 — the SENDER pull-surface for the bare-paste-placeholder tripwire's own GIVE-UP: its
+   * one-shot auto-recovery re-injection (`isPasteRecoveryAttempt`, this file) ALSO collapsed, and Loom will
+   * not retry a third time. Before this field, the give-up's only channels were a bare `console.warn` (card
+   * eef4883c) and, since card 47c11741, an attention-path `enqueueSystemNudge` to the session and its
+   * sender — pinned memory `shipping-a-detector-is-not-someone-reading-it` measured an advisory in that
+   * attention path at ZERO acted-on across every instance tracked, versus a precondition/pull-surface read
+   * at the point of use, which is what actually gets checked. This is that pull-surface — read at the SAME
+   * `worker_list`/`worker_status` point a manager already reads `lastMismatchReplay`/`lastMismatchFusion` —
+   * purely additive on top of both existing channels (the `console.warn` and the nudge are untouched).
+   * Same PULL-surface mechanics as its siblings: `null` = no give-up has fired yet since this session went
+   * live, `undefined` (see the getter) = session not live in this process, never cleared once set,
+   * overwritten (not accumulated) by a later occurrence — always reflects the LATEST give-up only.
+   */
+  lastPasteTripwireGiveUp: { gen: number; token: string | null; engineSessionId: string | null; detectedAt: number } | null;
 }
 
 export interface SpawnOpts {
@@ -4367,6 +4382,7 @@ export class PtyHost {
       activeTurnProactive: false,
       lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastPasteTripwireGiveUp: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
@@ -4545,6 +4561,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -4629,6 +4646,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       lastMismatchReplay: null, lastMismatchFusion: null, lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
@@ -5975,7 +5993,12 @@ export class PtyHost {
               // nothing else (no db.appendEvent, no nudge, zero consumers outside this log line). Purely
               // additive: the warn above is untouched, this just gives the give-up a real, queryable
               // channel on top of it.
-              this.events.onPasteTripwireGiveUp?.(sessionId, { token: matchEmbeddedPlaceholderToken(stats?.lastUserText), engineSessionId: live.engineSessionId ?? null });
+              const giveUpToken = matchEmbeddedPlaceholderToken(stats?.lastUserText);
+              // Card 72cab648: ALSO set the pull-surface (see `Live.lastPasteTripwireGiveUp`'s own doc) —
+              // purely additive alongside the event above; the event feeds the attention-path nudge/db
+              // record (47c11741), this feeds worker_list/worker_status for a watching manager.
+              live.lastPasteTripwireGiveUp = { gen: live.submitGeneration, token: giveUpToken, engineSessionId: live.engineSessionId ?? null, detectedAt: Date.now() };
+              this.events.onPasteTripwireGiveUp?.(sessionId, { token: giveUpToken, engineSessionId: live.engineSessionId ?? null });
             }
             if (!isRecoveryAttempt) {
               // Defer OUTSIDE the M2 synchronous window (see the box above deliverHook's Stop/StopFailure
@@ -9338,6 +9361,16 @@ export class PtyHost {
    *  repeats of the SAME signature) by a later occurrence. */
   getLastMismatchNoticeSuppressed(sessionId: string): Live["lastMismatchNoticeSuppressed"] | undefined {
     return this.live.get(sessionId)?.lastMismatchNoticeSuppressed;
+  }
+
+  /** Card 72cab648: the SENDER pull-surface for the bare-paste-placeholder tripwire's own GIVE-UP — see
+   *  `Live.lastPasteTripwireGiveUp`'s own doc for what it fires on (the one-shot auto-recovery re-injection
+   *  ALSO collapsed) and why it exists alongside the `console.warn` (eef4883c) and the attention-path
+   *  `enqueueSystemNudge` (47c11741) rather than replacing either. Same PULL-surface mechanics as its
+   *  siblings: `null` = no give-up has fired yet since this session went live, `undefined` = session not
+   *  live in this process, never cleared once set, overwritten (not accumulated) by a later occurrence. */
+  getLastPasteTripwireGiveUp(sessionId: string): Live["lastPasteTripwireGiveUp"] | undefined {
+    return this.live.get(sessionId)?.lastPasteTripwireGiveUp;
   }
 
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on

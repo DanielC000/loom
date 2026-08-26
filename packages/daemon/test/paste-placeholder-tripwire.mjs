@@ -462,12 +462,20 @@ try {
     // give-up branch (isRecoveryAttempt collapsing AGAIN), not merely on "a recovery turn happened at all."
     check("RECOVERY (i) NEGATIVE CONTROL (card 47c11741): a cleanly-resolved recovery emits NOTHING on the new give-up channel — byte-identical to pre-card behavior",
       giveUpLog.length === 0);
+    // NEGATIVE CONTROL (card 72cab648): the SENDER pull-surface (Live.lastPasteTripwireGiveUp,
+    // worker_list/worker_status' getLastPasteTripwireGiveUp) is a DIFFERENT channel from the
+    // onPasteTripwireGiveUp event above (same trigger, but stored on Live for a later read rather than
+    // fired once) — prove it independently stays null on the same clean-resolution case, not just that
+    // the event stayed silent.
+    check("RECOVERY (i) NEGATIVE CONTROL (card 72cab648): the pull-surface stays null — a cleanly-resolved recovery never sets lastPasteTripwireGiveUp",
+      host.getLastPasteTripwireGiveUp(SID) === null);
   }
 
   // (k) RECOVERY-ESCALATE, the loop-safety proof: the RECOVERY re-injection ITSELF collapses. Must NOT
   // chain a second recovery attempt — must escalate instead. This is the one-shot bound: `submittedText`
   // for the recovery turn carries PASTE_RECOVERY_TAG, so `isPasteRecoveryAttempt` recognizes it and the
   // host.ts call site takes the escalate branch rather than scheduling another setTimeout/enqueueStdin.
+  let pullSurfaceK = null; // captured for (l)'s own overwrite-not-accumulate cross-check below
   {
     const longPaste2 = "second scenario line\n".repeat(4) + "final line two";
     const writesBefore = fake.writes.length;
@@ -505,6 +513,18 @@ try {
     check("RECOVERY (k): the give-up event carries the placeholder token from THIS collapse",
       giveUpLog[0]?.token === "[Pasted text #23 +9 lines]");
     giveUpLog.length = 0; // consumed — reset for the next block's own delta assertion
+
+    // POSITIVE CONTROL (card 72cab648, DoD-3/4 — the MANDATORY forced-double-collapse proof): the SENDER
+    // pull-surface must fire on the exact same forced double-collapse, independently of the
+    // onPasteTripwireGiveUp event above — a signal for a rare path that is never exercised is
+    // indistinguishable from one that doesn't work, which is the defect this card exists to fix.
+    pullSurfaceK = host.getLastPasteTripwireGiveUp(SID);
+    check("RECOVERY (k) POSITIVE CONTROL (card 72cab648): the pull-surface (lastPasteTripwireGiveUp) is set on the forced double-collapse",
+      pullSurfaceK !== null && pullSurfaceK !== undefined);
+    check("RECOVERY (k): the pull-surface carries this collapse's own placeholder token",
+      pullSurfaceK?.token === "[Pasted text #23 +9 lines]");
+    check("RECOVERY (k): the pull-surface carries this session's engineSessionId and a real numeric gen/detectedAt",
+      pullSurfaceK?.engineSessionId === ENGINE_ID && typeof pullSurfaceK?.gen === "number" && typeof pullSurfaceK?.detectedAt === "number");
   }
   // (l) card 78e4b3f2 REGRESSION GUARD, RED-FIRST: the recovery re-injection ITSELF can be a genuine
   // physical RE-DELIVERY — an in-session give-up requeue that redrained marks its text
@@ -546,6 +566,17 @@ try {
     check("(l) card 47c11741: the give-up event carries this collapse's own placeholder token",
       giveUpLog[0]?.token === "[Pasted text #77 +2 lines]");
     giveUpLog.length = 0;
+
+    // POSITIVE CONTROL (card 72cab648): the pull-surface fires here too (a MARKED recovery's give-up must
+    // not defeat it either, mirroring the give-up event's own (l) assertion above), and OVERWRITES rather
+    // than accumulates — this collapse's token replaces (k)'s, never appending alongside it.
+    const pullSurfaceL = host.getLastPasteTripwireGiveUp(SID);
+    check("(l) card 72cab648: the pull-surface fires for a MARKED recovery's own collapse too",
+      pullSurfaceL !== null && pullSurfaceL !== undefined);
+    check("(l) card 72cab648: the pull-surface carries THIS collapse's own token, not (k)'s",
+      pullSurfaceL?.token === "[Pasted text #77 +2 lines]" && pullSurfaceL?.token !== pullSurfaceK?.token);
+    check("(l) card 72cab648: the pull-surface is OVERWRITTEN not accumulated — still a single object, its detectedAt advanced past (k)'s",
+      typeof pullSurfaceL?.detectedAt === "number" && pullSurfaceL.detectedAt >= pullSurfaceK?.detectedAt);
   }
 
   // (m) STALENESS ANNOTATION (card 4af5aefa): the actual live specimen was minted CORRECTLY (its content
@@ -701,6 +732,11 @@ try {
   // should have added to it.
   check("FINAL NEGATIVE CONTROL (card 47c11741): no further onPasteTripwireGiveUp firings from the non-give-up (m)/(n) scenarios",
     giveUpLog.length === 0);
+  // FINAL NEGATIVE CONTROL (card 72cab648): same reasoning for the pull-surface — it is STICKY (never
+  // cleared) so the correct outcome after (m)/(n)'s non-give-up scenarios is that it still holds exactly
+  // (l)'s own value, unchanged — neither reset to null nor overwritten by anything since.
+  check("FINAL NEGATIVE CONTROL (card 72cab648): the pull-surface still holds (l)'s own value, untouched by the non-give-up (m)/(n) scenarios",
+    host.getLastPasteTripwireGiveUp(SID)?.token === "[Pasted text #77 +2 lines]");
 } finally {
   console.warn = realWarn;
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
