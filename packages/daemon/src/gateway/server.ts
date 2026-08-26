@@ -5561,10 +5561,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Fleet delta-push transport (C2 of umbrella 1efde4ba): ONE socket per client/tab, NOT per session
-  // (contrast /ws/term above). TRANSPORT SKELETON ONLY — no data feeds flow yet (session/status/event
-  // emission are later cards, C3/C5/C7); this card just registers the socket, sends the hello handshake,
-  // and records/clears the caller's per-manager event subscriptions on the hub for those later cards to
-  // read. See gateway/fleet-hub.ts.
+  // (contrast /ws/term above). Of the three data feeds, only SESSION is wired: Db.sessionChangeListener
+  // → fleetHub.markSessionDirty → flushDirty → session:upsert/session:remove (fleet-hub.ts) — live, but
+  // INERT until a client attaches (markSessionDirty's `sockets.size === 0` early-out). STATUS has no
+  // producer anywhere in FleetHub — pausedScopes/schedulerEnabled are still REST-only, via
+  // /api/orchestration/status. EVENT is still pending C7 (broadcastEvent has no call sites yet). This
+  // card just registers the socket, sends the hello handshake, and records/clears the caller's
+  // per-manager event subscriptions on the hub for those later cards to read. See gateway/fleet-hub.ts.
   app.get("/ws/fleet", { websocket: true }, (socket: WebSocket) => {
     fleetHub.add(socket);
     socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
