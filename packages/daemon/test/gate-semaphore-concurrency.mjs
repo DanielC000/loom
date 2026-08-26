@@ -334,6 +334,53 @@ const worktrees = [];
   }
 }
 
+// ── PER-WORKTREE ADMISSION GUARD RELEASE-PATH EXHAUSTIVENESS (card 1f1f3d12) — `activeWorktrees` (card
+// 8d585277) shares the SAME `release()` body as `activeMergeRepos` above, but only had coverage on the
+// CLEAN-RESOLVE path (gate-cancel.mjs's own per-worktree-exclusivity block: task B is admitted once task
+// A resolves normally — genuine clean-resolve release evidence, just never labeled as such). Mirrors the
+// (d2)/(d4) idiom immediately above — same file, same shape, same `runExclusive` primitive — for the two
+// OTHER terminal shapes a leaked hold here would deadlock forever: a throwing `fn`, and an
+// abort-while-RUNNING `fn` that honors the signal by throwing. (d1) clean-resolve and (d3)
+// queued-then-cancelled are DELIBERATELY OMITTED: (d1) already has coverage (above), and `admit()` is the
+// ONLY site that adds to `activeWorktrees`, so a queued-then-cancelled entry never enters the Set —
+// trivially safe by construction, not release coverage (card 1f1f3d12's own DoD-2).
+{
+  const worktreeDesc = (id, worktreePath) => ({ gateType: "worker", projectId: `proj-${id}`, sessionId: `sess-${id}`, worktreePath });
+
+  // Prove `activeWorktrees` freed `worktreePath`, via the ONLY externally-observable proof available (no
+  // direct access to the private Set): a FRESH op bound to the SAME worktree admits near-instantly
+  // afterward — if the hold were still (incorrectly) held, this probe would itself hang/queue.
+  const worktreeFreedAfter = async (sem, worktreePath) => {
+    const started = Date.now();
+    await sem.runExclusive(2, worktreeDesc(`probe-${Date.now()}`, worktreePath), async () => "probe");
+    return Date.now() - started < 200;
+  };
+
+  // (w2) a throwing fn (a real runner exception/kill/timeout all look the same here)
+  {
+    const sem = new GateSemaphore();
+    await sem.runExclusive(2, worktreeDesc("w2", "/wt/w2"), async () => { throw new Error("boom"); }).catch(() => {});
+    check("(worktree-mutex, w2) a throwing fn still frees the worktree hold", await worktreeFreedAfter(sem, "/wt/w2"));
+  }
+  // (w4) asked to stop while RUNNING (fn honors the abort signal by throwing — mirrors how a real gate
+  // step's runner reacts to `cancelRunning`)
+  {
+    const sem = new GateSemaphore();
+    const p = sem.runExclusive(1, worktreeDesc("w4", "/wt/w4"), async (_startedAt, cancelSignal) => {
+      await new Promise((_resolve, reject) => {
+        cancelSignal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }).catch((e) => e);
+    await sleep(20); // let it genuinely admit
+    const runningId = sem.snapshot().entries.find((e) => e.phase === "running")?.id;
+    check("(worktree-mutex, w4) precondition: a running entry exists to cancel", !!runningId);
+    check("(worktree-mutex, w4) cancelRunning reports it asked a live entry", sem.cancelRunning(runningId, "test-abort") === true);
+    const result = await p;
+    check("(worktree-mutex, w4) the running fn actually threw on abort", result instanceof Error && result.message === "aborted");
+    check("(worktree-mutex, w4) an aborted-then-thrown run still frees the worktree hold", await worktreeFreedAfter(sem, "/wt/w4"));
+  }
+}
+
 // ── REPO-GUARD-ONLY PRIMITIVE (card b9e07a4a): acquireRepoGuardOnly ────────────────────────────────
 // Built for the `db9b0130` inert-diff skip: it never calls runExclusive (no gate to run), so it was
 // structurally invisible to the per-repo merge-admission guard entirely — b9e07a4a's reachability
