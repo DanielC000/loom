@@ -1667,6 +1667,28 @@ export function frameFromManager(text: string, tagSuffix?: string): string {
  *  mistook it for. */
 const FROM_MANAGER_HEADER_RE = new RegExp(`^\\[${FROM_MANAGER_TAG}(?::[a-z-]+)?\\]\\n`);
 
+/**
+ * Card f907c8c4 DoD-1: matches `messagePeerManager`'s own peer-frame tag — the RICHER cross-project
+ * variant (`[loom:from-manager · <name> · projectId:<id> · sessionId:<id>]`) — and ONLY that variant.
+ * The TAG ITSELF is derived from {@link FROM_MANAGER_TAG} (same reason {@link FROM_MANAGER_HEADER_RE}
+ * derives it, not a second hand-typed literal — a future change to the tag must not silently strand this
+ * pattern behind it). What's deliberately distinct from `FROM_MANAGER_HEADER_RE` is the SHAPE after the
+ * tag, not the tag: the plain worker-directed frame closes the bracket right after the tag/`:suffix` with
+ * no ` · ` fields, so a worker_message/redirect frame never matches this pattern and a peer frame never
+ * matches that one. Used by {@link carryPendingToSuccessor} to label a carried PEER message with a
+ * successor-inheritance notice (below) — scoped to cross-project peer_message frames only, never a
+ * worker/session/platform-directed carry.
+ *
+ * `[^\]]*` stops at the FIRST `]`, so a peer project literally named with a `]` in it (e.g. "Loom [dev]")
+ * produces a frame this pattern won't match, and the inheritance label below is silently skipped for that
+ * one delivery. Deliberately left as-is: under-labelling fails CLOSED (a successor loses some context, no
+ * worse than before this fix), whereas widening the pattern to swallow an embedded `]` risks the opposite,
+ * more dangerous direction — over-matching into an ordinary worker-directed frame and spuriously labelling
+ * it, exactly what the discriminating negative control in peer-message-recycle-inheritance.mjs exists to
+ * catch. Do not "fix" this without re-checking that control still holds.
+ */
+const PEER_MESSAGE_FRAME_RE = new RegExp(`^\\[${FROM_MANAGER_TAG} · [^\\]]*\\]\\n`);
+
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
 const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
   const ctrl = new AbortController();
@@ -7913,6 +7935,14 @@ export class SessionService {
    * carrying the ORIGINAL sender/taskId so an undelivered re-mint still surfaces to its sender on boot).
    * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source AND their
    * warning/agent classification preserved.
+   *
+   * Card f907c8c4 DoD-1: a re-minted record whose text is a {@link PEER_MESSAGE_FRAME_RE} peer_message
+   * frame gets an INHERITANCE label prepended before re-mint — the measured incident this card fixes: a
+   * cross-project peer_message queued for `oldId` (busy/not-ready) that only drains here, onto a fresh
+   * successor that never saw the thread (e.g. a farewell delivered to a manager with no context for it).
+   * Scoped to peer frames ONLY (never a worker/session/platform-directed carry) — additive-and-tolerant to
+   * the receiving project's manager, since the underlying `[loom:from-manager · …]` frame this card's own
+   * design constraint protects is left byte-identical; the label is a separate paragraph ahead of it.
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
@@ -7943,7 +7973,13 @@ export class SessionService {
       const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
       if (text === null) continue; // malformed — nothing to re-drive
       const sender = (typeof rec.detail?.sender === "string" && rec.detail.sender) ? rec.detail.sender : rec.managerSessionId;
-      this.enqueueDurableMessage(successorId, text, { sender, taskId: rec.taskId ?? null });
+      // Card f907c8c4 DoD-1: a peer_message frame carried here was addressed to `oldId`, which recycled
+      // before delivering it — label it as inherited so the successor doesn't read a bare, contextless
+      // message (see this method's own doc + PEER_MESSAGE_FRAME_RE's doc for the full reasoning/scope).
+      const carriedText = PEER_MESSAGE_FRAME_RE.test(text)
+        ? `[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${text}`
+        : text;
+      this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null });
     }
   }
 
