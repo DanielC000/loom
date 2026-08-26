@@ -150,6 +150,37 @@ try {
   const ordSess = await call("list_all_sessions", { projectId: "pOrd" });
   check("list_all_sessions (projectId): all rows belong to that project", ordSess.length >= 4 && ordSess.every((s) => s.projectId === "pOrd"));
 
+  // ---- scope (card 2fb68e76, DoD-1): live/archived/all — mirrors the auditor's list_sessions axis
+  // (transcript-read.ts) exactly. Default (scope omitted) MUST stay byte-identical to the pre-scope
+  // behavior (archived excluded) — that back-compat guarantee is what this block RED-proofs first: a
+  // regression that flips the default to "all" (or otherwise leaks SARCH into the default read) fails
+  // the very next check, before any scope-specific assertion runs.
+  db.insertSession({
+    id: "SARCH", projectId: "pOrd", agentId: "agentWork", engineSessionId: null, title: null, cwd: repo,
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role: null, parentSessionId: null,
+  });
+  db.archiveSession("SARCH");
+  const defaultScopeSess = await call("list_all_sessions", { projectId: "pOrd" });
+  check("list_all_sessions (scope omitted, DEFAULT): archived session EXCLUDED — byte-identical to pre-scope behavior",
+    !defaultScopeSess.some((s) => s.id === "SARCH"));
+  const liveScopeSess = await call("list_all_sessions", { projectId: "pOrd", scope: "live" });
+  check("list_all_sessions (scope:\"live\"): archived session EXCLUDED (explicit, same as default)",
+    !liveScopeSess.some((s) => s.id === "SARCH"));
+  const archScopeSess = await call("list_all_sessions", { projectId: "pOrd", scope: "archived" });
+  check("list_all_sessions (scope:\"archived\"): ONLY the archived row, live rows excluded",
+    archScopeSess.length > 0 && archScopeSess.every((s) => s.id === "SARCH"));
+  const allScopeSess = await call("list_all_sessions", { projectId: "pOrd", scope: "all" });
+  check("list_all_sessions (scope:\"all\"): includes BOTH a live row (PL) and the archived row (SARCH)",
+    allScopeSess.some((s) => s.id === "PL") && allScopeSess.some((s) => s.id === "SARCH"));
+  // Archived rows are ALWAYS kept regardless of `state` — mirrors list_sessions' contract exactly (an
+  // archived row is exited-by-construction and IS the intended history; `state` only thins non-archived
+  // rows). SARCH's own processState is still "live" (archiving never touches it) — its survival here can
+  // ONLY be explained by the archived-exemption, not by coincidentally matching state:"exited".
+  const allScopeExitedState = await call("list_all_sessions", { projectId: "pOrd", scope: "all", state: "exited" });
+  check("list_all_sessions (scope:\"all\", state:\"exited\"): archived SARCH survives the exited-state filter anyway, live PL does not",
+    allScopeExitedState.some((s) => s.id === "SARCH") && !allScopeExitedState.some((s) => s.id === "PL"));
+
   // ---- 8-char id-PREFIX resolution for list_all_sessions (card 7097f3fb) — mirrors project_get/
   // list_all_tasks: a full id OR an unambiguous 8-char prefix resolves the SAME rows; unknown/ambiguous
   // is an EXPLICIT error, never a silent []. ----
@@ -394,6 +425,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, and template_apply rejects an unknown templateName/projectId with nothing written — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, template_apply rejects an unknown templateName/projectId with nothing written, and list_all_sessions' scope axis (card 2fb68e76) defaults to archived-excluded (byte-identical to its pre-scope behavior) while scope:\"archived\"/\"all\" opt archived rows in and exempt them from the state filter — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

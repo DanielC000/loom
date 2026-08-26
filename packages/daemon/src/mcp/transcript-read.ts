@@ -43,10 +43,15 @@ export function registerTranscriptReadTools(
       description:
         "List sessions across the platform to choose which transcripts to audit. scope (default \"all\"): " +
         "\"live\" = non-archived sessions; \"archived\" = archived sessions only; \"all\" = every session " +
-        "including archived. state (default \"live\", mirrors list_all_sessions): \"live\" drops long-exited " +
-        "(finished-but-unarchived) sessions so the default feed stays bounded; \"exited\"/\"all\" opt that " +
-        "history back in. ARCHIVED rows are the auditor's intended history and are ALWAYS kept regardless of " +
-        "state. NOTE: short-lived WORKER sessions usually EXIT once their task lands, so the default state:\"live\" " +
+        "including archived. state (default \"live\", mirrors the STATE contract of both list_all_sessions " +
+        "tools — the Platform Lead's mcp/platform.ts and the setup operator's mcp/setup.ts — exactly): " +
+        "\"live\" drops long-exited (finished-but-unarchived) sessions so the default feed stays bounded; " +
+        "\"exited\"/\"all\" opt that history back in. ARCHIVED rows are the auditor's intended history and " +
+        "are ALWAYS kept regardless of state. ⚠️ ONLY `state` mirrors — the SCOPE (archive-visibility) axis " +
+        "does NOT: this tool defaults scope to \"all\" (archived included); the Lead's list_all_sessions " +
+        "carries its OWN `scope` param defaulting to \"live\" (archived excluded, opt in explicitly — card " +
+        "2fb68e76); the setup operator's list_all_sessions has no `scope` param at all and can NEVER see " +
+        "archived rows (a deliberate least-privilege choice, card 2fb68e76 DoD-3). NOTE: short-lived WORKER sessions usually EXIT once their task lands, so the default state:\"live\" " +
         "feed shows mostly managers/operators — pass state:\"all\" (or scope:\"all\") to include finished workers " +
         "when auditing worker behavior. Optional projectId narrows to one project. DEFAULT returns a lightweight " +
         "SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, " +

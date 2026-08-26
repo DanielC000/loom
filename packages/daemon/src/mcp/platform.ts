@@ -1142,16 +1142,17 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare sessions array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {sessions, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
+        description: "List sessions across the platform, each enriched with its project + agent name. scope (default \"live\", mirrors the auditor's list_sessions axis in transcript-read.ts — card 2fb68e76): \"live\" = archived sessions excluded entirely (this tool's ORIGINAL pre-scope default; a caller that never passes scope sees byte-identical results to before this param existed); \"archived\" = archived sessions ONLY; \"all\" = every session including archived. ⚠️ Any worktreePath/branch aliasing or cross-session-history question asked at the default scope is structurally UNDER-COUNTED: the dangling half of a worktree-path pairing (a stopped/crashed worker whose worktree still lingers) is overwhelmingly an ARCHIVED row, invisible unless scope is \"archived\" or \"all\" — don't conclude \"no aliases\" from a live-only read. 📌 For a PRECISE per-worker aliasing check (not a platform-wide enumeration), prefer a manager's worker_list/worker_status \`worktreePathAliases\` field first (card e55371c1) — it's already exact-string-keyed on the same worktree_path column this tool's scope axis reads, already includes archived rows (no scope needed there), and is already per-project-complete (a worktreePath is scoped by projectId, so it can never alias across projects). Reach for scope here only for CROSS-PROJECT DISCOVERY/audit — enumerating every session (incl. archived) to find aliases you don't already know to look for — since worker_list is per-manager-lineage-scoped and can't see another manager's rows. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. ARCHIVED rows are ALWAYS kept regardless of state (an archived row is exited-by-construction and IS the intended history) — state only thins non-archived rows, exactly mirroring list_sessions' contract. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare sessions array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {sessions, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
+          scope: z.enum(["all", "live", "archived"]).optional(),
           state: z.enum(["live", "exited", "all"]).optional(),
           full: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
         }),
       },
-      async ({ projectId, state, full, limit, offset }) => {
+      async ({ projectId, scope, state, full, limit, offset }) => {
         // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_tasks) —
         // full id OR unambiguous 8-char prefix, error on unknown/ambiguous — so it can never silently
         // read as a sessionless project (card 7097f3fb).
@@ -1161,7 +1162,19 @@ export class PlatformMcpRouter {
           if ("error" in project) return ok(project);
           resolvedProjectId = project.id;
         }
-        const all = filterSessionsByState(db.listAllSessions(), state ?? "live");
+        // scope (card 2fb68e76) selects the BASE row-set, mirroring list_sessions' axis (transcript-read.ts)
+        // exactly. Default omitted-scope ("live") reuses db.listAllSessions() unchanged, so an existing
+        // caller that never passes scope gets byte-identical results to before this param was added.
+        const rawAll =
+          scope === "archived" ? db.listAllArchivedSessions()
+          : scope === "all" ? db.listAllSessionsIncludingArchived()
+          : db.listAllSessions(); // "live" (default): archived excluded — the pre-scope behavior
+        // state filters only NON-archived rows; archived rows are ALWAYS kept regardless of state (an
+        // archived row is exited-by-construction and IS the intended history) — mirrors list_sessions.
+        const keepNonArchived = new Set(
+          filterSessionsByState(rawAll.filter((s) => s.archivedAt == null), state ?? "live").map((s) => s.id),
+        );
+        const all = rawAll.filter((s) => s.archivedAt != null || keepNonArchived.has(s.id));
         const filtered = resolvedProjectId === undefined ? all : all.filter((s) => s.projectId === resolvedProjectId);
         // Backstop the summary feed so an `all`/`exited` history read can't overflow with no explicit limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
