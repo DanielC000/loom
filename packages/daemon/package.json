@@ -76,7 +76,9 @@
     "test:cli-service": "node test/cli-service.mjs",
     "test:cli-channel": "node test/cli-channel.mjs",
     "test:daemon": "node scripts/test-daemon.mjs",
-    "guards": "node scripts/run-static-guards.mjs"
+    "guards": "node scripts/run-static-guards.mjs",
+    "host-quiet-check": "node scripts/host-quiet-check.mjs",
+    "host-attribution-check": "node scripts/host-attribution-check.mjs"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",

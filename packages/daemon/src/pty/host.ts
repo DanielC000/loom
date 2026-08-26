@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -4009,6 +4010,145 @@ export async function reapProcessesRootedInWorktree(
     // fully-exhausted outcome.
     console.error(`[reap] ${worktreePath}: process enumeration FAILED this cycle — found/killed NOTHING (fail-closed, not proof nothing needed killing): ${(err as Error).message}`);
     return { killedPids: [], enumerationFailed: true };
+  }
+}
+
+/**
+ * Card 3ab5c540 — CAPABILITY (a), THE QUIETNESS TEST. A whole-box CPU load reading, deliberately
+ * INDEPENDENT of `gate_queue`/`GateSemaphore` — the Codescape peer (mgr #34) TRACED a sibling worktree
+ * hand-running `tsx --test`, 6+ node children, actually consuming the box WHILE `gate_queue` read
+ * `activeCount:0` — that alone proves the instrument is blind, no comparison needed, since that load
+ * never touched the semaphore at all. (A companion sample pair they also took — 49.3s with
+ * `activeCount:0` before/after vs. 34.3s with a merge gate confirmed running — is illustrative only, NOT
+ * load-bearing: two points, and it would collapse if the 34.3s sample also carried hidden load nobody
+ * traced. Blindness is proven; that it BIT this particular pairing is not, and is not claimed here.)
+ * Their own follow-up went further: the single BIGGEST layer of load they measured (~88% sustained) was
+ * non-agent entirely (a game client, browsers, media) — invisible to `gate_queue` AND to any
+ * worktree-scoped process check. This function answers "is the BOX idle",
+ * never "is the gate idle" or "is Loom's own work idle" — see {@link attributeProcessesToWorktree} for
+ * the separate, narrower ATTRIBUTION question ("which agent work is running"). The two are NOT
+ * substitutes for each other: this one sees non-agent load and misses nothing running on the box, but
+ * says nothing about WHOSE load it is; that one attributes to a specific worktree but is blind to
+ * anything not rooted there (including this whole non-agent layer).
+ *
+ * win32: `Get-CimInstance Win32_Processor` returns one row per logical CPU package, each already carrying
+ * an OS-computed `LoadPercentage` (a rolling ~1s average) — averaged across rows here since a
+ * multi-package host would otherwise report only one package's figure. POSIX: `os.loadavg()[0]` (the
+ * 1-MINUTE load average, a DIFFERENT time base than win32's ~1s figure — do not compare the two
+ * platforms' readings against each other) divided by `os.cpus().length`, expressed as a percentage — the
+ * closest POSIX equivalent available without shelling out to `top`/`vm_stat`. `windowNote` on the return
+ * value names which time base a given reading came from, so a reader never has to assume it.
+ *
+ * Read-only: no kill, no worktree/process match of any kind, no mutation of any state. Rejects (never
+ * resolves a fake reading) on a genuine measurement failure — a wedged CIM query, a non-numeric result —
+ * so a caller can tell "the box is quiet" apart from "the instrument didn't answer" instead of the two
+ * looking identical.
+ */
+export async function readWholeBoxLoadPercent(): Promise<{
+  platform: "win32" | "posix";
+  loadPercent: number;
+  source: string;
+  windowNote: string;
+  measuredAt: string;
+}> {
+  const measuredAt = new Date().toISOString();
+  if (process.platform === "win32") {
+    const loadPercent = await new Promise<number>((resolve, reject) => {
+      const cmd = spawnProcess("powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average",
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      let errOut = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { cmd.kill(); } catch { /* already gone */ }
+        reject(new Error("host load query (Win32_Processor.LoadPercentage) produced no output within 10000ms"));
+      }, 10_000);
+      cmd.stdout?.on("data", (d) => { out += d; });
+      cmd.stderr?.on("data", (d) => { errOut += d; });
+      cmd.on("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+      cmd.on("close", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const n = Number(out.trim());
+        if (!Number.isFinite(n)) {
+          reject(new Error(`host load query returned a non-numeric result: ${JSON.stringify(out)}${errOut.trim() ? ` — stderr: ${errOut.trim()}` : ""}`));
+          return;
+        }
+        resolve(n);
+      });
+    });
+    return {
+      platform: "win32",
+      loadPercent,
+      source: "Win32_Processor.LoadPercentage (averaged across logical CPU packages)",
+      windowNote: "~1s rolling average — Windows' own LoadPercentage semantics, not comparable to POSIX's 1-minute figure",
+      measuredAt,
+    };
+  }
+  const cpuCount = os.cpus().length || 1;
+  const loadPercent = ((os.loadavg()[0] ?? 0) / cpuCount) * 100;
+  return {
+    platform: "posix",
+    loadPercent,
+    source: "os.loadavg()[0] / cpuCount",
+    windowNote: "1-minute load average — a DIFFERENT time base than win32's ~1s figure, don't compare across platforms",
+    measuredAt,
+  };
+}
+
+/**
+ * Card 3ab5c540 — CAPABILITY (b), THE ATTRIBUTION helper. A READ-ONLY sibling of
+ * {@link reapProcessesRootedInWorktree} — reuses the SAME enumeration + the SAME
+ * {@link processRootedInWorktree} path/cwd/commandLine match (the safety-critical predicate documented on
+ * that function), but NEVER kills anything and returns the full matched set for a reader, not a kill
+ * count. Answers "which OS processes can I attribute to worktree X", never "is the box quiet" — see
+ * {@link readWholeBoxLoadPercent} for that separate question.
+ *
+ * ⚠️ KNOWN COVERAGE GAP, measured directly (card 3ab5c540 §THE FIX WAS WRONG): of 17 live `node.exe`
+ * processes on a real host, 8 named a worktree segment in their own path/cwd/commandLine (what this
+ * function matches) — the other 9 (53%) did NOT, and were NOT descendants of any matched process either:
+ * the Loom daemon itself, its `codescape serve` child, `daemon-supervisor.mjs`, `test-daemon.mjs`, and
+ * other repo-root-rooted processes. `ParentProcessId` chaining from a matched root would find NONE of
+ * those 9 — it was tested and refuted as a fix, not merely unimplemented. So `matched: []` here is
+ * evidence only that "no process NAMES this worktree" — it is NOT evidence this project, or the box, is
+ * otherwise idle. Pair with {@link readWholeBoxLoadPercent} for that broader question, and read
+ * `totalProcessesScanned` alongside `matched.length` so the coverage ratio is visible at the call site.
+ *
+ * Matches at the FULL worktree-path boundary (never a bare project-id or worktree-id segment alone) —
+ * the same path-segment-boundary discipline {@link processRootedInWorktree} already enforces, which is
+ * what keeps this safe from the exact collision DoD-5 of card 3ab5c540 forbids: the project-id segment is
+ * shared by every worktree the project has ever created, so matching on it alone would attribute a
+ * SIBLING worktree's processes to this one.
+ */
+export async function attributeProcessesToWorktree(
+  worktreePath: string,
+  deps: { enumerate?: ProcessEnumerator; timeoutMs?: number } = {},
+): Promise<{
+  matched: WorktreeProcess[];
+  totalProcessesScanned: number;
+  enumerationFailed?: boolean;
+  enumerationAttempts?: number;
+}> {
+  const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
+  const timeoutMs = deps.timeoutMs ?? 10_000;
+  const totalBudgetMs = REAP_ENUMERATE_MAX_ATTEMPTS * timeoutMs + (REAP_ENUMERATE_MAX_ATTEMPTS - 1) * REAP_ENUMERATE_RETRY_DELAY_MS;
+  try {
+    const { procs, attempts } = await withReapTimeout(enumerateWithRetry(enumerate, timeoutMs), totalBudgetMs);
+    const matched = procs.filter((p) => processRootedInWorktree(p, worktreePath));
+    return { matched, totalProcessesScanned: procs.length, enumerationAttempts: attempts };
+  } catch (err) {
+    console.error(`[attribution] ${worktreePath}: process enumeration FAILED this cycle — returning NOTHING (fail-closed, not proof nothing is running): ${(err as Error).message}`);
+    return { matched: [], totalProcessesScanned: 0, enumerationFailed: true };
   }
 }
 

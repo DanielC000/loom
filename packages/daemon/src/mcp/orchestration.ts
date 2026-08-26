@@ -432,7 +432,30 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus " +
         "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
         "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
-        "guessing or polling gate_status per-opId, or firing `run_gate` blind to find out. Returns {cap, " +
+        "guessing or polling gate_status per-opId, or firing `run_gate` blind to find out. " +
+        "⚠️ THIS MEASURES SEMAPHORE ADMISSIONS, NEVER HOST LOAD (card 3ab5c540, traced live: a sibling " +
+        "worktree hand-running `tsx --test`, 6+ node children, was CONFIRMED consuming the box while this " +
+        "tool read `activeCount:0` — that alone proves the instrument is blind, no comparison needed, " +
+        "since that load never went through `run_gate` and so never touched this tool's count at all. " +
+        "Blind is not the same as HARMFUL-ON-ANY-GIVEN-READ, though — a companion sample pair (49.3s with " +
+        "`activeCount:0` before/after vs. 34.3s with a merge gate confirmed running) is illustrative ONLY, " +
+        "NOT load-bearing evidence of magnitude: it's two points, and it would collapse if the 34.3s " +
+        "sample also carried hidden load nobody traced). " +
+        "`activeCount:0`/`queuedCount:0` means 'nothing is admitted through the GateSemaphore right now' " +
+        "— it is NOT 'the box is idle', and treating it that way is the exact defect this card fixed. It " +
+        "is BLIND to: (1) ANY hand-run test/build a worker or human runs directly — INCLUDING this " +
+        "project's OWN worker doctrine, whose DoD DEFAULTS every worker to running its affected test " +
+        "file(s) directly rather than through `run_gate` (see CLAUDE.md's targeted-test default), so the " +
+        "fleet's ORDINARY, EXPECTED behavior is semaphore-invisible host load, up to one lane per live " +
+        "worker; and (2) ALL non-agent load — a game client, a browser, media — which measured as the " +
+        "SINGLE BIGGEST layer (~88% sustained) on a real desktop host, invisible to this tool AND to any " +
+        "worktree-scoped process check. If you actually need to know whether the BOX (not the queue) is " +
+        "quiet, that is a DIFFERENT question this tool cannot answer — reach for the two narrower " +
+        "instruments built for it instead, and keep them separate: `packages/daemon/scripts/" +
+        "host-quiet-check.mjs` (a whole-box CPU load reading — the one that actually licenses the word " +
+        "'quiet') and `host-attribution-check.mjs` (read-only, worktree-scoped process ATTRIBUTION only — " +
+        "~47% coverage of node processes in the one measured sample, see its own header for what it " +
+        "structurally cannot see). Returns {cap, " +
         "activeCount, queuedCount, running: " +
         "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
