@@ -1933,6 +1933,20 @@ export class SessionService {
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
   /**
+   * Card 7234688b — PER-MANAGER in-flight spawn COUNT, used ONLY for the concurrency-cap admit
+   * (`liveWorkers + inFlightForManager >= cap`, below). Kept as a SEPARATE structure from {@link
+   * inFlightSpawnTaskIds} rather than folding the two together, because the two guards have genuinely
+   * DIFFERENT correct scopes: the per-taskId duplicate-spawn guard above is correctly GLOBAL (a taskId is
+   * unique daemon-wide, so checking it against every in-flight spawn regardless of manager can never
+   * false-positive — two different managers can never legitimately race to spawn the SAME taskId), while
+   * the cap-admission comparison MUST be scoped to the calling manager because `liveWorkers` (the other
+   * half of that comparison) already is. Summing a daemon-global count against a per-manager count was
+   * exactly the bug this card fixes — do NOT "simplify" this back into one shared structure; that
+   * reintroduces the scope mismatch. Incremented/decremented in lockstep with `inFlightSpawnTaskIds`'s own
+   * add/delete (same claimKey's spawn, same try/finally), so it can never drift out of sync with it.
+   */
+  private readonly inFlightSpawnCountByManager = new Map<string, number>();
+  /**
    * BOUNDED record of a worker_spawn REJECTED purely because the concurrency cap was at capacity (a
    * distinct failure mode from {@link inFlightSpawnTaskIds}, which guards a live in-flight spawn against a
    * same-taskId race — this records an intent that never even started). See {@link CapQueueRegistry} for
@@ -5966,11 +5980,27 @@ export class SessionService {
     // BELOW), so call K observes the (K-1) prior claims already in the set. Checked BEFORE `.add()`, so `size`
     // excludes self: with cap C and L live workers, exactly C-L calls admit and the rest are rejected with the
     // existing message — each BEFORE createWorktree, so a rejected spawn leaves no orphan worktree/branch.
-    // (Conservative across managers: inFlightSpawnTaskIds is daemon-global while the live count is THIS manager's,
-    // so a sibling manager's in-flight spawn can only make this check reject EARLIER — never let the fleet overshoot.)
+    //
+    // SCOPED PER-MANAGER (card 7234688b — the prior daemon-global sum here was a real bug, not "conservative"):
+    // `liveWorkers` above is THIS manager's own live count, so the in-flight term summed against it must share
+    // that SAME scope or the comparison is meaningless. This used to sum the daemon-global
+    // `inFlightSpawnTaskIds.size` instead — a sibling manager B's own in-flight spawn (which can legitimately
+    // run for B's ENTIRE worktree-provisioning window: a bounded install up to PROVISION_TIMEOUT_MS plus a
+    // bounded build up to PROVISION_BUILD_TIMEOUT_MS, git/worktrees.ts — seconds to minutes, not a microsecond
+    // TOCTOU) inflated THIS manager's own admission check, wrongly cap-rejecting a spawn even while THIS
+    // manager was genuinely below its OWN cap. Worse, that daemon-global claim releases in a bare `finally`
+    // (below) with no drain call — only a RETIREMENT of one of THIS manager's own workers ever drains its
+    // queue — so a wrongly-rejected entry had no trigger to re-admit until an unrelated retirement or the
+    // cap-queue's 30-minute TTL. `inFlightSpawnCountByManager` fixes the scope mismatch directly: it counts
+    // only in-flight claims THIS manager itself currently holds, so a sibling manager's spawn can never affect
+    // this check again. `maxConcurrentWorkers` is documented (Settings UI: "Max workers / manager") as a
+    // PER-MANAGER limit — this restores that stated semantics; the daemon-global term was never enforcing a
+    // real daemon-global limit to begin with, so nothing is being removed here that was actually protecting
+    // anything at the daemon scope.
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
-    if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) {
+    const inFlightForManager = this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0;
+    if (liveWorkers + inFlightForManager >= cap) {
       // internal.skipCapQueueRecord (maybeDrainCapQueue's own re-call): the caller already holds the
       // ORIGINAL popped entry and re-queues THAT at the front itself — record()-ing a fresh one here would
       // mint a new opId at the BACK of the queue, demoting it behind younger entries and invalidating any
@@ -5983,6 +6013,7 @@ export class SessionService {
       throw new CapQueueRejectedError(cap, capQueued);
     }
     this.inFlightSpawnTaskIds.add(claimKey);
+    this.inFlightSpawnCountByManager.set(managerSessionId, (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) + 1);
     try {
       // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build gate, so skip the
       // monorepo BUILD phase for it — install still runs (it still needs node_modules to run/read).
@@ -6153,6 +6184,9 @@ export class SessionService {
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
       // next spawn must be free to proceed.
       this.inFlightSpawnTaskIds.delete(claimKey);
+      const remaining = (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) - 1;
+      if (remaining > 0) this.inFlightSpawnCountByManager.set(managerSessionId, remaining);
+      else this.inFlightSpawnCountByManager.delete(managerSessionId);
     }
   }
 
