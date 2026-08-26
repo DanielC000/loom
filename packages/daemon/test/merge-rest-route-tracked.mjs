@@ -169,7 +169,16 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 
   // Release the gate and re-attach (a caller re-clicking Merge, or the Review panel re-polling) — proves
   // this is a genuine re-attach loop, not a broken one-shot: the SAME op eventually settles for real.
+  // Card 6144fe32: a NAIVE immediate re-attach here races a REAL git squash (union-merge/checkout/squash,
+  // real subprocess work, NOT covered by the stubbed `runGate`) against confirmWorkerMergeUntilSettled's
+  // OWN ceiling (gateCommandTimeoutMs*6 — 6s at this test's tiny 1000ms knob), which is sized as a GATE
+  // budget, not a "cover an unbounded git subprocess" budget — under host load the squash can outlast it,
+  // and this exact assertion goes red for a reason that has nothing to do with the behavior under test.
+  // Wait on the REAL settle CONDITION instead (waitBriefly races the op's own settle promise, the same
+  // primitive the "(dead-owner)" block below already uses for this identical hazard) — bounded by a
+  // generous OUTER cap so a genuinely-stuck op still fails the assertion below instead of hanging forever.
   releaseGate("go");
+  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 30_000);
   const finalResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(ceiling) a later re-attach on the SAME worker returns the REAL settled result", finalResult.settled === true && finalResult.ok === true);
   check("(ceiling) the merge actually landed once the gate was released", finalResult.ok && finalResult.value?.merged === true);
@@ -265,7 +274,12 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const liveRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
   check("(live-owner control) exactly ONE pending_gate_ops row, matching (4)", liveRows.length === 1);
 
+  // Card 6144fe32: the SAME wall-clock race as the "(ceiling)" block above — an immediate re-attach here
+  // races a REAL git squash against confirmWorkerMergeUntilSettled's own 6x-gateCommandTimeoutMs ceiling
+  // (6s at this test's tiny 1000ms knob), which is sized as a GATE budget, not a "wait out an unbounded git
+  // subprocess" budget. This was the card's own named, live-reproduced failure — see the fix note above.
   releaseGate("go");
+  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 30_000);
   const finalResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
   check("(live-owner control) once released, the SAME op settles for real and merges", finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
   check("(live-owner control) still exactly ONE real gate invocation total", gateCalls === 1);

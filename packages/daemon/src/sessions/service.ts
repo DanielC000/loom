@@ -14208,9 +14208,14 @@ export class SessionService {
    * `gateCommandTimeoutMs` (one auto-extend on the first try, plus one un-extended retry — see
    * `confirmWorkerMerge`'s own `gateRetry` doc), and this op can ALSO sit queued behind roughly one more
    * gate of the same worst-case size before it is ever admitted — 6x covers both without needing to read
-   * live queue depth. On exceeding the ceiling, returns `{settled:false, opId}` rather than fabricating a
-   * result — the caller must report "still running", NEVER a synthesized "not merged" (a false negative
-   * here would invite exactly the duplicate re-trigger this card exists to prevent).
+   * live queue depth. This budget ALSO has to absorb the real, un-gated git subprocess work that happens
+   * around the gate step itself — the union-merge/checkout/squash `confirmWorkerMerge` performs before and
+   * after `runGate` resolves is real, unbounded-by-`gateCommandTimeoutMs` work, not merely gate attempts
+   * (card 6144fe32: a test wired with a tiny `gateCommandTimeoutMs` to keep this ceiling small in a targeted
+   * run learned this the hard way — its OWN post-release re-attach raced a real squash against a 6-second
+   * ceiling and lost under host load). On exceeding the ceiling, returns `{settled:false, opId}` rather than
+   * fabricating a result — the caller must report "still running", NEVER a synthesized "not merged" (a false
+   * negative here would invite exactly the duplicate re-trigger this card exists to prevent).
    */
   async confirmWorkerMergeUntilSettled(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
