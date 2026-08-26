@@ -55,11 +55,12 @@ import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_M
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
+import { appendTaskBodySection } from "../mcp/tasks.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
-import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
+import { resolveIdPrefix, getByIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
@@ -8069,11 +8070,11 @@ export class SessionService {
    */
   platformEscalate(
     managerSessionId: string,
-    input: { title: string; detail: string; severity?: string },
+    input: { title: string; detail: string; severity?: string; followUpOn?: string },
   ): {
-    taskId: string; projectId: string; deliveryStatus: DeliveryStatus; deduped?: boolean;
-    appended?: boolean; created?: boolean; linkedTaskId?: string; possiblyRelatedTaskIds?: string[];
-    suppressedShas?: string[];
+    taskId: string; projectId: string; deliveryStatus: DeliveryStatus; outcome: "created" | "appended";
+    deduped?: boolean; appended?: boolean; created?: boolean; followedUp?: boolean; targetWasTerminal?: boolean;
+    linkedTaskId?: string; possiblyRelatedTaskIds?: string[]; suppressedShas?: string[];
   } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
@@ -8116,24 +8117,54 @@ export class SessionService {
     const originName = origin?.name ?? caller.projectId;
     const now = new Date().toISOString();
     let reuseTaskId: string | undefined;
-    for (const e of this.db.listEscalationsForProject(caller.projectId)) {
-      const filedTitle = (e.detail?.title as string | undefined) ?? "";
-      if (!e.taskId || norm(filedTitle) !== key) continue;
-      const existingTask = this.db.getTask(e.taskId);
-      if (existingTask && this.columnEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
-        const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
-        if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
-          // Mode A fix (card 9315ddf9): this used to return here with the new `detail` silently
-          // dropped — a reader watching the card saw only whatever was there before. Append it as an
-          // attributed, timestamped section so the evidence is never lost, without touching (let alone
-          // clobbering) a Lead's own triage note or any prior report already on the body.
-          this.appendEscalationDetail(existingTask, managerSessionId, originName, severity, input.detail, now);
-          return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true, appended: true };
+    let followedUp = false;
+    let targetWasTerminal = false;
+    if (input.followUpOn !== undefined) {
+      // Card 8636f761 (DoD-4): the EXPLICIT "follow up on <taskId>" affordance — the fix for the
+      // 2026-08-24 incident where same-title (the only lever a manager had) silently forked a thread the
+      // instant the Lead moved the original card to the terminal column. Scoped to THIS project's OWN
+      // filed escalations (same origin-project boundary the automatic scan below already uses) so a
+      // manager can never append onto a different project's thread. UNCONDITIONAL on column state —
+      // unlike the automatic scan, which treats a terminal-column task as ineligible
+      // (`columnEscalationStatus(...) !== "resolved"` below) — because that exact veto, applied to an
+      // EXPLICIT request, is the bug this fixes: a Lead closing the thread must never silently change
+      // what a manager's stated intent does.
+      const ownEscalationTasks: Task[] = [];
+      for (const e of this.db.listEscalationsForProject(caller.projectId)) {
+        if (!e.taskId) continue;
+        const t = this.db.getTask(e.taskId);
+        if (t) ownEscalationTasks.push(t);
+      }
+      const resolved = getByIdPrefix(
+        input.followUpOn,
+        (id) => ownEscalationTasks.find((t) => t.id === id),
+        () => ownEscalationTasks,
+        "escalation task to follow up on",
+      );
+      if ("error" in resolved) throw new Error(resolved.error);
+      reuseTaskId = resolved.id;
+      followedUp = true;
+      targetWasTerminal = this.columnEscalationStatus(home.id, resolved.columnKey) === "resolved";
+    } else {
+      for (const e of this.db.listEscalationsForProject(caller.projectId)) {
+        const filedTitle = (e.detail?.title as string | undefined) ?? "";
+        if (!e.taskId || norm(filedTitle) !== key) continue;
+        const existingTask = this.db.getTask(e.taskId);
+        if (existingTask && this.columnEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
+          const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
+          if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
+            // Mode A fix (card 9315ddf9): this used to return here with the new `detail` silently
+            // dropped — a reader watching the card saw only whatever was there before. Append it as an
+            // attributed, timestamped section so the evidence is never lost, without touching (let alone
+            // clobbering) a Lead's own triage note or any prior report already on the body.
+            this.appendEscalationDetail(existingTask, managerSessionId, originName, severity, input.detail, now);
+            return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", outcome: "appended", deduped: true, appended: true };
+          }
+          // Higher severity than what's on file for this still-open task: stop scanning (this IS the
+          // authoritative current state for the title) and fall through to file a fresh event against it.
+          reuseTaskId = existingTask.id;
+          break;
         }
-        // Higher severity than what's on file for this still-open task: stop scanning (this IS the
-        // authoritative current state for the title) and fall through to file a fresh event against it.
-        reuseTaskId = existingTask.id;
-        break;
       }
     }
 
@@ -8286,8 +8317,14 @@ export class SessionService {
     }
     return {
       taskId, projectId: home.id, deliveryStatus,
+      // DoD-4: an unambiguous field naming which of the two outcomes actually happened, so the caller
+      // never has to infer it from `created`/`appended`/title-matching (the thing that was silently
+      // unreliable before this card).
+      outcome: created ? "created" : "appended",
       ...(created ? { created: true } : {}),
       ...(appended ? { appended: true } : {}),
+      ...(followedUp ? { followedUp: true } : {}),
+      ...(followedUp && targetWasTerminal ? { targetWasTerminal: true } : {}),
       ...(suppressedShas ? { suppressedShas } : {}),
       ...(linkedTaskId ? { linkedTaskId } : {}),
       ...(possiblyRelatedTaskIds ? { possiblyRelatedTaskIds } : {}),
@@ -8312,16 +8349,13 @@ export class SessionService {
   private appendEscalationDetail(
     task: Task, managerSessionId: string, originName: string, severity: string, detail: string, now: string,
   ): void {
-    const section = [
-      "",
-      "",
-      `## Re-escalation — ${now}`,
+    const body = appendTaskBodySection(task.body, "Re-escalation", [
       `- **From:** ${originName} manager session \`${managerSessionId}\``,
       `- **Severity:** ${severity}`,
       "",
       detail,
-    ].join("\n");
-    this.db.updateTask(task.id, { body: `${task.body ?? ""}${section}` });
+    ], now);
+    this.db.updateTask(task.id, { body });
   }
 
   /**

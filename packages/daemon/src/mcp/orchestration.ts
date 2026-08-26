@@ -4168,19 +4168,34 @@ export class OrchestrationMcpRouter {
           "platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
           "project's task board (use tasks_create there). `detail` is the canonical param; `body` is " +
-          "accepted as an ALIAS for it — pass either one (if both, detail wins).",
+          "accepted as an ALIAS for it — pass either one (if both, detail wins).\n" +
+          "⚠️ SAME TITLE IS NOT A CONTRACT for landing on a specific existing thread — it is only a " +
+          "best-effort heuristic (title + severity + still-open-per-the-board-column), and it silently " +
+          "stops matching the instant that card's column reaches the Lead's terminal lane (i.e. the Lead " +
+          "closed it) — a same-title follow-up at that point files a brand-new, unlinked card instead of " +
+          "appending, with nothing in the response telling you that happened differently than you intended. " +
+          "Pass `followUpOn:<taskId>` (the Platform task id THIS escalation returned, full id or an " +
+          "unambiguous 8-char prefix) instead whenever you specifically mean 'append this to that thread' " +
+          "— it appends UNCONDITIONALLY (even to a card the Lead has already closed) and always notifies the " +
+          "Lead, and is rejected with {error} if the id doesn't resolve to one of YOUR OWN project's " +
+          "previously filed escalations. Check the response's `outcome` (\"created\" | \"appended\") to know " +
+          "for certain which happened either way — don't infer it from the title you sent. When `followUpOn` " +
+          "was honored, the response also carries `followedUp:true`, and `targetWasTerminal:true` if the " +
+          "card you appended to had already been moved to the Lead's terminal column — i.e. you just " +
+          "reopened a thread the Lead had considered closed, worth knowing.",
         inputSchema: strictShape({
           title: z.string(),
           detail: z.string().optional(),
           body: z.string().optional(),
           severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+          followUpOn: z.string().optional(),
         }),
       },
-      async ({ title, detail, body, severity }) => {
+      async ({ title, detail, body, severity, followUpOn }) => {
         const resolvedDetail = resolveAlias(detail, body);
         if (resolvedDetail === undefined) return ok({ error: "detail (or body) is required" });
         try {
-          return ok(sessions.platformEscalate(managerSessionId, { title, detail: resolvedDetail, severity }));
+          return ok(sessions.platformEscalate(managerSessionId, { title, detail: resolvedDetail, severity, followUpOn }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

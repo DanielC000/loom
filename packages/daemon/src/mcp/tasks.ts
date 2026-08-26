@@ -916,6 +916,20 @@ export interface TaskUpdateActor {
   role?: string | null;
 }
 
+/**
+ * Card 8636f761 — the ONE shared formatter behind every ADDITIVE task-body write: a manager's
+ * re-escalation evidence ({@link SessionsService.appendEscalationDetail} in sessions/service.ts) and a
+ * Lead's triage note ({@link updateProjectTask}'s `appendBody` below). Two blank lines, a
+ * `## <heading> — <timestamp>` marker, then the given lines — appended to whatever body is already
+ * there, NEVER replacing it. Kept here (not duplicated in service.ts) so the two additive paths can't
+ * drift into two different section formats — the exact "divergent copies of a shared unit" defect class
+ * this project keeps re-discovering.
+ */
+export function appendTaskBodySection(currentBody: string | null | undefined, heading: string, lines: string[], now: string): string {
+  const section = ["", "", `## ${heading} — ${now}`, ...lines].join("\n");
+  return `${currentBody ?? ""}${section}`;
+}
+
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason">>,
@@ -923,7 +937,8 @@ export async function updateProjectTask(
   /**
    * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
    * `tasks_update` response), REQUIRED to write `title`/`body` on an EXISTING task; irrelevant for
-   * field-only patches (see the gate below). Mirrors `memory_write`'s `baseVersion` exactly.
+   * field-only patches (see the gate below). Mirrors `memory_write`'s `baseVersion` exactly. NOT required
+   * (and overridden internally) when `appendBody` is used instead of `body` — see its own doc below.
    */
   baseVersion?: number,
   /**
@@ -933,12 +948,40 @@ export async function updateProjectTask(
    * DELIBERATE flag, never inferable from anything else in the patch.
    */
   allowTruncate?: boolean,
+  /**
+   * Card 8636f761 (DoD-1) — an ADDITIVE alternative to `body`: appends a timestamped "## Triage note —
+   * <ts>" section instead of replacing the whole body. Exists because `body` is a full replace with no
+   * undo (see its own doc above) and a Lead triaging a `platform_escalate` card was clobbering the
+   * reporter's original evidence with its verdict — the Lead's own doctrine ("preserve the original
+   * verbatim below") was a manual workaround for exactly this default. Mutually exclusive with `body`
+   * (both together is a whole-patch REJECT, nothing written — same convention as every other guard in
+   * this function): a replace and an append are different intents and mixing them is never correct.
+   * DELIBERATELY UNVERSIONED — unlike a caller-authored `body` replace, an append can never destructively
+   * clobber a concurrent edit; the worst case under a race is two sections landing in a nondeterministic
+   * order, never data loss (same reasoning `bodyFoldPatch` below already relies on for its own additive
+   * write). The version used for the actual write is computed HERE, from a fresh read taken immediately
+   * before appending, not from the caller — see the re-fetch below. This does NOT disable the destructive-
+   * truncation guard: the computed body still flows through `patch.body` and the ordinary guard below, so
+   * a BUGGY append implementation that somehow shrinks the body is still caught — a guard that can never
+   * fire on a correct append costs nothing, and removing it would blind the exact case it exists for.
+   */
+  appendBody?: string,
 ): Promise<Task | TaskUpdateAck | { error: string } | TaskUpdateConflict | TaskUpdateTruncationGuard> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
-  const owned = resolveProjectTaskId(db, projectId, taskId);
+  let owned = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in owned) return owned;
+  if (appendBody !== undefined) {
+    if (patch.body !== undefined) return { error: "pass either body or appendBody, not both" };
+    // Re-read fresh immediately before composing the new body — mirrors the `freshForFold` pattern used
+    // by the deferred-clear body fold further down this function: an append composes onto whatever is on
+    // disk RIGHT NOW, closing the window a stale `owned` (read at the very top of this call) would leave.
+    const fresh = db.getTask(owned.id) ?? owned;
+    owned = fresh;
+    baseVersion = fresh.version;
+    patch = { ...patch, body: appendTaskBodySection(fresh.body, "Triage note", [appendBody], new Date().toISOString()) };
+  }
   const project = db.getProject(projectId);
   // Column-move guard: a move must target a column that EXISTS on this project's board, so a move can never
   // orphan a card onto a non-existent key (the HARD INVARIANT board-column lifecycle code upholds). Applied

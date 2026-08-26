@@ -2047,13 +2047,24 @@ export class PlatformMcpRouter {
           "(≥1024 characters, keeping <25% of it) is REFUSED — {error naming the current/proposed lengths, " +
           "truncation:true, current, currentLength, proposedLength} — same mechanism as the in-project " +
           "tasks_update. A short body, or a rewrite that stays a comparable size, is untouched by this. Pass " +
-          "allowTruncate:true to bypass it for a genuinely intentional large discard.",
+          "allowTruncate:true to bypass it for a genuinely intentional large discard.\n" +
+          "`appendBody` (card 8636f761, single-`taskId` path only) is the ADDITIVE alternative to `body`: " +
+          "appends a timestamped \"## Triage note — <ts>\" section instead of replacing the whole thing — use " +
+          "this for a triage verdict on an escalation card (or any card) so your note can never clobber the " +
+          "reporter's original evidence, which is exactly what a `body` write used to do here. Passing both " +
+          "`body` and `appendBody` is REJECTED (whole patch, nothing written) — they're different intents. " +
+          "`appendBody` needs NO `baseVersion` (unlike `body`): an append can't destructively clobber a " +
+          "concurrent edit the way a full replace can, so there's nothing to gate — worst case under a race " +
+          "is two sections landing in a nondeterministic order, never lost content. The destructive-truncation " +
+          "guard above still applies to the resulting write (it can never fire on a correct append, but stays " +
+          "as a backstop against a buggy one). Returns the full updated Task row, same as a `body` write.",
         inputSchema: strictShape({
           projectId: z.string(),
           taskId: z.string().optional(),
           taskIds: z.array(z.string()).min(1).max(200).optional(),
           title: z.string().optional(),
           body: z.string().optional(),
+          appendBody: z.string().optional(),
           columnKey: z.string().optional(),
           position: z.number().optional(),
           priority: prioritySchema.optional(),
@@ -2067,7 +2078,7 @@ export class PlatformMcpRouter {
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
-      async ({ projectId, taskId, taskIds, baseVersion, allowTruncate, ...patch }) => {
+      async ({ projectId, taskId, taskIds, baseVersion, allowTruncate, appendBody, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
@@ -2080,8 +2091,8 @@ export class PlatformMcpRouter {
         // updateProjectTask's repoKey authority guard (manager/platform only) the same way question_ask does.
         const actor = callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined;
         if (taskIds) {
-          if (patch.title !== undefined || patch.body !== undefined) {
-            return ok({ error: "taskIds batch move does not support title/body — apply those one card at a time via taskId" });
+          if (patch.title !== undefined || patch.body !== undefined || appendBody !== undefined) {
+            return ok({ error: "taskIds batch move does not support title/body/appendBody — apply those one card at a time via taskId" });
           }
           const results = await Promise.all(taskIds.map(async (id) => {
             const res = await updateProjectTask(db, project.id, id, patch, actor);
@@ -2089,7 +2100,7 @@ export class PlatformMcpRouter {
           }));
           return ok(results);
         }
-        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate));
+        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody));
       },
     );
 

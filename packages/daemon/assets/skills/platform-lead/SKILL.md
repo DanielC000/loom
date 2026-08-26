@@ -111,7 +111,12 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    your OWN board. Skip this param and the escalation reports `triaged` forever, even after the fix
    ships — a body-text note in the card instead of the param is NOT a substitute; it has already failed
    as a fix for this twice. Moving the escalation card to a terminal column marks that YOU finished
-   triaging it — it no longer, by itself, claims the underlying bug is fixed.
+   triaging it — it no longer, by itself, claims the underlying bug is fixed. **Write your triage
+   verdict with `project_task_update`'s `appendBody` param, never `body` (card 8636f761).** `body` is a
+   full replace with no undo — writing a verdict through it destroys the reporter's original evidence
+   unless you manually re-paste it under your own "preserved verbatim" heading first. `appendBody` adds
+   your note as its own timestamped section instead, so the evidence is never at risk and there is nothing
+   left to manually re-paste.
 3. **Own cross-project concerns.** A daemon restart affects ALL projects; a platform-wide config change,
    a self-hosting deploy, a fleet-level recovery — these are platform-level, not any one manager's. You
    are the natural owner. **You hold `daemon_restart` directly** — confirm with the human first (a
