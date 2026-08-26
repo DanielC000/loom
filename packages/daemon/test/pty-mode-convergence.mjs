@@ -372,12 +372,33 @@ try {
     await waitForLandedModeRead(I, 3000));
   check("9: a manager landed EXACTLY on its target gets NO mismatch notice (no false positive on a healthy landing)",
     !noticeLanded(fi, I));
+  // ============ 10) Card 5d4a4d02: the boot VALUE (computeBootMode) and this block's convergence TARGET ============
+  // ============     can no longer independently disagree — both now call the SAME resolveModeTarget. Simulate ============
+  // ============     a session that booted DIRECTLY at its target (as computeBootMode now does for a
+  // ============     DIRECT_BOOT_MODES target, card 51926260) by feeding THAT footer as the very first reading —
+  // ============     if the convergence target ever disagreed with the boot value, this would issue a spurious
+  // ============     Shift+Tab trying to climb AWAY from a session that already booted correctly.
+  const J = "sess-fresh-worker-direct-boot";
+  const fj = spawnFresh(J, "worker", 2); // computeBootMode({mode:"acceptEdits", startupModeCycles:2}) boots DIRECTLY at "auto"
+  fj.feed(AUTO_FOOTER); // the footer the session ACTUALLY boots with, per computeBootMode's real decision
+  host.deliverHook(J, { hook_event_name: "SessionStart", session_id: "eng-J" });
+  // precondition: DETERMINISTIC (not a fixed sleep — mirrors scenario 9's identical technique above), wait on
+  // the POSITIVE, observed proof that logLandedMode's own read (which runs AFTER the main convergence block,
+  // and is where a disagreeing heal would fire its own corrective press) has genuinely settled for THIS
+  // session, before asserting the negative (zero presses) below — a fixed sleep here would pass vacuously if
+  // a spurious press would have landed at N+1ms.
+  check("10: precondition — the landed-mode read genuinely settled (observed, not a fixed sleep)",
+    await waitForLandedModeRead(J, 3000));
+  check("10: convergence target agrees with the boot value it actually landed on — ZERO Shift+Tab presses " +
+    "(a divergent site-2 OR site-3 derivation would have issued a spurious Shift+Tab by now)",
+    countShiftTabs(fj) === 0);
 } finally {
   console.log = realLog;
   for (const s of [
     "sess-fresh-A", "sess-fresh-worker-stuck", "sess-fresh-manager-stuck", "sess-fresh-worker-stuck-start",
     "sess-fresh-worker-default-target", "sess-fresh-worker-unknown",
     "sess-resume-worker-cycles0", "sess-resume-worker-cycles2-stuck", "sess-fresh-manager-clean",
+    "sess-fresh-worker-direct-boot",
   ]) {
     try { host.stop(s, "hard"); } catch { /* ignore */ }
   }

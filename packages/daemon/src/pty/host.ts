@@ -1066,16 +1066,26 @@ const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", 
  */
 const DIRECT_BOOT_MODES: ReadonlySet<LandedMode> = new Set(["acceptEdits", "plan", "auto"]);
 /**
+ * Card 5d4a4d02 — THE single owner of the target-mode derivation: an explicit `resumeModeTarget` wins;
+ * otherwise, if `startupModeCycles` is set, the target it derives via {@link modeAfterCyclesFromAcceptEdits};
+ * otherwise no target (`null`, meaning "leave the boot mode"). `computeBootMode` (the boot
+ * `--permission-mode` value), the post-SessionStart mode-convergence block, and `logLandedMode`'s auto-heal
+ * (`healTarget`) all call this instead of each re-deriving it — so the three can no longer independently
+ * drift apart. Exported for the hermetic test.
+ */
+export function resolveModeTarget(o: { resumeModeTarget?: LandedMode | null; startupModeCycles?: number }): LandedMode | null {
+  return o.resumeModeTarget ?? ((o.startupModeCycles ?? 0) > 0 ? modeAfterCyclesFromAcceptEdits(o.startupModeCycles ?? 0) : null);
+}
+/**
  * Card 51926260 — PURE decision for the boot `--permission-mode` VALUE createPty passes to
- * buildSpawnArgs: this session's actual target mode directly (mirroring EXACTLY the
- * `resumeModeTarget ?? (startupModeCycles>0 ? modeAfterCyclesFromAcceptEdits(...) : null)` expression the
- * post-SessionStart convergence block and `logLandedMode`'s heal already use — so this can never disagree
- * with what that block will decide the target is), when that target is itself one of DIRECT_BOOT_MODES;
- * otherwise the raw `permission.mode` (today always `acceptEdits`) unchanged. Exported so a hermetic test
- * can assert this decision with no real claude — mirrors why `nextCycleAction` is exported.
+ * buildSpawnArgs: this session's actual target mode directly (from {@link resolveModeTarget}, the SAME
+ * derivation the post-SessionStart convergence block and `logLandedMode`'s heal call), when that target is
+ * itself one of DIRECT_BOOT_MODES; otherwise the raw `permission.mode` (today always `acceptEdits`)
+ * unchanged. Exported so a hermetic test can assert this decision with no real claude — mirrors why
+ * `nextCycleAction` is exported.
  */
 export function computeBootMode(permission: { mode: string; startupModeCycles?: number }, resumeModeTarget?: LandedMode | null): string {
-  const bootTarget = resumeModeTarget ?? ((permission.startupModeCycles ?? 0) > 0 ? modeAfterCyclesFromAcceptEdits(permission.startupModeCycles ?? 0) : null);
+  const bootTarget = resolveModeTarget({ resumeModeTarget, startupModeCycles: permission.startupModeCycles });
   return bootTarget && DIRECT_BOOT_MODES.has(bootTarget) ? bootTarget : permission.mode;
 }
 /**
@@ -4866,7 +4876,7 @@ export class PtyHost {
         // mid-cycle on plan.
         if (!live.startupCyclesDone) {
           live.startupCyclesDone = true;
-          const target = live.resumeModeTarget ?? (live.startupModeCycles > 0 ? modeAfterCyclesFromAcceptEdits(live.startupModeCycles) : null);
+          const target = resolveModeTarget({ resumeModeTarget: live.resumeModeTarget, startupModeCycles: live.startupModeCycles });
           if (target) {
             // Card c469d54e (THE FIX): a cycle is about to run, so the spawn-armed READY_FALLBACK_MS timer
             // — sized assuming the cycle starts near spawn+0 — can no longer be trusted; under host
@@ -8544,8 +8554,8 @@ export class PtyHost {
    * up at the RAW gate-free boot mode) — which is the OTHER stall the owner named: an unattended role
    * sitting in a mode that hasn't earned an allowlist entry for the command it needs stalls on that
    * permission prompt exactly the same way. The heal's destination is the session's ACTUAL configured
-   * target (`healTarget` below — the SAME `resumeModeTarget ?? modeAfterCyclesFromAcceptEdits(...)`
-   * expression the main SessionStart convergence path computes), not a hardcoded `auto` — every
+   * target (`healTarget` below, from {@link resolveModeTarget} — the SAME derivation the main
+   * SessionStart convergence path and `computeBootMode` call), not a hardcoded `auto` — every
    * platform-default (`startupModeCycles:2`) session still converges there, but a project that deliberately
    * sets `startupModeCycles:0` (stay at the gate-free acceptEdits boot mode) is honoured on BOTH fresh
    * spawn and resume instead of resume alone getting force-cycled past its own target. `noCyclingConfigured`
@@ -8594,7 +8604,7 @@ export class PtyHost {
     // resume always carries a definite `resumeModeTarget` (SessionService.resume derives it from the SAME
     // `startupModeCycles`, so `cycles:0` → `acceptEdits`, never `null`) — the fresh path is the one that
     // can genuinely have no target (`startupModeCycles:0` and no `resumeModeTarget`).
-    const healTarget = live.resumeModeTarget ?? (live.startupModeCycles > 0 ? modeAfterCyclesFromAcceptEdits(live.startupModeCycles) : null);
+    const healTarget = resolveModeTarget({ resumeModeTarget: live.resumeModeTarget, startupModeCycles: live.startupModeCycles });
     const noCyclingConfigured = healTarget == null || healTarget === "acceptEdits";
     let attempts = 0;
     const tryRead = (): void => {
