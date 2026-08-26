@@ -748,6 +748,72 @@ try {
   // Restore the pointer file so worktree cleanup (this test's own repoRoots teardown never touches
   // worktree dirs directly, but leaving a broken .git behind is bad hygiene for a shared tmp root).
   try { fs.rmSync(gitFile, { recursive: true, force: true }); fs.writeFileSync(gitFile, gitFileContent); } catch { /* best-effort */ }
+
+  // ============================ (13) BOOT TIMESTAMP + SUPERVISOR ITERATION (card 572dd777 DoD-3/4) ======
+  // A recipient must be able to correlate the nudge against daemon-output.log without guessing (DoD-3),
+  // and — when this boot ran under the dev supervisor — tell "the supervisor itself was just started"
+  // (iteration 1) apart from "the supervisor's own loop relaunched the daemon" (iteration >1) as a
+  // directly recorded fact, never fabricated for a boot the supervisor never saw (DoD-4).
+
+  // (13a) iteration 1 — worded as the supervisor's own fresh start, not a relaunch. Boot timestamp names
+  // the EXACT iso string passed in, on both the worker nudge and the manager summary nudge.
+  const id13a = { mgr: `cow-mgr13a-${sfx}`, wkr: `cow-wkr13a-${sfx}` };
+  const t13a = mkTask(`cow-t13a-${sfx}`, P.proj);
+  mkSession({ id: id13a.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id13a.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id13a.mgr, taskId: t13a, processState: "live" });
+  const derived13a = deriveCrashOrphanedWorkers(db, [db.getSession(id13a.mgr), db.getSession(id13a.wkr)]);
+  const bootedAt13a = new Date("2026-08-26T12:34:56.000Z");
+  sessions.recoverCrashOrphanedWorkers(derived13a, { resumeOne: () => true, shutdownMarker: null, bootedAt: bootedAt13a, supervisorIteration: 1 });
+  await flush();
+  check("(13a) the worker nudge names the boot timestamp verbatim",
+    pty.getPending(id13a.wkr).some((m) => m.includes(bootedAt13a.toISOString())));
+  check("(13a) the worker nudge says iteration 1 was the supervisor's own fresh start, not a relaunch",
+    pty.getPending(id13a.wkr).some((m) => /iteration 1/i.test(m) && /not a supervisor-driven relaunch/i.test(m)));
+  check("(13a) the manager summary nudge ALSO names the boot timestamp",
+    pty.getPending(id13a.mgr).some((m) => m.includes(bootedAt13a.toISOString())));
+
+  // (13b) iteration > 1 — worded as an in-process relaunch, not an external start.
+  const id13b = { mgr: `cow-mgr13b-${sfx}`, wkr: `cow-wkr13b-${sfx}` };
+  const t13b = mkTask(`cow-t13b-${sfx}`, P.proj);
+  mkSession({ id: id13b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id13b.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id13b.mgr, taskId: t13b, processState: "live" });
+  const derived13b = deriveCrashOrphanedWorkers(db, [db.getSession(id13b.mgr), db.getSession(id13b.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived13b, { resumeOne: () => true, shutdownMarker: null, supervisorIteration: 3 });
+  await flush();
+  check("(13b) iteration 3 is worded as an in-process relaunch, not an external start",
+    pty.getPending(id13b.wkr).some((m) => /relaunch iteration 3/i.test(m) && /not an external start/i.test(m)));
+
+  // (13c) supervisorIteration omitted (not running under the supervisor, or a caller that genuinely
+  // doesn't know) — negative control: the iteration clause is silently SKIPPED, never fabricated as
+  // "iteration 1" for a boot the supervisor never saw. The boot-timestamp clause still appears — it's
+  // independent of supervision.
+  const id13c = { mgr: `cow-mgr13c-${sfx}`, wkr: `cow-wkr13c-${sfx}` };
+  const t13c = mkTask(`cow-t13c-${sfx}`, P.proj);
+  mkSession({ id: id13c.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id13c.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id13c.mgr, taskId: t13c, processState: "live" });
+  const derived13c = deriveCrashOrphanedWorkers(db, [db.getSession(id13c.mgr), db.getSession(id13c.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived13c, { resumeOne: () => true, shutdownMarker: null });
+  await flush();
+  check("(13c) no supervisorIteration passed — no fabricated 'iteration' text in the nudge",
+    !pty.getPending(id13c.wkr).some((m) => /iteration/i.test(m)));
+  check("(13c) the boot-timestamp clause still appears even without a known supervisor iteration",
+    pty.getPending(id13c.wkr).some((m) => /Boot started \d{4}-\d\d-\d\dT/i.test(m)));
+
+  // (13d) clean-stop (shutdownMarker present) — the iteration clause is deliberately withheld on this
+  // branch even when a supervisorIteration IS passed (a clean stop already fully explains itself; see
+  // recoverCrashOrphanedWorkers' own doc for why iteration>1 should never co-occur with a missing marker
+  // anyway). The boot timestamp still appears — it's unconditional.
+  const id13d = { mgr: `cow-mgr13d-${sfx}`, wkr: `cow-wkr13d-${sfx}` };
+  const t13d = mkTask(`cow-t13d-${sfx}`, P.proj);
+  mkSession({ id: id13d.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  mkSession({ id: id13d.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id13d.mgr, taskId: t13d, processState: "live" });
+  const derived13d = deriveCrashOrphanedWorkers(db, [db.getSession(id13d.mgr), db.getSession(id13d.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived13d, { resumeOne: () => true, shutdownMarker: cleanMarker, supervisorIteration: 2 });
+  await flush();
+  check("(13d) clean-stop nudge still carries the boot timestamp",
+    pty.getPending(id13d.wkr).some((m) => /Boot started \d{4}-\d\d-\d\dT/i.test(m)));
+  check("(13d) clean-stop nudge withholds the iteration clause even when supervisorIteration is passed",
+    !pty.getPending(id13d.wkr).some((m) => /iteration/i.test(m)));
 } finally {
   console.log = realLog;
   console.warn = realWarn;

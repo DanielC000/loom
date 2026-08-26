@@ -202,6 +202,29 @@ export function isSupervised(): boolean {
 }
 
 /**
+ * Card 572dd777 DoD-4: which pass of the restart supervisor's `for(;;)` loop (scripts/daemon-
+ * supervisor.mjs) this boot is running under, if any — a DIRECTLY RECORDED fact, not a deduction from
+ * restart-intent/exit-code reasoning. Iteration 1 means the supervisor PROCESS ITSELF was just started
+ * (the loop's first pass) — on the self-host path that means a human ran `pnpm daemon:stable` (or
+ * `:stable:detach`), since nothing else launches that process. An iteration >1 means the supervisor's
+ * OWN loop relaunched the daemon in-process, without the supervisor process itself restarting — today
+ * that only ever follows the RESTART_EXIT_CODE `continue` (see the loop's own restart-policy comment:
+ * any OTHER exit ends the loop for good), so it should never actually co-occur with a missing shutdown
+ * marker — but recording it directly, rather than re-deriving that from the restart-intent/exit-code
+ * chain, means a reader doesn't have to trust the chain to see it.
+ * Returns null when not running under the supervisor at all (the shipped, supervisor-less loomctl path,
+ * an OS service manager, or a bare `tsx watch` dev daemon) — never fabricate an iteration for a boot the
+ * supervisor never saw. Also null on a malformed/non-positive value (defensive: the env var crosses a
+ * process boundary written by a sibling script, not a compile-time-checked contract).
+ */
+export function supervisorIterationAtBoot(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.LOOM_SUPERVISOR_ITERATION;
+  if (typeof raw !== "string" || raw === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
  * Cause/impact of a `[loom:daemon-restarted]` wake, for ONE resumed session (card 5907b71e part 1, refined
  * by 61cc91c6). A single self-hosting session takes ~10 restart wakes, most for routine deploys/
  * version-syncs another session triggered — and each currently burns a FULL re-check turn confirming

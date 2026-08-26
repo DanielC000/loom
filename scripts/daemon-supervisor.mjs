@@ -264,7 +264,16 @@ function runDaemon(cwd, extraEnv) {
   });
 }
 
+// Card 572dd777 DoD-4: which pass of this loop a given daemon boot ran under, threaded to the child as
+// LOOM_SUPERVISOR_ITERATION so the daemon can tell "this supervisor process was itself just started"
+// (iteration 1 — on the self-host path, necessarily a human running this command, since nothing else
+// launches it) apart from "this supervisor's own loop relaunched the daemon" (iteration >1, only ever
+// reached via the RESTART_EXIT_CODE `continue` below) — a directly recorded fact instead of a deduction
+// the daemon would otherwise have to make from restart-intent presence + exit code alone.
+let supervisorIteration = 0;
+
 for (;;) {
+  supervisorIteration++;
   // Build in two steps so a failure has the right blast radius. FULL TURBO no-ops when nothing
   // changed, so the tool-triggered restart (which already built) relaunches fast.
   //
@@ -299,14 +308,20 @@ for (;;) {
   // overrides an operator's own explicit setting.
   const extraEnv = {
     LOOM_SUPERVISED: "1", LOOM_DEV: process.env.LOOM_DEV ?? "1", UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE ?? "16",
+    LOOM_SUPERVISOR_ITERATION: String(supervisorIteration),
   };
   // Code Review finding #2: rotateCrashlog() just above ALWAYS runs before this launch, so a real prior
   // crash's crash.log is already gone by the time the child could check fs.existsSync itself — tell it
   // explicitly, ONLY when a file genuinely existed to rotate (never claim a crash that didn't happen).
   if (rotated) extraEnv.LOOM_PRIOR_CRASHLOG = "1";
+  console.log(
+    `[supervisor] launching daemon — supervisor iteration ${supervisorIteration}` +
+    (supervisorIteration === 1 ? " (this supervisor process was itself just started)" : " (relaunched in-process after an exit-75 restart request)") +
+    "…",
+  );
   const runCode = await runDaemon(daemonDir, extraEnv);
   if (runCode === RESTART_EXIT_CODE) {
-    console.log("[supervisor] daemon requested restart — rebuilding and relaunching…");
+    console.log(`[supervisor] daemon requested restart — rebuilding and relaunching (next iteration ${supervisorIteration + 1})…`);
     continue;
   }
   process.exit(runCode);

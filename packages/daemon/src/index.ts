@@ -54,7 +54,7 @@ import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestratio
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
-import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
+import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent, supervisorIterationAtBoot } from "./orchestration/restart.js";
 import { startVaultVersioners, logVaultPushStatus, VaultPushStatusWatcher, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
 import { resolveAllCompanionConfigs } from "./companion/store.js";
@@ -66,6 +66,15 @@ import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 
 async function main(): Promise<void> {
+  // Card 572dd777 DoD-3: this boot's own start time, captured as the very first statement of main() so
+  // it's as close as possible to the first line this process ever writes to daemon-output.log — a
+  // recipient of the crash-recovered/daemon-restarted nudge can correlate against that log without
+  // guessing which boot's lines they're looking at.
+  const bootStartedAt = new Date();
+  // Card 572dd777 DoD-4: which supervisor loop iteration this boot ran under, if any — see
+  // supervisorIterationAtBoot's own doc. Read here (not deeper in boot) purely to keep it alongside the
+  // other boot-classification signals captured up front on this same line of reasoning.
+  const supervisorIteration = supervisorIterationAtBoot();
   // Card 2f146782: capture whether the PRECEDING run actually wrote a JS-level fatal crash record BEFORE
   // installCrashHandlers() rotates crash.log to .prev below — this is the only point in boot where
   // that's still checkable directly. See crashlog.ts's hadCrashLogAtBoot for why this also needs
@@ -1249,13 +1258,16 @@ async function main(): Promise<void> {
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
     const { resumed, skippedParked, failed, managersFailed } =
-      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot });
+      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+        soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot, bootedAt: bootStartedAt, supervisorIteration,
+      });
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : "") +
-      (shutdownMarker ? ` (clean ${shutdownMarker.reason} stop marker found — nudges classified as a restart, not a crash)` : ""),
+      (shutdownMarker ? ` (clean ${shutdownMarker.reason} stop marker found — nudges classified as a restart, not a crash)` : "") +
+      (supervisorIteration !== null ? ` (supervisor iteration ${supervisorIteration})` : ""),
     );
   }
   // Durable queued-message recovery (card 2ca18433): re-drive any session_message/message_worker that was

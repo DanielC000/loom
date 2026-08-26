@@ -4769,14 +4769,44 @@ export class SessionService {
    * to run any handler (an OS-level kill, a host sleep/reboot, a crashed hosting terminal) — the
    * `[loom:crash-recovered]` nudge says so instead of claiming a JS "crash" that never happened. Omitted
    * (defaults to `true`) preserves the original "crashed" phrasing for every caller that doesn't pass it.
+   *
+   * `opts.bootedAt` (card 572dd777 DoD-3): this boot's own start time, appended to the nudge so a
+   * recipient can correlate against `daemon-output.log` without guessing which boot's lines they're
+   * reading. Omitted (defaults to `now`) rather than made mandatory, so an existing test caller that only
+   * ever passed `now` still gets a real (if slightly later-captured) timestamp instead of `undefined`.
+   *
+   * `opts.supervisorIteration` (card 572dd777 DoD-4): which pass of the restart supervisor's loop this
+   * boot ran under — see `supervisorIterationAtBoot`'s own doc (orchestration/restart.ts) for what
+   * iteration 1 vs >1 means. `null`/omitted means not running under the supervisor at all (or the caller
+   * genuinely doesn't know) — the clause is silently skipped rather than fabricating a number. Only ever
+   * surfaced on the crash-shaped branch (`cleanStop` false): a clean stop already fully explains itself,
+   * and the supervisor's own restart policy means iteration>1 should never actually co-occur with a
+   * missing shutdown marker — surfacing it there anyway would invite a reader to draw a conclusion from a
+   * combination that should be structurally impossible, rather than trusting what's actually true (see the
+   * card's own "Defect 2" writeup for why this is recorded as a directly observed fact rather than left as
+   * an inference chain the reader has to trust).
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
-    opts: { resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null; hadCrashLogAtBoot?: boolean } = {},
+    opts: {
+      resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
+      hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
+    } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[] } {
     const now = opts.now ?? new Date();
     const cleanStop = !!opts.shutdownMarker; // fresh marker present ⇒ the preceding stop was NOT a crash
     const hadCrashLog = opts.hadCrashLogAtBoot ?? true; // undecided ⇒ keep the original "crashed" phrasing
+    const bootedAt = opts.bootedAt ?? now;
+    const supervisorIteration = opts.supervisorIteration ?? null;
+    // Card 572dd777 DoD-3/4: the shared trailing clause every crash-recovered/daemon-restarted nudge below
+    // appends — the boot timestamp always, plus (crash-shaped boots only, per the doc above) the
+    // supervisor-iteration verdict when one was actually recorded.
+    const iterationClause = cleanStop || supervisorIteration === null
+      ? ""
+      : supervisorIteration === 1
+        ? " This boot is the supervisor's own iteration 1 (it was itself just started — not a supervisor-driven relaunch)."
+        : ` This boot is the supervisor's own relaunch iteration ${supervisorIteration} (its loop relaunched the daemon in-process, not an external start).`;
+    const bootDiagnosticsClause = ` Boot started ${bootedAt.toISOString()}.${iterationClause}`;
     // Default resumeOne LOGS the real thrown reason (dead transcript / gone worktree / recycled/…) on
     // failure instead of silently collapsing it to a bare boolean — a resume that doesn't happen must
     // never be a silent no-op (board evidence: a session was "marked dead-and-skipped" with nothing in
@@ -4856,10 +4886,10 @@ export class SessionService {
               cleanStop
                 ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — re-check your ` +
                   `worktree's state, then continue your assigned task from where you left off. If you had already ` +
-                  `finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL
+                  `finished, call worker_report (done/blocked) so your manager isn't left waiting.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
                 : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — re-check your ` +
                   `worktree's state, then continue your assigned task from where you left off. If you had ` +
-                  `already finished, call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
+                  `already finished, call worker_report (done/blocked) so your manager isn't left waiting.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL,
               this.db.getSession(w.workerSessionId)?.taskId ?? null,
             );
           } catch { /* not ready yet — the resume stands */ }
@@ -4895,8 +4925,8 @@ export class SessionService {
       const note = workers.length === 0
         ? isPlatform
           ? `${tag} ${lead} you — re-orient from your home board and your living resume doc, then continue ` +
-            `your platform work.` + RESUME_NUDGE_TAIL
-          : `${tag} ${lead} you — re-check your state and continue orchestrating.` + RESUME_NUDGE_TAIL
+            `your platform work.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
+          : `${tag} ${lead} you — re-check your state and continue orchestrating.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
         : (() => {
           // Card ab8b2cc6: reported ONLY relative to `recoveredCount` (a session that never resumed has
           // nothing to check) — and worded to make what was actually verified UNAMBIGUOUS either way, so
@@ -4925,8 +4955,8 @@ export class SessionService {
           ].filter(Boolean).join("; ");
           return isPlatform
             ? `${tag} ${lead} it — ${parts}. Re-orient from your home board and your living resume doc, then ` +
-              `continue your platform work.` + RESUME_NUDGE_TAIL
-            : `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
+              `continue your platform work.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
+            : `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL;
         })();
       // Card 597903fc: durable (see enqueueDurableNudge's own doc) — same reasoning as the worker nudge
       // above, applied to the manager/platform summary nudge. Deferred for a manager (mounts
