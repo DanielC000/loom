@@ -555,6 +555,59 @@ try {
         db.listEventsForWorker(wkr).filter((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId).length === 2);
     }
 
+    // (S13) Card ba9225f0 (DoD-6): this park site now reuses `suppressMootParkNotice` (085d9422's shipped
+    // shape, previously wired only into the sibling `handleGiveUpExhausted`) — mirrors
+    // redelivery-parked-notice-suppression.mjs's own (1): TWO independent chains that both reach PARK for
+    // the SAME rootMsgId (the auto-join double-park shape that card's own investigation root-caused) must
+    // produce exactly ONE [loom:worker-spawn-broken] notice, not two — the second is suppressed, its OWN
+    // durable "parked" event tagged noticeSuppressed:true (never silently dropped from the audit trail).
+    // RED against pre-ba9225f0 code (which had no suppression call here at all — both chains always fired).
+    {
+      const mgr = `kge-mgr13-${sfx}`, wkr = `kge-wkr13-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge13-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+      const rootMsgId = `root-s13-${sfx}`;
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s13a-${sfx}`, rootMsgId, `kickoff-s13-${sfx}`, TERMINAL_CHAIN_DEPTH);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s13b-${sfx}`, rootMsgId, `kickoff-s13-${sfx}`, TERMINAL_CHAIN_DEPTH);
+
+      const toMgr = pty.sent.filter((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]"));
+      check("(S13) THE FIX: two independent chains parking the SAME root produce exactly ONE notice, not two",
+        toMgr.length === 1);
+      const parkedEvents = db.listEventsForWorker(wkr).filter((e) =>
+        e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "parked");
+      check("(S13) BOTH chains still recorded their OWN parked event (audit trail complete, nothing silently dropped)",
+        parkedEvents.length === 2);
+      check("(S13) exactly ONE of the two parked events is marked noticeSuppressed:true",
+        parkedEvents.filter((e) => e.detail?.noticeSuppressed === true).length === 1);
+      check("(S13) the suppressed one carries reason 'duplicate-parked'",
+        parkedEvents.find((e) => e.detail?.noticeSuppressed === true)?.detail?.noticeSuppressedReason === "duplicate-parked");
+    }
+
+    // (S14) THE LOAD-BEARING NEGATIVE CONTROL (DoD-4): a single, genuinely-lost kickoff (no duplicate park
+    // for this root) STILL gets its [loom:worker-spawn-broken] notice, unsuppressed — (S13)'s new
+    // suppression call must never silence a genuinely needed notice.
+    {
+      const mgr = `kge-mgr14-${sfx}`, wkr = `kge-wkr14-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge14-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+      const rootMsgId = `root-s14-${sfx}`;
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s14-${sfx}`, rootMsgId, `kickoff-s14-${sfx}`, TERMINAL_CHAIN_DEPTH);
+
+      check("(S14) NEGATIVE CONTROL: a genuinely lost kickoff (no duplicate park) IS still reported",
+        pty.sent.filter((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")).length === 1);
+      const parkedEvt = db.listEventsForWorker(wkr).find((e) =>
+        e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "parked");
+      check("(S14) NEGATIVE CONTROL: its own event is NOT marked suppressed", parkedEvt?.detail?.noticeSuppressed !== true);
+    }
+
     db.close();
   }
 }
@@ -563,6 +616,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session."
+  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card ba9225f0 (DoD-6): this park site now reuses 085d9422's moot-suppression shape — two independently-parking chains sharing one rootMsgId produce exactly ONE notice, the second's own parked event tagged noticeSuppressed:true/duplicate-parked (S13), while a single genuinely-lost kickoff is still reported, unsuppressed (S14)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

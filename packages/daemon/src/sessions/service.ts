@@ -7800,10 +7800,25 @@ export class SessionService {
     }
     // eslint-disable-next-line no-console
     console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint(s) — the engine never confirmed receiving it; PARKING and notifying manager ${w.parentSessionId} instead of a bare drop`);
+    // Card ba9225f0 (DoD-6): this sibling park site is where `ecceccc8` left `085d9422`'s moot-suppression
+    // shape unwired (`suppressMootParkNotice` was reachable only from `handleGiveUpExhausted`) — the exact
+    // asymmetry `ba9225f0` was filed to close. Reusing the SAME shipped check here, not a parallel one:
+    // computed BEFORE the durable park event below, same ordering as `handleGiveUpExhausted`, so that
+    // event's OWN detail can record whether the manager-facing notice actually went out (the parked outcome
+    // is recorded EITHER way — card 085d9422's own load-bearing property; only the notice dispatch is
+    // gated). `recipientId` is `sessionId` (the kickoff's own destination) and `sender` is
+    // `w.parentSessionId` (the manager) — the same roles `handleGiveUpExhausted` passes for an ordinary
+    // durable message, just read off this method's own `w` instead of a `sender` param.
+    const mootReason = this.suppressMootParkNotice(sessionId, w.parentSessionId, rootMsgId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
-      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked" },
+      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked", ...(mootReason ? { noticeSuppressed: true, noticeSuppressedReason: mootReason } : {}) },
     });
+    if (mootReason) {
+      // eslint-disable-next-line no-console
+      console.log(`[give-up] ${sessionId} [loom:worker-spawn-broken] notice for root ${rootMsgId} SUPPRESSED as moot (${mootReason}) — the parked event above is still recorded durably; only the manager-facing notice is skipped`);
+      return;
+    }
     // Card 518d0305: the park budget itself is NOT raised (this notice's `GIVE_UP_REMINT_LIMIT` is SHARED
     // with the general durable-message give-up path — see that constant's own doc for the full derivation,
     // n=177, the ba6b65dc specimen, and why); instead the notice's CLAIM is made proportionate via
