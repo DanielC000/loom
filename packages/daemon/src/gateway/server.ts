@@ -3837,14 +3837,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // non-null while the gate is genuinely running, and briefly after it settles via the registry's RETAINED
   // terminal view — see PendingOpRegistry's doc). Not a DB column — it lives in the registry, so it's
   // folded on here rather than in listAllSessions. Subset to the shared `PendingMerge` shape {opId, state,
-  // startedAt, outcome}; null on every non-merging session (byte-identical). `outcome` is carried straight
-  // through — undefined while running, "merged"/"rejected"/"failed" once settled (see
+  // startedAt, outcome, gatePhase}; null on every non-merging session (byte-identical). `outcome` is
+  // carried straight through — undefined while running, "merged"/"rejected"/"failed" once settled (see
   // confirmWorkerMergeTracked's classifyOutcome) — so the Board can distinguish a rejected merge from a
   // successful one instead of both reading as `state:"done"`.
+  // `gatePhase` (card 53ad9ed3, closing the divergence 008f33f1 deliberately left open on this REST path)
+  // disambiguates `state:"running"` the SAME way worker_list/worker_status's MCP `pendingMerge` already
+  // does: `state:"running"` is PendingOpRegistry's own coarse in-flight bit, set the instant the merge op
+  // is minted — well before it's ever submitted to GateSemaphore for admission — so a viewer reading
+  // `startedAt` as "the gate started running" can watch the Board's live M:SS timer count queue-wait as if
+  // it were execution time. Reusing `gatePhaseForOpId` (never reimplemented — see its own doc in
+  // sessions/service.ts) folds in the SAME live GateSemaphore.findByOpId lookup gate_status/gate_queue
+  // already read, so this can never disagree with either. Only computed while `state === "running"` (a
+  // settled row's `outcome` already answers the question unambiguously) — omitted (not merely null)
+  // otherwise, byte-identical to before this field existed.
   app.get("/api/sessions", async () =>
     deps.db.listAllSessions().map((s) => {
       const pm = deps.sessions.peekPendingMerge(s.id);
-      return { ...s, pendingMerge: pm ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome } : null };
+      const gatePhase = pm && pm.state === "running" ? deps.sessions.gatePhaseForOpId(pm.opId) : undefined;
+      return { ...s, pendingMerge: pm ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome, gatePhase } : null };
     }));
 
   // Read-only vault browser (§7: no editing from the UI in phase 1).

@@ -428,11 +428,20 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
 // the softer `outcome` string to agree). `outcome` is only absent for a legacy/synthetic "done" with no
 // outcome field (e.g. an older cached row) — that degrades to "merged" for backward compatibility,
 // matching the old done⇒merged reading.
-type MergeState = "running" | "merged" | "cancelled" | "rejected" | "failed";
+//
+// "queued" (card 53ad9ed3) is the WAITING half of `state:"running"`, read off `pm.gatePhase` — see
+// PendingMerge's own doc. Without it, this pill showed "merging" (plus a ticking timer) for an op that
+// hadn't reached GateSemaphore admission yet, i.e. one that had done zero seconds of actual gate work —
+// exactly the misread the card was filed to close. Rendered muted/static rather than the amber sweep so
+// the two are never confusable at a glance.
+type MergeState = "queued" | "running" | "merged" | "cancelled" | "rejected" | "failed";
 type MergeDisplay = { state: MergeState; tone: Tone; label: string; startedAt: string };
 function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null {
   if (!pm) return null;
-  if (pm.state === "running") return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
+  if (pm.state === "running") {
+    if (pm.gatePhase === "queued") return { state: "queued", tone: "muted", label: "queued", startedAt: pm.startedAt };
+    return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
+  }
   if (pm.state === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
   if (pm.outcome === "cancelled") return { state: "cancelled", tone: "cyan", label: "cancelled", startedAt: pm.startedAt };
   if (pm.outcome === "rejected") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
@@ -467,21 +476,24 @@ function MergePill({ merge }: { merge: MergeDisplay }) {
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: tone[merge.tone], textTransform: "uppercase", letterSpacing: "0.06em" }}>
       <Dot tone={merge.tone} glow />
       <span>{merge.label}</span>
-      {merge.state === "running" && <MergeTimer startedAt={merge.startedAt} />}
+      {(merge.state === "running" || merge.state === "queued") && <MergeTimer startedAt={merge.startedAt} />}
     </span>
   );
 }
 
 // The bottom-edge hairline itself. RUNNING → an amber segment sweeping left↔right (the CSS keyframes
-// degrade to a static amber bar under prefers-reduced-motion); settled → a solid full-width fill —
-// phosphor (merged, with a faint CRT glow), cyan (cancelled — no verdict reached, deliberately NOT the
-// same amber a real rejection gets), amber (rejected — a solid bar, distinct from the RUNNING sweep's
-// animated one), or red (failed). aria-hidden — the worker-row pill already names the state in text.
+// degrade to a static amber bar under prefers-reduced-motion); QUEUED → a static muted bar (no sweep — a
+// queued op hasn't reached the gate, so animating it would read as active work it isn't doing); settled →
+// a solid full-width fill — phosphor (merged, with a faint CRT glow), cyan (cancelled — no verdict
+// reached, deliberately NOT the same amber a real rejection gets), amber (rejected — a solid bar, distinct
+// from the RUNNING sweep's animated one), or red (failed). aria-hidden — the worker-row pill already names
+// the state in text.
 function MergeTrack({ merge }: { merge: MergeDisplay }) {
   const fillStyle: React.CSSProperties =
     merge.state === "merged" ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
     : merge.state === "cancelled" ? { background: color.cyan }
     : merge.state === "rejected" ? { background: color.amber }
+    : merge.state === "queued" ? { background: color.textMuted }
     : { background: color.red };
   return (
     <div className="loom-merge-track" aria-hidden>

@@ -66,11 +66,16 @@ const now = new Date().toISOString();
 db.insertProject({ id: "p1", name: "Proj", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "a1", projectId: "p1", name: "Agent", startupPrompt: "x", position: 0, profileId: null });
 
-// A minimal SessionService stand-in — FleetHub's coalescer only ever calls peekPendingMerge on it, so a
-// full SessionService (pty/worktrees/etc.) would be pure unused ceremony here. Mutable so test (4) can
-// arm a pending op without any real PendingOpRegistry machinery.
+// A minimal SessionService stand-in — FleetHub's coalescer only ever calls peekPendingMerge and (while a
+// merge op is running) gatePhaseForOpId on it, so a full SessionService (pty/worktrees/etc.) would be pure
+// unused ceremony here. Mutable so test (4) can arm a pending op without any real PendingOpRegistry
+// machinery.
 const pendingMergeById = new Map();
-const sessions = { peekPendingMerge: (id) => pendingMergeById.get(id) };
+const gatePhaseByOpId = new Map();
+const sessions = {
+  peekPendingMerge: (id) => pendingMergeById.get(id),
+  gatePhaseForOpId: (opId) => gatePhaseByOpId.get(opId) ?? null,
+};
 
 const fleetHub = new FleetHub();
 const app = await buildServer({
@@ -149,14 +154,20 @@ try {
   check("(3) three rapid mutations produced exactly ONE delta (no trailing second one)", noSecondDelta === null);
 
   // --- (4) pendingMerge is folded in via the SAME opId/state/startedAt/outcome shape as REST ----------
+  // gatePhase (card 53ad9ed3) is folded in too, via the SAME gatePhaseForOpId reuse the REST /api/sessions
+  // handler uses — proves this WS path can't drift from the REST projection it mirrors.
   pendingMergeById.set("S1", { opId: "op-1", kind: "merge", key: "merge:S1", managerSessionId: "M", startedAt: now, state: "running" });
+  gatePhaseByOpId.set("op-1", "queued");
   db.setBusy("S1", true);
   const upsert3 = await inbox.next();
   check("(4) pendingMerge is folded into the upsert when a merge op is running",
     upsert3?.session?.pendingMerge?.opId === "op-1"
       && upsert3.session.pendingMerge.state === "running"
       && upsert3.session.pendingMerge.startedAt === now);
+  check("(4) gatePhase is folded in too, reusing the SAME live lookup the REST path uses",
+    upsert3?.session?.pendingMerge?.gatePhase === "queued");
   pendingMergeById.delete("S1");
+  gatePhaseByOpId.delete("op-1");
 
   // --- (5) archiving emits session:remove (row now excluded from getSessionListItemById) --------------
   db.archiveSession("S1");

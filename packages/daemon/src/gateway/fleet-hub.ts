@@ -98,8 +98,12 @@ export class FleetHub {
         const pm = this.sessions.peekPendingMerge(id);
         // pm.outcome is PendingOpOutcome (a bare `string`) — narrower-cast to PendingMerge's outcome union,
         // same as the REST /api/sessions handler this mirrors (server.ts's peekPendingMerge projection).
+        // gatePhase (card 53ad9ed3) is reused the SAME way — see server.ts's own doc for the full reading
+        // guide — so this live WS push never drifts from what a fresh REST poll of the same session would
+        // show.
+        const gatePhase = pm && pm.state === "running" ? this.sessions.gatePhaseForOpId(pm.opId) : undefined;
         const pendingMerge: PendingMerge | null = pm
-          ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome as PendingMerge["outcome"] }
+          ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome as PendingMerge["outcome"], gatePhase }
           : null;
         const session: SessionListItem & { pendingMerge: PendingMerge | null } = { ...row, pendingMerge };
         this.broadcast({ t: "session:upsert", session });

@@ -35,11 +35,14 @@ function cardByTitle(page: Page, title: string) {
 const AMBER_RGB = "255, 178, 62"; // --loom-amber #ffb23e (the running sweep gradient AND the rejected fill)
 const PHOSPHOR_RGB = "46, 230, 110"; // --loom-phosphor #2ee66e (merged fill)
 const RED_RGB = "255, 92, 92"; // --loom-red #ff5c5c (failed fill)
+const MUTED_RGB = "90, 99, 108"; // --loom-text-muted #5a636c (the queued fill — card 53ad9ed3)
 
 // `state` is the raw op state; `outcome` (only meaningful once `state !== "running"`) is what actually
 // distinguishes a merge SUCCESS from a gate REJECTION — both settle to `state:"done"` (see PendingMerge's
 // doc), so the card's rendered fill/label is driven by `outcome`, not `state`, for every terminal case.
-type MergeInjection = { state: "running" | "done" | "failed"; outcome?: "merged" | "rejected" | "failed" } | null;
+// `gatePhase` (only meaningful while `state === "running"`) disambiguates WAITING ("queued") from
+// EXECUTING (undefined/"running") — see PendingMerge's own doc (card 53ad9ed3).
+type MergeInjection = { state: "running" | "done" | "failed"; outcome?: "merged" | "rejected" | "failed"; gatePhase?: "queued" | "running" } | null;
 
 test("a board card's merge hairline sweeps while running, fills solid on settle, and ticks a live timer", async ({ page, loomDaemon }) => {
   // A worker bound to a card in Review (the lane a merge fires from), with a branch so the branch chip
@@ -96,6 +99,26 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   const t1 = toSecs((await timer.textContent()) ?? "0:00");
   await expect.poll(async () => toSecs((await timer.textContent()) ?? "0:00"), { timeout: 4000 }).toBeGreaterThan(t1);
   await shoot(card, "merge-running.png");
+
+  // ── QUEUED (op-state "running", gatePhase "queued" — card 53ad9ed3): the op is minted but hasn't reached
+  //    GateSemaphore admission yet, so this must NOT render as the animated "merging" sweep (that would
+  //    misread queue-wait as active gate execution) — a static muted bar instead, and the pill reads
+  //    "queued". ──
+  mergeInjection = { state: "running", gatePhase: "queued" };
+  await page.reload();
+  await expect(card.locator(".loom-merge-sweep")).toHaveCount(0);
+  const queuedFill = card.locator(".loom-merge-fill");
+  await expect(queuedFill).toBeVisible();
+  await expect(card.getByText("queued", { exact: true })).toBeVisible();
+  await expect(card.getByText("merging", { exact: true })).toHaveCount(0);
+  expect(await queuedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(MUTED_RGB);
+  await shoot(card, "merge-queued.png");
+
+  // Flip back to actively running (no gatePhase) before the footprint comparison and the settle sequence
+  // below, which both assume the plain "merging" sweep state.
+  mergeInjection = { state: "running" };
+  await page.reload();
+  await expect(card.locator(".loom-merge-sweep")).toBeVisible();
 
   // ── FOOTPRINT: the merging card must be no materially taller than a plain worker card (the hairline is
   //    an absolute 2px overlay; the timer shares the existing worker row). Compare their box heights. ──

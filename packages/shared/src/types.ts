@@ -627,6 +627,18 @@ export interface PendingMerge {
    *  distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as
    *  green "merged" via `state === "done"` — and, since Half Four, from a cancelled one (neither). */
   outcome?: "merged" | "cancelled" | "rejected" | "unknown";
+  /** Disambiguates `state:"running"` into WAITING vs EXECUTING (card 53ad9ed3, closing the divergence
+   *  008f33f1 left deliberately open on this REST/WS path — worker_list/worker_status's MCP `pendingMerge`
+   *  already carried this). `state:"running"` alone is PendingOpRegistry's own coarse in-flight bit, set
+   *  the instant the merge op is minted — well before it's ever submitted to GateSemaphore for admission —
+   *  so a viewer trusting `startedAt` as "the gate started running" can watch the live M:SS timer count
+   *  queue-wait as execution time. `"queued"` = admitted-pending (waiting on a semaphore slot or a
+   *  same-repo sibling); `"running"` = actually admitted and executing; `null` = the op hasn't reached gate
+   *  admission yet (worktree prep / union-merge still in progress), has already left the live registry, or
+   *  the project is gateless. `null` is a normal reading, not an error. Only ever present while
+   *  `state === "running"` — omitted (not merely null) on a settled row, where `outcome` already answers
+   *  the question unambiguously. */
+  gatePhase?: "queued" | "running" | null;
 }
 
 export interface Session {
