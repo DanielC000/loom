@@ -358,6 +358,17 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Card 23980bbf: render a duration for a human-facing log line, never rounding a sub-1000ms value down to
+ * a misleading `0s` — a plain `Math.round(ms / 1000)` does exactly that for any {@link
+ * CodescapeSupervisor.healthProbeIntervalMs} below 1000, which is the common case for this file's own test
+ * seams (300ms/60ms) and would have printed a nonsensical "checked every 0s" (caught by actually running
+ * the test corpus and reading the emitted line, not by inspection alone).
+ */
+function formatIntervalMs(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`;
+}
+
+/**
  * Nitpick fix (card 088afc94): normalize a repo path for use as a `projectIds`/`unresolvedProjectIds` map
  * key. Resolved + lowercased — mirrors `codescape/manifest.ts`'s `samePath` (itself mirroring codescape's
  * own `projectIdFor`: "Windows paths are case-insensitive"), so this instance's own cache can't miss a hit
@@ -979,10 +990,15 @@ export class CodescapeSupervisor {
         // to accept 5xx would silently re-enable drift-checking on a body we could not parse — this is its
         // own third outcome, not a relaxed version of either existing one. Latched so the fact is reported
         // ONCE per distinct status, not on every ~30s tick forever.
+        //
+        // Card 23980bbf: same latched-transition ambiguity as announceDriftCheckState — this line only
+        // fires once per distinct status, so a sustained error can sit silent for a long time afterward.
+        // Say so explicitly (plus the resolved probe cadence) rather than let the gap read as either "the
+        // probe stopped" or "the probe cadence is this sparse".
         this.consecutiveHealthFailures = 0;
         if (res.status !== this.lastHealthAnsweredErrorStatus) {
           this.lastHealthAnsweredErrorStatus = res.status;
-          console.warn(`[codescape] /graph/health answered HTTP ${res.status} (process alive and serving, just couldn't determine something) — NOT counted as a wedge; only a no-answer is wedge evidence`);
+          console.warn(`[codescape] /graph/health answered HTTP ${res.status} (process alive and serving, just couldn't determine something) — NOT counted as a wedge; only a no-answer is wedge evidence. Probed every ${formatIntervalMs(this.healthProbeIntervalMs)}; won't repeat this line while the status stays ${res.status} — only a change (a different status, or recovery to 200) logs again.`);
         }
         return;
       }
@@ -1066,11 +1082,18 @@ export class CodescapeSupervisor {
    * `console.log`, not `console.warn` — a mismatch is already loudly warned in detail by the caller's own
    * existing branches (deferring/STABLE/UNRESOLVED); this line exists so the coarse three-way signal
    * (match / mismatch / not-checked) is ALSO visible without reading those detailed lines.
+   *
+   * Card 23980bbf: a TRANSITION-only log is, on its own, indistinguishable from a low-frequency POLL log —
+   * both are sparse lines, and a reader who doesn't already know this line only fires on change can (and
+   * did — see the card) mis-derive a wait budget from the gaps between occurrences. Folding the RESOLVED
+   * {@link healthProbeIntervalMs} into the line itself (never the hardcoded default constant — this
+   * instance may have been constructed with a test/override seam) is what makes the true poll cadence
+   * derivable from the log output alone, without reading this source file.
    */
   private announceDriftCheckState(state: DriftCheckState): void {
     if (state === this.driftCheckState) return;
     this.driftCheckState = state;
-    console.log(`[codescape] drift-check state: ${state}`);
+    console.log(`[codescape] drift-check state: ${state} (checked every ${formatIntervalMs(this.healthProbeIntervalMs)}; this line only logs on a state CHANGE, not every check)`);
   }
 
   private async checkBuildDrift(healthJson: unknown): Promise<void> {
