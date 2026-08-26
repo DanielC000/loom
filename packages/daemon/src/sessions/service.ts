@@ -1053,6 +1053,121 @@ function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-ski
   }
 }
 
+/** Card e1ac691b — the `worker_merge_confirm` surfacing for the composer-fusion/prompt-mismatch/
+ *  paste-tripwire family (`Live.lastMismatchReplay`/`lastMismatchFusion`/`lastMismatchUnmatched`/
+ *  `lastPasteTripwireGiveUp`, pty/host.ts). Per pinned memory `shipping-a-detector-is-not-someone-
+ *  reading-it`, the ADVISORY arm of this family (a console.warn, an attention-path nudge) has scored
+ *  ZERO acted-on; this puts the SAME signal in front of an ACTION a manager was already taking
+ *  (confirming a merge) instead of adding a fourth advisory channel. NON-BLOCKING, ALWAYS — this must
+ *  never gate, refuse, or require clearing to merge (a refusal a manager cannot satisfy is worse than a
+ *  notice they can ignore, per that same note) — purely a `warning`-string addition, mirroring
+ *  {@link nestedRepoBlockWarning}/{@link worktreeGcWarning}'s own established shape and call-site
+ *  pattern (shared by the Green path and the ALREADY_MERGED path so the two can't drift).
+ *
+ *  Called from INSIDE the single async operation `confirmWorkerMergeTracked`'s `pendingOps.attach()`
+ *  wraps (`confirmWorkerMerge` / `finishAlreadyMerged`) — computed ONCE, baked into the returned
+ *  `ConfirmMergeResult` at the moment the merge actually executes, never at the outer call's own
+ *  issuance time. This is what makes it correct across ALL THREE of `worker_merge_confirm`'s response
+ *  shapes without extra plumbing: a sync-settled call sees this directly; a slow, async `pending` call's
+ *  eventual settle (via `[loom:merge-done]`/`gate_status`) reads the SAME frozen result, computed when
+ *  the op actually ran, never at request time; and a later cached-verdict reuse (a re-call at the same
+ *  commit) replays that identical frozen object rather than re-deriving anything — so it can never emit
+ *  a warning "computed at request time" for the pending case, nor a silently-stale one on reuse (it is
+ *  not stale; it is the correct, frozen answer for the run that produced it, same as every sibling
+ *  warning field already behaves).
+ *
+ *  ⚠️ IN-PROCESS BOUND, NOT A NEW ONE (this is `Live`'s own existing posture, restated here where a
+ *  reader of THIS warning will actually see it): these four fields live only in `PtyHost`'s in-memory
+ *  `live` map. A real claude session's `Live` entry survives its own pty process exit (only a bare
+ *  "shell" kind's entry is deleted — see `pty.onExit`'s own comment), so the signal is still readable
+ *  here even after the worker has stopped — but a DAEMON RESTART between the worker's work and this
+ *  merge confirm silently loses it (a fresh boot never had the events to record). Absence of this
+ *  warning is therefore "none recorded, or the daemon restarted since" — never a positive "nothing ever
+ *  happened" guarantee.
+ *
+ *  Surfaces EVERY candidate currently set (up to 4), not just one — CORRECTED from an earlier
+ *  "most-recent-of-four" design (manager review, card e1ac691b): picking by `detectedAt` alone can HIDE
+ *  the severe case behind a benign one — an `unmatched` (possible LOSS) at gen=4 followed by a `fusion`
+ *  (ESTABLISHED, nothing lost) at gen=9 used to surface ONLY the fusion, telling a manager "nothing was
+ *  lost" while a possible-loss event sat unmentioned. Picking by SEVERITY alone has its own trap this
+ *  reasoning surfaced: a `fusion` can specifically RESOLVE an earlier `replay`'s own open question (the
+ *  replay's own text says exactly this — "a later generation may still fuse it back in whole"), so
+ *  suppressing the later, resolving fusion in favor of the earlier, nominally-more-severe replay would
+ *  hide the very news that the concern was resolved — the mirror-image of the recency bug. Showing ALL
+ *  candidates sidesteps having to adjudicate that precedence at all, and at ≤4 short clauses the cost is
+ *  negligible. Ordered CHRONOLOGICALLY (oldest `detectedAt` first) — not severity-first — so a resolving
+ *  later event reads, in the warning's own text, AFTER the concern it resolves, the same order a human
+ *  reading the session's own notices over time would see them; the per-field detail (exact lengths,
+ *  which the doc-string wording above already surfaces via `spanGens`/`replayedGen`/`intendedLen`) is
+ *  ALSO already on `worker_list`/`worker_status`'s own `lastMismatchReplay`/`lastMismatchFusion`/
+ *  `lastMismatchUnmatched`/`lastPasteTripwireGiveUp` fields (and `lastMismatch`, card 31f3d047's
+ *  generic derived view over the first three) for a manager who wants the full structured record.
+ *
+ *  Card e1ac691b (design input from a LIVE specimen the manager observed on their own session mid-card,
+ *  `gen=10`, `spanGens=[9,10]`, confirmed and duplicate-checked clean): the session-facing
+ *  `[loom:prompt-mismatch]` notice this mirrors is actionable for three reasons, and each candidate's
+ *  wording below deliberately does the same three things — never a bare "an integrity event occurred":
+ *  (1) CLASSIFIES rather than just alarms (a reader who can't tell benign from harmful treats every
+ *  instance as noise) — each label below states its own kind AND, where the underlying detection
+ *  established it, whether anything was actually lost; (2) carries the SAME SCOPE the notice itself
+ *  computed (`spanGens`/`replayedGen`/length) — a span is what lets a reader bound a duplicate-check to
+ *  a few recent actions instead of re-auditing everything; (3) names the ONE check only the recipient
+ *  (here, the confirming manager) can actually run — never just "something happened." Deliberately
+ *  BARE where the underlying data doesn't support more: this reuses ONLY fields the four `Live` types
+ *  already carry (mirrored from the notice branches in `pty/host.ts`'s `deliverHook`, ~5659-5762) —
+ *  nothing here is invented past what detection itself established. */
+function composerIntegrityWarning(pty: PtyHost, workerSessionId: string): string | undefined {
+  // Guarded with `typeof … === "function"`, not a plain call: many existing merge-confirm tests drive
+  // `confirmWorkerMerge`/`finishAlreadyMerged` (this function's two call sites) against a minimal
+  // hand-rolled `ptyStub` — `{ stop(), isAlive(), enqueueStdin() }`, not a real `PtyHost` — that never
+  // implements these getters. A real `PtyHost` always does (see host.ts), so this guard changes nothing
+  // in production; it only stops an unrelated test's narrower stub from throwing `TypeError: ... is not
+  // a function` the instant this card's code starts reaching it.
+  const candidates: Array<{ gen: number; detectedAt: number; text: string }> = [];
+  const replay = typeof pty.getLastMismatchReplay === "function" ? pty.getLastMismatchReplay(workerSessionId) : undefined;
+  if (replay) {
+    candidates.push({
+      gen: replay.gen, detectedAt: replay.detectedAt,
+      text: `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — not an established loss (a later generation may still fuse it back in whole); if generation ${replay.replayedGen}'s own turn already ran, check whether you're about to see it acted on a second time`,
+    });
+  }
+  const fusion = typeof pty.getLastMismatchFusion === "function" ? pty.getLastMismatchFusion(workerSessionId) : undefined;
+  if (fusion) {
+    // `spanGens.length >= 2` STRUCTURALLY, never guarded here: `detectComposerAccumulation` (pty/host.ts)
+    // only ever loops `for (let k = 2; k <= window.length; k++)` — there is no k=1 candidate, so a
+    // confirmed fusion can never carry a single-entry span. `earlierGens` is therefore never empty.
+    const earlierGens = fusion.spanGens.slice(0, -1);
+    candidates.push({
+      gen: fusion.gen, detectedAt: fusion.detectedAt,
+      text: `a composer-FUSION at gen=${fusion.gen} spanning generation(s) ${fusion.spanGens.join(",")} — ESTABLISHED, nothing of gen=${fusion.gen}'s own turn was lost; if generation(s) ${earlierGens.join(",")}'s own turn(s) already ran, check this worker's own report/transcript for whether that content was acted on a second time`,
+    });
+  }
+  const unmatched = typeof pty.getLastMismatchUnmatched === "function" ? pty.getLastMismatchUnmatched(workerSessionId) : undefined;
+  if (unmatched) {
+    candidates.push({
+      gen: unmatched.gen, detectedAt: unmatched.detectedAt,
+      text: `an UNMATCHED prompt mismatch at gen=${unmatched.gen} — a possible LOSS (${unmatched.intendedLen} char(s) Loom intended for that turn could not be matched to anything recognized); re-read this worker's report/transcript for that generation before trusting it ran on what was intended`,
+    });
+  }
+  const tripwire = typeof pty.getLastPasteTripwireGiveUp === "function" ? pty.getLastPasteTripwireGiveUp(workerSessionId) : undefined;
+  if (tripwire) {
+    candidates.push({
+      gen: tripwire.gen, detectedAt: tripwire.detectedAt,
+      text: `a paste-recovery GIVE-UP at gen=${tripwire.gen} — Loom's own one-shot recovery attempt was exhausted; check this worker's transcript around that generation for stray or duplicated content before trusting its later turns`,
+    });
+  }
+  if (!candidates.length) return undefined;
+  // CHRONOLOGICAL, oldest-first — see this function's own doc for why (not severity-first, not
+  // recency-first): a later, resolving event reads AFTER the concern it resolves, matching the order a
+  // human watching the session's own notices arrive would see them.
+  const ordered = [...candidates].sort((a, b) => a.detectedAt - b.detectedAt);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return ordered.length === 1
+    ? `this worker recorded ${ordered[0]!.text} (detected ${iso(ordered[0]!.detectedAt)}).`
+    : `this worker recorded ${ordered.length} composer-integrity events during its life: ` +
+      ordered.map((c, i) => `(${i + 1}) ${c.text} (detected ${iso(c.detectedAt)})`).join("; ") + ".";
+}
+
 /**
  * Card 00bd3b4a: the shared hedge every give-up-EXHAUSTED-derived notice states — Loom's own redelivery/
  * give-up budget exhausting is NOT proof the underlying write was never received, and a later
@@ -13657,7 +13772,11 @@ export class SessionService {
     const emitCompareWarning = emitCompareSkip
       ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}`
       : undefined;
-    const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, emitCompareWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
+    // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the
+    // moment the merge actually runs, correct across every one of worker_merge_confirm's response shapes.
+    const composerWarning = composerIntegrityWarning(this.pty, workerSessionId);
+    const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, emitCompareWarning, composerWarning].filter((w): w is string => !!w).join(" ") || undefined;
     // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map
     // (card e50600d2) doesn't hold an entry for a session that can never merge again.
     this.lastWorkerGateCheck.delete(workerSessionId);
@@ -13749,7 +13868,11 @@ export class SessionService {
     // Task 035fb673: same additive worktree-GC warning as the Green path (confirmWorkerMerge) — see its
     // own comment for why this is purely additive and never a failure signal.
     const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, args.worktreePath) : undefined;
-    const warning = [nestedWarning, worktreeWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // Card e1ac691b — same non-blocking surfacing as the Green path (confirmWorkerMerge) — see
+    // composerIntegrityWarning's own doc. An ALREADY_MERGED confirm is still a real merge-confirm ACTION
+    // against this same worker, so the same signal is just as relevant here.
+    const composerWarning = composerIntegrityWarning(this.pty, args.workerSessionId);
+    const warning = [nestedWarning, worktreeWarning, composerWarning].filter((w): w is string => !!w).join(" ") || undefined;
     return warning
       ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true, warning }
       : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };

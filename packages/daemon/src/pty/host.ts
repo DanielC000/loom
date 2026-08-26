@@ -2697,6 +2697,15 @@ interface Live {
   // that later generation, if any, actually occurs (see `detectComposerAccumulation`'s own coverage-limit
   // doc, this file). Read as "a replay was detected, possibly recoverable by a later fusion", never as "an
   // established loss" — the session-facing notice's own wording carries the same correction.
+  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
+  // — one of FOUR sibling candidate fields (this, `lastMismatchFusion`, `lastMismatchUnmatched`,
+  // `lastPasteTripwireGiveUp`). NOT a selection among them: whichever of the four are currently set are
+  // ALL surfaced together, chronologically ordered by `detectedAt` — an earlier design there picked only
+  // the single most-recent-by-`detectedAt` field and was corrected (manager review, same card), because
+  // that could hide a SEVERE candidate (e.g. `lastMismatchUnmatched`'s "a possible LOSS") behind a
+  // merely more-recent BENIGN one (e.g. this field's own "not an established loss" reading). A
+  // non-blocking `warning` surfaced at merge-confirm time (an ACTION a manager was already taking),
+  // additive to this worker_list/worker_status pull surface, never a replacement for it.
   lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card f5f6515a DoD-4: the SENDER-directed arm for a FUSED match — `lastMismatchReplay` above only ever
   // fires on a byte-for-byte match against ONE single prior generation's own write; it stays null for a
@@ -2741,6 +2750,9 @@ interface Live {
   // field serves the session's own WATCHING manager (worker_list/worker_status); the notice serves the
   // session learning about ITSELF. Same PULL-surface posture as `lastMismatchReplay` otherwise — never
   // cleared once set, overwritten (not accumulated) by a later occurrence.
+  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
+  // — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
+  // chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note above for why.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card 59757189 DoD-1/3 — the UNMATCHABLE counterpart to `lastMismatchReplay`/`lastMismatchFusion` above:
   // set the instant a mismatch matches NONE of the recognized/confirmed shapes above (not a single-entry
@@ -2761,6 +2773,9 @@ interface Live {
   // string) with "nothing was ever captured" (`null`/`undefined`). Never cleared once set (same posture as
   // `lastMismatchReplay`/`lastMismatchFusion`); overwritten — not accumulated — by a later unmatchable
   // occurrence, so this always reflects the MOST RECENT one.
+  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
+  // — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
+  // chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note above for why.
   lastMismatchUnmatched: { gen: number; intendedLen: number; intendedText: string; detectedAt: number } | null;
   /**
    * Card c0323f8a — the SIGNATURE of the last `[loom:prompt-mismatch]` session-facing notice actually
@@ -2843,6 +2858,13 @@ interface Live {
    * Same PULL-surface mechanics as its siblings: `null` = no give-up has fired yet since this session went
    * live, `undefined` (see the getter) = session not live in this process, never cleared once set,
    * overwritten (not accumulated) by a later occurrence — always reflects the LATEST give-up only.
+   *
+   * Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
+   * — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
+   * chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note (this file)
+   * for why. A DIFFERENT family from the other three (give-up/redelivery, not composer-accumulation —
+   * see card e1ac691b's own DoD-2 closure) but the same actionable "check before trusting this worker's
+   * turns were each acted on exactly once" signal from a manager's point of view at merge-confirm time.
    */
   lastPasteTripwireGiveUp: { gen: number; token: string | null; engineSessionId: string | null; detectedAt: number } | null;
 }
