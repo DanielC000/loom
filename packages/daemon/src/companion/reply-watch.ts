@@ -20,15 +20,18 @@
  * set, unlike the heartbeat) — `enabled` on the companion_config row is the only gate, matching "per
  * ENABLED companion session" in the card's DoD.
  *
- * SURFACING (card scope limit): the Companion is an OWNER-FACING surface, so this module deliberately
- * does NOT push anything to the owner (no chat_reply, no attention-push, no notification) — it only (1)
- * writes a durable `companion_zero_reply_detected` orchestration event and (2) logs a `console.warn`
- * line, both purely internal/operational signals. Whether to also surface this in an owner-visible place
- * (e.g. the Settings UI's companion config panel) is a separate decision, left to a human/manager per the
- * card's own instruction.
+ * SURFACING (settled by card 8bda9fc6): this module still deliberately PUSHES nothing to the owner (no
+ * chat_reply, no attention-push, no notification) — a silent companion structurally cannot report its own
+ * silence, so the companion is exactly the wrong channel. It writes (1) a durable
+ * `companion_zero_reply_detected` orchestration event and (2) a `console.warn`, both internal/operational.
+ * The OWNER-visible half is a PULL: `buildCompanionReplyStatus` below feeds the dedicated runtime read
+ * `GET /api/companion/status[/:sessionId]`, which the web cockpit's companion CHAT panel renders as an
+ * alert banner — the surface the owner is already looking at while waiting for the reply that never came.
+ * It is deliberately NOT folded into `maskCompanionConfig` (the config-masking edge a human edits and PUTs
+ * back): config and runtime telemetry have different lifetimes and must not share a shape.
  */
 import { randomUUID } from "node:crypto";
-import type { OrchestrationEvent } from "@loom/shared";
+import type { CompanionReplyStatus, OrchestrationEvent } from "@loom/shared";
 
 /**
  * THRESHOLD (card DoD-5 — argued, not defaulted): 113 turns silent (the incident) is absurdly late; 1
@@ -106,4 +109,36 @@ export function checkCompanionReplyHealth(
     kind: "companion_zero_reply_detected",
     detail: { turnsSinceLastReply, threshold, turnSeq },
   });
+}
+
+/**
+ * The READ side of the same state (card 8bda9fc6 — "give the alert a named reader"). Pure derivation,
+ * deliberately colocated with `checkCompanionReplyHealth` above so the two can never drift: the detector
+ * decides WHEN to alert, this decides WHAT a reader sees, and both read the same three counters.
+ *
+ * `alerting` intentionally mirrors the detector's OWN dedup condition (`zeroReplyAlertTurnSeq != null`)
+ * rather than recomputing `turnsSinceLastReply >= threshold` — that field is what a landing reply CLEARS
+ * (`recordCompanionChatReply`), so it is the one that goes false the instant the companion recovers. A
+ * recomputation would keep reading "alerting" for a companion that has just replied, until the next turn.
+ *
+ * Adds NO persisted state: every input already exists on the `companion_config` row + the session row.
+ */
+export function buildCompanionReplyStatus(
+  row: { sessionId: string; name: string; enabled: boolean; lastChatReplyTurnSeq: number | null; zeroReplyAlertTurnSeq: number | null },
+  turnSeq: number,
+  threshold: number = DEFAULT_ZERO_REPLY_TURN_THRESHOLD,
+): CompanionReplyStatus {
+  return {
+    sessionId: row.sessionId,
+    name: row.name,
+    enabled: row.enabled,
+    turnSeq,
+    lastChatReplyTurnSeq: row.lastChatReplyTurnSeq,
+    zeroReplyAlertTurnSeq: row.zeroReplyAlertTurnSeq,
+    // null (not 0) with no baseline yet: "the detector has not observed this session" is a different fact
+    // from "zero turns have elapsed since a reply", and a reader must be able to tell them apart.
+    turnsSinceLastReply: row.lastChatReplyTurnSeq == null ? null : turnSeq - row.lastChatReplyTurnSeq,
+    threshold,
+    alerting: row.enabled && row.zeroReplyAlertTurnSeq != null,
+  };
 }

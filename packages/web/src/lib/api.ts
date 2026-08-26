@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -914,6 +914,13 @@ export const api = {
   // last-4 only). create/update surface the server's `{ error }` body verbatim (token/cadence/home
   // validation) via *Err for inline display; an omitted `botToken` on update keeps the stored token. ---
   companionConfigs: () => get<CompanionConfigMasked[]>("/api/companion/config"),
+  // RUNTIME reply-health (card 8bda9fc6) — a DEDICATED read, deliberately NOT part of the config shape
+  // above: config is read-modify-write, this is per-turn telemetry that is never written back. `alerting`
+  // is the zero-reply detector's live state (N turns completed with zero chat_reply deliveries), which the
+  // chat panel renders as an alert banner — the detector's named reader.
+  companionReplyStatuses: () => get<CompanionReplyStatus[]>("/api/companion/status"),
+  companionReplyStatus: (sessionId: string) =>
+    get<CompanionReplyStatus>(`/api/companion/status/${encodeURIComponent(sessionId)}`),
   // The simple, in-app-first create: a bare `{ name }` provisions a working IN-APP-ONLY companion (spawns
   // the assistant session + writes the in-app binding + arms it) with ZERO external config. Status-aware
   // (409 = single-companion guard) so the create flow can render a friendly precondition message.

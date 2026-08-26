@@ -262,6 +262,22 @@ export interface LoomDaemon {
    * one current. Uses the real insertCompanionMessage + startNewCompanionConversation paths (NOT the live WS),
    * so no real companion/pty is needed. Sequential seed calls guarantee the archive lands BETWEEN batches.
    */
+  /**
+   * Drive a seeded companion's ZERO-REPLY detector by running `turns` REAL completed turns through
+   * `incrementTurnSeq` + `checkCompanionReplyHealth` — the exact pair production's `onTurnCompleted` runs
+   * (card 8bda9fc6). The ONLY way an e2e spec can reach the alert state: it is written off a completed pty
+   * turn, and this fixture's no-spawn guard forbids a real pty. Nothing is hand-set — the spec drives the
+   * real detector, so a broken detector fails the spec rather than being papered over by a seeded flag.
+   * `turns` must exceed the detector's threshold (20) by ONE to alert: the very first completed turn is
+   * consumed by the detector's lazy baseline, which seeds the streak start without alerting.
+   */
+  seedCompanionTurns: (sessionId: string, turns: number) => Promise<void>;
+  /**
+   * Land a genuine chat_reply for a companion — `db.recordChatReplyDelivered`, the exact writer
+   * chat-gateway.ts calls on a successful delivery. ENDS any zero-reply streak in progress, so a spec can
+   * prove the alert CLEARS rather than latching on (card 8bda9fc6).
+   */
+  seedCompanionReplyDelivered: (sessionId: string) => Promise<void>;
   seedCompanionConversations: (
     sessionId: string,
     conversations: { author: "user" | "companion"; text: string; viaVoice?: boolean; channel?: string }[][],
@@ -589,6 +605,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       return { projectId: project.id, agentId: agent.id, sessionId, memoryName, reminderLabel };
     };
 
+    const seedCompanionTurns: LoomDaemon["seedCompanionTurns"] = async (sessionId, turns) => {
+      await apiPost(baseURL, "/internal/test/seed", { companionTurns: [{ sessionId, turns }] });
+    };
+
+    const seedCompanionReplyDelivered: LoomDaemon["seedCompanionReplyDelivered"] = async (sessionId) => {
+      await apiPost(baseURL, "/internal/test/seed", { companionReplyDelivered: [sessionId] });
+    };
+
     const seedCompanionConversations: LoomDaemon["seedCompanionConversations"] = async (sessionId, conversations) => {
       for (let i = 0; i < conversations.length; i++) {
         await apiPost(baseURL, "/internal/test/seed", {
@@ -721,7 +745,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

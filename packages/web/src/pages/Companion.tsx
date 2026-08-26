@@ -63,6 +63,19 @@ export default function Companion() {
 
   const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
+  // RUNTIME reply-health for every companion (card 8bda9fc6) — a DEDICATED read, never joined onto the
+  // config read above (config is read-modify-write; this is per-turn telemetry). Used ONLY to mark a stuck
+  // companion in the switcher below: with several companions the chat banner is scoped to the focused one,
+  // so without this a silent companion sitting behind an unselected tab shows nothing at all.
+  const replyStatuses = useQuery({
+    queryKey: ["companionReplyStatuses"],
+    queryFn: api.companionReplyStatuses,
+    refetchInterval: 5000,
+  });
+  const alertingIds = useMemo(
+    () => new Set((replyStatuses.data ?? []).filter((s) => s.alerting).map((s) => s.sessionId)),
+    [replyStatuses.data],
+  );
   // Shared cache key (["allSessions"], used app-wide) — read here ONLY for each companion's ctxTurns/
   // createdAt, to pick the history-bearing default selection below. Never used to reorder the switcher.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
@@ -158,6 +171,7 @@ export default function Companion() {
           <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
             <CompanionSwitcher
               companions={companions}
+              alertingIds={alertingIds}
               selectedId={selected.sessionId}
               onSelect={setSelectedId}
               onNew={() => { setCreating(true); provision.reset(); }}
@@ -184,11 +198,14 @@ export default function Companion() {
 // which one the Chat/Manage/Terminal panes below are scoped to; with exactly ONE it stays out of the way — just
 // the "New companion" button, right-aligned — so the single-companion page reads essentially as it did before
 // multi-companion (no picker where there's nothing to pick). Selection is client-only (the panes key off the
-// selected sessionId); "New companion" routes up to the parent's provision flow. Each entry carries an
-// enabled/disabled dot; an unnamed companion shows a short session-id tail so two default-named ones stay
+// selected sessionId); "New companion" routes up to the parent's provision flow. Each entry carries a state
+// dot — RED when the zero-reply detector flags that companion as stuck (card 8bda9fc6), else the
+// enabled/disabled state; an unnamed companion shows a short session-id tail so two default-named ones stay
 // distinguishable.
-function CompanionSwitcher({ companions, selectedId, onSelect, onNew }: {
+function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNew }: {
   companions: CompanionRow[];
+  /** Session ids the zero-reply detector currently flags as stuck (card 8bda9fc6). */
+  alertingIds: ReadonlySet<string>;
   selectedId: string;
   onSelect: (sessionId: string) => void;
   onNew: () => void;
@@ -202,12 +219,15 @@ function CompanionSwitcher({ companions, selectedId, onSelect, onNew }: {
             const on = c.sessionId === selectedId;
             const enabled = c.config ? c.config.enabled : true;
             const named = (c.config?.name ?? "").trim();
+            // A stuck companion's dot goes red and OUTRANKS the enabled/disabled state — "enabled" is the
+            // boring case and is exactly what a silently-stuck companion looks like from the config row.
+            const stuck = alertingIds.has(c.sessionId);
             return (
               <button
                 key={c.sessionId}
                 type="button"
                 aria-pressed={on}
-                title={enabled ? "enabled" : "disabled"}
+                title={stuck ? "not replying — open this companion" : enabled ? "enabled" : "disabled"}
                 onClick={() => onSelect(c.sessionId)}
                 className="loom-toggle"
                 style={{
@@ -219,9 +239,9 @@ function CompanionSwitcher({ companions, selectedId, onSelect, onNew }: {
                   fontFamily: font.mono, fontSize: 12, cursor: "pointer",
                 }}
               >
-                {/* Decorative — the enabled state is also in the button's title tooltip; keep it out of the
-                    accessible name so that stays just the companion's name. */}
-                <Dot tone={enabled ? "phosphor" : "muted"} />
+                {/* Decorative — the dot's meaning is also spelled out in the button's title tooltip; keep
+                    it out of the accessible name so that stays just the companion's name. */}
+                <Dot tone={stuck ? "red" : enabled ? "phosphor" : "muted"} />
                 <span>{named || COMPANION_DEFAULT_NAME}</span>
                 {!named && <span style={{ color: color.textMuted, fontSize: 11 }}>{c.sessionId.slice(0, 4)}</span>}
               </button>

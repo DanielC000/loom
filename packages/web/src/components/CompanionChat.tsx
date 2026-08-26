@@ -70,6 +70,15 @@ function blobToBase64(blob: Blob): Promise<string> {
  * `armed` (optional) is whether this companion actually has an in-app route. When false, we surface a gentle
  * "not wired" notice: a message to an unbound companion gets no reply frame, so we must not imply it was
  * delivered. Unknown (undefined) ⇒ no upfront notice, but the reply-timeout backstop still applies.
+ *
+ * ZERO-REPLY ALERT (card 8bda9fc6): this panel is the NAMED READER for the daemon's zero-reply detector
+ * (`companion/reply-watch.ts`). The detector's own outputs — a durable orchestration event and a
+ * `console.warn` — are both internal, and it cannot push the alert through the companion because a silent
+ * companion structurally cannot report its own silence. So the alert is PULLED here, from the dedicated
+ * runtime read `GET /api/companion/status/:sessionId`, and rendered as a red banner at the top of the
+ * chat. The incident that motivated the detector ended with the owner typing "Hello?" into this exact box
+ * — this panel is where a human's eye already is at the moment the failure is felt. It also upgrades the
+ * existing 25s reply-timeout backstop below from a hedge ("may be offline") to the known fact.
  */
 
 const RECONNECT_MIN_MS = 1000;
@@ -101,6 +110,20 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
   // ── Stick-to-bottom + jump-to-latest (the anti-"endless wall" scroll mechanic) ──
   const [atBottom, setAtBottom] = useState(true);
   const [unread, setUnread] = useState(0);
+
+  // ── Zero-reply health (card 8bda9fc6) — the detector's NAMED READER ────────────────────────────
+  // `companion/reply-watch.ts` flags a companion that has completed N turns with ZERO chat_reply
+  // deliveries. It writes a durable event and a console.warn, neither of which anyone reads. It CANNOT
+  // route the alert through the companion itself — a silent companion structurally cannot report its own
+  // silence — so the surface has to be one the owner is already looking at. THIS PANEL IS THAT SURFACE:
+  // the incident this exists for ended with the owner typing "Hello?" into this very box. Polled (not
+  // pushed) because the state only changes on a completed turn, and the read is a cheap derived row.
+  const replyHealth = useQuery({
+    queryKey: ["companionReplyStatus", sessionId],
+    queryFn: () => api.companionReplyStatus(sessionId),
+    refetchInterval: 5000,
+  });
+  const stuck = replyHealth.data?.alerting ? replyHealth.data : null;
 
   // Held in a ref so the sessionId-keyed WS effect below always calls the LATEST callback without
   // re-subscribing the socket when the parent passes a fresh function each render.
@@ -390,6 +413,27 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
       <ChatHeader conn={conn} title={name} />
 
+      {/* The zero-reply ALERT, deliberately ABOVE the "not wired" notice: "bound but has stopped
+          answering" is a live fault, "not bound yet" is an unfinished setup step. `role="alert"` (not
+          "status") so a screen reader announces it rather than queueing it politely. */}
+      {stuck && (
+        <div
+          style={notice("red")}
+          data-testid="companion-zero-reply-alert"
+          data-session-id={sessionId}
+          role="alert"
+        >
+          <span aria-hidden style={{ color: color.red }}>●</span>
+          <span>
+            <strong style={{ color: color.text }}>{name} has stopped replying.</strong>{" "}
+            {stuck.turnsSinceLastReply} turns have completed with no answer — Loom flagged it at turn{" "}
+            {stuck.zeroReplyAlertTurnSeq} (threshold {stuck.threshold}). It's running, so messages are
+            landing; check its <strong style={{ color: color.text }}>Terminal</strong> tab to see what
+            it's doing.
+          </span>
+        </div>
+      )}
+
       {armed === false && (
         <div style={notice("amber")} role="status">
           <span aria-hidden style={{ color: color.amber }}>▲</span>
@@ -413,9 +457,14 @@ export function CompanionChat({ sessionId, title, armed, onConversationArchived 
             <Timeline items={timeline} title={name} />
           )}
           {awaitingReply && !replyTimedOut && <TypingIndicator title={name} />}
+          {/* The per-message 25s backstop. When the durable detector ALREADY knows this companion is in a
+              zero-reply streak, say so definitely instead of guessing "may be offline" — same moment, same
+              spot on screen, but the owner learns the real fact rather than a hedge. */}
           {replyTimedOut && (
-            <div style={{ ...notice("muted"), alignSelf: "center", marginTop: 12 }} role="status">
-              No reply yet — {name} may be offline or not connected.
+            <div style={{ ...notice(stuck ? "red" : "muted"), alignSelf: "center", marginTop: 12 }} role="status">
+              {stuck
+                ? `No reply — ${name} has now gone ${stuck.turnsSinceLastReply} turns without answering anyone.`
+                : `No reply yet — ${name} may be offline or not connected.`}
             </div>
           )}
         </div>
@@ -748,14 +797,17 @@ function EmptyState({ connected, title }: { connected: boolean; title: string })
   );
 }
 
-// A small inline notice row (amber = attention, muted = quiet backstop).
-function notice(t: "amber" | "muted"): CSSProperties {
-  const c = t === "amber" ? color.amber : color.textMuted;
+// A small inline notice row. Three tones, escalating: `muted` = quiet backstop, `amber` = attention (a
+// config gap you can go fix), `red` = a live FAULT (the companion is running but has stopped answering).
+// The red tone is deliberately reserved for the zero-reply alert — if everything glowed amber the one
+// notice that means "this is actually broken" would read as the same weight as "you haven't bound a route".
+function notice(t: "amber" | "muted" | "red"): CSSProperties {
+  const accent = t === "amber" ? color.amber : t === "red" ? color.red : color.border;
   return {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
-    border: `1px solid ${t === "amber" ? color.amber : color.border}`, borderRadius: radius.base,
-    background: t === "amber" ? "rgba(255,178,62,0.06)" : color.panel2,
-    fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: c === color.amber ? color.textDim : color.textMuted,
+    border: `1px solid ${accent}`, borderRadius: radius.base,
+    background: t === "amber" ? "rgba(255,178,62,0.06)" : t === "red" ? "rgba(255,90,90,0.07)" : color.panel2,
+    fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
   };
 }
 

@@ -2218,6 +2218,40 @@ export interface CompanionConfigMasked {
   updatedAt: string;
 }
 
+/**
+ * The RUNTIME reply-health view of one companion — the zero-reply detector's state, read over the
+ * dedicated `GET /api/companion/status[/:sessionId]` (card 8bda9fc6).
+ *
+ * DELIBERATELY NOT part of `CompanionConfigMasked`. That shape is the CONFIG-masking edge: a human reads
+ * it, edits it, and PUTs it back (`PUT /api/companion/config/:sessionId`). This shape is pure runtime
+ * telemetry — never editable, never writable-back, and it changes on every completed turn. Folding the two
+ * together would mix two lifetimes and make every plain config read join runtime state it has no business
+ * touching, so a caller must never have to read a config row to learn a runtime fact.
+ *
+ * Every field is DERIVED from state that already exists (`companion_config.last_chat_reply_turn_seq` /
+ * `zero_reply_alert_turn_seq` + `sessions.turn_seq`) — this view adds no persisted state of its own.
+ */
+export interface CompanionReplyStatus {
+  /** The companion session this status describes. */
+  sessionId: SessionId;
+  /** The companion's given (human-friendly) name, or "" when never named — so a UI needn't join the config read. */
+  name: string;
+  /** Whether the config row is enabled. The detector runs ONLY for enabled companions, so a disabled row's counters are frozen at whatever they last were and `alerting` is always false. */
+  enabled: boolean;
+  /** The bound session's current completed-turn counter. */
+  turnSeq: number;
+  /** The `turnSeq` the last genuine `chat_reply` delivery landed at, or null before the detector's first observation of this session. */
+  lastChatReplyTurnSeq: number | null;
+  /** The `turnSeq` the CURRENT streak's alert fired at, or null when no alert is active. */
+  zeroReplyAlertTurnSeq: number | null;
+  /** How many turns have completed since the last reply, or null while `lastChatReplyTurnSeq` is null (no baseline yet — not a zero-length streak). */
+  turnsSinceLastReply: number | null;
+  /** The turn-streak threshold the detector alerts at, so a reader can render "N of M" without hardcoding it. */
+  threshold: number;
+  /** The headline: this companion is enabled and currently in an un-cleared zero-reply streak that has crossed the threshold. */
+  alerting: boolean;
+}
+
 /** Auth scheme a stored Connection uses. `oauth2` added in agent-tooling P5a (authorization-code + PKCE). */
 export type ConnectionAuthScheme = "api-key" | "bearer" | "oauth2";
 

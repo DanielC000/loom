@@ -40,6 +40,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
+import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
@@ -1503,6 +1504,31 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return null;
   };
 
+  // --- Companion RUNTIME STATUS (card 8bda9fc6) — the zero-reply detector's NAMED READER. -------------
+  // A DEDICATED runtime read, deliberately SEPARATE from `/api/companion/config`: a caller must never have
+  // to read a config row to learn a runtime fact. `companion/reply-watch.ts` already writes a durable
+  // `companion_zero_reply_detected` event and a `console.warn` on detection, but both are internal — the
+  // warn goes to a rotating log nobody tails and the event was never queried. This is the pull side.
+  //
+  // ⛔ NOT folded into `maskCompanionConfig`. That is the CONFIG-masking edge — its shape is what a human
+  // edits and PUTs back to `PUT /api/companion/config/:sessionId` — and a settings row (read-modify-write)
+  // and a per-turn runtime counter have different lifetimes. Mixing them would also make every plain config
+  // read join runtime state it has no business touching.
+  //
+  // Adds NO persisted state: every field is derived from `companion_config`'s existing
+  // last_chat_reply_turn_seq / zero_reply_alert_turn_seq plus the bound session's `turn_seq`.
+  //
+  // Read-only, so Tier-1 in `gateway/trust-tier.ts` alongside the other companion GETs.
+  const replyStatusOf = (row: import("../db.js").CompanionConfigRow) =>
+    buildCompanionReplyStatus(row, deps.db.getSession(row.sessionId)?.turnSeq ?? 0);
+  app.get("/api/companion/status", async () => deps.db.listCompanionConfigs().map(replyStatusOf));
+  app.get("/api/companion/status/:sessionId", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const row = deps.db.getCompanionConfig(sessionId);
+    if (!row) return reply.code(404).send({ error: "no companion config for that session" });
+    return replyStatusOf(row);
+  });
+
   app.get("/api/companion/config", async () => {
     return deps.db.listCompanionConfigs().map((row) => maskCompanionConfig(row, homeOf(row.sessionId), process.env));
   });
@@ -2917,6 +2943,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           allowedChatId?: string; chatScope?: "dm" | "group";
           heartbeatIntervalMinutes?: number; heartbeatPrompt?: string | null;
         }[];
+        // Drive a companion's ZERO-REPLY detector by running N REAL completed turns (card 8bda9fc6's e2e).
+        // The ONLY way an e2e spec can reach the alert state: it is written by `checkCompanionReplyHealth`
+        // off `onTurnCompleted`, which needs a live pty the e2e fixture's no-spawn guard forbids. This runs
+        // the EXACT production pair — `incrementTurnSeq` then `checkCompanionReplyHealth` — once per turn,
+        // so the spec drives the real detector rather than hand-setting the flag it is meant to assert on.
+        companionTurns?: { sessionId: string; turns: number }[];
+        // Land a genuine chat_reply for a companion, ENDING whatever zero-reply streak is in progress —
+        // `db.recordChatReplyDelivered`, the exact call chat-gateway.ts makes on a successful deliverReply.
+        // Lets an e2e prove the alert CLEARS (a one-way latch would pass the "it appears" spec and fail this).
+        companionReplyDelivered?: string[];
         companionMemories?: { sessionId: string; name: string; content: string }[];
         companionReminders?: { sessionId: string; cron?: string; prompt?: string; label?: string | null; enabled?: boolean }[];
         // Companion chat MESSAGES + conversation boundaries (conversation-history browser e2e, card 59e8e0c9).
@@ -3051,6 +3087,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           name: c.name ?? "",
         });
         companionConfigSessionIds.push(c.sessionId);
+      }
+      // Companion completed TURNS: `incrementTurnSeq` + `checkCompanionReplyHealth` per turn — byte-for-byte
+      // what `onTurnCompleted` does in production (index.ts), minus the pty. Runs AFTER the config loop
+      // above so a config seeded in the SAME call is already in place for the detector to gate on.
+      let companionTurnsRun = 0;
+      for (const t of b.companionTurns ?? []) {
+        if (typeof t.sessionId !== "string" || typeof t.turns !== "number") {
+          return reply.code(400).send({ error: "companionTurns[].sessionId (string) and .turns (number) are required" });
+        }
+        for (let i = 0; i < t.turns; i++) {
+          deps.db.incrementTurnSeq(t.sessionId);
+          checkCompanionReplyHealth(deps.db, t.sessionId);
+          companionTurnsRun++;
+        }
+      }
+      for (const sid of b.companionReplyDelivered ?? []) {
+        if (typeof sid !== "string") return reply.code(400).send({ error: "companionReplyDelivered[] must be session id strings" });
+        deps.db.recordChatReplyDelivered(sid);
       }
       // Companion memory: authored straight into the companion's OWN MEMORY.md file store (there is no
       // DB table — companion-memory-store.ts is filesystem-backed), the same writer the companion's own
@@ -3249,7 +3303,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
-        companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
+        companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds, companionTurnsRun,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
         projectMemoryIds, scheduleDeferralIds,

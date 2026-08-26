@@ -126,6 +126,9 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/companion/reminders/:sessionId" },
   { method: "GET", pattern: "/api/companion/restricted-tools/:sessionId" },
   { method: "GET", pattern: "/api/companion/skills/:sessionId" },
+  // Runtime reply-health (card 8bda9fc6) — pure derived telemetry, no secrets, no lifecycle.
+  { method: "GET", pattern: "/api/companion/status" },
+  { method: "GET", pattern: "/api/companion/status/:sessionId" },
   { method: "GET", pattern: "/api/companion/skills/:sessionId/:name" },
   { method: "GET", pattern: "/api/companion/voice-prefs/:sessionId" },
 ];
