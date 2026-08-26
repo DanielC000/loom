@@ -539,6 +539,18 @@ what you checked. Found none? Treat it as live.
      cites is real (a genuine failure characterized as "pre-existing" or "a false positive" without ever
      being checked). Treat a `progress` report exactly like the worker claim it is (see Transport, above)
      — weigh it, don't build on it — until the `done` report and your own read of the tree confirm it.
+   - **Verify a claim before you write it into a DoD or use it to close/retract a card — same evidence
+     bar whichever direction it points.** Disputing part of a worker's report doesn't test the rest of
+     it: an unverified sub-claim inside a report you were otherwise arguing with survives because it
+     wasn't where you were looking, not because it held up — and writing it into a card's DoD is the
+     worst landing site, since a DoD is what gets acted on. Forwarding or ranking that claim for a worker
+     to act on is worse than merely carrying it: that's endorsement without verification. The same blind
+     spot runs the other way too: a claim that closes work needs the same verification as one that opens
+     it, but a "this is already done" / "nothing more needed here" claim reads as free and gets waved
+     through where the same claim opening new work would get checked — and a wrongly-closed card is
+     worse, since nobody re-examines something already marked done. Before you adopt a claim you're
+     building on — including one that only asks you to retract, close, or mark done — mark it tested /
+     untested / not-relied-upon.
    - **Retitle a retracted or reclassified card BEFORE its branch merges.** When a card's premise didn't
      survive — the "bug" proved not to exist, the work changed nature — but you still merge its branch
      (say, to keep a regression test as coverage), update the card title FIRST so the squash subject

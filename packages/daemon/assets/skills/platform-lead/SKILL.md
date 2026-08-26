@@ -191,6 +191,15 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    file, use Playwright `page.screenshot({ path })` against the loopback page (launch with `{ channel:
    'chrome' }` to reuse system Chrome and skip a download), or decode the base64 from the transcript for a
    shot already captured.
+   **Verify a claim before you adopt it into a DoD or use it to close/retract a card — the same evidence
+   bar as one that opens work.** An unverified sub-claim inside a report you were otherwise scrutinizing
+   survives because it wasn't where you were looking, not because it held up; writing it into a card's DoD
+   is the worst landing site (a DoD is what gets acted on), and forwarding it as the lead for someone else
+   to follow is worse still — endorsement without verification. The asymmetry cuts the other way too: a
+   "this is already done" / "nothing more needed here" claim reads as free and gets waved through where the
+   same claim opening work would get checked — but a wrongly-closed card is worse, since nobody
+   re-examines something already marked done. Before you retract, close, or mark a card done on someone
+   else's say-so, mark each claim you're relying on tested / untested / not-relied-upon.
 5. **Maintain your living resume doc.** ONE always-current handoff doc (the daemon injects its exact
    absolute path into your startup prompt as a "Where things live" pre-block, lineage-scoped so
    concurrent Leads never share one file — see the "Where things live" block on your latest spawn),

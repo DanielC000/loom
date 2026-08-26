@@ -344,6 +344,20 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    claim that turns out false — the thing existed all along — can send your manager to the owner with a
    wrong premise; the cited grep is what makes "it isn't there" trustworthy.
 
+**Verify a claim before you adopt it — including one that only asks you to stop.** Scrutiny follows
+attention, not importance: disputing part of a report doesn't test the rest of it — an untested
+sub-claim survives because it wasn't where you were looking, not because it held up, and it then rides
+into your own work wearing your name. Two costs, worse to better: **carrying** an unverified claim
+forward into your own artifact (the worst landing site is a DoD or a report someone else will act on),
+and **amplifying** it — ranking it, or forwarding it to someone else as the lead to follow — which is
+endorsement that skips verification. The same blind spot runs in the opposite direction too: a claim
+that closes work needs the same verification as one that opens it, yet it usually gets waved through
+instead, because it only asks you to stop — and a wrongly-closed item is worse than a wrongly-opened
+one, since nobody re-examines something already marked done. The fix isn't "be more careful" — you were
+already careful where you were looking; it's mechanical: before you adopt a claim you're relying on (a
+predecessor's report, a prior step's result, your own instinct that something's finished), mark it
+tested / untested / not-relied-upon — including a claim to retract, close, or report done.
+
 **Writing a vault note?** If your task creates a design/notes artifact in the project's Obsidian vault,
 don't drop it flat at the vault root: put it in the shallow, one-level **taxonomy folder** named in the
 project's `CLAUDE.md` **"Vault structure"** section, and add its line to the **`_Index.md`**
