@@ -970,9 +970,25 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
 }
 
 /**
- * The cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode (claude 2.1.163; mapped by
- * the probe — board card f05e4897 / test/_probe-resume-mode.mjs):
+ * The cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED under Loom's own
+ * spawn conditions (claude 2.1.163; mapped by the probe — board card f05e4897 / test/_probe-resume-mode.mjs):
  *   acceptEdits →(+1) plan →(+2) auto →(+3) default →(+4) acceptEdits   (period 4).
+ *
+ * Card 8c60c068 — re-verified against the installed CLI (v2.1.246) by extracting its bundled JS: the real
+ * mode-cycle handler is a CONDITIONAL state machine, not a fixed array. From `plan` it advances to
+ * `bypassPermissions` if that mode is available, else `auto` if THAT is available, else `default`; from
+ * `bypassPermissions` it advances to `auto` if available else `default`; `dontAsk` is never entered by
+ * forward cycling at all (only exits to `default`). `bypassPermissions` is available ONLY when the session
+ * was launched with `--dangerously-skip-permissions` (confirmed in the CLI's own refusal string) — Loom
+ * never passes that flag — so that branch is permanently dead here, which is why omitting it from this
+ * array is correct. `auto`'s availability is genuinely dynamic at runtime (model support + a rollout gate +
+ * `permissions.disableAutoMode`), so this array/period-4 arithmetic describes the cycle correctly only when
+ * auto is available (the expected case), not as a universal guarantee of the real CLI's behavior. This is
+ * safe in practice, not just lucky: {@link runCycleToMode}'s press loop never blind-presses off this array
+ * — it presses ONE Shift+Tab, observes the REAL footer mode, and only stops (`nextCycleAction`) on what it
+ * actually reads, or gives up leaving the session at its last observed mode. This array is only ever used
+ * to LABEL a target mode from a `startupModeCycles` integer ({@link modeAfterCyclesFromAcceptEdits}); it is
+ * never used to blindly count presses against the real terminal.
  */
 const ACCEPT_EDITS_CYCLE_ORDER: LandedMode[] = ["acceptEdits", "plan", "auto", "default"];
 /**
