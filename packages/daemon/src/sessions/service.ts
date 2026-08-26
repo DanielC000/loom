@@ -8190,9 +8190,17 @@ export class SessionService {
       // Same Mode A gap as the dedup branch above: a severity bump used to reuse the task and file a
       // fresh (higher-severity) event WITHOUT ever writing the new detail to the body — the Lead got a
       // high-severity nudge with no payload behind it (the second half of card 9315ddf9). Append here too.
+      //
+      // Card 772d15bd DoD-3: this branch DELIBERATELY never moves `reusedTask` out of the terminal
+      // column, even when `targetWasTerminal` is true (an explicit followUpOn reopening a closed
+      // thread). Auto-reopening a card the Lead deliberately closed is its own surprising behaviour
+      // change — the Lead may have closed it because the underlying issue genuinely resolved, and a
+      // manager's follow-up evidence doesn't know that. Leaving the column alone and making the
+      // reopened-ness visible IN the card body (the distinct heading below) lets the Lead decide
+      // whether to move it, rather than Loom silently deciding for them.
       const reusedTask = this.db.getTask(taskId);
       if (reusedTask) {
-        this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now);
+        this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now, targetWasTerminal);
         appended = true;
       }
     } else {
@@ -8267,7 +8275,17 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: now,
       managerSessionId, taskId, kind: "platform_escalate",
-      detail: { originProjectId: caller.projectId, severity, platformProjectId: home.id, title: input.title },
+      detail: {
+        originProjectId: caller.projectId, severity, platformProjectId: home.id, title: input.title,
+        // Card 772d15bd DoD-1: stamped even though the caller already gets these two fields back in the
+        // return value — that return dies at the calling manager the moment it doesn't act on it (the
+        // whole failure this card exists to close). Recording them HERE too means a forensic read of
+        // this task's escalation history (`listEscalationsForProject`/`listEscalationsForPlatform`) can
+        // always tell "was this event a reopen of a closed thread" without depending on anyone having
+        // paid attention when the call returned. Free to write; costs nothing to omit when false.
+        ...(followedUp ? { followedUp: true } : {}),
+        ...(followedUp && targetWasTerminal ? { targetWasTerminal: true } : {}),
+      },
     });
 
     // Additive best-effort live nudge: if a Lead session happens to be live, push a heads-up via the same
@@ -8357,11 +8375,21 @@ export class SessionService {
    * instead of filing a new one (same-title dedup, or a severity bump) — both paths used to come back
    * as "success" while the new evidence silently vanished. An append-only section means a Lead's own
    * triage note (which REPLACES the body when filed) and any prior report already there both survive.
+   *
+   * `terminalReopen` (card 772d15bd, DoD-2) — set ONLY when this append is an explicit `followUpOn`
+   * reopening a target that was sitting in the terminal (resolved) column. Without it, this section is
+   * byte-identical to an ordinary append onto a still-open card — so a human reading the card (or the
+   * Lead, on the no-live-Lead `deliveryStatus:"boarded"` path where nothing else ever tells them) has no
+   * way to tell "routine follow-up" from "someone reopened a thread I'd already closed" from the body
+   * alone. A distinct heading is the cheapest artifact that survives that path: it costs nothing extra
+   * to write and needs no live recipient to be seen.
    */
   private appendEscalationDetail(
     task: Task, managerSessionId: string, originName: string, severity: string, detail: string, now: string,
+    terminalReopen = false,
   ): void {
-    const body = appendTaskBodySection(task.body, "Re-escalation", [
+    const heading = terminalReopen ? "Re-escalation (thread was closed)" : "Re-escalation";
+    const body = appendTaskBodySection(task.body, heading, [
       `- **From:** ${originName} manager session \`${managerSessionId}\``,
       `- **Severity:** ${severity}`,
       "",

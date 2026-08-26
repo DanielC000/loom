@@ -21,6 +21,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       fix — and reports outcome:"appended", followedUp:true, targetWasTerminal:true.
 //   (3) `followUpOn` against a STILL-OPEN target also appends, with targetWasTerminal absent/false.
 //   (4) an unknown/foreign-project `followUpOn` id is REJECTED with an error, nothing written.
+//   (5) Card 772d15bd — `targetWasTerminal`'s downstream durability, on the exact no-live-Lead
+//       (`deliveryStatus:"boarded"`) path this whole harness runs (SeamHost throws if enqueueStdin is
+//       ever reached — there is no live Lead anywhere in this file): the `orchestration_event` detail
+//       carries `followedUp`/`targetWasTerminal`, and the card body section heading for a reopened
+//       CLOSED thread is textually distinguishable from the heading for the SAME append onto a
+//       still-open thread. A test that only exercised a live-Lead nudge could never catch this — the
+//       defect is specifically about what survives when nobody is listening, and this harness has
+//       nobody listening throughout.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE — a REAL Db + SessionService driven directly (no MCP
 // layer), mirroring platform-escalate-append.mjs's harness exactly.
@@ -108,6 +116,31 @@ try {
   check("(3) targetWasTerminal is NOT set for a still-open target", !escE.targetWasTerminal);
   const bodyD = db.getTask(escD.taskId).body;
   check("(3) both the original and follow-up detail are present", bodyD.includes("D: original.") && bodyD.includes("E: explicit follow-up on an OPEN thread."));
+
+  // ===== (5) card 772d15bd — targetWasTerminal must survive the no-live-Lead ("boarded") path =====
+  // escC (from (2) above) is the followUpOn append onto escA, a TERMINAL target; escE (from (3)) is the
+  // followUpOn append onto escD, a STILL-OPEN target. Neither call above ever touched a live Lead
+  // (SeamHost.enqueueStdin throws if reached), so both already exercised the exact `deliveryStatus:
+  // "boarded"` path the card's DoD-4 requires — this section just reads what that path left behind.
+  const eventsA = db.listEscalationsForProject("pOrd").filter((e) => e.taskId === escA.taskId);
+  const followupEventA = eventsA.find((e) => e.detail?.followedUp === true);
+  check("(5) the orchestration_event for the TERMINAL-target follow-up carries followedUp:true", followupEventA?.detail?.followedUp === true);
+  check("(5) …and targetWasTerminal:true — durable, not just returned to the caller and dropped", followupEventA?.detail?.targetWasTerminal === true);
+
+  const eventsD = db.listEscalationsForProject("pOrd").filter((e) => e.taskId === escD.taskId);
+  const followupEventD = eventsD.find((e) => e.detail?.followedUp === true);
+  check("(5) the orchestration_event for the STILL-OPEN-target follow-up carries followedUp:true", followupEventD?.detail?.followedUp === true);
+  check("(5) …but targetWasTerminal is absent (never stamped false) for a still-open target", followupEventD?.detail?.targetWasTerminal === undefined);
+
+  check("(5) the TERMINAL-target card body marks the section as a reopened-closed-thread",
+    bodyA.includes("## Re-escalation (thread was closed) —"));
+  check("(5) …and the STILL-OPEN-target card body uses the ORDINARY heading, not the reopened one",
+    bodyD.includes("## Re-escalation —") && !bodyD.includes("## Re-escalation (thread was closed) —"));
+  check("(5) the two headings are textually distinguishable from one another",
+    bodyA.includes("## Re-escalation (thread was closed) —") && !bodyD.includes("(thread was closed)"));
+
+  check("(5) DoD-3: the reopened TERMINAL target is DELIBERATELY left in its terminal column — a follow-up never auto-moves the card",
+    db.getTask(escA.taskId).columnKey === "done");
 
   // ===================== (4) rejected: unknown / foreign-project followUpOn =====================
   let threwUnknown = false;
