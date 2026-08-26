@@ -748,7 +748,11 @@ what you checked. Found none? Treat it as live.
    (`references/serving-and-capture.md`, under this skill's own directory), never assume a
    default and never reassemble a URL from the bare port yourself — the same port can be reachable at one
    loopback host and refuse another on a perfectly healthy server, so a guessed host fails exactly like
-   "the server never started" against a server that's fine. **The recorded value can itself be wrong —
+   "the server never started" against a server that's fine. **A `url` still `null` after `start` returns
+   is not automatically "still starting" — check the tracking file's `portDetectionFailed`/
+   `detectionEndedAt` fields first** (`references/serving-and-capture.md` has the full three-way read and
+   the sanctioned fallback: go straight to the helper's own `logFile`, selected by the launcher's printed
+   id, never a content-sweep of the host's `loom-dev-server-*.log` files). **The recorded value can itself be wrong —
    when other browser-capable workers may be running their own dev servers on this same host, confirm the
    recorded port is actually owned by YOUR tracked pid before trusting what you see** (the server's own
    startup banner, or the listening socket's owning pid confirmed to trace UPWARD — via each process's

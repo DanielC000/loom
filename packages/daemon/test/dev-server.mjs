@@ -102,6 +102,23 @@ try {
   const heartbeatAdvanced = trackedPid != null && await waitUntil(() => fs.existsSync(heartbeatOut) && Date.now() - fs.statSync(heartbeatOut).mtimeMs < 2000);
   check("(a) fixture is actually running (heartbeat file advancing)", heartbeatAdvanced);
 
+  // card 744028c4 — a permanent detection timeout must leave the terminal state legible IN THE FILE, not
+  // just on `start`'s own stdout (which a later, different-shell consumer of the tracking file never
+  // sees). Read the tracking file fresh, exactly as that later consumer would.
+  const workAbsDir = path.resolve(workDir);
+  const workTrackHash = crypto.createHash("sha256").update(workAbsDir).digest("hex").slice(0, 16);
+  const workTrackFile = path.join(os.tmpdir(), `loom-dev-server-${workTrackHash}.json`);
+  const workTracked = JSON.parse(fs.readFileSync(workTrackFile, "utf8"));
+  check("(a) timed-out tracking file marks portDetectionFailed:true", workTracked.portDetectionFailed === true);
+  check(
+    "(a) timed-out tracking file records a parseable detectionEndedAt timestamp",
+    typeof workTracked.detectionEndedAt === "string" && !Number.isNaN(Date.parse(workTracked.detectionEndedAt)),
+  );
+  check(
+    "(a) timed-out tracking file still leaves port/host/url null (only the marker changed)",
+    workTracked.port === null && workTracked.host === null && workTracked.url === null,
+  );
+
   // (e) a second start over the same still-alive dir must refuse, not spawn a second untracked process.
   const doubleStart = spawnSync(process.execPath, [HELPER, "start", workDir, "--", process.execPath, heartbeatScript, heartbeatOut], { encoding: "utf8", timeout: 10_000, env: FAST_PORT_TIMEOUT_ENV });
   check("(e) double-start over a live tracked dir refuses (nonzero exit)", doubleStart.status !== 0);
@@ -261,6 +278,18 @@ try {
   check("(f) start's bound url parses and carries the ACTUAL bound port", boundParsed != null);
   check("(f) recorded host is the banner's own token (localhost), captured alongside the port", boundParsed != null && boundParsed.hostname === "localhost");
   const recordedPort = boundParsed ? Number(boundParsed.port) : null;
+
+  // NEGATIVE CONTROL for card 744028c4's new marker: a genuine, successful detection must NOT set
+  // portDetectionFailed — proving the marker isn't spuriously always true (the polarity this project's
+  // doctrine calls for: checking something that should be ABSENT needs proof the check can distinguish,
+  // not just that it CAN return false).
+  const portTrackHash = crypto.createHash("sha256").update(path.resolve(portWorkDir)).digest("hex").slice(0, 16);
+  const portTrackFile = path.join(os.tmpdir(), `loom-dev-server-${portTrackHash}.json`);
+  const portTracked = JSON.parse(fs.readFileSync(portTrackFile, "utf8"));
+  check(
+    "(f) NEGATIVE CONTROL: a real successful detection never sets portDetectionFailed",
+    portTracked.portDetectionFailed !== true,
+  );
 
   check(
     "(f) recorded port differs from the configured/decoy-proxy-line port — proves it's neither echoing " +

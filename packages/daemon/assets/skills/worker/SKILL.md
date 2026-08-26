@@ -236,7 +236,14 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    default (a stale server already holding the default port would silently verify the wrong thing and
    report a false pass). **If you launched via the bundled `dev-server.mjs` tracked-pid helper (see its
    own note below), its recorded `url` is a starting point, not a given — the recorded value can itself be
-   wrong.** On a host where OTHER browser-capable workers may be running their own dev servers
+   wrong.** And a `url` still `null` is not automatically "still starting" — read the tracking file's
+   `portDetectionFailed`/`detectionEndedAt` fields: both absent means detection is genuinely still in
+   flight (re-read shortly); both present means detection gave up for good and nothing will ever fill
+   `url` in, so the sanctioned next step is to read the helper's own `logFile` yourself (the tracking
+   file's `logFile` field, or the path `start` printed) — selected by the launcher's own printed id, never
+   by content-sweeping every `loom-dev-server-*.log` on the host for one whose contents happen to match
+   what you expected (see the log-identity discipline just below — the same trap applies here). On a host
+   where OTHER browser-capable workers may be running their own dev servers
    concurrently, confirm the recorded port is actually owned by YOUR tracked pid before trusting what you
    see (the startup banner, or the listening socket's owning pid confirmed to trace UPWARD — via each
    process's parent pid, hop by hop — to the pid your launcher printed; do NOT enumerate the launcher's

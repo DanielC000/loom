@@ -27,7 +27,12 @@
 //     <dir>'s absolute path (see trackingFilePath) so a LATER, separate `stop` invocation — even from a
 //     different shell — can find and kill EXACTLY this process. `port`/`host`/`url` start `null` and are
 //     filled in once the child's own startup banner (e.g. Vite's "Local: http://localhost:5173/")
-//     appears in its captured output — see PORT DETECTION below. **A consumer must use `url` AS GIVEN,
+//     appears in its captured output — see PORT DETECTION below. **If detection times out instead, the
+//     tracking file is rewritten with `portDetectionFailed: true` and `detectionEndedAt` (an ISO
+//     timestamp)** — so a later, different-shell consumer reading `url: null` can tell "detection is
+//     still in flight, re-read shortly" (both fields absent) from "detection gave up for good, go read
+//     `logFile` instead" (both fields present) without ever having seen `start`'s own stdout. **A
+//     consumer must use `url` AS GIVEN,
 //     never rebuild it from `port` alone** — the banner's reported HOST is captured alongside the port
 //     precisely because a bare port doesn't determine a reachable URL: the same port can be reachable at
 //     `127.0.0.1` on one server and refuse that same address while answering at `[::1]` (or vice versa)
@@ -79,10 +84,13 @@
 // already gave the supervisor, so `killTracked`'s `-pid` group-kill reaches it too — unchanged.
 //
 // Bounded (LOOM_DEV_SERVER_PORT_TIMEOUT_MS, default 15000ms) so a framework that never announces a port —
-// or is just slow to boot — doesn't hang `start` forever; on timeout the tracking file's `port`/`host`/
-// `url` stay `null` for good (nothing keeps polling the log after `start`'s own process exits) and the
-// printed log path is the fallback — grep it directly once the child catches up, or raise the timeout if
-// this framework is just slow to boot.
+// or is just slow to boot — doesn't hang `start` forever; on timeout `port`/`host`/`url` stay `null` for
+// good (nothing keeps polling the log after `start`'s own process exits), but the tracking file is
+// rewritten with `portDetectionFailed: true` + `detectionEndedAt` so the terminal state is legible to a
+// LATER reader of the file, not just to whoever watched `start`'s own stdout — a `url: null` tracking
+// file with neither field means detection is still in flight; one with both means it gave up for good.
+// The printed log path is the fallback either way — read it directly once the child catches up, or raise
+// the timeout if this framework is just slow to boot.
 // SAFETY (the reason this helper exists): `stop` only ever acts on the pid THIS SAME HELPER recorded
 // in `start` for that exact <dir> — never a name/port/netstat search, never a bash `$!` (which on
 // Windows is the shell's pid, not the real listener). It never touches any process it didn't itself
@@ -364,7 +372,16 @@ async function start(dir, cmdArgs) {
     // never rebuild it from the port, since the same port can be unreachable at a guessed host.
     console.log(`Bound: ${url} (recorded to the tracking file)`);
   } else {
-    console.log(`Bound host:port not detected within ${timeoutMs}ms — the tracking file's port/host/url stay unset (nothing keeps watching after this command exits); grep ${logPath} directly once the server has finished starting, or raise LOOM_DEV_SERVER_PORT_TIMEOUT_MS if this framework is just slow to boot.`);
+    // Rewrite the tracking file even though port/host/url stay null — a later, different-shell consumer
+    // must be able to tell "still starting, re-read shortly" from "detection gave up for good, go read
+    // logFile" from the file alone, without ever having seen this process's own stdout (see the header
+    // comment). `portDetectionFailed`/`detectionEndedAt` absent ⇒ still in flight or the child died at
+    // spawn; both present ⇒ this permanent terminal state.
+    const current = readTracked(absDir);
+    if (current && current.pid === child.pid) {
+      writeTracked(absDir, { ...current, portDetectionFailed: true, detectionEndedAt: new Date().toISOString() });
+    }
+    console.log(`Bound host:port not detected within ${timeoutMs}ms — the tracking file now records portDetectionFailed:true (port/host/url stay unset; nothing keeps watching after this command exits). Read logFile (${logPath}) directly, or raise LOOM_DEV_SERVER_PORT_TIMEOUT_MS if this framework is just slow to boot.`);
   }
 }
 
