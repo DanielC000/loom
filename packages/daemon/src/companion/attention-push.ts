@@ -172,8 +172,20 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       line = `${projectName}: crash-loop, auto-resume gave up — ${who}`;
       break;
     case "question_asked": {
-      const title = typeof detail.title === "string" ? truncateText(detail.title, ALERT_TITLE_MAX_CHARS) : "untitled";
-      line = `${projectName}: decision needed — "${title}" (${m8})`;
+      const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
+      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
+      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+      // Card e9688b1b: generalizes the platform_escalate fold-in below — carry the FULL questionId (not
+      // an 8-char slice) so a decisions-relay-granted recipient can decisions_list() to resolve the full
+      // title/body/options/recommendation; a truncated slice can't resolve. Placed BEFORE the (unbounded)
+      // title, same placement discipline as platform_escalate's taskRef, so this id survives both the
+      // title's own truncation AND the final ALERT_LINE_MAX_CHARS trim. And when the title itself was
+      // cut, SAY SO explicitly rather than relying on the bare "…" to be noticed — a silent cut reads
+      // exactly like a genuinely short question, and the measured incident (a Companion answering from
+      // half a sentence, then retracting) is exactly this ambiguity turning into a wrong decision.
+      const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
+      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
+      line = `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
       break;
     }
     case "idle_escalated":
@@ -186,7 +198,9 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       line = `${projectName}: manager context overflow risk — ${m8}`;
       break;
     case "platform_escalate": {
-      const title = typeof detail.title === "string" ? truncateText(detail.title, ALERT_TITLE_MAX_CHARS) : "untitled";
+      const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
+      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
+      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       // CR fold-in (companion re-delivery card): the FULL taskId (not the 8-char `task8` slice every other
       // case uses for human display) — a board-reach-granted companion (e.g. lead mode, which grants
       // board-reach act-mode on every project incl. the reserved Platform home) needs the EXACT id to
@@ -194,7 +208,11 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // can't resolve. Placed BEFORE the (unbounded) title so a long title's truncation (ALERT_LINE_MAX_CHARS)
       // trims the title's tail, never this id.
       const taskRef = e.taskId ? ` (task:${e.taskId})` : "";
-      line = `${projectName}: escalated to platform${taskRef} — "${title}" (${m8})`;
+      // Card e9688b1b DoD-3: when the title itself was cut, say so explicitly (same discipline applied to
+      // question_asked above) — the bare "…" a plain truncateText() leaves behind reads exactly like a
+      // genuinely short title, not a cut one.
+      const cutFlag = titleTruncated ? " [title TRUNCATED]" : "";
+      line = `${projectName}: escalated to platform${taskRef}${cutFlag} — "${title}" (${m8})`;
       break;
     }
     case "session_rate_limited":

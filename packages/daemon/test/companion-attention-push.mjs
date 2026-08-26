@@ -12,7 +12,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // alertClasses/digestMinutes across granted projects (Lead fork 4), digest-mode accumulation + a single
 // bundled flush (Lead fork 5, the re-scan-buffer v1), the watermark-stall fix (no-stall regressions in both
 // modes), the seq cursor's immunity to sqlite rowid reuse after a hard delete (CR-caught correctness bug),
-// the immediate-mode burst cap (CR fold-in [3]), and the alert-line length bound (CR fold-in [5]).
+// the immediate-mode burst cap (CR fold-in [3]), and the alert-line length bound (CR fold-in [5]). Also
+// covers card e9688b1b: a truncated question_asked/platform_escalate title carries the FULL id (not an
+// 8-char slice) and an explicit "TRUNCATED" flag rather than a bare "…", plus a positive control proving
+// the full record is actually fetchable by that id (via db.getQuestion, the same row decisions_list reads).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-attention-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -390,7 +393,68 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   e.watcher.tick(new Date());
   check("line-bound: a 5000-char title still produces ONE bounded turn", e.enqueued.length === 1);
   check("line-bound: the rendered line is capped well under the raw title length", e.enqueued[0].text.length < 300);
+  // Card e9688b1b DoD-1/3: the truncated title still carries the FULL questionId (not an 8-char slice)
+  // and explicitly flags the cut — never a silent "…" a recipient could mistake for a genuinely short ask.
+  check("line-bound: carries the FULL questionId for decisions_list, not a truncated slice", e.enqueued[0].text.includes("question:q1"));
+  check("line-bound: explicitly flags the title as TRUNCATED", /truncated/i.test(e.enqueued[0].text));
   cleanupEnv(e);
+}
+
+// --- 16b. NEGATIVE CONTROL: a SHORT title (under ALERT_TITLE_MAX_CHARS) is NOT flagged truncated — proves
+//     the [title TRUNCATED] marker is genuinely conditional, not an always-on decoration that would make
+//     test 16's positive assertion meaningless. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["decision-pending"] } });
+  e.watcher.start(); e.watcher.stop();
+  e.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: e.mgrA, kind: "question_asked", detail: { questionId: "q-short", title: "short question" } });
+  e.watcher.tick(new Date());
+  check("line-bound (negative control): a short title still carries the questionId", e.enqueued[0].text.includes("question:q-short"));
+  check("line-bound (negative control): a short title is NOT flagged truncated", !/truncated/i.test(e.enqueued[0].text));
+  cleanupEnv(e);
+}
+
+// --- 16c. POSITIVE CONTROL (card e9688b1b DoD-4): a question whose title EXCEEDS the cap arrives
+//     truncated + flagged, but the FULL questionId carried in the alert line lets the recipient retrieve
+//     the whole record (title/body/options) BEFORE answering — via db.getQuestion(questionId), the exact
+//     row `decisions_list` (companion/capabilities.ts) itself reads and returns in full. This proves the
+//     fetch path actually resolves the full body, not just that an id is present in the string. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["decision-pending"] } });
+  e.watcher.start(); e.watcher.stop();
+  const fullTitle = "Should we deploy the new worktree provisioning path to production tonight, given the risk of a partial rollout affecting in-flight worker sessions across every project? ".repeat(1) + "Please advise.";
+  check("positive-control setup: the real title exceeds ALERT_TITLE_MAX_CHARS (100)", fullTitle.length > 100);
+  const qId = `q-${randomUUID()}`;
+  const now = new Date().toISOString();
+  e.db.insertQuestion({
+    id: qId, sessionId: e.mgrA, projectId: e.projA, title: fullTitle, body: "Full body: rollback plan attached; risk assessed low if staged.",
+    options: ["deploy now", "wait for morning"], recommendation: "wait for morning", state: "pending",
+    chosenOption: null, note: null, createdAt: now, answeredAt: null, consumedAt: null,
+  });
+  e.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: e.mgrA, kind: "question_asked", detail: { questionId: qId, title: fullTitle } });
+  e.watcher.tick(new Date());
+  const pushedText = e.enqueued[0]?.text ?? "";
+  check("positive-control: the pushed alert's title is actually cut short of the real title", pushedText.length > 0 && !pushedText.includes(fullTitle));
+  check("positive-control: the pushed alert explicitly flags the cut", /truncated/i.test(pushedText));
+  check("positive-control: the pushed alert carries the FULL questionId", pushedText.includes(`question:${qId}`));
+  // Extract the carried id and use it to fetch the full record — exactly what a decisions-relay-granted
+  // recipient does via decisions_list before answering.
+  const carriedId = pushedText.match(/question:(\S+?)\)/)?.[1];
+  check("positive-control: the carried id round-trips exactly (no mangling)", carriedId === qId);
+  const fetched = e.db.getQuestion(carriedId);
+  check("positive-control: the full record is fetchable by that id", !!fetched);
+  check("positive-control: the fetched title is the COMPLETE, untruncated text", fetched?.title === fullTitle);
+  check("positive-control: the fetched body/options are also available (not just the title)", fetched?.body?.includes("rollback plan") && Array.isArray(fetched?.options) && fetched.options.length === 2);
+  cleanupEnv(e);
+}
+
+// --- 16d. Same explicit-truncation discipline applied to platform_escalate (DoD-3 is general, not
+//     question_asked-only) — a long escalation title is flagged, a short one is not. ---
+{
+  const longTitle = "x".repeat(200);
+  const lineLong = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", taskId: "task-1", kind: "platform_escalate", detail: { title: longTitle } }, "escalation", "Proj A");
+  check("platform_escalate: a long title is explicitly flagged truncated", /truncated/i.test(lineLong));
+  const lineShort = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", taskId: "task-1", kind: "platform_escalate", detail: { title: "short" } }, "escalation", "Proj A");
+  check("platform_escalate: a short title is NOT flagged truncated", !/truncated/i.test(lineShort));
 }
 
 // --- 17. classify()/alertLine() sanity — the exported helpers used by the tick loop above ---
