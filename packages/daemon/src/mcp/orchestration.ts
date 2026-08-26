@@ -1709,20 +1709,28 @@ export class OrchestrationMcpRouter {
             "env var). " +
             "Because it shares one budget with merge/deploy gates, a busy fleet MAY mean this call queues behind " +
             "another in-flight gate before it even starts — that's expected, not a hang. " +
-            "COST MODEL (card d2753f2a): this run and the gate `worker_merge_confirm` fires at merge time are " +
-            "structurally SEPARATE ops (different key in the daemon's pending-op registry) — a green result " +
-            "here is never consulted by, and never shrinks the cost of, that merge gate's own re-gate, which " +
-            "always runs for real regardless of this call (CLAUDE.md calls it the AUTHORITATIVE full-suite " +
-            "guarantee). Ordering this before requesting merge is still worth it for the reasons above — a " +
-            "bounded, semaphore-admitted self-check with real per-step diagnosis before you ask for merge — " +
-            "but it does NOT amortize or replace the merge gate's own cost. On a busy daemon (a non-empty " +
-            "`gate_queue`) the honest total for firing both is ~2 full gate runs end to end, not one reused " +
-            "one — observed: a 17m43s self-check here followed by its own queued merge gate cost roughly " +
-            "35 minutes of gate time for one card, with nothing shared between them. `worker_merge_confirm`'s " +
-            "OWN re-call verdict cache (a separate mechanism, for repeated confirm calls on the SAME branch) " +
-            "is real but structurally can't help here either whenever that branch was behind main at admission " +
-            "— see that tool's own description for the mechanism and the `supersededBy` signal that announces " +
-            "it. Returns {ran:false, " +
+            "COST MODEL (card e50600d2 shipped the reuse; card b3c04b89 corrected this text — an earlier " +
+            "version claimed a green result here is NEVER consulted by the merge gate's own re-gate; that was " +
+            "FALSE and is retracted, confirmed reused in production more than once). A green self-check here " +
+            "CAN be reused and skip the merge gate's own re-run entirely, IF at merge time your branch is " +
+            "`freshBehindMain === 0` against main's then-current HEAD AND your worktree is clean with no " +
+            "drift since this self-check settled — both re-derived fresh at merge time, never assumed. " +
+            "THE FORFEIT CONDITION IS YOUR OWN BRANCH FALLING BEHIND MAIN BETWEEN THIS SELF-CHECK AND YOUR " +
+            "MERGE, NOT A BUSY OR CONTENDED GATE LANE — a saturated `maxConcurrentGates` lane does NOT by " +
+            "itself defeat reuse (measured directly: reuse still fired while a sibling merge gate held the " +
+            "other lane slot for the entire run). Your decision rule: this self-check pays for itself when " +
+            "your branch is current with main and likely to STAY current until you request merge — " +
+            "regardless of how busy `gate_queue` looks — and it is wasted (~2 full gate runs end to end: this " +
+            "one plus a full re-run at merge, observed ~35 minutes of gate time for one card) only when main " +
+            "is genuinely moving out from under your branch in that window, e.g. several sibling branches on " +
+            "this same project landing while you wait. `worker_merge_confirm`'s OWN re-call verdict cache is " +
+            "a SEPARATE mechanism (for repeated confirm calls on the SAME branch, not for a prior run_gate " +
+            "call) and is likewise defeated whenever that branch was behind main at admission — see that " +
+            "tool's own description for the mechanism and the `supersededBy` signal that announces it. " +
+            "Ordering this before requesting merge is worth it whenever your branch is likely to stay " +
+            "current — a bounded, semaphore-admitted self-check with real per-step diagnosis before you ask " +
+            "for merge, that in that case also amortizes the merge gate's own cost via the reuse above. " +
+            "Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_GATE_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
