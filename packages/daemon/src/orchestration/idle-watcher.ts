@@ -453,7 +453,7 @@ export class IdleWatcher {
       // liveWorkers/none all flow through this ONE insertion point) so the digest is never a half-fix
       // covering only one shape. A "not computed" delta is never phrased so it could be mistaken for a
       // measured empty one (DoD-3) — see formatBoardDeltaDigest's own three-way contract.
-      const boardDeltaSuffix = ` ${formatBoardDeltaDigest(computeBoardDelta(db, m.id, nonTerminal))}`;
+      const boardDeltaSuffix = ` ${formatBoardDeltaDigest(computeBoardDelta(db, m.id, m.projectId, nonTerminal))}`;
       // Card a193398f: append the bounded-recheck hint to the MANAGER branches only (they cite the
       // openTodos/stranded/live-worker counts this hint refers to) — the platform (Lead) branch above
       // doesn't surface those counts, so the hint wouldn't make sense appended there.

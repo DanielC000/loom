@@ -9,11 +9,21 @@ import type { Db } from "../db.js";
  * live board against that snapshot to produce a delta digest.
  *
  * Stored via the EXISTING generic Db.getMeta/setMeta (app_meta table) — no schema change, so this never
- * touches db.ts. Keyed per-session so two sessions parked at different times get different deltas (DoD-2:
- * anchored to the recipient's OWN last read, never a wall-clock window).
+ * touches db.ts. Keyed per-(session, project) — card e9750bc2: a Lead session can genuinely read MULTIPLE
+ * projects (list_all_tasks, either the no-filter aggregate or a projectId-narrowed call), so a single
+ * per-session key would let a read of project B silently clobber project A's snapshot (and a later delta
+ * for A would then diff against B's cards — false "created" for every one of A's real cards). Keying by
+ * (session, project) makes each project's anchor independent, so DoD-3's not-computed/measured-zero/
+ * real-delta three-way distinction holds PER PROJECT, not just per session. A manager (single-project,
+ * unchanged since card 9c8e256e) still gets exactly one key — this is a superset, not a behavior change
+ * for that path.
  */
 const BOARD_READ_META_PREFIX = "board_read:";
 const DELTA_LIST_CAP = 10;
+
+function boardReadMetaKey(sessionId: string, projectId: string): string {
+  return `${BOARD_READ_META_PREFIX}${sessionId}:${projectId}`;
+}
 
 interface SnapshotCard {
   columnKey: string;
@@ -59,7 +69,19 @@ export function recordBoardRead(db: Db, sessionId: string, projectId: string, at
     cards[t.id] = { columnKey: t.columnKey, priority: t.priority, title: t.title };
   }
   const snapshot: BoardReadSnapshot = { at: atIso, cards };
-  db.setMeta(BOARD_READ_META_PREFIX + sessionId, JSON.stringify(snapshot));
+  db.setMeta(boardReadMetaKey(sessionId, projectId), JSON.stringify(snapshot));
+}
+
+/**
+ * Card e9750bc2 DoD-1 — the platform (`list_all_tasks`) analogue of {@link recordBoardRead} for a
+ * cross-project aggregate read: records ONE (session, project) snapshot per project the aggregate
+ * actually scanned (`projectIds` — every live project when unfiltered, or the single narrowed project),
+ * regardless of how the aggregate's OWN result set is filtered/paginated afterward — same "independent of
+ * this call's own filter/pagination args" contract {@link recordBoardRead} already has for a single
+ * project, just applied once per project instead of once per call.
+ */
+export function recordBoardReadForProjects(db: Db, sessionId: string, projectIds: string[], atIso: string): void {
+  for (const projectId of projectIds) recordBoardRead(db, sessionId, projectId, atIso);
 }
 
 export interface BoardDeltaEntry {
@@ -88,9 +110,12 @@ export type BoardDelta =
 /**
  * Diff `currentNonTerminal` (the caller's ALREADY-FETCHED live board slice — idle-watcher passes its own
  * `nonTerminal`, so this never re-queries the board) against `sessionId`'s last recorded board-read
- * snapshot. `computed:false` means no snapshot exists for this session yet (it has never called
- * tasks_list since this feature shipped, or its one recorded snapshot is corrupt) — this MUST render
- * distinctly from a computed-but-empty delta (card 9c8e256e DoD-3); see {@link formatBoardDeltaDigest}.
+ * snapshot FOR `projectId` (card e9750bc2 — snapshots are keyed per (session, project), see the module
+ * doc, so a delta for project A is never computed against a snapshot a different project's read left
+ * behind). `computed:false` means no snapshot exists for THIS project under this session yet (it has
+ * never read this project's board since this feature shipped, or its one recorded snapshot is corrupt) —
+ * this MUST render distinctly from a computed-but-empty delta (card 9c8e256e DoD-3); see
+ * {@link formatBoardDeltaDigest}.
  *
  * Deliberately does NOT use Task.updatedAt to detect a move/re-prioritization: `Db.updateTask` (db.ts)
  * bumps `updatedAt` on EVERY patch — held/deferred/repoKey/merged* writes included, not just column or
@@ -102,9 +127,10 @@ export type BoardDelta =
 export function computeBoardDelta(
   db: Db,
   sessionId: string,
+  projectId: string,
   currentNonTerminal: Pick<Task, "id" | "title" | "columnKey" | "priority">[],
 ): BoardDelta {
-  const raw = db.getMeta(BOARD_READ_META_PREFIX + sessionId);
+  const raw = db.getMeta(boardReadMetaKey(sessionId, projectId));
   if (!raw) return { computed: false };
   let parsed: unknown;
   try {

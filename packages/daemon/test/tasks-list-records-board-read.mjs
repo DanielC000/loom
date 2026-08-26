@@ -81,29 +81,29 @@ async function callTasksList(sessionId, args = {}) {
 try {
   // ═══════════════════════════ (A) manager → recorded ═══════════════════════════
   check("(A) before any tasks_list call, a manager's delta is NOT COMPUTED",
-    computeBoardDelta(db, MGR, db.listTasks(projId)).computed === false);
+    computeBoardDelta(db, MGR, projId, db.listTasks(projId)).computed === false);
   await callTasksList(MGR);
   check("(A) after a tasks_list call, the manager's delta IS computed",
-    computeBoardDelta(db, MGR, db.listTasks(projId)).computed === true);
+    computeBoardDelta(db, MGR, projId, db.listTasks(projId)).computed === true);
 
   // ═══════════════════════════ (B) platform → recorded ═══════════════════════════
   check("(B) before any tasks_list call, a platform session's delta is NOT COMPUTED",
-    computeBoardDelta(db, PLATFORM, db.listTasks(projId)).computed === false);
+    computeBoardDelta(db, PLATFORM, projId, db.listTasks(projId)).computed === false);
   await callTasksList(PLATFORM);
   check("(B) after a tasks_list call, the platform session's delta IS computed",
-    computeBoardDelta(db, PLATFORM, db.listTasks(projId)).computed === true);
+    computeBoardDelta(db, PLATFORM, projId, db.listTasks(projId)).computed === true);
 
   // ═══════════════════════════ (C) worker → NOT recorded (deliberate scope fence) ═══════════════════════
   await callTasksList(WORKER);
   check("(C) a WORKER's tasks_list call does NOT record a board-read snapshot (idle-watcher never nudges workers)",
-    computeBoardDelta(db, WORKER, db.listTasks(projId)).computed === false);
+    computeBoardDelta(db, WORKER, projId, db.listTasks(projId)).computed === false);
 
   // ═══════════════════════════ (D) countsOnly → NOT recorded ═══════════════════════
   const MGR2 = "S-MGR-COUNTSONLY";
   seedSession(MGR2, "manager");
   await callTasksList(MGR2, { countsOnly: true });
   check("(D) a countsOnly:true call does NOT record a board-read snapshot (no card contents were seen)",
-    computeBoardDelta(db, MGR2, db.listTasks(projId)).computed === false);
+    computeBoardDelta(db, MGR2, projId, db.listTasks(projId)).computed === false);
 
   // ═══════ (E) the snapshot covers the WHOLE non-terminal board, not just this call's filtered view ═════
   const MGR3 = "S-MGR-FILTERED";
@@ -111,7 +111,7 @@ try {
   // Filtered to ONLY "todo" — brd-b and brd-c are excluded from what this call actually returns.
   await callTasksList(MGR3, { columns: ["todo"] });
   const nonTerminal = db.listTasks(projId).filter((t) => t.columnKey !== "done");
-  const delta = computeBoardDelta(db, MGR3, nonTerminal);
+  const delta = computeBoardDelta(db, MGR3, projId, nonTerminal);
   check("(E) delta computed after a FILTERED tasks_list call", delta.computed === true);
   check("(E) a card the filtered call never returned (brd-b) is STILL in the snapshot — no false 'created' next time",
     delta.computed && delta.createdCount === 0);
