@@ -673,6 +673,9 @@ async function main(): Promise<void> {
     // conversation thread. Human/REST-triggered only (POST /api/companion/:sessionId/upgrade) — see
     // sessions/service.ts's upgradeCompanionCapabilities for the full mechanism.
     upgradeCompanionSession: (sid) => sessions.upgradeCompanionCapabilities(sid),
+    // AUTO-UPGRADE-ON-ENABLE signal (card dbba993f) — see CompanionControllerDeps.wasSessionAlreadyLive's
+    // own doc for why this is injected rather than the controller reaching into `db` itself.
+    wasSessionAlreadyLive: (sid) => db.getSession(sid)?.engineSessionId != null,
   });
 
   // OrchestrationMcpRouter needs SessionService (worker_spawn/worker_stop), so it comes after. The

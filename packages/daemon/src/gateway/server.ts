@@ -1911,6 +1911,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // companion PROCESS only ever fetches `tools/list` once, at MCP registration/startup: it has no way to
   // discover a tool it never asked for. See `POST /api/companion/:sessionId/upgrade` below (Framework §6's
   // conversation-preserving respawn) for the on-demand live-apply path; this route alone does not trigger one.
+  // (Card dbba993f: the CORE chat_reply gate itself — companionSessionIds, arming a companion at all, not a
+  // per-capability grant — hit the identical gap and now DOES auto-trigger that same respawn from
+  // `CompanionController.startOne`, since a companion that can never discover chat_reply can never reply at
+  // all. This per-capability-grant path is unaffected and stays a deliberate human/REST-only opt-in.)
   //
   // REVOKE/downgrade (this CR fix), by contrast, is ALREADY live with NO respawn needed: the companion may
   // still believe a revoked tool exists (its own stale `tools/list` belief), but the very next attempt to

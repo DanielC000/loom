@@ -145,7 +145,12 @@ export interface CompanionControl {
   /**
    * The CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework §6) — a
    * human/REST-triggered upgrade, `POST /api/companion/:sessionId/upgrade`, NEVER auto-fired from a grant
-   * write. Delegates to the injected `upgradeCompanionSession` (SessionService.upgradeCompanionCapabilities)
+   * write. (Card dbba993f: `startOne` DOES now auto-trigger the same underlying `upgradeCompanionSession`
+   * primitive for one narrow case — arming the core chat_reply gate itself on an already-live session — but
+   * calls it directly rather than through THIS method, to avoid re-entering this method's own chain
+   * serialization from inside an already-running chain op; see `startOne`'s doc. This method itself stays
+   * exactly what it says: the human/REST path, never auto-fired.) Delegates to the injected
+   * `upgradeCompanionSession` (SessionService.upgradeCompanionCapabilities)
    * and is SERIALIZED on the same reconcile chain as start/update/stop/onSessionExit, so it can never
    * interleave with a concurrent teardown/start of the SAME session's gateway (e.g. a racing token-change
    * reconcile). Its own pty.stop() triggers index.ts's onExit → `onSessionExit` for the SAME session — see
@@ -248,6 +253,21 @@ export interface CompanionControllerDeps {
    *  {@link CompanionControl.upgrade} resolves `{ok:false}` for every session (test seams that don't
    *  exercise the upgrade path stay byte-identical). */
   upgradeCompanionSession?: (sessionId: string) => Promise<Session>;
+  /**
+   * AUTO-UPGRADE-ON-ENABLE signal (card dbba993f) — true when `sessionId` already had a captured engine
+   * session id BEFORE this enable (i.e. it was already live — its own `tools/list` already ran once,
+   * before it could ever have included `chat_reply`). `startOne` reads this to decide whether it needs to
+   * auto-trigger `upgradeCompanionSession` — see that method's own doc. Deliberately a NARROW injected
+   * predicate rather than the controller reaching into `db.getSession(...)` itself: the first cut of this
+   * fix called `db.getSession` directly and broke four test fixtures whose `db` mock never implemented it
+   * (a partial mock satisfies TypeScript via the interface cast, so the compiler couldn't catch it) — this
+   * shape keeps `startOne` free of any NEW required capability on `deps.db`, mirroring every other narrow
+   * optional signal in this interface (`originResolver`, `closeTrustWindow`, `upgradeCompanionSession`
+   * itself). The daemon injects `(sid) => db.getSession(sid)?.engineSessionId != null`. Optional: absent ⇒
+   * `startOne` never auto-respawns (byte-identical to before this card — every existing test fixture that
+   * doesn't wire it is completely unaffected, not merely degraded).
+   */
+  wasSessionAlreadyLive?: (sessionId: string) => boolean;
   /** Envelope key-file override (test seam only). */
   keyPath?: string;
   /** Build the gateway for an effective config (test seam — defaults to createCompanionGateway with the
@@ -364,12 +384,15 @@ export class CompanionController implements CompanionControl {
    * "companion-off" when that session has no live gateway (chat_reply is gated to enabled sessions, so this
    * is only reachable in a brief window; it never throws).
    *
-   * NOTE (stateless-MCP tool discovery — known, SAFE, no code change): adding/removing a session in
-   * `hooks.companionSessionIds` (un)registers chat_reply at the ROUTER for THAT session, but an
-   * ALREADY-CONNECTED companion `claude` session won't re-list tools until its next MCP (re)connect — so a
-   * LIVE enable may not surface chat_reply on a running session until reconnect/resume, and a lingering
-   * chat_reply call on a running session AFTER its teardown routes HERE and no-ops with "companion-off"
-   * (its map entry is cleared) — never a cross-wire or a throw.
+   * NOTE (stateless-MCP tool discovery): adding/removing a session in `hooks.companionSessionIds`
+   * (un)registers chat_reply at the ROUTER for THAT session, but an ALREADY-CONNECTED companion `claude`
+   * session won't re-list tools until its next MCP (re)connect — so a LIVE enable used to be able to leave
+   * chat_reply silently undiscoverable on an already-running session until its next reconnect/resume. Card
+   * dbba993f: `startOne` now detects exactly that transition (a session already live before it was armed —
+   * see its own doc) and auto-triggers the SAME conversation-preserving respawn `POST
+   * /api/companion/:sessionId/upgrade` exposes, so the gap no longer needs a human to notice and retrigger
+   * it by hand. A lingering chat_reply call on a running session AFTER its teardown still routes HERE and
+   * no-ops with "companion-off" (its map entry is cleared) — never a cross-wire or a throw.
    */
   async deliverReply(sessionId: string, text: string, voice?: boolean): Promise<DeliverResult | { delivered: false; reason: "companion-off" }> {
     const gateway = this.gateways.get(sessionId);
@@ -579,8 +602,32 @@ export class CompanionController implements CompanionControl {
     }
   }
 
-  /** OFF → ON for one session: full start (build+start its gateway, arm its heartbeat/reminders, gate it in). */
+  /**
+   * OFF → ON for one session: full start (build+start its gateway, arm its heartbeat/reminders, gate it in).
+   *
+   * Card dbba993f: a companion armed on a session whose `claude` process was ALREADY live never surfaces
+   * `chat_reply` on its own (see `deliverReply`'s doc) — that process fetched `tools/list` once, at ITS OWN
+   * startup, before this session ever entered `companionSessionIds`, and has no way to discover a tool it
+   * never asked for (the identical mechanism already fixed for capability grants — gateway/server.ts's
+   * ADD/upgrade comment). Left alone, that companion can never reply, silently, for the rest of that
+   * process's life. `engineSessionId` is captured on SessionStart and is therefore ALREADY SET, at this
+   * point, for exactly the sessions that were live before now — a session spawned fresh as part of THIS
+   * same provisioning call has not yet reached its own first SessionStart when `startOne` runs (config is
+   * written and reconciled synchronously, well before the newly-spawned `claude` process finishes booting),
+   * so it reads `null` here and is correctly left alone: its own first `tools/list` still has `chat_reply`
+   * in it. Reusing the existing conversation-preserving respawn (Framework §6, `upgradeCompanionSession`)
+   * rather than inventing a second one — same primitive `POST /api/companion/:sessionId/upgrade` already
+   * exercises. Real, honest cost, paid ONLY on this previously-silently-broken path: worst case ~13s, and it
+   * briefly blocks every OTHER live companion's reconcile via `this.chain` (see `upgrade()`'s own doc).
+   * Best-effort — a failed auto-respawn is logged, not thrown; the session stays enabled either way (the
+   * owner can retry via the same REST upgrade route), matching `reconcile`'s own best-effort contract.
+   *
+   * The "was it already live" read goes through the injected `deps.wasSessionAlreadyLive` — see that
+   * field's own doc for why this is NOT a direct `deps.db.getSession(...)` call.
+   */
   private async startOne(desired: CompanionConfig): Promise<void> {
+    // Snapshot BEFORE any side effect below — read once, up front, so nothing here can change the answer.
+    const wasAlreadyLive = this.deps.wasSessionAlreadyLive?.(desired.sessionId) ?? false;
     await this.stopGatewayFor(desired.sessionId); // defensive (invariant: no gateway when not in cfgs) — never stack
     this.startGatewayFor(desired);
     this.rearmHeartbeatFor(desired);
@@ -588,6 +635,18 @@ export class CompanionController implements CompanionControl {
     this.rearmAttentionPushFor(desired.sessionId);
     this.cfgs.set(desired.sessionId, desired);
     this.deps.hooks.companionSessionIds.add(desired.sessionId);
+    if (wasAlreadyLive && this.deps.upgradeCompanionSession) {
+      console.log(
+        `[companion] ${desired.sessionId}: enabling on an already-live session — auto-respawning so chat_reply is discoverable (card dbba993f)`,
+      );
+      try {
+        await this.deps.upgradeCompanionSession(desired.sessionId);
+      } catch (err) {
+        console.warn(
+          `[companion] ${desired.sessionId}: auto-respawn-on-enable failed (companion stays enabled; retry via POST /api/companion/${desired.sessionId}/upgrade): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   /**

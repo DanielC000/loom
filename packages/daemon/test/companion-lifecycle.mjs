@@ -36,6 +36,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      ALREADY come back alive by the time this (chain-serialized) op actually runs — e.g. a live-upgrade's
 //      own stop→resume completing first — is a no-op, not a teardown; tearing down a freshly-live companion
 //      for a stale exit would silently kill its gateway/heartbeat/chat_reply gate.
+//   8. AUTO-UPGRADE-ON-ENABLE (card dbba993f): startOne (OFF→ON) auto-triggers the conversation-preserving
+//      respawn when — and only when — the injected `wasSessionAlreadyLive(sid)` says the session was
+//      ALREADY LIVE before being armed, since that's the case whose already-running claude process can't
+//      discover the freshly-registered chat_reply on its own. index.ts wires that predicate from
+//      db.getSession(sid)?.engineSessionId != null; a session with none yet (freshly spawned in the SAME
+//      call, e.g. companion PROVISION) is untouched — byte-identical to before this card. A rejected/thrown
+//      respawn doesn't fail the enable (best-effort, matches reconcile's own contract) — chat_reply still
+//      goes live. An ON→ON update (updateOne) never triggers it — only the OFF→ON transition can hit the gap.
+//   8c. REGRESSION GUARD: startOne itself never touches `deps.db` for this check — it reads ONLY the
+//      injected `wasSessionAlreadyLive` (absent ⇒ never auto-respawns). Proven against the SAME minimal
+//      db-mock + resolveEffective shape 4 OTHER fixtures (companion-in-app/-messages/-mirror/-voice-web-
+//      inbound) actually use — a `db.getSession` that THROWS if ever called, to fail loudly on a regression
+//      back to calling it directly (which is what broke those 4 fixtures the first time this card shipped).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-lifecycle.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -163,7 +176,7 @@ function writeConfig(db, { sessionId, token = TOKEN_A, chatId = "chat-1", scope 
 // the controller's live gate). Returns everything the assertions need. `resolveEffective` (optional, returns
 // a CompanionConfig[]) drives applyDesired's diff directly (bypassing resolveAllEnabledConfigs's DB read) so
 // a test can exercise an ON→ON change of ANY single field in isolation.
-function makeRig(db, resolveEffective) {
+function makeRig(db, resolveEffective, opts = {}) {
   const submitted = [];
   const submitSpy = (sid, text) => { submitted.push({ sid, text }); return { delivered: true }; };
   const gw = makeGatewayBuilder(submitSpy);
@@ -190,6 +203,8 @@ function makeRig(db, resolveEffective) {
     buildGateway: gw.builder,
     buildHeartbeat: hb.builder,
     ...(resolveEffective ? { resolveEffective } : {}),
+    ...(opts.upgradeCompanionSession ? { upgradeCompanionSession: opts.upgradeCompanionSession } : {}),
+    ...(opts.wasSessionAlreadyLive ? { wasSessionAlreadyLive: opts.wasSessionAlreadyLive } : {}),
   });
   const orch = new OrchestrationMcpRouter(db, {}, hooks);
   return { submitted, gw, hb, hooks, controller, orch, pty: ptyStub };
@@ -527,11 +542,124 @@ try {
     check("stale-exit: no second gateway was built (nothing was torn down to rebuild)", rig.gw.built.length === 1);
     db.close();
   }
+
+  // ============ Part 8 — AUTO-UPGRADE-ON-ENABLE (card dbba993f) ============
+  // A companion armed on a session whose claude process was ALREADY live can never discover the
+  // freshly-registered chat_reply on its own (its tools/list already ran, once, before now) — startOne
+  // detects that case (engineSessionId already captured) and auto-triggers the conversation-preserving
+  // respawn. A session with NO engineSessionId yet (mirrors PROVISION's own ordering — config is written
+  // and reconciled before the freshly-spawned claude process reaches its own first SessionStart) is left
+  // alone: its own first tools/list will have chat_reply in it already.
+  {
+    const db = new Db(dbFile("p8.db"));
+    const now = new Date().toISOString();
+    db.insertProject({ id: "p8-proj", name: "Auto-upgrade", repoPath: "p8-proj", vaultPath: "p8-proj", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "p8-agent", projectId: "p8-proj", name: "Companion", startupPrompt: "", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    // (a) already-live: engineSessionId already captured (a prior boot already happened).
+    db.insertSession({
+      id: "p8-live", projectId: "p8-proj", agentId: "p8-agent", engineSessionId: "eng-p8-live", title: null, cwd: "p8-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+    // (b) freshly-spawned: no engineSessionId yet — its own SessionStart hasn't fired.
+    db.insertSession({
+      id: "p8-fresh", projectId: "p8-proj", agentId: "p8-agent", engineSessionId: null, title: null, cwd: "p8-proj",
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+
+    const upgradeCalls = [];
+    const upgradeCompanionSession = async (sid) => { upgradeCalls.push(sid); return { id: sid }; };
+    // Mirrors index.ts's REAL wiring verbatim (db.getSession(sid)?.engineSessionId != null) — the
+    // controller itself no longer touches `db.getSession` directly (see CompanionControllerDeps.
+    // wasSessionAlreadyLive's own doc: a first cut called it inline and broke four OTHER fixtures whose
+    // db mock didn't implement getSession), so this proves the real glue, not just the controller logic.
+    const wasSessionAlreadyLive = (sid) => db.getSession(sid)?.engineSessionId != null;
+    const rig = makeRig(db, undefined, { upgradeCompanionSession, wasSessionAlreadyLive });
+    await rig.controller.startInitial(null);
+
+    // Distinct tokens — same-token collision guard would otherwise refuse the 2nd companion, unrelated to
+    // what this Part is testing.
+    writeConfig(db, { sessionId: "p8-live", token: TOKEN_A, chatId: "chat-live", cadence: 0 });
+    writeConfig(db, { sessionId: "p8-fresh", token: TOKEN_B, chatId: "chat-fresh", cadence: 0 });
+    await rig.controller.reconcile();
+
+    check("auto-upgrade: enabling an ALREADY-LIVE session (engineSessionId set) auto-respawns it exactly once", upgradeCalls.length === 1 && upgradeCalls[0] === "p8-live");
+    check("auto-upgrade: chat_reply still goes live on the already-live session", rig.hooks.companionSessionIds.has("p8-live") && (await chatReplyOn(rig.orch, "p8-live")) === true);
+    check("auto-upgrade: a FRESHLY-SPAWNED session (no engineSessionId yet) does NOT trigger a respawn", !upgradeCalls.includes("p8-fresh"));
+    check("auto-upgrade: chat_reply still goes live for the fresh session too", rig.hooks.companionSessionIds.has("p8-fresh") && (await chatReplyOn(rig.orch, "p8-fresh")) === true);
+
+    // ON→ON: a cadence change on the already-enabled p8-live companion must NOT re-trigger the respawn —
+    // only the OFF→ON transition (startOne) can hit the discovery gap; updateOne never calls it.
+    upgradeCalls.length = 0;
+    writeConfig(db, { sessionId: "p8-live", chatId: "chat-live", cadence: 120 });
+    await rig.controller.reconcile();
+    check("auto-upgrade: an ON→ON update (updateOne) never triggers the respawn", upgradeCalls.length === 0);
+    db.close();
+  }
+
+  // ============ Part 8b — a REJECTED/THROWN auto-respawn doesn't break the enable ============
+  // Best-effort, matching reconcile()'s own contract: a failed respawn is logged, not thrown — the
+  // companion still ends up enabled with chat_reply live (the owner can retry via the REST upgrade route).
+  {
+    const db = new Db(dbFile("p8b.db"));
+    const now = new Date().toISOString();
+    db.insertProject({ id: "p8b-proj", name: "Auto-upgrade fail", repoPath: "p8b-proj", vaultPath: "p8b-proj", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "p8b-agent", projectId: "p8b-proj", name: "Companion", startupPrompt: "", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    db.insertSession({
+      id: "p8b-live", projectId: "p8b-proj", agentId: "p8b-agent", engineSessionId: "eng-p8b-live", title: null, cwd: "p8b-proj",
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
+    });
+
+    const upgradeCompanionSession = async () => { throw new Error("companion process did not stop in time"); };
+    const wasSessionAlreadyLive = (sid) => db.getSession(sid)?.engineSessionId != null;
+    const rig = makeRig(db, undefined, { upgradeCompanionSession, wasSessionAlreadyLive });
+    await rig.controller.startInitial(null);
+
+    writeConfig(db, { sessionId: "p8b-live", chatId: "chat-1", cadence: 0 });
+    let threw = false;
+    try { await rig.controller.reconcile(); } catch { threw = true; }
+    check("auto-upgrade: a REJECTED respawn does not throw out of reconcile (best-effort)", threw === false);
+    check("auto-upgrade: the companion still ends up enabled — chat_reply live despite the failed respawn", rig.hooks.companionSessionIds.has("p8b-live") && (await chatReplyOn(rig.orch, "p8b-live")) === true);
+    db.close();
+  }
+
+  // ============ Part 8c — startOne never touches deps.db (regression: the FIRST cut of card dbba993f's
+  // fix called db.getSession(...) directly from startOne and broke FOUR other fixtures — companion-in-app,
+  // -messages, -mirror, -voice-web-inbound — whose `db` mock is a bare partial object that has NO
+  // getSession at all; TypeScript couldn't catch it because the mock is cast to the interface). Prove it
+  // directly with the SAME minimal shape those fixtures use: neither `wasSessionAlreadyLive` nor
+  // `upgradeCompanionSession` wired, and NO getSession on the mock at all — reconcile must not throw.
+  // (NOTE: `getSession`, when a mock DOES provide it, is legitimately called by OTHER pre-existing,
+  // unrelated logic on this path — resolveCompanionGrant's lead-mode check — so a getSession THAT THROWS
+  // is not a usable regression signal here; omitting it entirely, like the 4 real fixtures do, is.) ============
+  {
+    // Same minimal db shape + resolveEffective-bypasses-the-DB pattern the 4 broken fixtures actually use
+    // (see e.g. companion-in-app.mjs's own controller construction) — no getSession at all.
+    // listCompanionBindings/upsertCompanionBinding are here only because this Part reuses the shared rig's
+    // REAL gateway builder (makeGatewayBuilder), which needs them regardless of this card's fix — the 4
+    // real broken fixtures instead inject their OWN buildGateway that never touches bindings via `db`.
+    let bindings = [];
+    const db = {
+      listEnabledCompanionReminders: () => [],
+      listCompanionBindings: () => bindings,
+      upsertCompanionBinding: (b) => { bindings.push(b); },
+    };
+    const cfg = {
+      botToken: TOKEN_A, allowedChatId: "chat-1", sessionId: "p8c-sess", chatScope: "dm",
+      homeChannel: "telegram", homeChatId: "chat-1", heartbeatIntervalMinutes: 0, heartbeatPrompt: "p",
+    };
+    // No wasSessionAlreadyLive, no upgradeCompanionSession wired — exactly the 4 fixtures' shape.
+    const rig = makeRig(db, () => [cfg]);
+    await rig.controller.startInitial(null);
+    let threw = null;
+    try { await rig.controller.reconcile(); } catch (e) { threw = e; }
+    check("auto-upgrade: startOne on a MINIMAL db mock (no getSession) does not throw", threw === null);
+    check("auto-upgrade: chat_reply still goes live on a minimal-db fixture", rig.hooks.companionSessionIds.has("p8c-sess") && (await chatReplyOn(rig.orch, "p8c-sess")) === true);
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the hot lifecycle controller drives the running companion LIVE from config writes: create starts the adapter + binding + chat_reply + heartbeat with no restart, cadence changes re-arm/disarm the heartbeat, token changes restart the adapter with no leaked long-poll, disable/delete tear down to the OFF state, repeated toggles never stack a watcher or leak a poll, and the REAL REST drives the same live controller end-to-end."
+  ? "\n✅ ALL PASS — the hot lifecycle controller drives the running companion LIVE from config writes: create starts the adapter + binding + chat_reply + heartbeat with no restart, cadence changes re-arm/disarm the heartbeat, token changes restart the adapter with no leaked long-poll, disable/delete tear down to the OFF state, repeated toggles never stack a watcher or leak a poll, the REAL REST drives the same live controller end-to-end, and enabling an already-live session auto-respawns it so chat_reply is discoverable (fresh/updated sessions and a rejected respawn are all left byte-identical or non-fatal)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
