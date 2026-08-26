@@ -375,6 +375,66 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         wrongFieldCandidate === undefined);
     }
   }
+
+  // ── (J) Card 2f0b2e57 — THE REAL INCIDENT: op `5b2075db` reported gateDetail.failingTest as a PASSING
+  //     assertion. `merge-gate-single-file-retry.mjs`'s own retry-decoupling check is LABELLED with prose
+  //     that describes the UNCAUGHT idiom — "the retry call names flaky-j (from failTierTest), never
+  //     anything derived from the UNCAUGHT diagnostic string" — and that label, once printed as
+  //     `PASS  <label>` by this daemon's own check() convention, matched tier 0's UNANCHORED `UNCAUGHT`
+  //     pattern and WON, because it contains the bare word "UNCAUGHT". This is the VERBATIM real line
+  //     (op 5b2075db's own gateDetail.failingTest, reproduced from the card), not a paraphrase. ──────────
+  {
+    // Verbatim, as printed by check(): `${cond ? "PASS" : "FAIL"}  ${label}` with the real op's own label.
+    const REAL_PASS_LINE = "PASS  (J) the retry call names flaky-j (from failTierTest), never anything derived from the UNCAUGHT diagnostic string";
+    const REAL_FAIL_LINE = "FAIL  (G) worker2's own re-union at admission absorbed worker1's landed squash";
+    const REAL_UNCAUGHT_LINE = "      💥 UNCAUGHT — Error: waitUntil timed out after 8000ms";
+
+    // (J1) THE BUG, REPRODUCED PRE-FIX / PROVEN FIXED POST-FIX: the specimen PASS line ALONE — nothing
+    // else in the stream recognizable as a failure — must report undefined. Pre-fix, tier 0's unanchored
+    // \bUNCAUGHT\b matched this exact line and `result()` returned it as "the failing test" despite it
+    // being a passing assertion; this is the negative control proving the fix, not just a shape check.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${REAL_PASS_LINE}\n`, "utf-8"));
+      check("(J1) THE BUG SPECIMEN: the real op 5b2075db PASS line, fed alone, is NEVER reported as failingTest (pre-fix this exact line was wrongly returned)",
+        tracker.result() === undefined);
+      check("(J1) matchCount() agrees: zero matches, not a phantom hit on a tier that then got suppressed for display only",
+        tracker.matchCount() === 0);
+    }
+
+    // (J2) DoD-3 POSITIVE CONTROL, ARM (a): the specimen PASS line (contains "UNCAUGHT") coexists with a
+    // REAL FAIL line ⇒ the FAIL line is reported, never the PASS line — proves the guard doesn't just
+    // suppress the PASS line into a false "nothing recognizable", it correctly falls through to a real
+    // failure elsewhere in the same stream.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${REAL_PASS_LINE}\n${REAL_FAIL_LINE}\n`, "utf-8"));
+      check("(J2) DoD-3(a): PASS-line-containing-UNCAUGHT + a real FAIL line ⇒ result() reports the FAIL line",
+        tracker.result() === REAL_FAIL_LINE);
+      check("(J2) DoD-3(a): the PASS line is genuinely not what's returned (not a coincidental substring match)",
+        tracker.result() !== REAL_PASS_LINE);
+    }
+
+    // (J3) DoD-3 POSITIVE CONTROL, ARM (b): a genuine UNCAUGHT crash, no FAIL line, but the SAME
+    // PASS-line-containing-UNCAUGHT specimen also present in the stream ⇒ the UNCAUGHT crash line still
+    // wins — proves the PASS guard does NOT regress card 0e5b2045's actual purpose (UNCAUGHT outranking a
+    // bare FAIL summary when a genuine crash is present).
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${REAL_PASS_LINE}\n${REAL_UNCAUGHT_LINE}\n`, "utf-8"));
+      check("(J3) DoD-3(b): a genuine UNCAUGHT crash line is still reported even with a PASS-line-containing-UNCAUGHT also present",
+        tracker.result() === REAL_UNCAUGHT_LINE.trim());
+    }
+
+    // (J4) extractFailingTest (the post-hoc fallback for a raw string) must honor the SAME invariant —
+    // the fix applies to both entry points, not just the live tracker.
+    {
+      check("(J4) extractFailingTest: the specimen PASS line alone reports undefined",
+        extractFailingTest(REAL_PASS_LINE) === undefined);
+      check("(J4) extractFailingTest: the specimen PASS line + a real FAIL line reports the FAIL line, not the PASS line",
+        extractFailingTest(`${REAL_PASS_LINE}\n${REAL_FAIL_LINE}`) === REAL_FAIL_LINE);
+    }
+  }
 }
 // dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).

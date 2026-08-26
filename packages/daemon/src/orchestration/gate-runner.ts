@@ -86,6 +86,21 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
  *  review of this line too. */
 const FAIL_TIER_INDEX = 1;
 
+/** Card 2f0b2e57 (two real merge-gate rejections, both from this daemon's OWN test suite): a line
+ *  recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`, optionally
+ *  indented — must never be mistaken for a failure, no matter what words the passing assertion's own
+ *  LABEL happens to contain. `FAILING_TEST_PATTERNS`' `UNCAUGHT`/`AssertionError`/`error TS\d+` tiers are
+ *  all UNANCHORED (they match the keyword ANYWHERE in a line, not just at its start) — a real specimen
+ *  (op `5b2075db`) hit this exactly: `merge-gate-single-file-retry.mjs`'s own retry-decoupling assertion
+ *  is LABELLED `"the retry call names flaky-j (from failTierTest), never anything derived from the
+ *  UNCAUGHT diagnostic string"` — a line describing the UNCAUGHT idiom in prose, which PASSED, was
+ *  reported as the failing test. Checked BEFORE any `FAILING_TEST_PATTERNS` tier is tried, so no tier —
+ *  anchored or not, tier 0 or tier 3 — can ever win against a line that is itself a recorded PASS. The
+ *  `FAIL`/`not ok` tier (index {@link FAIL_TIER_INDEX}) already can't match a PASS line on its own (it's
+ *  anchored to the start of the line), but this guard makes the invariant FLAT and tier-independent rather
+ *  than an accident of which tiers happen to be anchored today. */
+const PASS_LINE_RE = /^\s*PASS\b/i;
+
 /** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
  *  remainder it holds between `feed()` calls. See that function's own doc for why this must be bounded. */
 const FAILING_TEST_CARRY_CAP_BYTES = 8192;
@@ -131,6 +146,20 @@ const FAILING_TEST_CARRY_CAP_BYTES = 8192;
  * Exported (unlike the rest of this module's internals) so a hermetic test can drive it directly with
  * synthetic bare-`\r`/no-delimiter chunks, mirroring how `runGateStep`/`splitGateSteps` are already
  * exported for the same reason.
+ *
+ * ⚠️ KNOWN LIMITATION, LEFT UNFIXED HERE (card 2f0b2e57, specimen 2 — a WEAKER hypothesis than the
+ * PASS-line bug specimen 1 fixed above; not reconstructed from a raw stream, only observed as plausible):
+ * this daemon's own `test-daemon.mjs` runs failing files through a concurrent multi-lane pool, and every
+ * lane's output lands in the SAME combined stream this tracker scans. "The LAST line matching the winning
+ * tier" therefore means "whichever lane's matching line was written last to the shared stream", not "the
+ * line belonging to whichever file the run ultimately blames". When more than one file's own FAIL-tier
+ * line is genuinely present, `failTierMatchCount() !== 1` already refuses the single-file MERGE RETRY on
+ * that ambiguity ({@link identifyRetriableTestFile} below) — but `result()`/`failingTest` (the DIAGNOSTIC
+ * field surfaced in `gateDetail`) carries no equivalent gate: it always returns *a* real matching line,
+ * with no guarantee it's the one test-daemon.mjs's own end-of-run `FAILURES:` echo ultimately blames.
+ * Fixing this for real needs test-daemon.mjs to tag each lane's own lines with an attributable marker (a
+ * lane or file id) before they ever reach this scanner — a change to the test HARNESS, not this tracker,
+ * and out of scope for this card.
  */
 export function createFailingTestTracker(): {
   feed(chunk: Buffer): void;
@@ -157,6 +186,9 @@ export function createFailingTestTracker(): {
   // both, and re-scanning the same carry line twice would silently inflate its tier's count.
   let carryFlushed = false;
   const scanLine = (line: string): void => {
+    // Card 2f0b2e57: a recorded PASS is never a failure, whatever its label says — see PASS_LINE_RE's own
+    // doc. Checked before any tier so no tier, anchored or not, can ever win against a PASS line.
+    if (PASS_LINE_RE.test(line)) return;
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
       if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return; }
     }
@@ -999,12 +1031,15 @@ export function classifyGatePhase(step: string | undefined): "typecheck" | "test
  * this at all. Scans for the same cross-ecosystem failure markers as that live scan (an uncaught-throw
  * `UNCAUGHT` idiom, Loom's own `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers,
  * thrown `AssertionError`s, and `error TSxxxx` typechecker diagnostics) and returns the FIRST matching line,
- * trimmed. Returns `undefined`
+ * trimmed. A line recording a PASS ({@link PASS_LINE_RE}) is skipped entirely before any pattern is tried —
+ * same flat invariant as {@link createFailingTestTracker}'s own `scanLine` (card 2f0b2e57), so this
+ * fallback can't repeat the bug the live scan was fixed for just because it re-derives from a raw string
+ * instead of the tracker. Returns `undefined`
  * when nothing recognizable is found — this is a diagnostic aid, not a parser, so a silent miss just means
  * the raw tail is still surfaced on its own.
  */
 export function extractFailingTest(outputTail: string): string | undefined {
-  const lines = outputTail.split(/\r?\n/);
+  const lines = outputTail.split(/\r?\n/).filter((l) => !PASS_LINE_RE.test(l));
   const patterns = FAILING_TEST_PATTERNS;
   for (const pattern of patterns) {
     const hit = lines.find((l) => pattern.test(l));
