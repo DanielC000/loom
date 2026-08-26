@@ -887,9 +887,21 @@ async function main(): Promise<void> {
   // counters as SEPARATE surfaced signals rather than appending to this line — readability, not a test
   // constraint: boot-listen-not-blocked.mjs (card fdf93d3a) now asserts this chain via the real AST
   // (src/index.ts), so growing this line or adding comments near the call site below is safe.
+  //
+  // Card c33f94b2: `mergesFailed` used to read as a bare "N failed (retry next boot)" for EVERY failure
+  // shape, including a repoKey that structurally can never resolve — "retry next boot" is false comfort
+  // for that class (three such records retried at every boot for 26+ days, never once clearing). Split
+  // the wording here the same way worktreesStillWedged/worktreesNeedsHuman already split out of
+  // worktreesPruned on this line: an honestly-retriable count, plus (only when non-zero) the permanently-
+  // wedged count with a pointer to reconcileOrchestrationOnBoot's own dedicated per-entry warn (which
+  // names each worker/branch/project/wedged-since/attempts — too much detail for this one condensed line).
   void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
     if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
-      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
+      const retriableFailed = reconciled.mergesFailed - reconciled.mergeReconcileWedged;
+      const wedgedPhrase = reconciled.mergeReconcileWedged > 0
+        ? `, ${reconciled.mergeReconcileWedged} permanently wedged on an unresolvable repoKey — NOT retriable, see the dedicated [reconcile] warn above for which`
+        : "";
+      console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${retriableFailed} failed (retry next boot)${wedgedPhrase}, resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
     }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);

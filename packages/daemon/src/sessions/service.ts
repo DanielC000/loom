@@ -9,7 +9,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type CompanionRoute,
 } from "@loom/shared";
-import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict } from "../db.js";
+import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
@@ -1866,6 +1866,20 @@ export class SessionService {
   private static readonly DEFAULT_WEDGE_SWEEP_INTERVAL_MS = 45 * 60_000; // 45min — inside the owner's 30-60min band
   private static readonly DEFAULT_WEDGE_GIVE_UP_ATTEMPTS = 50;
   private static readonly DEFAULT_WEDGE_GIVE_UP_MS = 7 * 24 * 60 * 60_000; // 7 days
+  /**
+   * Card c33f94b2: the give-up threshold for a Pass-A merge reconciliation wedged on a structurally
+   * unresolvable repoKey (see `db.recordMergeReconcileWedgeAttempt`'s doc) — past
+   * {@link mergeReconcileEscalateAttempts} boots OR {@link mergeReconcileEscalateMs} elapsed (whichever
+   * trips first), `escalateWedgedMergeReconcile` fires ONE `[loom:merge-orphaned]` nudge (never repeated —
+   * see `db.markMergeReconcileEscalated`) instead of retrying it silently forever. Much lower than the
+   * worktree-removal wedge bound above: THIS wedge can never self-heal by retrying (no held OS handle to
+   * eventually release — the repoKey will never resolve on its own), so there is no reason to wait days
+   * before telling a human. Both test-overridable (opts), mirroring wedgeGiveUpAttempts/wedgeGiveUpMs.
+   */
+  private readonly mergeReconcileEscalateAttempts: number;
+  private readonly mergeReconcileEscalateMs: number;
+  private static readonly DEFAULT_MERGE_RECONCILE_ESCALATE_ATTEMPTS = 3;
+  private static readonly DEFAULT_MERGE_RECONCILE_ESCALATE_MS = 24 * 60 * 60_000; // 1 day
   /** The armed background sweep timer, or null when nothing is currently wedged (self-arms/disarms). */
   private wedgeSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Agent Runs R3 run-webhook delivery (injectable for tests; defaults to a bounded fetch + 5s cap). */
@@ -2049,6 +2063,7 @@ export class SessionService {
       findNestedGitRepos?: (worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>;
       runGate?: (gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
+      mergeReconcileEscalateAttempts?: number; mergeReconcileEscalateMs?: number;
       codescape?: CodescapeSupervisor;
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
@@ -2067,6 +2082,8 @@ export class SessionService {
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
+    this.mergeReconcileEscalateAttempts = opts?.mergeReconcileEscalateAttempts ?? SessionService.DEFAULT_MERGE_RECONCILE_ESCALATE_ATTEMPTS;
+    this.mergeReconcileEscalateMs = opts?.mergeReconcileEscalateMs ?? SessionService.DEFAULT_MERGE_RECONCILE_ESCALATE_MS;
     this.runWebhookPost = opts?.runWebhookPost ?? defaultRunWebhookPost;
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
@@ -15430,6 +15447,32 @@ export class SessionService {
   }
 
   /**
+   * Card c33f94b2, DoD-3: past the give-up threshold (`mergeReconcileEscalateAttempts` boots OR
+   * `mergeReconcileEscalateMs` elapsed), surface a Pass-A merge reconciliation wedged on a structurally
+   * unresolvable repoKey to the OWNING PROJECT instead of retrying it silently forever. Reuses the SAME
+   * `[loom:merge-orphaned]` tag/delivery mechanism `reconcileOrphanedGateOps` already uses for "no verdict
+   * was ever reached" nudges (the manager who filed this card confirmed that path already works well and
+   * gives correct guidance) rather than inventing a second escalation channel: same lineage-resolved
+   * target (`resolveSettleNudgeTarget`, so a recycled manager's live successor still receives it, and a
+   * fully-dead lineage degrades to the same best-effort no-op every other settle nudge already accepts),
+   * same durable delivery (`enqueueDurableMessage`). One-shot: `db.markMergeReconcileEscalated` makes a
+   * repeat call for an already-escalated entry a no-op, so this never re-fires on every subsequent boot.
+   */
+  private escalateWedgedMergeReconcile(s: Session, project: Project, entry: MergeReconcileWedgeEntry): void {
+    const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
+    const ageDays = Math.max(0, Math.round((Date.now() - new Date(entry.firstWedgedAt).getTime()) / 86_400_000));
+    const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries). This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`;
+    try {
+      this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" });
+    } catch {
+      /* best-effort — mirrors every other boot-time/settle notification; the DB record + next-boot warn still stand */
+    }
+    this.db.markMergeReconcileEscalated(s.id);
+    // eslint-disable-next-line no-console
+    console.warn(`[reconcile] worker ${s.id} merge reconciliation permanently wedged (repoKey "${entry.repoKey}") — escalated [loom:merge-orphaned] to ${target.slice(0, 8)}`);
+  }
+
+  /**
    * Boot-time orchestration reconcile (#22 run-2 + audit M4). Run once at daemon boot, AFTER
    * recoverStaleSessions has marked prior-run ptys exited (so nothing live holds a worktree).
    * Three surgical, idempotent passes:
@@ -15466,7 +15509,7 @@ export class SessionService {
   // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
   // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
   // prove Pass A's early-out never spawns git for an already-finalized worker.
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; mergeReconcileWedged: number; mergeFailureDetails: Array<{ sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string; reason: string; wedged: boolean; wedgedSince?: string; attempts?: number }>; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; worktreesLeftOnDiskSuspectedLive: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -15501,9 +15544,12 @@ export class SessionService {
     //     whose worktree is gone never pays for a git spawn. Provably behaviour-identical to the old
     //     order: in BOTH orders such a worker's iteration ends in `continue`, and findLandedSquashCommit
     //     has no side effect but its own (now-aggregated, see below) log line — reordering relative to it
-    //     changes nothing observable. (repoKey resolution stays BEFORE this early-out, unchanged from
-    //     before, so a stale repoKey is still counted/warned exactly as it was pre-fix.) On this repo's own
-    //     measured shape this alone removes ~1789 of the 2041 spawns (the already-finalized population).
+    //     changes nothing observable. On this repo's own measured shape this alone removes ~1789 of the
+    //     2041 spawns (the already-finalized population). Card c33f94b2: repoKey resolution NOW runs
+    //     AFTER this early-out (it used to run before it) — a session already fully reconciled by some
+    //     other means (e.g. Pass A2's branch-gone resolver, below) but whose STAMPED repoKey has since
+    //     gone stale/unresolvable no longer throws on every single boot for nothing; see
+    //     `db.recordMergeReconcileWedgeAttempt`'s doc for the permanently-wedged-forever bug this closes.
     //  2. The residual sessions (no recorded merge_done, or worktree still on disk) look their branch up
     //     in the batch {@link findLandedSquashCommitViaMap} map — ONE bounded `git log` pass per REPO,
     //     shared/cached across every session checked against it — instead of a fresh single-branch walk
@@ -15520,20 +15566,20 @@ export class SessionService {
     //     bigger than the limit degrades gracefully back to per-session fallback walks, unchanged from
     //     before this fix, never a false "not landed".
     let preFixTrailerNoticeCount = 0; // aggregated across this whole pass — see findLandedSquashCommit's onPreFixTrailerNotice param
+    // Card c33f94b2 DoD-1: every failed-to-finish reconciliation this boot, named (worker/branch/task/
+    // project) — not just a bare count. `wedged:true` entries are the structurally-permanent repoKey
+    // class (see below); `wedged:false` are ordinary/transient failures ("retry next boot" is honest for
+    // these now that the permanent class has its own bucket).
+    const mergeFailureDetails: Array<{
+      sessionId: string; branch: string | null; taskId: string | null; projectId: string; projectName: string;
+      reason: string; wedged: boolean; wedgedSince?: string; attempts?: number;
+    }> = [];
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed (restart-intent) — leave it intact
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
-        // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo — anchored to its
-        // stamped `repoKey` (see Session.repoKey's doc), not `project.repoPath`. A stale key (the registry
-        // entry was removed) throws {@link UnknownRepoKeyError}, caught by the SAME per-session catch this
-        // whole pass already has below — boot must never crash on one stale session, and this session's
-        // merge-finish is simply retried on a later boot once a human fixes the registry (mirrors every
-        // other per-session failure this pass already tolerates). WRITE/RECOVERY path, but reconcile's
-        // existing catch-and-count IS the degrade here, not a silent swallow — mergesFailed still counts it.
-        const repoPath = resolveRepoByKey(project, s.repoKey).path;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
         // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
@@ -15542,9 +15588,42 @@ export class SessionService {
         // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
         // the finalizeMerge guard above) forcing the column back to terminal each time.
         const alreadyFinalized = this.db.listEventsForWorker(s.id).some((e) => e.kind === "merge_done");
-        // CHEAP EARLY-OUT, moved ahead of the (potentially expensive) squash lookup below — see the perf
-        // comment above this loop.
-        if (alreadyFinalized && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
+        // CHEAP, REPO-FREE EARLY-OUT (card c33f94b2: moved ahead of repoKey resolution too, not just the
+        // squash lookup below) — "already fully reconciled" is knowable from the DB + fs alone, so a
+        // session finalized by some other means (e.g. Pass A2 just below) never needs its repo resolved at
+        // all, even if its stamped repoKey has since gone stale/unresolvable.
+        if (alreadyFinalized && !worktreeOnDisk) {
+          this.db.clearMergeReconcileWedge(s.id); // no longer wedged, whatever its repoKey now says
+          continue; // already fully reconciled — nothing to finish
+        }
+        // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo — anchored to its
+        // stamped `repoKey` (see Session.repoKey's doc), not `project.repoPath`.
+        let repoPath: string;
+        try {
+          repoPath = resolveRepoByKey(project, s.repoKey).path;
+        } catch (e) {
+          if (!(e instanceof UnknownRepoKeyError)) throw e; // an unexpected shape — let the outer catch below handle it exactly as before
+          // Card c33f94b2: a stale repoKey is a STRUCTURALLY PERMANENT condition — no amount of retrying
+          // will ever resolve it on its own, unlike a transient git failure. Tracked distinctly (never
+          // folded into the generic "retry next boot" bucket) so the boot summary can name WHICH
+          // session/branch/project is stuck, since WHEN it first got stuck, and escalate past a threshold.
+          const entry = this.db.recordMergeReconcileWedgeAttempt(
+            s.id, { branch: s.branch, taskId: s.taskId, projectId: project.id, repoKey: s.repoKey ?? null }, e.message,
+          );
+          mergesFailed++;
+          mergeFailureDetails.push({
+            sessionId: s.id, branch: s.branch, taskId: s.taskId, projectId: project.id, projectName: project.name,
+            reason: e.message, wedged: true, wedgedSince: entry.firstWedgedAt, attempts: entry.attempts,
+          });
+          const ageMs = Date.now() - new Date(entry.firstWedgedAt).getTime();
+          if (!entry.escalated && (entry.attempts >= this.mergeReconcileEscalateAttempts || ageMs >= this.mergeReconcileEscalateMs)) {
+            this.escalateWedgedMergeReconcile(s, project, entry);
+          }
+          // eslint-disable-next-line no-console
+          console.warn(`[reconcile] worker ${s.id} (branch ${s.branch}) merge reconciliation permanently wedged — ${e.message} (wedged since ${entry.firstWedgedAt}, ${entry.attempts} attempt(s))`);
+          continue;
+        }
+        this.db.clearMergeReconcileWedge(s.id); // resolved again (e.g. a human fixed the registry) — stop tracking
         // SQUASH detection (the CRUX): the worker branch is NOT in main's ancestry, so the old
         // isBranchMerged is always false and worktreeHasWork (branch-ahead) cannot tell a landed-squash
         // orphan from a live worker. findLandedSquashCommit keys on the deterministic `Loom-Worker-Branch`
@@ -15581,9 +15660,24 @@ export class SessionService {
         mergesFinished++;
       } catch (e) {
         mergesFailed++;
+        mergeFailureDetails.push({
+          sessionId: s.id, branch: s.branch, taskId: s.taskId, projectId: project.id, projectName: project.name,
+          reason: (e as Error).message, wedged: false,
+        });
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] could not finish merge for worker ${s.id} (branch ${s.branch}): ${(e as Error).message}`);
       }
+    }
+    // Card c33f94b2 DoD-1/2: name every wedged repoKey reconciliation this boot in one dedicated line
+    // (mirrors worktreesStaleRepoKey's own dedicated-warn convention just below in Pass B) — distinct
+    // from the condensed index.ts summary line's bare count, and distinguishing "deferred once" from
+    // "wedged" (a session seen wedged on a PRIOR boot too carries its true firstWedgedAt/attempts here,
+    // not this boot's fresh values).
+    const wedgedThisBoot = mergeFailureDetails.filter((d) => d.wedged);
+    if (wedgedThisBoot.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${wedgedThisBoot.length} merge reconciliation(s) permanently wedged on an unresolvable repoKey (NOT "retry next boot" — retrying can never clear these): ` +
+        wedgedThisBoot.map((d) => `worker ${d.sessionId.slice(0, 8)} (branch ${d.branch ?? "?"}, project "${d.projectName}", wedged since ${d.wedgedSince}, ${d.attempts} attempt(s))`).join("; "));
     }
     // Aggregated ONCE per pass, not per session (card 6ee48e4d) — mirrors scanMergedCommitMap's own
     // once-per-scan log for the identical fact, so a boot with many pre-fix-trailer landings can't flood
@@ -15894,7 +15988,7 @@ export class SessionService {
     if (branchesReclaimed > 0) {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
+    return { mergesFinished, mergesFailed, mergeReconcileWedged: wedgedThisBoot.length, mergeFailureDetails, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, worktreesLeftOnDiskSuspectedLive, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
   }
 
   /**

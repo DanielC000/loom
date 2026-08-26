@@ -1384,6 +1384,38 @@ export interface WedgedWorktreeEntry {
   needsHuman: boolean;
 }
 
+/**
+ * app_meta key for boot-reconcile Pass-A merge-reconciliation wedge tracking (card c33f94b2) — mirrors
+ * WORKTREE_WEDGED_KEY's single-JSON-array pattern exactly (a handful of entries expected, no new table).
+ * Tracks a worker session whose stamped `repoKey` names no entry in its project's CURRENT repo registry
+ * ({@link UnknownRepoKeyError} from resolveRepoByKey) — a condition that, unlike a transient git failure,
+ * cannot clear by simply retrying: the key will never resolve on its own. Read/written by
+ * listMergeReconcileWedges/recordMergeReconcileWedgeAttempt/markMergeReconcileEscalated/
+ * clearMergeReconcileWedge.
+ */
+const MERGE_RECONCILE_WEDGED_KEY = "merge_reconcile_wedged";
+
+/**
+ * One boot-reconcile Pass-A session whose repoKey can never resolve (card c33f94b2: three such records
+ * retried at every boot for 26+ days with a bare "3 failed (retry next boot)" line, naming neither which
+ * merges nor whose). Keyed on `sessionId` (stable across boots) rather than a worktree/branch path — a
+ * wedged reconciliation may have no worktree left on disk at all.
+ */
+export interface MergeReconcileWedgeEntry {
+  sessionId: string;
+  branch: string | null;
+  taskId: string | null;
+  projectId: string;
+  repoKey: string | null;
+  firstWedgedAt: string;
+  lastAttemptAt: string;
+  attempts: number;
+  reason: string;
+  /** Flips true once a `[loom:merge-orphaned]` escalation nudge has fired for this entry — idempotent
+   *  gate so the nudge is sent exactly once, not re-fired on every subsequent boot past the threshold. */
+  escalated: boolean;
+}
+
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
   role: "TEXT",
@@ -3248,6 +3280,68 @@ export class Db {
     const after = before.filter((e) => e.worktreePath !== worktreePath);
     if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
     this.setMeta(WORKTREE_WEDGED_KEY, JSON.stringify(after));
+  }
+
+  // --- merge-reconcile wedge tracking (card c33f94b2; app_meta JSON array, mirrors the worktree-wedge
+  // block above) — a Pass-A session whose repoKey is structurally unresolvable, not a transient failure ---
+  /** Every currently-tracked wedged merge-reconcile session. Corrupt/missing blob → empty (never throws). */
+  listMergeReconcileWedges(): MergeReconcileWedgeEntry[] {
+    const raw = this.getMeta(MERGE_RECONCILE_WEDGED_KEY);
+    if (!raw) return [];
+    try {
+      const v: unknown = JSON.parse(raw);
+      if (Array.isArray(v)) {
+        return v.filter(
+          (e): e is MergeReconcileWedgeEntry =>
+            !!e && typeof e.sessionId === "string" && typeof e.projectId === "string" &&
+            typeof e.firstWedgedAt === "string" && typeof e.lastAttemptAt === "string" &&
+            typeof e.attempts === "number" && typeof e.reason === "string" && typeof e.escalated === "boolean",
+        );
+      }
+    } catch { /* corrupt blob ⇒ empty (like listWedgedWorktrees) */ }
+    return [];
+  }
+  /** The tracked entry for `sessionId`, or undefined if it isn't (currently) wedged. */
+  getMergeReconcileWedge(sessionId: string): MergeReconcileWedgeEntry | undefined {
+    return this.listMergeReconcileWedges().find((e) => e.sessionId === sessionId);
+  }
+  /**
+   * Record ONE more boot's failed repoKey-resolution attempt for `sessionId` — upsert: a first sighting
+   * creates the entry (`attempts:1`, `escalated:false`); a repeat bumps `attempts`/`lastAttemptAt` while
+   * keeping the original `firstWedgedAt`, so a give-up/escalate policy in the caller can measure how long
+   * it's been wedged. Pure bookkeeping — this method never decides escalation; that policy lives in
+   * SessionService (mirrors recordWorktreeWedgeAttempt's own division of responsibility).
+   */
+  recordMergeReconcileWedgeAttempt(
+    sessionId: string,
+    ctx: { branch: string | null; taskId: string | null; projectId: string; repoKey: string | null },
+    reason: string,
+  ): MergeReconcileWedgeEntry {
+    const now = new Date().toISOString();
+    const list = this.listMergeReconcileWedges();
+    const existing = list.find((e) => e.sessionId === sessionId);
+    const updated: MergeReconcileWedgeEntry = existing
+      ? { ...existing, ...ctx, lastAttemptAt: now, attempts: existing.attempts + 1, reason }
+      : { sessionId, ...ctx, firstWedgedAt: now, lastAttemptAt: now, attempts: 1, reason, escalated: false };
+    this.setMeta(MERGE_RECONCILE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), updated]));
+    return updated;
+  }
+  /** Flip `sessionId` to `escalated:true` (the give-up threshold was crossed and a nudge was fired) — a
+   *  no-op if it isn't currently tracked or is already escalated (keeps the nudge one-shot). */
+  markMergeReconcileEscalated(sessionId: string): void {
+    const list = this.listMergeReconcileWedges();
+    const entry = list.find((e) => e.sessionId === sessionId);
+    if (!entry || entry.escalated) return;
+    this.setMeta(MERGE_RECONCILE_WEDGED_KEY, JSON.stringify([...list.filter((e) => e.sessionId !== sessionId), { ...entry, escalated: true }]));
+  }
+  /** Drop `sessionId` from wedge tracking (a no-op if it wasn't tracked) — called once its repoKey
+   *  resolves again (a human fixed the registry) or Pass A finds it already fully reconciled by other
+   *  means (e.g. Pass A2's branch-gone resolver), whatever its currently-stamped repoKey says. */
+  clearMergeReconcileWedge(sessionId: string): void {
+    const before = this.listMergeReconcileWedges();
+    const after = before.filter((e) => e.sessionId !== sessionId);
+    if (after.length === before.length) return; // wasn't tracked ⇒ nothing to clear
+    this.setMeta(MERGE_RECONCILE_WEDGED_KEY, JSON.stringify(after));
   }
 
   // --- companion RUN config (Companion epic Phase 3): the "how to RUN this companion" layer, keyed by
