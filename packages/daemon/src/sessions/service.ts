@@ -2992,13 +2992,18 @@ export class SessionService {
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
       // RESUME mode convergence (card f05e4897, generalized to fresh spawns too by b99d3d67) —
-      // SUPERSEDES Fix A's blind startupModeCycles:0. A `claude --resume` HONOURS `--permission-mode
-      // acceptEdits` and boots at acceptEdits — the SAME gate-free mode a fresh spawn boots in
-      // (probe-verified on 2.1.163; it does NOT restore the persisted mode, the opposite of Fix A's
-      // premise). Both a fresh spawn AND a resume now converge via the SAME feedback-verified cycler
-      // (cycleToMode in host.ts): read the footer and press Shift+Tab until it lands on the target,
-      // instead of a fixed blind press count (the old blind-2 half-landed on plan on the summary-gate
-      // path — the 2026-06-03 strand bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). Resume
+      // SUPERSEDES Fix A's blind startupModeCycles:0. `resumeModeTarget` below is what lets a `--resume`
+      // reach the SAME target a fresh spawn of this config reaches, since `--resume` HONOURS
+      // `--permission-mode` and does NOT restore the persisted mode (probe-verified on 2.1.163; the
+      // opposite of Fix A's premise) — the raw `permission.mode` field here stays `acceptEdits` (a
+      // resolveAgentSpawn/PermissionPolicy constant), but card 51926260's `computeBootMode`
+      // (pty/host.ts, at the actual spawn chokepoint) resolves `resumeModeTarget` into the REAL
+      // `--permission-mode` flag directly when it's expressible, so this resume typically boots straight
+      // at its target with zero presses rather than climbing there. `computeBootMode` falls back to the
+      // SAME feedback-verified cycler (cycleToMode in host.ts) — read the footer and press Shift+Tab
+      // until it lands on the target — for a target that isn't directly expressible, instead of a fixed
+      // blind press count (the old blind-2 half-landed on plan on the summary-gate path — the 2026-06-03
+      // strand bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). Resume
       // passes its target here EXPLICITLY via `resumeModeTarget` — wherever a FRESH spawn of THIS config
       // lands (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a
       // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
@@ -5420,7 +5425,7 @@ export class SessionService {
     this.pty.spawn({
       sessionId: session.id,
       cwd: snapshotDir,
-      permission: config.permission, // VERBATIM boot recipe (acceptEdits) — only prompt + MCP surface differ
+      permission: config.permission, // VERBATIM boot recipe (config.permission's own field values, unmodified — computeBootMode resolves the actual --permission-mode flag from these, same as any other role) — only prompt + MCP surface differ
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook

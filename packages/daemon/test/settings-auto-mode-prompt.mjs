@@ -6,6 +6,15 @@
 // disturb any existing field) — it cannot verify the CLI actually honors it (that needs a real spawn; see
 // test/_smoke-mode-fix-9c03f5a6.mjs, run manually).
 //
+// ISOLATION NOTE (card 51926260, Code Review catch): this calls `writeSessionSettings` DIRECTLY with a
+// literal `mode`, verifying that function's own faithful passthrough — it says NOTHING about which
+// `mode` PRODUCTION actually passes it. Since 795910c7, `createPty` (host.ts) resolves the REAL boot
+// mode via `computeBootMode` BEFORE calling `writeSessionSettings`, so a `startupModeCycles`-bearing
+// permission object is no longer production's actual input shape here (production now passes the
+// ALREADY-RESOLVED target, e.g. `auto`, not the raw `acceptEdits` + cycles it used to). The coupling
+// between the WRITTEN `defaultMode` and the REAL `--permission-mode` argv value is covered by
+// `boot-mode-settings-argv-coupling.mjs`, not this file.
+//
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   pnpm build (repo root) then `node test/settings-auto-mode-prompt.mjs` from packages/daemon.
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
@@ -23,12 +32,15 @@ process.env.LOOM_HOME = tmpHome;
 const { writeSessionSettings } = await import("../dist/pty/claude-settings.js");
 
 try {
-  const perm = { mode: "acceptEdits", allow: ["mcp__loom-tasks"], deny: [], startupModeCycles: 2 };
+  // No `startupModeCycles` — irrelevant to writeSessionSettings (it never reads that field; see the
+  // ISOLATION NOTE above) and its presence previously implied this was production's real input shape,
+  // which it no longer is.
+  const perm = { mode: "acceptEdits", allow: ["mcp__loom-tasks"], deny: [] };
 
   const plain = JSON.parse(fs.readFileSync(writeSessionSettings("sam-plain", perm, "test-hook-token"), "utf8"));
   check("skipAutoPermissionPrompt:true is present on a plain (no vault) session",
     plain.skipAutoPermissionPrompt === true);
-  check("it did NOT displace any existing field — permissions.defaultMode still wired",
+  check("it did NOT displace any existing field — permissions.defaultMode faithfully reflects whatever mode was passed in",
     plain.permissions.defaultMode === "acceptEdits");
   check("it did NOT displace the resume-gate env override", plain.env.CLAUDE_CODE_RESUME_THRESHOLD_MINUTES !== undefined);
   check("includeCoAuthoredBy is unaffected (still false)", plain.includeCoAuthoredBy === false);

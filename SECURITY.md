@@ -26,7 +26,7 @@ Loom is a **local-first, single-user tool**, and its security posture reflects t
 - **Loopback-only daemon.** The daemon binds `127.0.0.1` (port `4317` by default) — it is not
   designed to be exposed to a network or run multi-tenant. Exposing it beyond loopback (e.g. via a reverse proxy or port forward) is outside the supported posture.
 - **It drives real interactive `claude` sessions.** Loom spawns and drives the real interactive
-  `claude` CLI under a server-owned PTY, with a `--permission-mode acceptEdits` posture plus a tool **allowlist** (not `--dangerously-skip-permissions`). Sessions can read and edit files within their working tree. Treat the machine running Loom as you would any environment where an AI agent has filesystem and tool access.
+  `claude` CLI under a server-owned PTY, with a gate-free `--permission-mode` posture (never `--dangerously-skip-permissions`) plus a tool **allowlist** — see `CLAUDE.md`'s spawn-recipe invariant for the exact mode. Sessions can read and edit files within their working tree. Treat the machine running Loom as you would any environment where an AI agent has filesystem and tool access.
 - **Privileged actions are human-only by design.** The trust-boundary surfaces — vault writes, git
   writes (checkout/commit/push/create-branch), and `gateCommand`/shell — are reachable only through a **human-only REST surface**. No agent MCP tool exposes them; a session can never commit, push, or run gated shell commands on its own. Git writes are bounded and non-interactive (`GIT_TERMINAL_PROMPT=0` + timeouts).
 

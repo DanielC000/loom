@@ -127,7 +127,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
 - **Spawn recipe** (`pty/host.ts`): absolute claude path (Windows node-pty doesn't search %PATH%);
-  env scrub of `CLAUDECODE`/`CLAUDE_CODE_*`; `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` + `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1`; `--permission-mode acceptEdits` + allowlist (NOT `--dangerously-skip-permissions`, which shows a blocking gate); `--strict-mcp-config` WITH an explicit `--mcp-config` (suppresses the `.mcp.json` enable prompt). This combo boots unattended.
+  env scrub of `CLAUDECODE`/`CLAUDE_CODE_*`; `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` + `CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT=1`; `--permission-mode <target>` (card 51926260 — `pty/host.ts`'s `computeBootMode` is the source of truth for `<target>`: it boots DIRECTLY at the session's real target mode when that target is itself acceptEdits/plan/auto, falling back to the acceptEdits boot + Shift+Tab climb only for a target that isn't directly expressible as a flag value) + allowlist (NOT `--dangerously-skip-permissions`, which shows a blocking gate); `--strict-mcp-config` WITH an explicit `--mcp-config` (suppresses the `.mcp.json` enable prompt). This combo boots unattended.
   - **Role-scoped human-prompt disallow** (`buildSpawnArgs`/`disallowedToolsForRole`): a Loom-DRIVEN role —
     **worker, setup, auditor, workspace-auditor** — spawns with `--disallowedTools AskUserQuestion
     ExitPlanMode EnterPlanMode`, so the interactive human-prompt tools are REMOVED from the model's tool

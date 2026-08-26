@@ -47,13 +47,22 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
 /**
  * BEST-EFFORT suppression of Claude Code's "auto mode" first-run entry-warning dialog (card 9c03f5a6) —
  * a SEPARATE interactive gate from the `--dangerously-skip-permissions`/bypassPermissions acceptance
- * dialog this file already avoids (see `writeSessionSettings`'s own doc comment: acceptEdits + allowlist
- * over `--dangerously-skip-permissions` specifically to dodge THAT gate). Loom's workers already boot
- * gate-free at `acceptEdits` and feedback-cycle to `auto` post-boot (host.ts's `cycleToMode`); this key
- * closes the residual risk that auto mode's OWN one-time consent dialog could fire the first time a
- * machine/profile ever reaches auto, which would be exactly the kind of unattended boot hang this whole
- * card exists to eliminate — now that the widened auto-heal (host.ts's `logLandedMode`) reliably drives
- * every Loom-driven role all the way to auto, this residual risk is reachable more often than before.
+ * dialog this file already avoids (see `writeSessionSettings`'s own doc comment: a gate-free boot +
+ * allowlist over `--dangerously-skip-permissions` specifically to dodge THAT gate). This key closes the
+ * residual risk that auto mode's OWN one-time consent dialog could fire the first time a machine/profile
+ * ever reaches auto, which would be exactly the kind of unattended boot hang this whole card exists to
+ * eliminate — now that the widened auto-heal (host.ts's `logLandedMode`) reliably drives every
+ * Loom-driven role all the way to auto, this residual risk is reachable more often than before.
+ *
+ * Card 51926260: WHEN a session reaches auto has changed — `computeBootMode` (host.ts) now boots most
+ * Loom-driven roles (the platform/worker default) DIRECTLY at `--permission-mode auto`, rather than
+ * booting gate-free at `acceptEdits` and feedback-cycling to `auto` POST-boot (host.ts's `cycleToMode`,
+ * still the fallback for a target that isn't directly expressible). This key is written to the settings
+ * file BEFORE either kind of boot, so it's positioned to matter either way — but whether the underlying
+ * CLI's entry-warning dialog is gated on a runtime TRANSITION into auto (the case this key was
+ * originally reasoned about) versus firing identically for a COLD boot already sitting in auto has not
+ * been separately re-verified against the new direct-boot shape; that live-probe gap is tracked
+ * separately, not resolved here.
  *
  * UNVERIFIED / reverse-engineered (found by inspecting the installed CLI binary's own gating logic:
  * `skipAutoPermissionPrompt===true` on ANY of a few named settings scopes suppresses the dialog) — the
@@ -61,8 +70,9 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
  * harness to probe it against in the environment this was written in). Purely ADDITIVE and safe even if
  * the guess is wrong: an unrecognized settings key is simply ignored by both an older CLI and (if the
  * scope mapping turns out wrong) this CLI too — worst case is a no-op, never a regression. Does NOT touch
- * the spawn argv or the `--permission-mode acceptEdits` boot flag — settings-file key only. Treat as a
- * belt on top of the proven acceptEdits-then-cycle recipe, not a replacement for it.
+ * the spawn argv or whichever `--permission-mode` value this session actually boots with (see
+ * `computeBootMode`) — settings-file key only. Treat as a belt on top of the proven gate-free boot
+ * (direct-at-target or acceptEdits-then-cycle) recipe, not a replacement for it.
  */
 const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as const;
 
@@ -166,9 +176,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
 /**
  * Write the per-session --settings file: the hooks that relay back to the daemon, plus the
  * resolved permission policy. SessionStart captures the engine id; UserPromptSubmit/Stop/
- * StopFailure drive the busy state machine (rising/falling edges). acceptEdits + allowlist
- * avoids the "Bypass Permissions mode" acceptance gate that --dangerously-skip-permissions
- * triggers. (All behaviors validated in the spike.)
+ * StopFailure drive the busy state machine (rising/falling edges). A gate-free `mode` (see
+ * `computeBootMode`, host.ts, for which one) + allowlist avoids the "Bypass Permissions mode"
+ * acceptance gate that --dangerously-skip-permissions triggers. (All behaviors validated in the spike.)
  *
  * PreToolUse (card cd0c7fee) is ALWAYS wired too, matcher-scoped to `worker_report`/`memory_write`
  * only (see `PRE_TOOL_USE_ATTRIBUTION_MATCHER`) — feeds PtyHost's sub-agent-call correlation queue.
@@ -193,7 +203,13 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  */
 export function writeSessionSettings(
   sessionId: string,
-  permission: PermissionPolicy,
+  // Card 51926260: `mode` is `string`, not the narrower `PermissionPolicy["mode"]` — the caller may pass
+  // the session's DIRECTLY-computed boot target (e.g. "auto", not one of PermissionPolicy.mode's 4
+  // literals) here, and this must stay byte-consistent with whatever `--permission-mode` value the same
+  // call's `buildSpawnArgs` receives (see host.ts's createPty, computeBootMode). This function only ever
+  // reads `.mode`/`.allow`/`.deny` off it (see `defaultMode`/`allow`/`deny` below), so narrowing to
+  // exactly those three fields — rather than requiring the full `PermissionPolicy` — costs nothing.
+  permission: { mode: string; allow: PermissionPolicy["allow"]; deny: PermissionPolicy["deny"] },
   hookToken: string,
   vaultPath?: string,
 ): string {

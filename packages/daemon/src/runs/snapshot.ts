@@ -8,7 +8,7 @@ import { RUNS_DIR } from "../paths.js";
  *
  * ╔═ WHY A SNAPSHOT (the run-cwd isolation decision, owner-approved 2026-06-05) ════════════════════════╗
  * ║ A run must read the project's code but produce NO commit and NEVER dirty the LIVE checkout — yet it ║
- * ║ boots with the SAME gate-free `acceptEdits` recipe as every other session (CLAUDE.md spawn law), so ║
+ * ║ boots with the SAME gate-free posture as every other session (CLAUDE.md's spawn-mode table), so     ║
  * ║ Write/Edit are auto-approved. cwd=the real repoPath would let a run silently write into the live    ║
  * ║ working tree. So each run gets its OWN throwaway copy of the project's COMMITTED HEAD, extracted     ║
  * ║ with no `.git` — hence NO branch and NO git-worktree admin record (sidesteps the worktree-GC bug    ║

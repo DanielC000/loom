@@ -1056,6 +1056,29 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
  */
 const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
 /**
+ * Card 51926260 — `LandedMode`s the real `claude --permission-mode` flag accepts DIRECTLY as a boot
+ * value (probe-verified: `claude --help` lists "acceptEdits"/"auto"/"plan" among its accepted
+ * `--permission-mode` choices). Deliberately excludes `bypassPermissions` (never reachable via
+ * {@link ACCEPT_EDITS_CYCLE_ORDER} anyway — see {@link cyclesToReachFromAcceptEdits}'s own doc — and kept
+ * off this list defensively, matching {@link HEALABLE_MODES}'s style) and `default`/`unknown` (not
+ * confirmed as accepted flag values — booting those still climbs off `acceptEdits` via the unchanged
+ * Shift+Tab convergence below).
+ */
+const DIRECT_BOOT_MODES: ReadonlySet<LandedMode> = new Set(["acceptEdits", "plan", "auto"]);
+/**
+ * Card 51926260 — PURE decision for the boot `--permission-mode` VALUE createPty passes to
+ * buildSpawnArgs: this session's actual target mode directly (mirroring EXACTLY the
+ * `resumeModeTarget ?? (startupModeCycles>0 ? modeAfterCyclesFromAcceptEdits(...) : null)` expression the
+ * post-SessionStart convergence block and `logLandedMode`'s heal already use — so this can never disagree
+ * with what that block will decide the target is), when that target is itself one of DIRECT_BOOT_MODES;
+ * otherwise the raw `permission.mode` (today always `acceptEdits`) unchanged. Exported so a hermetic test
+ * can assert this decision with no real claude — mirrors why `nextCycleAction` is exported.
+ */
+export function computeBootMode(permission: { mode: string; startupModeCycles?: number }, resumeModeTarget?: LandedMode | null): string {
+  const bootTarget = resumeModeTarget ?? ((permission.startupModeCycles ?? 0) > 0 ? modeAfterCyclesFromAcceptEdits(permission.startupModeCycles ?? 0) : null);
+  return bootTarget && DIRECT_BOOT_MODES.has(bootTarget) ? bootTarget : permission.mode;
+}
+/**
  * `setPermissionMode` (worker_set_mode) outer retry bound (card 9c03f5a6) — how many FULL cycleToMode
  * passes to attempt, each starting from a fresh footer read, before giving up and reporting the true
  * landed mode. 1 = the raw single-pass behaviour; >1 self-corrects a genuinely dropped keystroke (a press
@@ -2846,11 +2869,13 @@ export interface SpawnOpts {
   skills?: string[] | null;
   /**
    * RESUME ONLY (card f05e4897). The permission mode the resumed session must land in — the mode a
-   * FRESH spawn of this config reaches (default `auto`). When set, host.ts feedback-cycles the footer
-   * to it after SessionStart (bounded + graceful), instead of the FRESH path's blind `startupModeCycles`
-   * presses. A `--resume` boots at the gate-free acceptEdits mode (probe-verified — `--resume` honours
-   * `--permission-mode`, it does NOT restore the persisted mode), so without this nudge it would stay
-   * one short of auto. Omit for fresh/fork/recycle spawns (they use the blind relative count and work).
+   * FRESH spawn of this config reaches (default `auto`). Card 51926260: `computeBootMode` uses this to
+   * boot the `--resume` DIRECTLY at the target (zero presses) whenever it's directly expressible; when
+   * it isn't, host.ts still feedback-cycles the footer to it after SessionStart (bounded + graceful) as
+   * the fallback — a `--resume` HONOURS `--permission-mode` but does NOT restore the persisted mode
+   * (probe-verified), so without this field it would land wherever the raw boot mode is instead of the
+   * config's real target. Omit for fresh/fork/recycle spawns (they derive the equivalent target from
+   * their own `startupModeCycles` — see `computeBootMode`).
    */
   resumeModeTarget?: LandedMode;
   /**
@@ -4612,7 +4637,12 @@ export class PtyHost {
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, hookToken ?? "", opts.vaultPath);
+    // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
+    // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,
+    // or the two boot-mode mechanisms could disagree about where this session actually lands. See
+    // computeBootMode's own doc for what/why.
+    const bootMode = computeBootMode(permission, opts.resumeModeTarget);
+    const settingsPath = writeSessionSettings(opts.sessionId, bootMode === permission.mode ? permission : { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
@@ -4641,7 +4671,19 @@ export class PtyHost {
     // recycle all call createPty, which rebuilds mcpServers fresh each time), mirroring writeSessionSettings.
     const capabilitySecrets = collectMcpEnvSecrets(mcpServers);
     const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
+    // Card 51926260 — `bootMode` (computed above, before writeSessionSettings) is reused here VERBATIM as
+    // the `--permission-mode` flag value: booting DIRECTLY at the session's actual target mode, instead of
+    // always booting at `acceptEdits` and Shift+Tab-climbing to the target afterward. The old
+    // always-acceptEdits boot + climb transited an intermediate mode (typically `plan`, on the way to the
+    // platform default `auto`) that the real engine treats as a genuine mode change — probe-verified (task
+    // 51926260) to inject a spurious "Exited Plan Mode" system-reminder into the session's very first turn
+    // on EVERY fresh spawn/resume/fork/recycle, even though the session never asked for plan mode. Booting
+    // there directly means the post-SessionStart convergence block (below) reads the target on its very
+    // first footer poll and presses NOTHING — see computeBootMode's own doc for why this can never
+    // disagree with that block, and never touches `nextCycleAction`/`cycleToMode`/`logLandedMode`'s
+    // auto-heal, which stay the untouched backstop for a target that isn't directly expressible and for
+    // any later runtime `worker_set_mode` override.
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: bootMode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
 
     // Card abcf0eba part (a) / 0050a17e: preflight the EXACT command line this spawn is about to hand
     // node-pty — Windows-only (see preflightWindowsCommandLine's doc: POSIX's ARG_MAX is orders of
@@ -4803,10 +4845,12 @@ export class PtyHost {
           this.events.onEngineSessionId(sessionId, hook.session_id);
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
         }
-        // Claude is up → cycle the permission mode off the gate-free boot default into the target mode
-        // (the human Shift+Tab step), once per (re)spawn. BOTH a fresh spawn and a `--resume` boot at the
-        // gate-free `mode` (acceptEdits) — `claude --resume` HONOURS `--permission-mode` and does NOT
-        // restore the persisted mode (probe-verified on 2.1.163; card f05e4897). Both FRESH and RESUME now
+        // Claude is up → converge the permission mode to its target, once per (re)spawn. Card 51926260:
+        // `computeBootMode` now boots directly AT the target whenever it's directly expressible, so this
+        // read below typically finds `target` on its very first poll and presses NOTHING; it remains the
+        // fallback climb off the gate-free `mode` (acceptEdits) boot default for a target that isn't
+        // directly expressible — `claude --resume` HONOURS `--permission-mode` and does NOT restore the
+        // persisted mode (probe-verified on 2.1.163; card f05e4897). Both FRESH and RESUME now
         // share ONE strategy — ABSOLUTE feedback cycling (cycleToMode, card b99d3d67): derive the target
         // mode and drive the footer to it by reading it and pressing Shift+Tab until it lands, instead of
         // FRESH's old BLIND relative cycling (a dropped/mistimed press could half-land on `plan` and stay
@@ -8134,9 +8178,13 @@ export class PtyHost {
   /**
    * GENERAL permission-mode convergence primitive (card f05e4897, generalized off resume-only in card
    * b99d3d67) — used by BOTH a fresh spawn and a `--resume` to drive the footer to an ABSOLUTE `target`
-   * mode. Both boot at the gate-free acceptEdits mode (`--resume` honours `--permission-mode` and does
-   * NOT restore the persisted mode; probe-verified on 2.1.163), so both need the SAME climb off that boot
-   * default. Rather than cycle a fixed COUNT (unreliable — a dropped/mistimed press half-lands mid-cycle
+   * mode. Historically both booted at the gate-free acceptEdits mode (`--resume` honours
+   * `--permission-mode` and does NOT restore the persisted mode; probe-verified on 2.1.163) and needed
+   * the SAME climb off that boot default. Card 51926260: `computeBootMode` now boots directly AT `target`
+   * whenever it's directly expressible, so on the common path this primitive's very first footer read
+   * already equals `target` and it presses NOTHING — it remains the FALLBACK for a target that isn't
+   * directly expressible, the runtime `worker_set_mode` override, and `logLandedMode`'s auto-heal, all of
+   * which still need a real climb. Rather than cycle a fixed COUNT (unreliable — a dropped/mistimed press half-lands mid-cycle
    * and stays there; that was the FRESH path's old blind `sendModeCycles`, and the resume/summary-gate
    * path's original blind approach before this), drive the footer to `target` ABSOLUTELY: read the mode,
    * and while it isn't the target press ONE Shift+Tab and then WAIT for the footer to actually CHANGE
