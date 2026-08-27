@@ -43,6 +43,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       BRANCH gains a new commit during the wait (a still-active worker committing further) — the gap
 //       ac7aad04's own re-derivation left open (it was keyed on main movement alone). MUST re-derive and
 //       take the real gate, never ride through on the stale pre-wait docs-only verdict.
+//   (K) THE NON-LOOM CASE (card 1c0d4aa4, Code Review finding on b97f643d): `INERT_MERGE_PATH_PREFIXES`
+//       is certified by MEASURING Loom's own corpus — but this repo (like any OTHER project the daemon
+//       serves) has a test file that DOES read `docs/` via a real read-call. A branch touching ONLY
+//       `docs/` MUST still full-gate here — the per-repo re-verification (`repoTreeReferencesInertPrefix`,
+//       unit-tested in isolation by `inert-prefix-repo-scan.mjs`) is what makes that true; PRE-card this
+//       would have wrongly skipped exactly like scenario (A).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-inert-diff.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -65,6 +71,16 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=mgid@loom -c user.name=mgid";
 const now = new Date().toISOString();
+
+// ⚠️ Scenario (K)'s fixture body is assembled via CONCATENATION here, never as one literal template — see
+// inert-prefix-repo-scan.mjs's own header for the full reasoning (Code Review, card 1c0d4aa4 Critical): a
+// literal read-call written contiguous with a real-source anchor and this prefix's own name, directly in
+// THIS file's source, would match `repoTreeReferencesInertPrefix`'s own scan of THIS repo's tracked tree
+// the moment this file is committed, permanently defeating Loom's real docs/-only-diff skip from that
+// commit forward.
+const _K_READ_CALL = "readFile" + "Sync";
+const _K_ANCHOR = "__dir" + "name";
+const kFixtureBody = `import fs from "node:fs";\nimport path from "node:path";\nfs.${_K_READ_CALL}(path.join(${_K_ANCHOR}, "docs", "note.md"));\n`;
 
 // Races `sessions.confirmWorkerMerge` against a bounded timeout — used ONLY to prove a repo guard was
 // genuinely released (not leaked) after a prior op's exit: a leaked guard wedges this call forever, so a
@@ -697,6 +713,37 @@ try {
     // "late.ts")` check above already proves the post-late-commit content is what's on main; the actual
     // discriminating proof of the fix is "(J) the late src commit forced a REAL gate" above (gateRan/calls).
   }
+  // ── (K) THE NON-LOOM CASE (card 1c0d4aa4) — see this file's own header for the summary. Unlike (A),
+  //        THIS repo's own test corpus (committed on main, BEFORE the worktree is even cut) contains a
+  //        real `readFileSync(...docs...)`-shaped call — the exact configuration `INERT_MERGE_PATH_PREFIXES`
+  //        was never measured against, since the certification is Loom-specific. A docs-only branch here
+  //        MUST still run the full gate: the per-repo re-verification is what makes that true, not a
+  //        coincidence of this repo happening to look like Loom's. ─────────────────────────────────────────
+  {
+    const K = mk("k");
+    fs.mkdirSync(K.repo, { recursive: true });
+    registerForCleanup(K.repo);
+    fs.writeFileSync(path.join(K.repo, "README.md"), "# mgid-k\n");
+    mkdirp(path.join(K.repo, "test"));
+    fs.writeFileSync(path.join(K.repo, "test", "reads-docs.mjs"), kFixtureBody);
+    execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m "test: add a test that reads docs/"`, { cwd: K.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
+    K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
+    mkdirp(path.join(worktreePath, "docs"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "findings\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    seed(db, K, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(K.mgrId, K.workerId);
+    check("(K) the gate command WAS called — this repo's OWN test corpus reads docs/, so the Loom-only allowlist measurement must not apply here", calls === 1);
+    check("(K) merged:true", confirm.merged === true);
+    check("(K) gateRan:true — the non-Loom case this card exists to protect", confirm.gateRan === true);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -704,6 +751,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), and a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J)."
+  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J), and a repo whose OWN test corpus reads docs/ (unlike Loom's) still full-gates a docs-only diff — the per-repo re-verification, not just the Loom-measured allowlist (K)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

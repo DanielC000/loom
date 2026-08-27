@@ -2049,15 +2049,28 @@ async function changedPathSetDigest(
 }
 
 /**
- * Path prefixes PROVEN to hold nothing compiled, tested, or read at runtime by the daemon test suite —
- * card db9b0130. Verified 2026-08-05: `grep -rnE "(readFileSync|existsSync|readdirSync|createReadStream)
- * \([^)]*docs" packages/daemon/test/*.mjs` ⇒ zero hits (the identical pattern against `assets` ⇒ non-zero,
- * so the zero is a real absence, not a broken pattern — see the card for the full positive control), and
- * the one `docs/` path a test file's own comment cites (`test-daemon-gate-timing.mjs`) is a provenance
- * citation, never a real read. Deliberately narrow and NOT extension-based: `assets/**` is markdown too,
- * and IS heavily tested (10 test files reference it) — an extension check would wrongly classify a
- * `SKILL.md` change as inert. ⛔ Do not widen this list without re-running that same grep against the new
- * prefix first — the whole point is that every entry here is a MEASURED absence, not an assumption.
+ * Path prefixes PROVEN to hold nothing compiled, tested, or read at runtime by the LOOM daemon test suite
+ * SPECIFICALLY — card db9b0130. Verified 2026-08-05: `grep -rnE "(readFileSync|existsSync|readdirSync|
+ * createReadStream)\([^)]*docs" packages/daemon/test/*.mjs` ⇒ zero hits (the identical pattern against
+ * `assets` ⇒ non-zero, so the zero is a real absence, not a broken pattern — see the card for the full
+ * positive control), and the one `docs/` path a test file's own comment cites (`test-daemon-gate-
+ * timing.mjs`) is a provenance citation, never a real read. Deliberately narrow and NOT extension-based:
+ * `assets/**` is markdown too, and IS heavily tested (10 test files reference it) — an extension check
+ * would wrongly classify a `SKILL.md` change as inert. ⛔ Do not widen this list without re-running that
+ * same grep against the new prefix first — the whole point is that every entry here is a MEASURED
+ * absence, not an assumption. ⚠️ A future MULTI-SEGMENT entry (e.g. `"site/docs/"`) needs its OWN
+ * re-measurement, not just a re-run of the same grep: {@link repoTreeReferencesInertPrefix}'s scan
+ * requires `site/docs` to appear CONTIGUOUS on one line, which `path.join(__dirname, "site", "docs")` —
+ * an entirely ordinary way to write that path — never produces, a silent false negative for exactly the
+ * shape this list plausibly grows into (Code Review, card 1c0d4aa4).
+ *
+ * ⚠️ THAT MEASUREMENT IS LOOM-ONLY, BUT {@link isInertMergeDiff} RUNS FOR EVERY PROJECT THIS DAEMON
+ * SERVES (card 1c0d4aa4, Code Review finding on `b97f643d`) — a consumer project whose own tests DO read
+ * a top-level `docs/` must not have its gate silently skipped just because Loom's don't. This is why
+ * `isInertMergeDiff` does not trust this list alone: it re-verifies PER-REPO, at gate time, via
+ * {@link repoTreeReferencesInertPrefix} — this list stays a cheap first-pass allowlist (a path outside it
+ * still fails closed immediately, no scan needed), and the per-repo scan is the thing that actually makes
+ * a `true` result safe to trust for a project other than Loom.
  */
 const INERT_MERGE_PATH_PREFIXES = ["docs/"];
 
@@ -2093,6 +2106,10 @@ function isInertMergePath(p: string): boolean {
  * - Any single changed path outside the allowlist ⇒ `false`. A brand-new/unknown top-level directory is
  *   not on the allowlist by construction, so it fails closed too — satisfying "an unrecognized path gates"
  *   without a separate check for it.
+ * - Every changed path IS on the allowlist, but this repo's own corpus (per {@link
+ *   repoTreeReferencesInertPrefix}) references the matched prefix, or that scan itself couldn't confirm
+ *   otherwise (a spawn error, a non-"no-match" exit, a timeout) ⇒ `false` (card 1c0d4aa4 — see
+ *   {@link INERT_MERGE_PATH_PREFIXES}'s own doc for why this re-check exists).
  */
 export async function isInertMergeDiff(
   repoPath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
@@ -2105,7 +2122,164 @@ export async function isInertMergeDiff(
     return false;
   }
   if (paths.length === 0) return false;
-  return paths.every(isInertMergePath);
+  if (!paths.every(isInertMergePath)) return false;
+  // Card 1c0d4aa4 (Code Review finding on b97f643d): INERT_MERGE_PATH_PREFIXES above is certified by
+  // MEASURING Loom's own test corpus (card db9b0130's doc comment) — but this function runs for every
+  // project this daemon serves, not just Loom. Re-verify the measurement PER-REPO, against THIS repo's
+  // corpus at `baseSha`, before trusting it for a project it was never measured against. See
+  // {@link repoTreeReferencesInertPrefix}'s own doc for the fail-closed contract.
+  for (const prefix of INERT_MERGE_PATH_PREFIXES) {
+    const bareToken = prefix.replace(/\/+$/, "");
+    const referenced = await repoTreeReferencesInertPrefix(repoPath, baseSha, bareToken, timeoutMs);
+    if (referenced) return false;
+  }
+  return true;
+}
+
+/** `git grep`'s own exit code for "searched the tree, found nothing" — the ONLY outcome {@link
+ *  repoTreeReferencesInertPrefix} treats as a confirmed, real absence. Any other exit code (a bad
+ *  revision, a corrupt object, git erroring) means the absence was never actually proven. */
+const GIT_GREP_NO_MATCH_EXIT_CODE = 1;
+
+/**
+ * The SAME read-call NAMES {@link INERT_MERGE_PATH_PREFIXES}'s own measurement (card db9b0130) used to
+ * prove Loom's corpus never reads `docs/` — reused here (card 1c0d4aa4) to make that same measurement
+ * PER-REPO instead of Loom-only, PLUS one refinement db9b0130's own manual measurement needed a HUMAN to
+ * apply and a mechanical scan cannot skip: that measurement's own 2026-08-27 re-verification (see this
+ * card's provenance) found "exactly 2 hits, both `path.join(<tempRepo>, "docs", …)`" and judged them NOT
+ * real reads BY HAND — both are `merge-gate-inert-diff.mjs` assertions against a THROWAWAY git repo the
+ * test itself constructs at run time (`H.repo`, `wt2.worktreePath`, …), unrelated to this project's own
+ * checked-out tree and structurally incapable of being affected by ANY diff under evaluation. A bare
+ * "does the token 'docs' appear near a read-call anywhere" scan cannot tell that apart from a genuine
+ * project-relative read and — measured directly — DOES regress Loom's own skip on exactly these 2 lines
+ * (`inert-prefix-repo-scan.mjs` scenario (4) pins this as a live regression check, not a hypothetical).
+ *
+ * The fix: require the SAME call to ALSO reference a well-known REAL-SOURCE-TREE anchor (`__dirname`,
+ * `__filename`, `process.cwd()`, `import.meta.url`, `import.meta.dirname`) somewhere in its argument
+ * list — a fixture path built from a test-local variable (`H.repo`, `worktreePath`, an `os.tmpdir()`-
+ * derived root) never carries one of these literally, while a test genuinely reading ITS OWN project's
+ * `docs/` overwhelmingly does. Re-verified against the real Loom repo (`inert-prefix-repo-scan.mjs`
+ * scenario (4), run AFTER committing — see that file's own header for why "before" doesn't prove
+ * anything): with this anchor requirement, `docs` returns to a confirmed absence and `assets` (genuinely,
+ * anchor-referenced, project-relative) still returns found.
+ *
+ * ANCHOR MAY APPEAR ON EITHER SIDE OF THE TOKEN (Code Review, card 1c0d4aa4) — `readFileSync(new
+ * URL("../docs/x.md", import.meta.url))` puts the token FIRST, the ESM-idiomatic form for "a file next to
+ * this module." An anchor-then-token-only match would silently miss it; {@link
+ * repoTreeReferencesInertPrefix} matches `anchor…token` OR `token…anchor` for exactly this reason.
+ *
+ * NOT A PERFECT DISCRIMINATOR — THREE NAMED GAPS, NOT HIDDEN ONES (Code Review, card 1c0d4aa4, measured:
+ * 11 realistic read shapes, 4 matched, 7 missed, ALL in the safe-to-fail-closed-on direction):
+ * 1. INDIRECTION: a real read anchored through a locally-defined constant (`const ROOT =
+ *    path.resolve(__dirname, "..")`, used on a LATER line) is invisible to this single-line, single-call
+ *    scan.
+ * 2. NESTED PARENS IN THE ANCHOR ITSELF: `readFileSync(path.join(path.dirname(fileURLToPath(import.meta
+ *    .url)), "docs", "x.md"))` — THE standard `__dirname` replacement in ESM — closes THREE parens
+ *    between the anchor and the token; `[^)]*` cannot cross a real `)`, so the second half of the bridge
+ *    never reaches "docs". Genuinely out of reach for a line-based single-call regex — a real parser
+ *    would be needed, and this file's own `computeEmitCompareGate` doc (see its "A HAND-ROLLED SCANNER
+ *    LOOP IS NOT A SAFE SUBSTITUTE" warning, above) is exactly why one isn't attempted here.
+ * 3. MULTI-LINE CALLS: `git grep` matches per-line by default; a prettier-wrapped call whose anchor and
+ *    token land on different lines is invisible to this scan regardless of pattern.
+ * Accepted deliberately, not silently: the alternative (no anchor requirement at all) is a CONFIRMED,
+ * demonstrated false positive against Loom's own corpus, which the DoD requires not regressing; this
+ * mechanism NARROWS the pre-card gap (100% false-negative for every non-Loom project) without claiming
+ * to CLOSE it. See `computeEmitCompareGate`'s own doc (this file, "WHY NOT... resolve a changed fixture's
+ * consumers") for the same reasoning applied to a sibling mechanism: a resolver that can miss a case is
+ * still preferred here to no check at all, because the asymmetry is the same — a missed reference costs
+ * one wrongly-skipped gate (bad), but that is what this whole mechanism already risked pre-card for EVERY
+ * non-Loom project.
+ */
+const INERT_PREFIX_READ_CALL_NAMES = "(readFileSync|existsSync|readdirSync|createReadStream|readFile|opendirSync|globSync)";
+/** See {@link INERT_PREFIX_READ_CALL_NAMES}'s own doc — the anchor alternation checked on either side of
+ *  the token. `import\\.meta\\.dirname` (Node ≥20.11; this repo targets 22) added alongside the original
+ *  four (Code Review, card 1c0d4aa4). */
+const INERT_PREFIX_ANCHOR_PATTERN = "(__dirname|__filename|process\\.cwd\\(\\)|import\\.meta\\.url|import\\.meta\\.dirname)";
+
+/**
+ * Whether ANY file tracked at `treeish` in `repoPath` contains a call reading a path under `bareToken`
+ * (e.g. `"docs"` for the `docs/` prefix) — i.e. whether THIS repo's own corpus, at the commit the diff is
+ * based on, actually reads paths under that prefix, the same question card db9b0130's doc comment answers
+ * for Loom by hand. Card 1c0d4aa4 (Code Review finding on `b97f643d`, "arguably the sharpest thing this
+ * review surfaced"): {@link isInertMergeDiff} is applied to EVERY project this daemon serves, but
+ * `INERT_MERGE_PATH_PREFIXES` was only ever measured against Loom's own corpus — a consumer project whose
+ * OWN tests read a top-level `docs/` must not have its gate silently skipped just because Loom's don't.
+ *
+ * Uses `git grep` directly via `child_process.spawn` (not the `simple-git` `.raw()` wrapper the rest of
+ * this file uses) SPECIFICALLY so the real process exit code is observable: `git grep`'s "no match" exit
+ * code ({@link GIT_GREP_NO_MATCH_EXIT_CODE}) is the ONLY outcome this treats as a confirmed absence —
+ * every other outcome (a spawn error, a non-1 nonzero exit, e.g. a bad `treeish`, or a timeout) resolves
+ * `true` ("references it"), which forces {@link isInertMergeDiff} to run the full gate rather than trust
+ * an unproven scan. This is the SAME fail-closed asymmetry {@link isInertMergeDiff} already applies to a
+ * git error: a false `true` costs one ordinary gate run (safe); a false `false` would silently skip a
+ * gate a project's own tests actually depend on.
+ *
+ * Scoped to `treeish` (the diff's own `baseSha`), never the repo's current working tree — deterministic
+ * regardless of what happens to be checked out in `repoPath` at call time. NOTE: on a BLOBLESS PARTIAL
+ * CLONE, `git grep <treeish>` is not unconditionally local — it fetches any missing blob content from the
+ * promisor remote on demand (reproduced: a missing blob without network access fails the fetch, exit
+ * 128, which is NOT {@link GIT_GREP_NO_MATCH_EXIT_CODE} and so still fails closed). Bounded by `timeoutMs`
+ * like every other op in this file; never a wedge, just a new (small) network dependency this specific
+ * call introduces that the rest of this file's bounded git reads don't have.
+ *
+ * ANY OUTCOME OTHER THAN A CONFIRMED MATCH (0) OR CONFIRMED NO-MATCH (1) IS LOGGED, not just fail-closed
+ * silently — Code Review, card 1c0d4aa4: fail-closed alone made every degraded outcome (a missing `git`
+ * on PATH, a `baseSha` that stops resolving, a partial-clone fetch failure) indistinguishable from an
+ * ordinary gate run, with zero operator signal that the mechanism had silently stopped skipping ANYTHING,
+ * forever, for that repo. `console.warn` (not `.error` — this isn't a request failure, the caller degrades
+ * safely) with the captured stderr tail ({@link appendTail}/{@link formatTail}, same bounded ring the
+ * provisioning helpers above use) so a persistently-broken scan is at least visible in the daemon's logs.
+ *
+ * POSITIVE-CONTROLLED by `inert-prefix-repo-scan.mjs`: that test proves this exact pattern fires against
+ * a fixture repo built to trip it (a committed file whose body contains a real
+ * `readFileSync(...docs...)`-shaped call) before trusting a zero result from it anywhere, and
+ * `merge-gate-inert-diff.mjs` scenario (K) proves the end-to-end wiring: a repo whose own test file reads
+ * `docs/` still forces the full gate on an otherwise docs/-only diff. ⚠️ Both fixtures deliberately build
+ * their trigger text via string concatenation rather than a literal template — this file's OWN scan
+ * would otherwise match the fixture-construction CODE in these very test files the moment they're
+ * committed to THIS repo (Code Review, card 1c0d4aa4 — the Critical: a literal fixture body is
+ * indistinguishable, byte-for-byte, from a real project read, and `isInertMergeDiff` scans this repo's
+ * OWN tracked tree, its own tests included). See those files' own comments before changing either fixture.
+ *
+ * Exported (like {@link appendTail}/{@link formatTail}) for direct unit coverage independent of the full
+ * {@link isInertMergeDiff}/`confirmWorkerMerge` call chain.
+ */
+export function repoTreeReferencesInertPrefix(
+  repoPath: string, treeish: string, bareToken: string, timeoutMs: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    // Plain capturing groups, NOT `(?:...)` — git grep's -E is POSIX ERE, which has no non-capturing-group
+    // syntax at all (measured: git rejects it outright with "Invalid preceding regular expression", exit
+    // 128 — itself fail-closed, but this is the fix, not a case to rely on failing closed for).
+    const pattern = `${INERT_PREFIX_READ_CALL_NAMES}\\([^)]*(${INERT_PREFIX_ANCHOR_PATTERN}[^)]*${bareToken}|${bareToken}[^)]*${INERT_PREFIX_ANCHOR_PATTERN})`;
+    const child = spawn("git", ["grep", "-I", "-l", "-E", pattern, treeish], {
+      cwd: repoPath,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderrTail = "";
+    child.stderr?.on("data", (d) => { stderrTail = appendTail(stderrTail, d); });
+    const warnDegraded = (reason: string) => {
+      console.warn(`[git:inert-prefix-scan] ${reason} for ${repoPath}@${treeish} (token "${bareToken}") — failing closed, treating as referenced${formatTail(stderrTail)}`);
+    };
+    let settled = false;
+    const done = (r: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      warnDegraded(`git grep exceeded ${timeoutMs}ms (killed)`);
+      done(true); // couldn't confirm absence within the bound ⇒ fail closed
+    }, timeoutMs);
+    child.on("error", (e) => { warnDegraded(`spawn failed (${e.message})`); done(true); }); // fail closed, cannot confirm absence
+    child.on("exit", (code) => {
+      if (code === 0 || code === GIT_GREP_NO_MATCH_EXIT_CODE) { done(code !== GIT_GREP_NO_MATCH_EXIT_CODE); return; }
+      warnDegraded(`git grep exited ${code ?? "null"} (neither a confirmed match nor a confirmed no-match)`);
+      done(true);
+    });
+  });
 }
 
 /** Prefix under which a Loom-bundled skill asset lives. Only Loom's OWN self-hosted repo ever has a path
