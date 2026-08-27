@@ -1,0 +1,42 @@
+PRESERVED 2026-08-27 for card f779b3da — RAW, UNFILTERED daemon-output.log lines 33178-33214
+Shows the gen9->gen10 transition for daf64e68 interleaved with an UNRELATED session (19e1c839) on the same daemon.
+This is what revealed that root c3cc651c (a relayed worker-report) and root ca3bf8ef (the prompt-mismatch
+notice) are two DIFFERENT logical messages both caught up in this session's give-up/redrain chain.
+
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=79 tag=bracket-end gen=2 len=6 h=21a0f1b2 1787797072437
+[busy] 19e1c839-b341-460c-ad98-54522f55537a -> true (immediate) 1787797072438
+[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: message 1e105434-796d-4b1e-9012-6966bcdabd1e (9709 chars, hash=980085a8) exhausted its requeue budget (1) after repeated give-ups — handing off to onGiveUpExhausted (wired) instead of a bare drop 1787797072443
+[give-up] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 message 19fdbafb-ed9f-4762-ae83-53a9e66da8b3 (root c3cc651c-b672-4b2f-a5cc-e2fa7c111ec2, 9709 chars, head="[loom:possible-duplicate root:c3cc651c] [loom:worker-report]") PARKED after 1 re-mint attempts — Loom will NOT retry this automatically; surfacing to the sender 1787797072444
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=80 tag=enter gen=2 len=1 h=080c61d8 1787797072624
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 1/4 written gen=2 — awaiting confirmation 1787797072625
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 1 NOT confirmed within 900ms — retrying 1787797073520
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=81 tag=reassert-paste gen=2 len=12 h=7e94fadc 1787797073520
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=82 tag=enter gen=2 len=1 h=080c61d8 1787797073525
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 2/4 written gen=2 — awaiting confirmation 1787797073526
+[mcp] 27b34c1e-4124-4fe3-a1b1-ed6555d419d1 router=task method=- tool=- rpcId=- seq=486 at=2026-08-27T02:17:54.193Z 1787797074206
+[mcp] 27b34c1e-4124-4fe3-a1b1-ed6555d419d1 router=orchestration method=- tool=- rpcId=- seq=487 at=2026-08-27T02:17:54.198Z 1787797074209
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 2 NOT confirmed within 900ms — retrying 1787797074438
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=83 tag=reassert-paste gen=2 len=12 h=7e94fadc 1787797074449
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=84 tag=enter gen=2 len=1 h=080c61d8 1787797074449
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 3/4 written gen=2 — awaiting confirmation 1787797074450
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 3 NOT confirmed within 900ms — retrying 1787797075347
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=85 tag=reassert-paste gen=2 len=12 h=7e94fadc 1787797075348
+[pty-write] 19e1c839-b341-460c-ad98-54522f55537a seq=86 tag=enter gen=2 len=1 h=080c61d8 1787797075697
+[submit] 19e1c839-b341-460c-ad98-54522f55537a Enter attempt 4/4 written gen=2 — awaiting confirmation 1787797075719
+[submit] 19e1c839-b341-460c-ad98-54522f55537a GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787797076899
+[busy] 19e1c839-b341-460c-ad98-54522f55537a -> false (give-up-recovery) afterMs=4465 1787797076900
+[submit] 19e1c839-b341-460c-ad98-54522f55537a GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787797076901
+[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=1680 head="[loom:possible-duplicate root:ca3bf8ef] [loom:prompt-mismatc" 1787797077813
+[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 redelivering an already-attempted message (composer possibly dirty, 11349 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db) 1787797077814
+[pty-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 seq=151 tag=reassert-paste gen=10 len=12 h=7e94fadc 1787797077815
+[busy] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 -> true (drain) 1787797077815
+[hook] 19e1c839-b341-460c-ad98-54522f55537a UserPromptSubmit session_id=2cf4eacf-ec6b-4193-ad6f-4339348abb3a 1787797078017
+[submit] 19e1c839-b341-460c-ad98-54522f55537a GIVE-UP RECOVERY was a false negative (content-matched) — a confirming hook proves logicalId=a6722213-ae85-4902-b78e-d01ea18aacea's turn actually started; purged a still-queued duplicate (955 chars) instead of letting it double-deliver 1787797078023
+[submit] 19e1c839-b341-460c-ad98-54522f55537a CONFIRMED logicalId=a6722213-ae85-4902-b78e-d01ea18aacea latencyMs=5398 (content-matched — resolving any still-queued duplicate copies) 1787797078029
+[submit] 19e1c839-b341-460c-ad98-54522f55537a composerDirtyLen cleared at CONFIRMED (gen=2) — decisive proof this generation's turn actually started, not stranded 1787797078030
+[prompt-echo] 19e1c839-b341-460c-ad98-54522f55537a gen=2 byteIdentical=true reportedLen=955 writtenLen=955 reportedHash=fd6331b7 writtenHash=fd6331b7 ambiguousMatch=false 1787797078030
+[busy] 19e1c839-b341-460c-ad98-54522f55537a -> true (user-prompt-submit-hook) 1787797078031
+[pty-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 seq=152 tag=enter gen=10 len=1 h=080c61d8 1787797078141
+[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=10 — awaiting confirmation 1787797078145
+[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787797079049
+[pty-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 seq=153 tag=reassert-paste gen=10 len=12 h=7e94fadc 1787797079050

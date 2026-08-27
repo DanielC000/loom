@@ -1,0 +1,127 @@
+PRESERVED 2026-08-27 for card f779b3da — console log is perishable, this is the full session lifetime
+source: ~/.loom/logs/daemon-output.log (grep -n "daf64e68" | grep -E "prompt-mismatch|prompt-echo|submit-write|\[submit\]|\[heal\]|GIVE-UP")
+session daf64e68-9fd0-4ede-b7f3-bb34766d3d59 — specimen 1 (gen=10 mismatch, reportedLen=11349)
+
+31117:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=kickoff-guarantee busyBefore=true len=42526 head="[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE " 1787793537581
+31165:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=1 — awaiting confirmation 1787793539194
+31167:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 CONFIRMED gen=1 logicalId=374c70b5-272f-4d27-b537-7bfd59657f7f latencyMs=247 1787793539441
+31168:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=1 byteIdentical=true reportedLen=42526 writtenLen=42526 reportedHash=20cd42ff writtenHash=20cd42ff ambiguousMatch=false 1787793539442
+31411:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=28767 head="[loom:project-memory] Shared project memory — durable notes " 1787794441814
+31502:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=1 — awaiting confirmation 1787794443032
+31522:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787794443947
+31525:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=1 — awaiting confirmation 1787794443949
+31535:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 CONFIRMED gen=1 logicalId=9103782f-d4f9-44d2-9947-550ecc0eeb4a latencyMs=1439 1787794444471
+31536:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=1 byteIdentical=true reportedLen=28767 writtenLen=28767 reportedHash=59ba0074 writtenHash=59ba0074 ambiguousMatch=false 1787794444471
+32415:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=2422 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787795762677
+32423:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=2 — awaiting confirmation 1787795762924
+32425:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 CONFIRMED gen=2 logicalId=d51036da-a685-40cb-b775-2dd2b32d4d46 latencyMs=165 1787795763089
+32426:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=2 byteIdentical=true reportedLen=2422 writtenLen=2422 reportedHash=da5984ba writtenHash=da5984ba ambiguousMatch=false 1787795763090
+32696:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=immediate busyBefore=false len=3242 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787796571417
+32705:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=3 — awaiting confirmation 1787796571677
+32707:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 CONFIRMED gen=3 logicalId=ea37e805-73ce-40b8-b71d-f850935603e2 latencyMs=201 1787796571879
+32708:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=3 byteIdentical=true reportedLen=3242 writtenLen=3242 reportedHash=6e0f45b1 writtenHash=6e0f45b1 ambiguousMatch=false 1787796571879
+32896:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=9669 head="[loom:worker-report] worker 19e1c839-b341-460c-ad98-54522f55" 1787796952480
+32911:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=4 — awaiting confirmation 1787796953011
+32923:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787796953941
+32926:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=4 — awaiting confirmation 1787796953943
+32935:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787796954830
+32938:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=4 — awaiting confirmation 1787796954833
+32939:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787796955733
+32942:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=4 — awaiting confirmation 1787796956046
+32943:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787796957262
+32945:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787796957263
+32946:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=3917 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787796957717
+32947:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 composer possibly dirty from an earlier unconfirmed give-up (9669 chars) — clearing defensively before this write 1787796957718
+32967:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=5 — awaiting confirmation 1787796958111
+32968:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787796959012
+32971:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=5 — awaiting confirmation 1787796959014
+32972:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787796959919
+32975:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=5 — awaiting confirmation 1787796959922
+32976:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787796960824
+32981:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=5 — awaiting confirmation 1787796961156
+32982:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787796962362
+32984:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787796962364
+32986:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=9709 head="[loom:possible-duplicate root:c3cc651c] [loom:worker-report]" 1787796977734
+32987:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 redelivering an already-attempted message (composer possibly dirty, 13586 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db) 1787796977737
+32991:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=6 — awaiting confirmation 1787796978052
+32992:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787796978956
+32995:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=6 — awaiting confirmation 1787796978958
+32996:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787796979862
+32999:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=6 — awaiting confirmation 1787796979865
+33000:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787796980777
+33003:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=6 — awaiting confirmation 1787796981086
+33004:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787796982327
+33006:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: message 4b99fd94-3873-4d1f-9ac8-e4108fe995c0 (9669 chars, hash=fee1e649) exhausted its requeue budget (1) after repeated give-ups — handing off to onGiveUpExhausted (wired) instead of a bare drop 1787796982332
+33011:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY was a false negative (content-matched) — a confirming hook proves logicalId=dc766a0e-d327-412d-802e-4c0d8800ffb3's turn actually started; purged a still-queued duplicate (3917 chars) instead of letting it double-deliver 1787796984517
+33012:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 CONFIRMED logicalId=dc766a0e-d327-412d-802e-4c0d8800ffb3 latencyMs=26401 (content-matched — resolving any still-queued duplicate copies) 1787796984518
+33013:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 composerDirtyLen cleared at CONFIRMED (gen=5) — decisive proof this generation's turn actually started, not stranded 1787796984518
+33014:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=6 byteIdentical=false reportedLen=3917 writtenLen=9709 reportedHash=28596e16 writtenHash=980085a8 ambiguousMatch=false 1787796984523
+33015:[prompt-mismatch] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=3917 intendedLen=9709 lenDelta=-5792 divergesAtChar=6 tailReportedLen=3911 tailIntendedLen=9703 reportedAround="[loom:from-manager · Loom · projectId:c36e8691" intendedAround="[loom:possible-duplicate root:c3cc651c] [loom:" 1787796984527
+33059:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 4 is still ambiguous, but generation 6 (a fresh, non-ambiguous submit) is now current — leaving generation 4's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797039346
+33061:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=9709 head="[loom:possible-duplicate root:c3cc651c] [loom:worker-report]" 1787797039504
+33076:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=7 — awaiting confirmation 1787797040077
+33077:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787797040979
+33080:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=7 — awaiting confirmation 1787797040980
+33081:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787797041889
+33084:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=7 — awaiting confirmation 1787797041891
+33085:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787797042799
+33088:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=7 — awaiting confirmation 1787797043125
+33089:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787797044330
+33091:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787797044332
+33092:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=1640 head="[loom:prompt-mismatch] Loom wrote 9709 chars for this turn (" 1787797047787
+33093:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 composer possibly dirty from an earlier unconfirmed give-up (9709 chars) — clearing defensively before this write 1787797047788
+33111:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=8 — awaiting confirmation 1787797048133
+33112:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787797049045
+33115:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=8 — awaiting confirmation 1787797049046
+33116:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787797049951
+33119:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=8 — awaiting confirmation 1787797049954
+33120:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787797050868
+33123:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=8 — awaiting confirmation 1787797051171
+33124:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787797052391
+33126:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787797052397
+33155:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=9709 head="[loom:possible-duplicate root:c3cc651c] [loom:worker-report]" 1787797067810
+33156:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 redelivering an already-attempted message (composer possibly dirty, 11349 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db) 1787797067811
+33160:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=9 — awaiting confirmation 1787797068148
+33161:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787797069047
+33164:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=9 — awaiting confirmation 1787797069055
+33165:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787797069957
+33168:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=9 — awaiting confirmation 1787797069958
+33169:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787797070865
+33172:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=9 — awaiting confirmation 1787797071172
+33173:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787797072433
+33175:[submit-write] 19e1c839-b341-460c-ad98-54522f55537a reason=immediate busyBefore=false len=955 head="[loom:redelivery-parked] a message you sent to daf64e68 (roo" 1787797072435
+33180:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: message 1e105434-796d-4b1e-9012-6966bcdabd1e (9709 chars, hash=980085a8) exhausted its requeue budget (1) after repeated give-ups — handing off to onGiveUpExhausted (wired) instead of a bare drop 1787797072443
+33201:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=1680 head="[loom:possible-duplicate root:ca3bf8ef] [loom:prompt-mismatc" 1787797077813
+33202:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 redelivering an already-attempted message (composer possibly dirty, 11349 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db) 1787797077814
+33212:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=10 — awaiting confirmation 1787797078145
+33213:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1 NOT confirmed within 900ms — retrying 1787797079049
+33216:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2/4 written gen=10 — awaiting confirmation 1787797079054
+33217:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 2 NOT confirmed within 900ms — retrying 1787797079955
+33220:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3/4 written gen=10 — awaiting confirmation 1787797079959
+33221:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 3 NOT confirmed within 900ms — retrying 1787797080858
+33230:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 4/4 written gen=10 — awaiting confirmation 1787797081180
+33231:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787797082424
+33233:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: message ca3bf8ef-171f-4991-8694-8a95e7064d7b (1640 chars, hash=3bcbfca1) exhausted its requeue budget (1) after repeated give-ups — handing off to onGiveUpExhausted (none — non-durable entry, nothing further to preserve) instead of a bare drop 1787797082450
+33237:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 5 is still ambiguous, but generation 10 (a fresh, non-ambiguous submit) is now current — leaving generation 5's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797097185
+33238:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=10 byteIdentical=false reportedLen=11349 writtenLen=1680 reportedHash=417892cc writtenHash=d48367c7 ambiguousMatch=false 1787797097186
+33239:[prompt-mismatch] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=11349 intendedLen=1680 lenDelta=9669 divergesAtChar=31 tailReportedLen=11318 tailIntendedLen=1649 reportedAround="ble-duplicate root:c3cc651c] [loom:worker-report] worker 19e" intendedAround="ble-duplicate root:ca3bf8ef] [loom:prompt-mismatch] Loom wro" 1787797097186
+33240:[prompt-mismatch-unmatched-remainder] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=10 recognizedGen=9 matchedLen=9709 reportedLen=11349 leadingRemainderLen=0 trailingRemainderLen=1640 leadingRemainder="" trailingRemainder="[loom:prompt-mismatch] Loom wrote 9709 chars for this turn (gen=6, written at 20…" — card d005f55b DoD-3: otherwise-unmatched, but reported CONTAINS generation 9's own recorded write as a substring; the remainder(s) above are NOT accounted for. No mechanism or confirmation is claimed by this alone. 1787797097187
+33241:[prompt-mismatch-unmatched-longer] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=10 reportedLen=11349 intendedLen=1680 lenDelta=9669 — UNCHARACTERIZED population (card 68459420): reported LONGER than intended, matches none of this session's recent writes, and is neither of the two known benign prefix/whitespace shapes above. Distinct from the measured replay-of-immediately-preceding-generation regularity — do not assume a mechanism or fold this into that shape. 1787797097187
+33254:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 5 is still ambiguous, but generation 10 (a fresh, non-ambiguous submit) is now current — leaving generation 5's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797166443
+33256:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=1318 head="[loom:prompt-mismatch] Loom wrote 1680 chars for this turn (" 1787797166474
+33263:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=11 — awaiting confirmation 1787797166666
+33265:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 7 is still ambiguous, but generation 11 (a fresh, non-ambiguous submit) is now current — leaving generation 7's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797166913
+33266:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=11 byteIdentical=true reportedLen=1318 writtenLen=1318 reportedHash=a7974d7e writtenHash=a7974d7e ambiguousMatch=false 1787797166914
+33295:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 7 is still ambiguous, but generation 11 (a fresh, non-ambiguous submit) is now current — leaving generation 7's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797254605
+33297:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=3824 head="[loom:worker-report] worker 19e1c839-b341-460c-ad98-54522f55" 1787797254650
+33306:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=12 — awaiting confirmation 1787797254931
+33308:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 8 is still ambiguous, but generation 12 (a fresh, non-ambiguous submit) is now current — leaving generation 8's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797255735
+33309:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=12 byteIdentical=true reportedLen=3824 writtenLen=3824 reportedHash=324d96ae writtenHash=324d96ae ambiguousMatch=false 1787797255736
+33491:[prompt-mismatch-unresolved] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=6 writtenHash=980085a8 reportedHash=28596e16 intendedLen=9709 — no confirming later generation resolved this within 600000ms; treating as an established loss and failing loud (card f9b1ea00). 1787797584541
+33514:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 GIVE-UP RECOVERY: a confirming hook arrived while generation 8 is still ambiguous, but generation 12 (a fresh, non-ambiguous submit) is now current — leaving generation 8's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787797639905
+33516:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=512 head="[loom:merge-done] worker 19e1c839-b341-460c-ad98-54522f55537" 1787797639929
+33522:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=13 — awaiting confirmation 1787797640096
+33524:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=13 byteIdentical=true reportedLen=512 writtenLen=512 reportedHash=c4956c40 writtenHash=c4956c40 ambiguousMatch=false 1787797640251
+33559:[submit-write] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 reason=drain busyBefore=false len=5390 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787797680846
+33570:[submit] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 Enter attempt 1/4 written gen=14 — awaiting confirmation 1787797681184
+33572:[prompt-echo] daf64e68-9fd0-4ede-b7f3-bb34766d3d59 gen=14 byteIdentical=true reportedLen=5390 writtenLen=5390 reportedHash=e8e7d8f5 writtenHash=e8e7d8f5 ambiguousMatch=false 1787797681480

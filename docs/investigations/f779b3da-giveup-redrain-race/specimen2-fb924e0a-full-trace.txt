@@ -1,0 +1,218 @@
+PRESERVED 2026-08-27 for card f779b3da — console log is perishable, this is the full session lifetime
+source: ~/.loom/logs/daemon-output.log (grep -n "fb924e0a" | grep -E "prompt-mismatch|prompt-echo|submit-write|\[submit\]|\[heal\]|GIVE-UP")
+session fb924e0a-7d93-4a4e-86e7-2b000fbb0893 — specimen 2 (gen=4 mismatch, reportedLen=444)
+
+33750:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=kickoff-guarantee busyBefore=true len=42042 head="[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE " 1787798089382
+33797:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=1 — awaiting confirmation 1787798090946
+33798:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787798091849
+33801:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=1 — awaiting confirmation 1787798091852
+33802:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2 NOT confirmed within 900ms — retrying 1787798092758
+33805:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3/4 written gen=1 — awaiting confirmation 1787798092763
+33806:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3 NOT confirmed within 900ms — retrying 1787798093662
+33809:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 4/4 written gen=1 — awaiting confirmation 1787798093977
+33810:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY after 4 Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge 1787798095206
+33812:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787798095208
+33813:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=444 head="[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mi" 1787798098532
+33814:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 composer possibly dirty from an earlier unconfirmed give-up (42042 chars) — clearing defensively before this write 1787798098533
+33863:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=2 — awaiting confirmation 1787798099378
+33864:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787798100284
+33867:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=2 — awaiting confirmation 1787798100286
+33868:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2 NOT confirmed within 900ms — retrying 1787798101193
+33871:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3/4 written gen=2 — awaiting confirmation 1787798101195
+33872:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3 NOT confirmed within 900ms — retrying 1787798102102
+33875:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 4/4 written gen=2 — awaiting confirmation 1787798102416
+33876:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP SUPPRESSED after 4 Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize 1787798103316
+33880:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY: re-queued 1 message(s) at the front of pending, HELD from drain for up to 20000ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld 1787798148667
+33881:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=42082 head="[loom:possible-duplicate root:ca4a43b7] [loom:deploy-stale] " 1787798148667
+33882:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 redelivering an already-attempted message (composer possibly dirty, 42486 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db) 1787798148668
+33886:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=4 — awaiting confirmation 1787798148704
+33888:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY was a false negative (content-matched) — a confirming hook proves logicalId=b889f8d7-7f43-4ed0-aa83-8495e00f847f's turn actually started; purged a still-queued duplicate (444 chars) instead of letting it double-deliver 1787798149123
+33889:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED logicalId=b889f8d7-7f43-4ed0-aa83-8495e00f847f latencyMs=49734 (content-matched — resolving any still-queued duplicate copies) 1787798149129
+33890:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 composerDirtyLen cleared at CONFIRMED (gen=2) — decisive proof this generation's turn actually started, not stranded 1787798149129
+33891:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=4 byteIdentical=false reportedLen=444 writtenLen=42082 reportedHash=40ac358a writtenHash=5a2d3b33 ambiguousMatch=false 1787798149145
+33892:[prompt-mismatch] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=444 intendedLen=42082 lenDelta=-41638 divergesAtChar=7 tailReportedLen=437 tailIntendedLen=42075 reportedAround="[loom:prompt-mismatch-unresolved] an earlier [l" intendedAround="[loom:possible-duplicate root:ca4a43b7] [loom:d" 1787798149147
+34033:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY: a confirming hook arrived while generation 1 is still ambiguous, but generation 4 (a fresh, non-ambiguous submit) is now current — leaving generation 1's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787798429006
+34035:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3122 head="[loom:worker-report] worker 61230440-5aac-4ec9-9c62-c35bcd90" 1787798429009
+34044:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=5 — awaiting confirmation 1787798429271
+34046:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY: a confirming hook arrived while generation 2 is still ambiguous, but generation 5 (a fresh, non-ambiguous submit) is now current — leaving generation 2's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787798429434
+34047:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=5 logicalId=682f84e3-59a6-49f8-b710-50e362904a29 latencyMs=163 1787798429434
+34048:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=5 byteIdentical=true reportedLen=3122 writtenLen=3122 reportedHash=767f118b writtenHash=767f118b ambiguousMatch=false 1787798429434
+34128:[prompt-mismatch-unresolved] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=4 writtenHash=5a2d3b33 reportedHash=40ac358a intendedLen=42082 — no confirming later generation resolved this within 600000ms; treating as an established loss and failing loud (card f9b1ea00). 1787798749162
+34168:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP RECOVERY: a confirming hook arrived while generation 2 is still ambiguous, but generation 5 (a fresh, non-ambiguous submit) is now current — leaving generation 2's requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold 1787798855396
+34170:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=4127 head="[loom:from-platform]\nLead, on `015eacc6`. Three results, one" 1787798855402
+34180:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=6 — awaiting confirmation 1787798855717
+34182:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=6 logicalId=d90c39cc-11ef-4377-8622-82c802e1cf78 latencyMs=139 1787798855856
+34183:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=6 byteIdentical=true reportedLen=4127 writtenLen=4127 reportedHash=9aa7d9a5 writtenHash=9aa7d9a5 ambiguousMatch=false 1787798855856
+34210:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=445 head="[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mi" 1787798959815
+34216:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=7 — awaiting confirmation 1787798959979
+34218:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=7 logicalId=7fd3801a-2b95-48d3-9ce8-c6cc01bc630f latencyMs=202 1787798960181
+34219:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=7 byteIdentical=true reportedLen=445 writtenLen=445 reportedHash=9020cd6a writtenHash=9020cd6a ambiguousMatch=false 1787798960181
+34406:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=4218 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787799469889
+34416:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=9 — awaiting confirmation 1787799470186
+34417:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787799471089
+34420:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=9 — awaiting confirmation 1787799471090
+34421:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2 NOT confirmed within 900ms — retrying 1787799471989
+34424:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3/4 written gen=9 — awaiting confirmation 1787799471991
+34425:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3 NOT confirmed within 900ms — retrying 1787799472900
+34428:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 4/4 written gen=9 — awaiting confirmation 1787799472964
+34429:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 GIVE-UP SUPPRESSED after 4 Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize 1787799473875
+34593:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3288 head="[loom:from-platform]\nLead, on `5036ac13`. **You told me to c" 1787799863640
+34594:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 composer possibly dirty from an earlier unconfirmed give-up (4218 chars) — clearing defensively before this write 1787799863640
+34609:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=10 — awaiting confirmation 1787799863978
+34611:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=10 logicalId=5d755340-2216-4501-8147-1db2af4e29f9 latencyMs=272 1787799864249
+34612:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=10 byteIdentical=true reportedLen=3288 writtenLen=3288 reportedHash=b419e6a2 writtenHash=b419e6a2 ambiguousMatch=false 1787799864250
+34703:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=4230 head="[loom:from-platform]\nLead, on `77dc70c2`. **Your finding is " 1787799921230
+34713:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=11 — awaiting confirmation 1787799921530
+34715:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=11 logicalId=4e720625-701c-413d-8848-3e03efe76710 latencyMs=165 1787799921695
+34716:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=11 byteIdentical=true reportedLen=4230 writtenLen=4230 reportedHash=8b4ce5af writtenHash=8b4ce5af ambiguousMatch=false 1787799921696
+34789:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3107 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787800149270
+34798:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=12 — awaiting confirmation 1787800149529
+34800:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=12 logicalId=242bf6d3-daa0-404d-9e1f-4168b048880e latencyMs=146 1787800149674
+34801:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=12 byteIdentical=true reportedLen=3107 writtenLen=3107 reportedHash=ff84f55b writtenHash=ff84f55b ambiguousMatch=false 1787800149674
+34865:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=4157 head="[loom:from-platform]\nLead. **Verified independently — I re-m" 1787800272961
+34875:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=13 — awaiting confirmation 1787800273293
+34877:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=13 logicalId=b1aa773a-4ed2-40db-8a61-3e6bdb47eab3 latencyMs=163 1787800273455
+34878:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=13 byteIdentical=true reportedLen=4157 writtenLen=4157 reportedHash=80af3e0f writtenHash=80af3e0f ambiguousMatch=false 1787800273456
+34893:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3427 head="[loom:from-platform]\nLead. **`10915e91` was already cancelle" 1787800315643
+34902:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=14 — awaiting confirmation 1787800315910
+34904:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=14 logicalId=4ba5dafe-1369-4e86-b6e9-ef8358378807 latencyMs=162 1787800316072
+34905:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=14 byteIdentical=true reportedLen=3427 writtenLen=3427 reportedHash=2a0e868c writtenHash=2a0e868c ambiguousMatch=false 1787800316072
+34920:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=5083 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787800343966
+34930:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=15 — awaiting confirmation 1787800344283
+34932:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=15 logicalId=e7244b4c-b256-44cf-a7cb-bf1f28d71d47 latencyMs=146 1787800344429
+34933:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=15 byteIdentical=true reportedLen=5083 writtenLen=5083 reportedHash=4b6e777b writtenHash=4b6e777b ambiguousMatch=false 1787800344429
+35113:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=1585 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787800803150
+35120:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=16 — awaiting confirmation 1787800803347
+35122:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=16 logicalId=5240f490-bb80-4cf7-a673-761cbf36e845 latencyMs=137 1787800803483
+35123:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=16 byteIdentical=true reportedLen=1585 writtenLen=1585 reportedHash=7b5944d2 writtenHash=7b5944d2 ambiguousMatch=false 1787800803484
+35198:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=5623 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787801177993
+35209:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=17 — awaiting confirmation 1787801178341
+35211:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=17 logicalId=65eb046d-f489-4141-88a3-f0c5fefba2ad latencyMs=214 1787801178555
+35212:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=17 byteIdentical=true reportedLen=5623 writtenLen=5623 reportedHash=98b23ec6 writtenHash=98b23ec6 ambiguousMatch=false 1787801178556
+35295:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=3068 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787801739201
+35303:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=18 — awaiting confirmation 1787801739452
+35305:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=18 logicalId=6a2ae624-fbbc-44ca-bbe3-94842dbf6199 latencyMs=135 1787801739587
+35306:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=18 byteIdentical=true reportedLen=3068 writtenLen=3068 reportedHash=8c1ea650 writtenHash=8c1ea650 ambiguousMatch=false 1787801739588
+35459:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=5171 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787802050713
+35470:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=19 — awaiting confirmation 1787802051053
+35472:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=19 logicalId=6821b8d8-bd99-414b-96cc-211089870b91 latencyMs=168 1787802051221
+35473:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=19 byteIdentical=true reportedLen=5171 writtenLen=5171 reportedHash=ad5af6b5 writtenHash=ad5af6b5 ambiguousMatch=false 1787802051222
+35555:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=2053 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787802292775
+35563:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=20 — awaiting confirmation 1787802293025
+35564:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787802293931
+35567:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=20 — awaiting confirmation 1787802293932
+35571:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=20 logicalId=bf249d12-c7a1-4973-a001-903506774502 latencyMs=1071 1787802294092
+35572:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=20 byteIdentical=true reportedLen=2053 writtenLen=2053 reportedHash=e4f39693 writtenHash=e4f39693 ambiguousMatch=false 1787802294093
+35614:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=2726 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787802397134
+35622:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=21 — awaiting confirmation 1787802397423
+35623:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787802398332
+35626:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=21 — awaiting confirmation 1787802398334
+35627:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2 NOT confirmed within 900ms — retrying 1787802399245
+35630:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3/4 written gen=21 — awaiting confirmation 1787802399247
+35631:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3 NOT confirmed within 900ms — retrying 1787802400148
+35634:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 4/4 written gen=21 — awaiting confirmation 1787802400183
+35636:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=21 logicalId=cc6d7c03-12fb-4cb0-9b25-994e95883b3d latencyMs=2987 1787802400410
+35637:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=21 byteIdentical=true reportedLen=2726 writtenLen=2726 reportedHash=9c88529b writtenHash=9c88529b ambiguousMatch=false 1787802400411
+35653:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=697 head="[loom:merge-rejected] worker 8ece5a3c-aee8-4100-a881-4c9ad30" 1787802527784
+35663:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=22 — awaiting confirmation 1787802527954
+35665:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=22 logicalId=3bfdb07a-2fb9-4775-aa6c-ca632adf7aa8 latencyMs=136 1787802528089
+35666:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=22 byteIdentical=true reportedLen=697 writtenLen=697 reportedHash=df007e26 writtenHash=df007e26 ambiguousMatch=false 1787802528090
+35709:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3844 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787802673711
+35718:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=23 — awaiting confirmation 1787802673992
+35720:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=23 logicalId=e3d488d2-03c4-459b-add8-ed7f20114e21 latencyMs=134 1787802674126
+35721:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=23 byteIdentical=true reportedLen=3844 writtenLen=3844 reportedHash=f72d4973 writtenHash=f72d4973 ambiguousMatch=false 1787802674126
+35931:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=28767 head="[loom:project-memory] Shared project memory — durable notes " 1787802839403
+36076:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=1 — awaiting confirmation 1787802841394
+36092:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787802842307
+36095:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=1 — awaiting confirmation 1787802842309
+36106:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=1 logicalId=4a880efc-dfed-4d5a-b770-17ba09ee460b latencyMs=1091 1787802842485
+36107:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=1 byteIdentical=true reportedLen=28767 writtenLen=28767 reportedHash=59ba0074 writtenHash=59ba0074 ambiguousMatch=false 1787802842485
+36263:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3376 head="[loom:possible-duplicate root:dc33b62f] [loom:from-manager ·" 1787802987878
+36272:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=2 — awaiting confirmation 1787802988147
+36274:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=2 logicalId=dc33b62f-e8a1-434a-8183-ef1d27a648d1 latencyMs=360 1787802988507
+36275:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=2 byteIdentical=true reportedLen=3376 writtenLen=3376 reportedHash=10f5d765 writtenHash=10f5d765 ambiguousMatch=false 1787802988508
+36361:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=2188 head="[loom:possible-duplicate root:aa8b9ca6] [loom:worker-report]" 1787803080237
+36369:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=3 — awaiting confirmation 1787803080481
+36371:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=3 logicalId=aa8b9ca6-64c0-4187-acd9-e03ed06effba latencyMs=523 1787803081017
+36372:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=3 byteIdentical=true reportedLen=2188 writtenLen=2188 reportedHash=7b3a942d writtenHash=7b3a942d ambiguousMatch=false 1787803081018
+36383:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=1698 head="[loom:daemon-restarted] Another manager restarted the daemon" 1787803134350
+36390:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=4 — awaiting confirmation 1787803134553
+36391:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1 NOT confirmed within 900ms — retrying 1787803135460
+36394:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2/4 written gen=4 — awaiting confirmation 1787803135462
+36395:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 2 NOT confirmed within 900ms — retrying 1787803136356
+36398:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 3/4 written gen=4 — awaiting confirmation 1787803136360
+36404:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=4 logicalId=641ddc25-5bf8-4144-a8d1-8763829948ff latencyMs=2255 1787803136814
+36405:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=4 byteIdentical=true reportedLen=1698 writtenLen=1698 reportedHash=e55c06d2 writtenHash=e55c06d2 ambiguousMatch=false 1787803136815
+36508:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=2849 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787803211401
+36516:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=5 — awaiting confirmation 1787803211668
+36518:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=5 logicalId=401af985-e32f-4f04-a6ed-95c468688717 latencyMs=681 1787803212350
+36519:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=5 byteIdentical=false reportedLen=4547 writtenLen=2849 reportedHash=f73e9a7d writtenHash=3ad245a4 ambiguousMatch=false 1787803212351
+36520:[prompt-mismatch] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=4547 intendedLen=2849 lenDelta=1698 divergesAtChar=6 tailReportedLen=4541 tailIntendedLen=2843 reportedAround="[loom:daemon-restarted] Another manager restar" intendedAround="[loom:from-manager · Loom · projectId:c36e8691" 1787803212351
+36533:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=2972 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787803322664
+36541:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=6 — awaiting confirmation 1787803322917
+36543:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=6 logicalId=ee65fe3f-5b0b-4ea1-96fe-76febb5bdb66 latencyMs=251 1787803323167
+36544:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=6 byteIdentical=true reportedLen=2972 writtenLen=2972 reportedHash=2ae561db writtenHash=2ae561db ambiguousMatch=false 1787803323168
+36559:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=1309 head="[loom:worker-report] worker 8ece5a3c-aee8-4100-a881-4c9ad30c" 1787803417805
+36566:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=7 — awaiting confirmation 1787803418018
+36568:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=7 logicalId=2566d7e0-c113-4f15-ae70-520dfb89de8a latencyMs=244 1787803418262
+36569:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=7 byteIdentical=true reportedLen=1309 writtenLen=1309 reportedHash=07bf2e5b writtenHash=07bf2e5b ambiguousMatch=false 1787803418262
+36601:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=1596 head="[loom:prompt-mismatch] Loom wrote 2849 chars for this turn (" 1787803524136
+36608:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=8 — awaiting confirmation 1787803524339
+36610:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=8 logicalId=867ed8ee-5835-4024-ac35-b1e92c54adc5 latencyMs=153 1787803524492
+36611:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=8 byteIdentical=true reportedLen=1596 writtenLen=1596 reportedHash=7d9685d9 writtenHash=7d9685d9 ambiguousMatch=false 1787803524492
+36624:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=4990 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787803573325
+36634:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=9 — awaiting confirmation 1787803573646
+36636:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=9 logicalId=9125b5c8-46a8-4fc7-a170-33eab4fedcf2 latencyMs=181 1787803573827
+36637:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=9 byteIdentical=true reportedLen=4990 writtenLen=4990 reportedHash=47554d0d writtenHash=47554d0d ambiguousMatch=false 1787803573828
+36686:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=5341 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787803816603
+36697:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=10 — awaiting confirmation 1787803816936
+36699:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=10 logicalId=2e93ae6d-7353-4850-a0d3-414e614215f2 latencyMs=172 1787803817108
+36700:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=10 byteIdentical=true reportedLen=5341 writtenLen=5341 reportedHash=ac7cd74b writtenHash=ac7cd74b ambiguousMatch=false 1787803817109
+36877:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=3819 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787804624350
+36886:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=11 — awaiting confirmation 1787804624637
+36888:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=11 logicalId=8410aa47-977a-4a24-9ead-f2244ab33bbf latencyMs=327 1787804624964
+36889:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=11 byteIdentical=true reportedLen=3819 writtenLen=3819 reportedHash=d52f1f18 writtenHash=d52f1f18 ambiguousMatch=false 1787804624966
+37175:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=4226 head="[loom:worker-report] worker 44194a88-1d70-4c51-889c-62af4b9e" 1787805276134
+37185:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=12 — awaiting confirmation 1787805276429
+37187:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=12 logicalId=435c24fe-d09c-4a79-964c-e10db05ed202 latencyMs=216 1787805276645
+37188:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=12 byteIdentical=true reportedLen=4226 writtenLen=4226 reportedHash=ab25aa97 writtenHash=ab25aa97 ambiguousMatch=false 1787805276646
+37260:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=2987 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787805592809
+37268:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=13 — awaiting confirmation 1787805593059
+37270:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=13 logicalId=90d10c73-3921-40c6-b88d-78a26e3faf63 latencyMs=846 1787805593903
+37271:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=13 byteIdentical=true reportedLen=2987 writtenLen=2987 reportedHash=14f74150 writtenHash=14f74150 ambiguousMatch=false 1787805593905
+37351:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=531 head="[loom:merge-done] worker 44194a88-1d70-4c51-889c-62af4b9e38f" 1787805751071
+37357:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=14 — awaiting confirmation 1787805751236
+37359:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=14 logicalId=a223c30f-b7bb-4494-aeb9-ee015bb17aa1 latencyMs=156 1787805751391
+37360:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=14 byteIdentical=true reportedLen=531 writtenLen=531 reportedHash=095137b4 writtenHash=095137b4 ambiguousMatch=false 1787805751391
+37444:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=5475 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787806156367
+37455:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=15 — awaiting confirmation 1787806156710
+37457:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=15 logicalId=736252d3-d3c6-483f-92af-d3d7cb23a2d3 latencyMs=219 1787806156928
+37458:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=15 byteIdentical=true reportedLen=5475 writtenLen=5475 reportedHash=ac2dd027 writtenHash=ac2dd027 ambiguousMatch=false 1787806156929
+37561:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=5247 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787806739202
+37572:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=16 — awaiting confirmation 1787806739528
+37574:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=16 logicalId=8bc817ef-0bf6-4924-b094-ac155c7fc8a6 latencyMs=135 1787806739662
+37575:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=16 byteIdentical=true reportedLen=5247 writtenLen=5247 reportedHash=f12127e6 writtenHash=f12127e6 ambiguousMatch=false 1787806739663
+37845:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=3308 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787807584533
+37854:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=17 — awaiting confirmation 1787807584801
+37856:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=17 logicalId=c23146fa-aca5-47e4-b5e8-ab8a14454c42 latencyMs=136 1787807584937
+37857:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=17 byteIdentical=true reportedLen=3308 writtenLen=3308 reportedHash=678cf885 writtenHash=678cf885 ambiguousMatch=false 1787807584937
+37887:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=4326 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787807759452
+37897:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=18 — awaiting confirmation 1787807759771
+37899:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=18 logicalId=8cfaa919-c646-444f-9e08-ea6a63cb1119 latencyMs=169 1787807759940
+37900:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=18 byteIdentical=true reportedLen=4326 writtenLen=4326 reportedHash=f80fb178 writtenHash=f80fb178 ambiguousMatch=false 1787807759940
+37983:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=3534 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787808415960
+37992:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=19 — awaiting confirmation 1787808416227
+37994:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=19 logicalId=2111bc60-2f10-4cae-9b84-6f2944602dc6 latencyMs=135 1787808416362
+37995:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=19 byteIdentical=true reportedLen=3534 writtenLen=3534 reportedHash=2a8e423f writtenHash=2a8e423f ambiguousMatch=false 1787808416362
+38004:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=drain busyBefore=false len=3091 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787808497030
+38013:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=20 — awaiting confirmation 1787808497291
+38015:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=20 logicalId=d871645a-abef-42b1-aab6-89fad580358f latencyMs=135 1787808497427
+38016:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=20 byteIdentical=true reportedLen=3091 writtenLen=3091 reportedHash=14bc2909 writtenHash=14bc2909 ambiguousMatch=false 1787808497428
+38428:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=4592 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787810425471
+38438:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=1 — awaiting confirmation 1787810425762
+38440:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=1 logicalId=9276c155-f543-4cd1-aef9-95dcbcdf09fc latencyMs=196 1787810425959
+38441:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=1 byteIdentical=true reportedLen=4592 writtenLen=4592 reportedHash=d657218a writtenHash=d657218a ambiguousMatch=false 1787810425959
+38459:[submit-write] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 reason=immediate busyBefore=false len=3218 head="[loom:from-manager · Loom · projectId:c36e8691-44d8-44ae-91e" 1787810741128
+38468:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 Enter attempt 1/4 written gen=2 — awaiting confirmation 1787810741403
+38470:[submit] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 CONFIRMED gen=2 logicalId=bfdd83fa-cfb7-4f07-bb63-59452c7eb98a latencyMs=141 1787810741544
+38471:[prompt-echo] fb924e0a-7d93-4a4e-86e7-2b000fbb0893 gen=2 byteIdentical=true reportedLen=3218 writtenLen=3218 reportedHash=7b2c7c51 writtenHash=7b2c7c51 ambiguousMatch=false 1787810741544
