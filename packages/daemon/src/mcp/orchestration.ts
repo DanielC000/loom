@@ -1114,6 +1114,15 @@ export class OrchestrationMcpRouter {
    */
   private myContext(sessionId: string): Record<string, unknown> {
     const s = this.db.getSession(sessionId);
+    // Card 7fcb586a: `sessionId` (the URL-path id — see resolveRole) IS the daemon's own LOOM-namespaced
+    // session row id; return it explicitly named `loomSessionId` so a session can self-report the id its
+    // manager/durable rows actually use, rather than an ENGINE-namespaced id inferred from its own
+    // scratchpad/transcript path (the two are indistinguishable well-formed uuids by shape alone).
+    // `engineSessionId` is returned ALONGSIDE it (never omitted) so a reader can always tell which
+    // namespace it's looking at; explicit `null` (not an absent key) when the SessionStart hook hasn't
+    // captured it yet — `null` here is decidable ("not captured yet"), an absent key would not be.
+    const loomSessionId = sessionId;
+    const engineSessionId = s?.engineSessionId ?? null;
     const ctxInputTokens = s?.ctxInputTokens ?? null;
     const measuredAt = s?.ctxUpdatedAt ?? null;
     const gateCommand = this.resolvedGateCommand(s?.projectId);
@@ -1148,6 +1157,7 @@ export class OrchestrationMcpRouter {
       const model = profile?.model ?? null;
       const contextWindow = contextWindowForModel(model);
       return {
+        loomSessionId, engineSessionId,
         ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, columns, measured: false,
         note: "context not measured yet (no completed turn) — occupancy unknown; contextWindow/model " +
           "reflect the CONFIGURED profile model when set, else the DEFAULT_CONTEXT_WINDOW fallback",
@@ -1160,6 +1170,8 @@ export class OrchestrationMcpRouter {
     const model = s?.model ?? null;
     const contextWindow = contextWindowForModel(model);
     return {
+      loomSessionId,
+      engineSessionId,
       ctxInputTokens,
       contextWindow,
       pct: Math.round((ctxInputTokens / contextWindow) * 100),
@@ -1213,9 +1225,26 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read YOUR OWN context occupancy (no args — server-derived from your session). Returns " +
-          "{ctxInputTokens, contextWindow, pct, model, measuredAt, gateCommand}: pct is your measured " +
+          "{loomSessionId, engineSessionId, ctxInputTokens, contextWindow, pct, model, measuredAt, " +
+          "gateCommand}: pct is your measured " +
           "context size as a percentage of your model's window. Use it at a clean seam to self-assess — " +
           "a manager to decide whether to recycle_me, a worker to worker_report that it's getting heavy. " +
+          "`loomSessionId` is the id the DAEMON uses for you — it's what a manager/durable event row/" +
+          "peer frame names you by, and the one to state when SELF-IDENTIFYING in a report (e.g. \"my " +
+          "session is X\"). `engineSessionId` is the SEPARATE id the underlying engine assigns (what your " +
+          "own scratchpad/transcript/tool-results paths are namespaced under) — returned alongside so you " +
+          "can always tell which is which; it is explicit `null` (never an absent key) until the " +
+          "SessionStart hook has captured it. WHY BOTH EXIST: both are well-formed v4 uuids that look " +
+          "identical by shape. A value read off the ENGINE's OWN transcript file path, or its harness-" +
+          "managed tool-results directory, is ALWAYS the engine one, never the daemon one — reporting " +
+          "that id as \"my session\" silently fails to match against Loom-stamped rows, with no error, " +
+          "and reads identically to \"nothing was wrong\". ⚠️ NOT every path you can read is engine-" +
+          "keyed, though: Loom's OWN scratch dir (exposed as `LOOM_SCRATCH_DIR` when set, and where a " +
+          "spilled result like an oversized `tasks_list` read's `rowsFile` lands) is keyed by the LOOM " +
+          "session id instead — reading a uuid off THAT path is a second legitimate self-identification " +
+          "route, not the same trap. Prefer `loomSessionId` for self-identification unless you " +
+          "specifically mean the engine's own id, and check WHICH KIND of path you're reading off before " +
+          "trusting either. " +
           "If not yet measured (no completed turn), pct is null and `measured:false` is set explicitly — " +
           "contextWindow/model in that case reflect your CONFIGURED profile model (still accurate), not a " +
           "fake reading. `gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
@@ -3241,8 +3270,8 @@ export class OrchestrationMcpRouter {
           "CONSUMES them). Use this to survey pending/answered/consumed requests, including ones asked " +
           "with no taskId or asked by a predecessor manager on this project. NON-CONSUMING — reading NEVER " +
           "drains or flips state; calling it twice returns the same records. Returns {items, total, " +
-          "returned, offset, hasMore}: `items` per row is {id, projectId, sessionId, agentId, taskId, type, " +
-          "title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/" +
+          "returned, offset, hasMore}: `items` per row is {id, projectId, loomSessionId, agentId, taskId, " +
+          "type, title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/" +
           "note for decision|input, approved/note for permission, ack ONLY for credential (NEVER the secret " +
           "— a pending row's answer fields read null rather than a misleading false-ish value). `total` is " +
           "the FULL matching count and `hasMore` tells you whether `items` was truncated. Filters (all optional, AND'd): state " +

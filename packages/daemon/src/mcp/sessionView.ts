@@ -4,6 +4,13 @@ import type { SessionListItem } from "@loom/shared";
 // platform list_all_sessions). This is a PRESENTATION projection only — it never touches the db
 // query semantics; the same enriched SessionListItem[] is fetched, then thinned here.
 
+// SESSION-ID NAMING POLICY (card 7fcb586a): the settled rule for every MCP surface that returns a
+// session id to an agent lives on `Session` in `@loom/shared` (packages/shared/src/types.ts) — hosted
+// there, not here, because it governs surfaces across both packages (my_context, events_search,
+// auditRequestItem, input params), not just this file's list-projection surface. Read it there rather
+// than re-deriving it. SessionSummary/SessionListItem's own `id` field below is a case of that policy's
+// rule 3 (a record's own primary key stays bare `id`) — see `Session.id`'s own doc for the full reasoning.
+
 /**
  * The lightweight session row the list tools return by DEFAULT — a compact projection that keeps
  * just what's needed to triage + address a session (its id, project, agent, lifecycle state, and

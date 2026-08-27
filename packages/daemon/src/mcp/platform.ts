@@ -1244,7 +1244,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "events_search",
       {
-        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-empty result would misread as \"this never occurred\" rather than \"you asked a question this tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, sessionId, projectId, projectName, agentName, branch} — detail is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null.",
+        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-empty result would misread as \"this never occurred\" rather than \"you asked a question this tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` (input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from `my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, agentName, branch} — `loomSessionId` (card 7fcb586a — named to declare its namespace, unlike this tool's own `sessionId` INPUT filter arg above, which keeps its existing name since agents already call it by that name; see `Session`'s session-id naming policy doc in `@loom/shared` for the naming rule) is the SAME Loom session id the input filter matches on. `detail` is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           projectId: z.string().optional(),
@@ -1451,7 +1451,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "session_stop",
       {
-        description: "Stop ANY session by id (cross-project). mode \"graceful\" (default — clean Ctrl-C ×2, resumable) or \"hard\" (pty.kill escalation); both orphan-free. Mirrors POST /api/sessions/:id/stop. 404 if the session is unknown.",
+        description: "Stop ANY session by id (cross-project) — the DAEMON's own Loom-namespaced session id, never the engine's own (see `Session`'s session-id naming policy doc in `@loom/shared`, card 7fcb586a). mode \"graceful\" (default — clean Ctrl-C ×2, resumable) or \"hard\" (pty.kill escalation); both orphan-free. Mirrors POST /api/sessions/:id/stop. 404 if the session is unknown.",
         inputSchema: strictShape({ sessionId: z.string(), mode: z.enum(["graceful", "hard"]).optional() }),
       },
       async ({ sessionId, mode }) => {
@@ -1468,7 +1468,8 @@ export class PlatformMcpRouter {
       {
         description:
           "Reap (kill) any OS process still lingering in ANY session's worktree (cross-project, by " +
-          "sessionId alone) — a stuck test runner, an escaped/detached vite/esbuild, a zombie left " +
+          "sessionId alone — the DAEMON's own Loom-namespaced session id, never the engine's own; see " +
+          "`Session`'s session-id naming policy doc in `@loom/shared`, card 7fcb586a) — a stuck test runner, an escaped/detached vite/esbuild, a zombie left " +
           "behind after a crash — WITHOUT stopping the session itself. Daemon-executed: the daemon " +
           "killing its own children never routes through Claude Code's own auto-mode safety classifier, " +
           "so use this during a fleet-down cleanup instead of a raw `kill`/`taskkill` Bash command that " +
@@ -1502,7 +1503,10 @@ export class PlatformMcpRouter {
       "session_transcript",
       {
         description:
-          "Read ANY session's transcript across the whole platform, by sessionId alone — no project or " +
+          "Read ANY session's transcript across the whole platform, by sessionId alone (the DAEMON's own " +
+          "Loom-namespaced session id — e.g. `loomSessionId` from `my_context`, or the bare `id` " +
+          "`list_all_sessions` returns, never the engine's own id; see `Session`'s session-id naming policy doc in `@loom/shared`, " +
+          "card 7fcb586a) — no project or " +
           "parent/child scoping (the Lead stands above every project's tree). Accepts a full session id " +
           `OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays). Live vs. ` +
           "archived is AUTO-DETECTED from the session row (no `archived` flag to pass): a live/exited-but-" +

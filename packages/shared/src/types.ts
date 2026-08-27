@@ -641,7 +641,53 @@ export interface PendingMerge {
   gatePhase?: "queued" | "running" | null;
 }
 
+/**
+ * SESSION-ID NAMING POLICY (card 7fcb586a) — the settled rule for every MCP surface that returns a
+ * session id to an agent. Hosted HERE (not in a daemon-side leaf) because it governs surfaces across both
+ * packages — `my_context`, `events_search`, `auditRequestItem`, and every input param — not just the
+ * `packages/daemon/src/mcp/sessionView.ts` list-projection surface it used to live in; that file now
+ * references this block rather than owning it. Every id reachable from INSIDE a session (its own
+ * scratchpad/transcript/tool-results paths) is ENGINE-namespaced UNLESS it was read off Loom's own
+ * scratch dir (`sessionScratchDir` in the daemon — Loom-keyed, exposed as `LOOM_SCRATCH_DIR`/spill file
+ * paths — a legitimate exception, not a trap); every id the DAEMON stamps into a durable row, an event,
+ * or a peer frame is LOOM-namespaced. Both are well-formed v4 uuids that look identical by shape, so the
+ * FIELD NAME is the only thing that can tell a reader which one they're holding. Sites that touch this
+ * area should point HERE rather than restate the rule:
+ *
+ *   1. A NEW or RENAMED output field carrying a Loom session id is named `loomSessionId` — never a bare
+ *      `sessionId` (e.g. `my_context`'s `loomSessionId`/`engineSessionId`, `events_search`'s per-event
+ *      `loomSessionId`, `auditRequestItem`'s `loomSessionId`). This governs NEW/RENAMED fields, not every
+ *      existing one — see the KNOWN LEGACY EXCEPTIONS below for pre-existing sites this does not reach.
+ *   2. A ROLE-PREFIXED name (`workerSessionId`, `managerSessionId`, `parentSessionId`,
+ *      `targetSessionId`, `newWorkerSessionId`, `recycledFrom`, …) is Loom-namespaced BY CONVENTION and
+ *      stays as-is — every one of these resolves to a Loom id today, the role prefix already disambiguates
+ *      it from an engine id in practice, and renaming the whole family buys no live ambiguity fix for a
+ *      wide, disruptive blast radius (dozens of `inputSchema` call sites across worker_report_get,
+ *      worker_stop, worker_message, and siblings).
+ *   3. A record's own PRIMARY KEY stays a bare `id` (see `Session.id`'s own doc, right below) — the same
+ *      convention every other Loom record type (task, project, agent) uses. Renaming it for session rows
+ *      alone would break that convention to fix an ambiguity `engineSessionId` sitting right beside it
+ *      under `full:true` already resolves.
+ *   4. An INPUT param KEEPS ITS EXISTING NAME (even a bare `sessionId`) and instead names its namespace
+ *      IN THE TOOL DESCRIPTION — renaming an input is a call-site-breaking change (agents already invoke
+ *      the tool by that param name, and existing tests assert against it), where an output rename is not.
+ *
+ * KNOWN LEGACY EXCEPTIONS TO RULE 1 — known examples, NOT an exhaustive list; other pre-existing sites
+ * may carry a bare `sessionId` this enumeration did not find:
+ *   - `GateHistoryRow.sessionId` (below) — `gate_history`'s output. Deliberately UNCHANGED: it's
+ *     test-pinned by `packages/daemon/test/gate-history.mjs`, and renaming a settled, widely-consumed
+ *     history feed for a naming-only fix wasn't judged worth the churn.
+ *   - The peer-relay frames `[loom:from-manager · <name> · projectId:<id> · sessionId:<id>]`
+ *     (`packages/daemon/src/sessions/service.ts:8881`) and `[loom:from-assistant · <name> ·
+ *     sessionId:<id>]` (`packages/daemon/src/sessions/service.ts:9056`) — prose an agent reads, not a
+ *     JSON key; both carry a Loom id under a bare `sessionId` label. Left untouched by this card (that
+ *     file is outside this card's edit scope) and flagged for separate sequencing.
+ */
 export interface Session {
+  /** The DAEMON's own (Loom-namespaced) session-row primary key — distinct from `engineSessionId` below
+   *  (the underlying Claude Code engine's own id). Kept as a bare `id` (not `loomSessionId`) since this
+   *  is a record's own primary key, the same convention every other Loom record type uses — see the
+   *  session-id naming policy doc right above (card 7fcb586a) this follows. */
   id: SessionId;
   projectId: ProjectId;
   agentId: AgentId;
@@ -1517,6 +1563,10 @@ export interface GateHistoryRow {
   outcome: GateOutcome;
   projectId: string | null;
   projectName: string | null;
+  /** Loom-namespaced (the daemon's own session-row id). A named, deliberate exception to the
+   *  `loomSessionId`-for-new-fields rule — see the session-id naming policy doc on {@link Session}
+   *  (card 7fcb586a) for why this one stays a bare `sessionId`: it's test-pinned by
+   *  `packages/daemon/test/gate-history.mjs`. */
   sessionId: string | null;
   taskId: string | null;
   branch: string | null;

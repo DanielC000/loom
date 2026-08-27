@@ -23,6 +23,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       exactly { gate_queue, gate_status, my_context, run_gate, worker_report }.
 //   (W) Pre-first-turn contextWindow/model reflect the session's CONFIGURED profile model (not the
 //       misleading DEFAULT_CONTEXT_WINDOW/null), with an explicit measured:false marker either way.
+//   (I) Card 7fcb586a: my_context returns `loomSessionId` (the daemon's OWN, Loom-namespaced session row
+//       id — never a bare `sessionId`) alongside `engineSessionId` (the SEPARATE engine-namespaced id) —
+//       asserted by EQUALITY against the real row id, not merely "looks like a uuid" (a shape check can't
+//       discriminate the two namespaces, which is the entire bug this card reports), PLUS a same-router
+//       distinctness check that the two fields aren't wired to the same source. VERIFIED RED FOR REAL:
+//       reverting the myContext() src change and rebuilding made these equality checks fail (6 failures
+//       in this file, re-measured after a later test-set change — see the (I) section comment below for
+//       the current count) before the fix was restored — a manual revert-rebuild cycle, not a check against a
+//       hand-constructed object literal (an earlier draft's "positive control" compared literals it built
+//       itself, which passes by construction regardless of what the router does — deleted). engineSessionId
+//       is explicit null (never an absent key) before the SessionStart hook captures it. Both fields
+//       present in BOTH the measured and pre-first-turn (unmeasured) return branches.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -267,6 +279,66 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     check("(W) unmeasured no-profile session → resolves gracefully, no throw",
       !threw && c?.contextWindow === 200_000 && c?.measured === false);
   }
+
+  db.close();
+  rmDb(file);
+}
+
+// ==================== (I) session identity — loomSessionId vs engineSessionId ====================
+{
+  const file = tmpDbFile("identity");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+
+  db.insertProject({
+    id: "pI", name: "Identity", repoPath: "/i", vaultPath: "/i", config: {}, createdAt: now, archivedAt: null,
+  });
+  db.insertAgent({ id: "aI", projectId: "pI", name: "i", startupPrompt: "x", position: 0 });
+
+  const LOOM_ID = "mgrIdent-3f9c1e2a-daemon-row-id";
+  const ENGINE_ID = "9c2e1f4a-engine-claude-code-id";
+  db.insertSession({
+    id: LOOM_ID, projectId: "pI", agentId: "aI", engineSessionId: ENGINE_ID, title: null, cwd: "/i",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+
+  const router = new OrchestrationMcpRouter(db, {});
+  const c = router.myContext(LOOM_ID);
+
+  // The core assertion the DoD requires: loomSessionId EQUALS the daemon's own session row id — not
+  // merely "is a uuid" (a shape check can't discriminate the bug this card is about, since both ids are
+  // well-formed uuids that look identical by shape). VERIFIED RED (not merely asserted, and RE-MEASURED
+  // after the check set below changed — see this section's own header comment near the top of this
+  // file): reverting the src change to myContext() and rebuilding makes ALL SIX checks in this (I)
+  // section fail for real (measured directly, not copied from a review) before the fix is restored.
+  check("(I) loomSessionId equals the daemon's own session row id", c.loomSessionId === LOOM_ID);
+  check("(I) engineSessionId equals the engine id captured on the row", c.engineSessionId === ENGINE_ID);
+
+  // A regression that wired both fields to the SAME source (e.g. both returning sessionId, or both
+  // returning s.engineSessionId) would pass the two equality checks above only by accident of THIS
+  // fixture's values — this checks the router's REAL output directly, so it also catches that shape even
+  // if a future fixture happened to pick colliding ids.
+  check("(I) the two ids are distinct values from the router — not the same id under two names",
+    c.loomSessionId !== c.engineSessionId);
+
+  // engineSessionId is explicit `null` (never an absent key) before the SessionStart hook captures it —
+  // a null that means "not captured yet" is decidable, an absent key is not.
+  const LOOM_ID2 = "wkrIdent-no-engine-yet";
+  db.insertSession({
+    id: LOOM_ID2, projectId: "pI", agentId: "aI", engineSessionId: null, title: null, cwd: "/i",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker",
+  });
+  const c2 = router.myContext(LOOM_ID2);
+  check("(I) engineSessionId is explicit null (not an absent key) before the SessionStart hook captures it",
+    "engineSessionId" in c2 && c2.engineSessionId === null);
+  check("(I) loomSessionId is still correctly returned even with no engine id captured yet",
+    c2.loomSessionId === LOOM_ID2);
+
+  // Both fields present in the UNMEASURED (pre-first-turn) branch too — not just the measured branch.
+  check("(I) unmeasured branch also carries loomSessionId/engineSessionId (both return branches, not one)",
+    c2.measured === false && c2.loomSessionId === LOOM_ID2 && c2.engineSessionId === null);
 
   db.close();
   rmDb(file);

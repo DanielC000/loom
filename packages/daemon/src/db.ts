@@ -7593,7 +7593,13 @@ export interface EventForensicsRow {
   detail: Record<string, unknown> | undefined;
   taskId: string | null;
   taskTitle: string | null;
-  sessionId: string | null;
+  /** Card 7fcb586a: named `loomSessionId` (never a bare `sessionId`) — this is the DAEMON's own
+   *  session-row id (COALESCE(worker_session_id, manager_session_id), both Loom-namespaced), never the
+   *  underlying engine's own session id. See `Session`'s session-id naming policy doc in `@loom/shared` (packages/shared/src/types.ts) for the naming rule this
+   *  follows. Deliberately NOT renamed on the shared {@link GateEventJoinRow}/{@link GateHistoryRow} this
+   *  is derived from — `gate_history`'s own output keeps its existing `sessionId` field unchanged; only
+   *  this events_search-facing projection was in scope for the rename. */
+  loomSessionId: string | null;
   projectId: string | null;
   projectName: string | null;
   agentName: string | null;
@@ -7609,7 +7615,7 @@ function toEventForensicsRow(r: GateEventJoinRow): EventForensicsRow {
   }
   return {
     id: r.id, ts: r.ts, kind: r.kind, detail, taskId: r.taskId, taskTitle: r.taskTitle,
-    sessionId: r.sessionId, projectId: r.projectId, projectName: r.projectName,
+    loomSessionId: r.sessionId, projectId: r.projectId, projectName: r.projectName,
     agentName: r.agentName, branch: r.branch,
   };
 }

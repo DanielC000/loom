@@ -20,9 +20,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) NON-CONSUMING — a pending request's `state` (and a separately-answered request's `state`) is
 //       UNCHANGED after being read via requests_list, unlike question_pull's drain-and-consume.
 //   (D) filters: projectId, state, type — each narrows correctly.
-//   (E) the row shape: {id, projectId, sessionId, agentId, taskId, type, title, state, createdAt,
+//   (E) the row shape: {id, projectId, loomSessionId, agentId, taskId, type, title, state, createdAt,
 //       answeredAt, consumedAt} plus the per-type answer summary (chosenOption/note for decision,
-//       approved/note for permission).
+//       approved/note for permission). `loomSessionId` (card 7fcb586a, renamed from a bare `sessionId`)
+//       is asserted by EQUALITY against the REAL Db session row's own `id` (via db.getSession), not
+//       merely that the renamed key exists — a shape/presence check alone can't discriminate the Loom
+//       vs. engine namespace, which is the entire point of the rename.
 //   (F) envelope + pagination: {items,total,returned,offset,hasMore} is present and truthful; bounded to
 //       the default cap by default; an explicit limit/offset pages past it; hasMore flips false once every
 //       row has been paged through.
@@ -63,8 +66,12 @@ try {
   db.insertProject({ id: "pB", name: "Project B", repoPath: "pB", vaultPath: "pB", config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: "agentA", projectId: "pA", name: "Mgr A", startupPrompt: "MGR", position: 0 });
   db.insertAgent({ id: "agentB", projectId: "pB", name: "Mgr B", startupPrompt: "MGR", position: 0 });
+  // engineSessionId is a DISTINCT value from the Loom id "mgrA" (never null) so the (E) discriminating
+  // check below has an actual engine id to assert loomSessionId is NOT equal to — a null engineSessionId
+  // would make that assertion vacuous (nothing to discriminate against).
+  const MGR_A_ENGINE_ID = "eng-mgrA-not-a-loom-id";
   db.insertSession({
-    id: "mgrA", projectId: "pA", agentId: "agentA", engineSessionId: null, title: null, cwd: "pA",
+    id: "mgrA", projectId: "pA", agentId: "agentA", engineSessionId: MGR_A_ENGINE_ID, title: null, cwd: "pA",
     processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager",
   });
@@ -125,7 +132,17 @@ try {
   const rowCred = all.find((r) => r.id === qCred);
 
   // ============ (E) row shape + per-type answer summary ============
-  check("(E) decision row carries the full identity shape", rowA.projectId === "pA" && rowA.sessionId === "mgrA" && rowA.agentId === "agentA" && rowA.type === "decision" && rowA.title === "Which lib for pA?" && rowA.state === "pending" && typeof rowA.createdAt === "string");
+  check("(E) decision row carries the full identity shape", rowA.projectId === "pA" && rowA.loomSessionId === "mgrA" && rowA.agentId === "agentA" && rowA.type === "decision" && rowA.title === "Which lib for pA?" && rowA.state === "pending" && typeof rowA.createdAt === "string");
+  // POSITIVE CONTROL for the rename (card 7fcb586a): `loomSessionId` must NOT equal "mgrA"'s own
+  // engine session id (MGR_A_ENGINE_ID, seeded distinct above) — the assertion that actually
+  // discriminates the Loom namespace from the engine one. (`db.getSession("mgrA").id === "mgrA"` is a
+  // tautology of the lookup key and was WRONGLY treated as a discriminating control in an earlier draft
+  // of this test — it cannot distinguish anything, since nothing about it depends on which namespace
+  // "mgrA" belongs to; this replaces it.)
+  check("(E) loomSessionId is the Loom id, NOT this session's own (distinct) engine session id",
+    rowA.loomSessionId === "mgrA" && rowA.loomSessionId !== MGR_A_ENGINE_ID);
+  check("(E) the old bare `sessionId` field name is GONE from the row (rename, not an alias)",
+    !("sessionId" in rowA));
   check("(E) a PENDING decision reads chosenOption:null, note:null (not a stale default)", rowA.chosenOption === null && rowA.note === null);
   check("(E) a request row does NOT carry body/options/recommendation (title-altitude, not the full record)", rowA.body === undefined && rowA.options === undefined && rowA.recommendation === undefined);
   check("(E) a PENDING permission reads approved:null (not falsely 'denied')", rowB.approved === null && rowB.state === "pending");

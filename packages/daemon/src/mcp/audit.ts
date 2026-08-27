@@ -91,7 +91,7 @@ export class AuditMcpRouter {
           "to surface in a transcript. NON-CONSUMING — reading NEVER drains or flips state, unlike " +
           "question_pull's agent-scoped drain-and-consume (a distinct primitive; mirrors task_requests_list/ " +
           "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
-          "`items` per row is {id, projectId, sessionId, agentId, taskId, type, title, state, createdAt, " +
+          "`items` per row is {id, projectId, loomSessionId, agentId, taskId, type, title, state, createdAt, " +
           "answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for decision|input, " +
           "approved/note/scope/expiresAt/lapsed for permission (scope/expiresAt are the human's ACTUAL " +
           "decided grant, distinct from the ask-time requested scope/expiry; lapsed is read-time-derived, " +

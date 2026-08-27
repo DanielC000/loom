@@ -305,14 +305,16 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * Platform Auditor's cross-project `requests_list` payload (card 59489267). Title-altitude + answer-by-
  * type, NOT the full body/options/recommendation (that's `task_request_get`'s job): the audit LIST spans
  * every project's Requests at once, so it stays bounded the way `task_requests_list`'s rows do, plus the
- * identity fields (`projectId`/`sessionId`/`agentId`/`taskId`) a cross-project triage needs that a single-
- * project caller already knows from context. NON-CONSUMING; shares `questionAnswerByType` with
+ * identity fields (`projectId`/`loomSessionId`/`agentId`/`taskId`) a cross-project triage needs that a
+ * single-project caller already knows from context. NON-CONSUMING; shares `questionAnswerByType` with
  * `taskRequestGetItem` so the credential never-echo guarantee (never `secret_blob`, only `ack`) can never
- * drift between the two read surfaces.
+ * drift between the two read surfaces. `sessionId` → `loomSessionId` (card 7fcb586a — the asking session's
+ * own DAEMON id, see `Session`'s session-id naming policy doc in `@loom/shared`): the only consumer asserting the OLD field name,
+ * `test/audit-requests-list.mjs`, was updated in lockstep with this rename.
  */
 export function auditRequestItem(q: Question & { agentId: string | null }): Record<string, unknown> {
   return {
-    id: q.id, projectId: q.projectId, sessionId: q.sessionId, agentId: q.agentId, taskId: q.taskId,
+    id: q.id, projectId: q.projectId, loomSessionId: q.sessionId, agentId: q.agentId, taskId: q.taskId,
     type: q.type, title: q.title, state: q.state,
     createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
     ...questionAnswerByType(q),
