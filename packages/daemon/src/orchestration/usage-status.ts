@@ -1,9 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { execSync, execFile } from "node:child_process";
 import type { UsageLimitsStatus, UsageWindow, UsageExtra } from "@loom/shared";
 import { resolveExecutable } from "../pty/resolve-bin.js";
+import { claudeCredentialsPath, CLAUDE_BINARY_NAME } from "../pty/claude-doctrine.js";
 
 /**
  * ACCOUNT-WIDE Claude plan-usage poller — the source of Mission Control's plan-usage strip.
@@ -27,8 +26,10 @@ import { resolveExecutable } from "../pty/resolve-bin.js";
 
 const USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA = "oauth-2025-04-20";
-// Windows-first: %USERPROFILE%\.claude\.credentials.json. (macOS uses the Keychain — unavailable.)
-const DEFAULT_CREDENTIALS_PATH = path.join(os.homedir(), ".claude", ".credentials.json");
+// HarnessAdapter seam (card 2b099e48): the literal credentials-file location is claude-specific and now
+// owned by pty/claude-doctrine.ts#claudeCredentialsPath (Windows-first: %USERPROFILE%\.claude\.credentials.json;
+// macOS uses the Keychain — unavailable there).
+const DEFAULT_CREDENTIALS_PATH = claudeCredentialsPath();
 // Sane pinned fallback when `claude --version` can't be read — the UA just needs the claude-code/ prefix.
 const PINNED_VERSION_FALLBACK = "2.1.162";
 
@@ -51,7 +52,7 @@ function claudeVersion(): string {
   if (cachedClaudeVersion) return cachedClaudeVersion;
   let v = PINNED_VERSION_FALLBACK;
   try {
-    const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+    const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || CLAUDE_BINARY_NAME);
     const out = execSync(`"${bin}" --version`, { encoding: "utf8", timeout: 8000, windowsHide: true });
     v = out.match(/(\d+\.\d+\.\d+)/)?.[1] ?? PINNED_VERSION_FALLBACK;
   } catch {
@@ -87,7 +88,7 @@ export function getCachedClaudeVersion(): string | null {
  */
 export function prewarmClaudeVersionAsync(): void {
   if (cachedClaudeVersion) return;
-  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || CLAUDE_BINARY_NAME);
   execFile(bin, ["--version"], { timeout: 8000, windowsHide: true }, (err, stdout) => {
     if (err) return;
     const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];

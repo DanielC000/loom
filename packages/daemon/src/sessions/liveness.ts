@@ -1,10 +1,6 @@
-import chokidar, { type FSWatcher } from "chokidar";
-import os from "node:os";
-import path from "node:path";
 import type { Db } from "../db.js";
 import { engineTranscriptExists } from "./transcript.js";
-
-const CLAUDE_PROJECTS = path.join(os.homedir(), ".claude", "projects");
+import { claudeAdapter } from "../pty/claude-adapter.js";
 
 /**
  * Dead-ID detection (§12-Q5). A stored session is unresumable once its engine transcript
@@ -23,23 +19,17 @@ export function sweepDeadSessions(db: Db): number {
   return marked;
 }
 
-/** Watch ~/.claude/projects; re-sweep when a transcript is removed (debounced). */
-export function watchClaudeProjects(db: Db, onChange?: (marked: number) => void): FSWatcher {
-  let timer: NodeJS.Timeout | undefined;
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { const n = sweepDeadSessions(db); if (n > 0) onChange?.(n); }, 1500);
-  };
-  return chokidar
-    .watch(CLAUDE_PROJECTS, { ignoreInitial: true, depth: 2 })
-    .on("unlink", (f) => { if (f.endsWith(".jsonl")) schedule(); })
-    // A watched project dir can vanish mid-stat — e.g. a short-lived temp run cwd (loom-mgmt-cwd-*)
-    // whose transcript is cleaned up — which on Windows surfaces as EPERM/ENOENT/EBUSY. chokidar emits
-    // these on the 'error' event; with NO listener that unhandled event would CRASH the whole daemon
-    // (it took the daemon down on 2026-06-16). Swallow it (log only): the watcher keeps running and the
-    // next debounced sweep self-heals. NEVER rethrow here — a transient FS race must not kill the daemon.
-    .on("error", (err) => {
-      const e = err as NodeJS.ErrnoException;
-      console.warn(`[liveness] claude-projects watcher error (ignored, watcher continues): ${e?.code ?? ""} ${e?.message ?? String(err)}`);
-    });
+/**
+ * Watch the engine's transcript store; re-sweep when a transcript is removed (debounced). The watch
+ * MECHANISM (which directory, what to debounce, how to survive a transient FS error) is claude-specific
+ * and lives behind the `HarnessAdapter` seam (card 2b099e48) — routed through `claudeAdapter.watchLiveness`
+ * (Code Review B1: this is the seam's real consumer, not just its own module) rather than importing
+ * `pty/claude-doctrine.ts#watchClaudeLiveness` directly. This function owns only the generic "what to do
+ * when it fires" — re-sweep this DB's dead-session bookkeeping. Return type inferred from the adapter's
+ * own `watchLiveness` signature (Code Review B3: no cast — the prior `as FSWatcher` compiled today only
+ * because `watchClaudeLiveness` happened to return one; it would have silently mistyped a future `null`
+ * return as a live watcher and thrown at the caller's `.close()` instead of failing the build).
+ */
+export function watchClaudeProjects(db: Db, onChange?: (marked: number) => void) {
+  return claudeAdapter.watchLiveness(() => { const n = sweepDeadSessions(db); if (n > 0) onChange?.(n); });
 }

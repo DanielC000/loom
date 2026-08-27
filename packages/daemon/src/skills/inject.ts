@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SessionRole } from "@loom/shared";
 import { SKILLS_DIR, OBSIDIAN_PREFLIGHT_FRAGMENT } from "../paths.js";
+import { claudeSkillsDir, doctrineGitExcludeEntries } from "../pty/claude-doctrine.js";
 
-const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into a .claude/skills
+const MANIFEST = ".loom-skills.json"; // records which skill names EACH session injected into the doctrine dir's skills subtree
 
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
@@ -156,7 +157,7 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   try {
     storeNames = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch { return; } // no store yet
-  const targetDir = path.join(cwd, ".claude", "skills");
+  const targetDir = claudeSkillsDir(cwd);
   fs.mkdirSync(targetDir, { recursive: true });
 
   // What THIS session should have present: a non-empty subset ∩ the store, else ALL store skills.
@@ -277,7 +278,7 @@ function hideFromGit(cwd: string, entries: string[]): void {
   try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }
   const excludePath = path.join(infoDir, "exclude");
   let cur = ""; try { cur = fs.readFileSync(excludePath, "utf8"); } catch { /* none */ }
-  const want = [...entries.map((e) => `/.claude/skills/${e}`), "/.claude/settings.local.json"];
+  const want = doctrineGitExcludeEntries(entries);
   const missing = want.filter((p) => !cur.split(/\r?\n/).includes(p));
   if (missing.length === 0) return;
   const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";

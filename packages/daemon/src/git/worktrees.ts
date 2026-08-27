@@ -7,6 +7,7 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
+import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -1326,8 +1327,8 @@ export function uncommittedWorkFiles(porcelain: string): string[] {
     //      re-copy surfaces as a TRACKED modification (` M …`/`A  …`), not `??`, so the untracked-only rule
     //      (a) misses it and boot-reconcile Pass B reads a genuinely-clean worktree as "has work". This drop
     //      closes that leak. (Loom never commits `.claude/skills/`; it is injected per-session + git-excluded.)
-    if (status === "??" && p.startsWith(".claude/")) continue;
-    if (p.startsWith(".claude/skills/")) continue;
+    if (status === "??" && isDoctrineArtifactPath(p)) continue;
+    if (isDoctrineSkillsPath(p)) continue;
     files.push(p);
   }
   return files;
@@ -2389,6 +2390,11 @@ export const STATIC_GUARD_REPO_PATHS = [
   // `~/.loom` (which holds `loom.db`) would ship on the reduced gate path with nothing catching it — the
   // exact hermetic-guard blind spot (`requireHermeticEnv` cannot see this var) this card closed.
   "packages/daemon/test/real-home-scope-guard.mjs",
+  // Card 2b099e48 (HarnessAdapter seam, Phase 0): a corpus-wide scan of packages/daemon/src/**/*.ts asserting
+  // no claude-specific `.claude`/'claude' literal exists outside the adapter module's own file allowlist —
+  // see the guard's own header for the comment/code classification and why it exists (the seam this card just
+  // extracted has no structural way to stop a FUTURE file from reintroducing the same scattered coupling).
+  "packages/daemon/test/harness-adapter-claude-literal-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */

@@ -43,6 +43,7 @@ import { allowIfDmMatch, type CompanionAuth } from "./auth.js";
 import { noPairing, type CompanionPairing } from "./pairing.js";
 import { inMemoryVoicePrefs, voicePrefRoute, type CompanionVoicePrefs } from "./voice-prefs.js";
 import { parseCommand, commandHandler } from "./commands.js";
+import { vendorProcessSlashCommand } from "../pty/claude-doctrine.js";
 
 /**
  * Split `text` into chunks no longer than `max` chars, preferring a newline then a whitespace boundary so
@@ -488,9 +489,14 @@ export class ChatGateway {
    */
   private async resetConversation(sessionId: string): Promise<void> {
     try {
-      this.submitTurn(sessionId, "/clear");
+      // HarnessAdapter seam (card 2b099e48): the injected reset command is a vendor-process built-in
+      // (Claude Code's "/clear"), not Loom's own — resolved via vendorProcessSlashCommand rather than a
+      // hardcoded literal so a harness with no in-band equivalent (returns null) skips this half instead
+      // of submitting a nonsense turn. Every harness registered today always returns "/clear" here.
+      const resetCmd = vendorProcessSlashCommand("reset");
+      if (resetCmd) this.submitTurn(sessionId, resetCmd);
     } catch (err) {
-      this.debug(`resetConversation: /clear submit failed for ${sessionId}: ${describeError(err)}`);
+      this.debug(`resetConversation: reset-command submit failed for ${sessionId}: ${describeError(err)}`);
     }
     this.refreshPersona(sessionId);
     this.closeTrustWindow?.(sessionId);
