@@ -2391,6 +2391,14 @@ export const STATIC_GUARD_REPO_PATHS = [
   // see the guard's own header for the comment/code classification and why it exists (the seam this card just
   // extracted has no structural way to stop a FUTURE file from reintroducing the same scattered coupling).
   "packages/daemon/test/harness-adapter-claude-literal-guard.mjs",
+  // Card 4f2c493a: reads working-tree BYTES ON DISK (never git status/diff/numstat/show — see the guard's
+  // own header for why those are structurally blind to a whole-file CRLF-to-LF flip) to catch a Write-tool
+  // (or equivalent) wholesale rewrite silently flipping a tracked text file's line endings. Belongs here on
+  // the same ground as fixed-wait-witness-guard.mjs above: a CRLF flip of a packages/daemon/src/**/*.ts or
+  // packages/daemon/test/**/*.mjs file changes zero compiled/runtime behaviour, so it can pass through
+  // computeEmitCompareGate's reduced path (which reasons about compiled-output/test-pass equivalence, not
+  // raw bytes) without ever re-running the corpus-wide guards this array feeds the reduced gate too.
+  "packages/daemon/test/working-tree-eol-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */
