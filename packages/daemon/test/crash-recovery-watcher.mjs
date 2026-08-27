@@ -37,7 +37,7 @@ const NOW = new Date("2026-06-11T12:00:00.000Z");
 const STABILITY_MS = 120_000; // 2 min — the injected stability window for these tests
 const at = (ms) => new Date(NOW.getTime() + ms);
 
-function makeEnv({ projectConfig = {} } = {}) {
+function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-crash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `cp-${Math.random().toString(36).slice(2, 8)}`;
@@ -53,7 +53,7 @@ function makeEnv({ projectConfig = {} } = {}) {
   const enqueued = [];
   const pty = { enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; } };
   const control = new OrchestrationControl();
-  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS });
+  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge });
   return { dbFile, db, projId, agentId, resumes, enqueued, control, watcher, resume };
 }
 
@@ -645,6 +645,57 @@ function cleanup(e) {
   const nudge = e.enqueued.find((x) => x.id === "wkr-16d");
   check("(16d) a CONSUMED blocked report (a manager reply already sent) gets the ordinary continue-nudge, not the re-state-your-blocker one",
     !!nudge && /continue your assigned task/i.test(nudge.text) && !/re-state your blocker/i.test(nudge.text));
+  cleanup(e);
+}
+
+// (17a) Card 9f7c59f1: when `enqueueDurableNudge` IS wired (production shape — index.ts passes
+// sessions.enqueueDurableNudge.bind(sessions)), a worker continuation nudge routes through IT, not the raw
+// `pty.enqueueStdin` this tick used to call directly (no MCP-seen gate, no durable give-up record). RED
+// under pre-9f7c59f1 code: `enqueueDurableNudge` would never be provided at all (the dep didn't exist), so
+// this call would have gone straight to `pty.enqueueStdin` regardless of what's wired here.
+{
+  const durableCalls = [];
+  const e = makeEnv({ enqueueDurableNudge: (id, role, text, taskId) => { durableCalls.push({ id, role, text, taskId }); } });
+  seedSession(e, "mgr-17a", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-17a", { role: "worker", parentSessionId: "mgr-17a", taskId: "t17a" });
+  die(e, "wkr-17a", at(1000));
+  e.watcher.tick(at(1100));
+  check("(17a) the worker nudge routes through enqueueDurableNudge, not raw pty.enqueueStdin",
+    durableCalls.length === 1 && durableCalls[0].id === "wkr-17a" && durableCalls[0].role === "worker" && durableCalls[0].taskId === "t17a" && /continue your assigned task/i.test(durableCalls[0].text));
+  check("(17a) raw pty.enqueueStdin is NOT also called for this same nudge (no double-dispatch)",
+    e.enqueued.length === 0);
+  cleanup(e);
+}
+
+// (17b) Same routing for the manager/platform re-orient nudge (the OTHER call site converted by 9f7c59f1).
+// Mirrors (11b)'s shape: a dead manager with a live worker has real stake, so the full nudge fires.
+{
+  const durableCalls = [];
+  const e = makeEnv({ enqueueDurableNudge: (id, role, text, taskId) => { durableCalls.push({ id, role, text, taskId }); } });
+  seedSession(e, "mgr-17b", { role: "manager" });
+  seedSession(e, "mgr-17b-wkr", { role: "worker", parentSessionId: "mgr-17b", processState: "live" });
+  die(e, "mgr-17b", NOW);
+  e.watcher.tick(at(100));
+  const nudge = durableCalls.find((x) => x.id === "mgr-17b");
+  check("(17b) the manager re-orient nudge ALSO routes through enqueueDurableNudge",
+    !!nudge && nudge.role === "manager" && /auto-recovered/i.test(nudge.text) && /re-check your workers/i.test(nudge.text));
+  check("(17b) raw pty.enqueueStdin is NOT also called for the manager nudge",
+    !e.enqueued.some((x) => x.id === "mgr-17b"));
+  cleanup(e);
+}
+
+// (17c) REGRESSION GUARD: with NO `enqueueDurableNudge` dep (every pre-existing hermetic test double,
+// throughout this whole file, above) the watcher falls back to the pre-9f7c59f1 raw `pty.enqueueStdin`
+// dispatch, byte-identical — this is what keeps every test (1)-(16d) above passing unmodified.
+{
+  const e = makeEnv(); // no enqueueDurableNudge — the default every other test in this file already uses
+  seedSession(e, "mgr-17c", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-17c", { role: "worker", parentSessionId: "mgr-17c", taskId: "t17c" });
+  die(e, "wkr-17c", at(1000));
+  e.watcher.tick(at(1100));
+  const nudge = e.enqueued.find((x) => x.id === "wkr-17c");
+  check("(17c) with no enqueueDurableNudge dep, the nudge still lands via raw pty.enqueueStdin (fallback)",
+    !!nudge && /continue your assigned task/i.test(nudge.text));
   cleanup(e);
 }
 

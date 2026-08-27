@@ -1197,6 +1197,13 @@ async function main(): Promise<void> {
   const crashRecoveryWatcher = new CrashRecoveryWatcher({
     db, control, pty, intervalMs: crashRecoveryMs,
     resume: (id) => { sessions.resume(id); return true; },
+    // Card 9f7c59f1: route this watcher's continuation nudges through the SAME MCP-seen-gated + durable
+    // dispatch `recoverCrashOrphanedWorkers` already uses, instead of the raw pty.enqueueStdin it used to
+    // call directly — see CrashRecoveryDeps.enqueueDurableNudge's own doc. NOT the same as
+    // `resumeFleetOnBoot`: that path's own `enqueueNudge` is MCP-seen-gated too, but deliberately NOT YET
+    // durable-on-give-up-exhaustion — see service.ts's `resumeFleetOnBoot` doc (durability bullet) and
+    // card 06ebbb78 (the filed follow-up to converge it).
+    enqueueDurableNudge: (id, role, text, taskId) => sessions.enqueueDurableNudge(id, role, text, taskId),
   });
   crashRecoveryWatcher.start();
   console.log(`[boot] crash-recovery watchdog on (tick ${crashRecoveryMs}ms)`);

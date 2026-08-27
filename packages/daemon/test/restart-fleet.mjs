@@ -138,10 +138,18 @@ try {
   const blockedW = `rf-blocked-${sfx}`;
   mkSession({ id: blockedW, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, taskId: `rf-blocked-task-${sfx}` });
   db.appendEvent({ id: `rf-blocked-evt-${sfx}`, ts: now, managerSessionId: id.mgrB, workerSessionId: blockedW, kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
+  // Card 9f7c59f1: this daemon_restart path used to never silence a `done`-awaiting-review worker either
+  // (unlike recoverCrashOrphanedWorkers, which always has) — RED under the pre-fix code: this worker would
+  // get the SAME generic "Continue your assigned task" nudge as any ordinary mid-work worker, even though
+  // its last report already stands unconsumed and there is nothing left for it to continue.
+  const doneW = `rf-done-${sfx}`;
+  mkSession({ id: doneW, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, taskId: `rf-done-task-${sfx}` });
+  db.appendEvent({ id: `rf-done-evt-${sfx}`, ts: now, managerSessionId: id.mgrB, workerSessionId: doneW, kind: "worker_report", detail: { status: "done", summary: "shipped it" } });
   const resumeSet = [
     ...fleet,
     { sessionId: deadW, role: "worker", parentSessionId: id.mgrB },
     { sessionId: blockedW, role: "worker", parentSessionId: id.mgrB },
+    { sessionId: doneW, role: "worker", parentSessionId: id.mgrB },
   ];
   const pendingSnap = { [id.wkrA1]: ["wkrA1 pending #1 (worker_report frame)", "wkrA1 pending #2"] };
   const intent = { reason: "deploy merged daemon code", managerSessionId: id.mgrA, resume: resumeSet, pending: pendingSnap, requestedAt: now };
@@ -151,10 +159,10 @@ try {
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
   await flush(); // let every deferred (manager/worker) continuation nudge's waitForMcpSeen().then(...) settle
 
-  check("(2) every non-dead session resumed (7)", result.resumed.length === 7 && !result.resumed.includes(deadW));
+  check("(2) every non-dead session resumed (8)", result.resumed.length === 8 && !result.resumed.includes(deadW));
   check("(2) the dead worker is in `failed`", result.failed.includes(deadW) && result.failed.length === 1);
   check("(2) the parked worker is reported skippedParked", result.skippedParked.includes(id.wkrA2) && result.skippedParked.length === 1);
-  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 8);
+  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 9);
 
   // Requester managerA: ONE message — its "code is now LIVE" re-prompt.
   const mgrAq = pty.getPending(id.mgrA);
@@ -197,6 +205,12 @@ try {
     blockedWq[0] === buildBlockedResumeNudgeBody(
       "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
     ) + RESUME_NUDGE_TAIL);
+  // Card 9f7c59f1: a worker whose LAST report is worker_report(done), still unconsumed, gets NO nudge at
+  // all on the daemon_restart path either — mirrors recoverCrashOrphanedWorkers's identical silence (its
+  // report already stands; there's nothing left for it to continue). RED under pre-9f7c59f1 code (it got
+  // the generic "Continue your assigned task" nudge here, same trap the blocked case above used to hit).
+  check("(2) a DONE-awaiting-review worker gets NO nudge at all on daemon_restart",
+    pty.getPending(doneW).length === 0);
 
   // ============================ (3) PROTECTION — full set keeps every project's worktree ===========
   // Two real repos, each with a CLEAN (0-commit, safe-to-discard) worktree of an EXITED worker — i.e.

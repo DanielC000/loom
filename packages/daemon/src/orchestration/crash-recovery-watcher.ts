@@ -74,6 +74,21 @@ export interface CrashRecoveryDeps {
   /** OPTIONAL: enqueue a cheap heads-up to a dead worker's live parent manager on give-up. The required,
    *  role-agnostic surface is the Mission-Control attention event + lastError; this is additive. */
   pty?: CrashRecoveryPty;
+  /**
+   * OPTIONAL: dispatch a post-resume continuation nudge through `SessionService.enqueueDurableNudge`
+   * (index.ts passes an arrow wrapper, `(id, role, text, taskId) => sessions.enqueueDurableNudge(id, role,
+   * text, taskId)`) instead of the bare `pty.enqueueStdin`
+   * this tick used to call directly for its worker/assistant/operator and manager/platform continuation
+   * nudges (card 9f7c59f1) — see this file's own class doc for why that raw call was a real, narrower
+   * instance of the exact gap `enqueueDurableNudge` exists to close: no `PtyHost.waitForMcpSeen` gate (a
+   * fresh MCP-client handshake can lose the race to an immediate `enqueueStdin`, same as `deferredNudge`'s
+   * own doc describes) and no durable give-up-exhaustion record. ABSENT (e.g. every existing hermetic test
+   * double that doesn't pass it) falls back to the pre-9f7c59f1 raw `pty.enqueueStdin` dispatch, byte-
+   * identical — additive, never a hard dependency a test double must opt into. The one-shot crash-loop
+   * heads-up below (`session_recovery_abandoned`) is DELIBERATELY NOT routed through this — see its own
+   * comment for why that one stays best-effort on purpose.
+   */
+  enqueueDurableNudge?: (sessionId: string, role: SessionRole, text: string, taskId: string | null) => void;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
   /** Stability window (ms) before a live resume counts as recovered (counter reset). Injectable for tests. */
@@ -213,10 +228,32 @@ export function isCrashRecoveryEligible(
 }
 
 /**
- * Crash-recovery watchdog. The complement of resumeFleetOnBoot: where THAT auto-resumes the whole fleet on
- * a daemon RESTART, THIS auto-recovers an ISOLATED session whose pty died UNEXPECTEDLY while the daemon
- * stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed. It acts on EITHER of two
- * durable triggers (see RECOVERY_TRIGGER_KINDS), sharing one bound:
+ * Crash-recovery watchdog. **The THIRD of the three resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT
+ * a claim these are the only such sites in the codebase.** `orchestration/wake.ts`, `orchestration/poll.ts`,
+ * and `orchestration/event-triggers.ts` each resume a not-live session and then enqueue too, independently,
+ * and are KNOWN, UNCONVERGED siblings this card never touched (`event-triggers.ts`'s own gap is carded
+ * separately — do NOT converge them here). See `SessionService.resumeFleetOnBoot`'s own doc for the full
+ * caveat and why "three" isn't a completeness claim.
+ * Where {@link SessionService.resumeFleetOnBoot} auto-resumes the whole fleet on a deliberate
+ * `daemon_restart`, and {@link SessionService.recoverCrashOrphanedWorkers} does the same for a crash / OS-
+ * restart / clean stop — the two are STRICTLY mutually exclusive per boot — THIS runs on EVERY boot
+ * regardless of which of those two fired, auto-recovering an ISOLATED session whose pty died UNEXPECTEDLY
+ * while the daemon stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed. Per-facet
+ * ruling against its two siblings:
+ *   - **report-state handling:** CONVERGED for the worker case — the worker branch below calls the SAME
+ *     {@link deriveAwaitingReview} the other two paths call, and gives a `blocked`/`done` worker the same
+ *     treatment (re-state-your-blocker nudge / silence, respectively — see the worker branch's own comment).
+ *   - **durability of the enqueue:** WAS a real, undeclared gap, CONVERGED by card 9f7c59f1 — this tick used
+ *     to call `pty.enqueueStdin` directly for its continuation nudges, with NEITHER the MCP-seen gate NOR
+ *     the durable give-up-exhaustion record its two siblings apply (via `enqueueNudge`/`enqueueDurableNudge`
+ *     respectively). Now routed through the SAME `SessionService.enqueueDurableNudge` `recoverCrashOrphanedWorkers`
+ *     uses, via the optional `CrashRecoveryDeps.enqueueDurableNudge` — see that field's own doc. The ONE
+ *     deliberate exception is the crash-loop escalation heads-up below (`session_recovery_abandoned`),
+ *     which stays on raw `pty.enqueueStdin` ON PURPOSE — see its own comment.
+ *   - **ordering:** N/A — this watcher has no cross-session ordering concept at all (it recovers one
+ *     isolated dead session per candidate; neither sibling's "resume the manager/requester first-or-last"
+ *     question applies to a single session with no fleet to sequence against).
+ * It acts on EITHER of two durable triggers (see RECOVERY_TRIGGER_KINDS), sharing one bound:
  *   • `session_died`              — an unexpected pty death (recordUnexpectedExit; intended stops + whole-
  *      daemon restarts are excluded — see there).
  *   • `worker_report_undelivered` — STRAND BACKSTOP (incident 22a44352): a worker reported `done` to a
@@ -249,7 +286,7 @@ export class CrashRecoveryWatcher {
   }
 
   tick(now: Date = new Date()): void {
-    const { db, resume, control, pty } = this.deps;
+    const { db, resume, control, pty, enqueueDurableNudge } = this.deps;
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
     const fileEvent = (s: { id: string; parentSessionId?: string | null; taskId?: string | null }, kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>): void => {
@@ -258,6 +295,15 @@ export class CrashRecoveryWatcher {
         managerSessionId: s.parentSessionId ?? s.id, workerSessionId: s.id, taskId: s.taskId ?? null,
         kind, detail,
       });
+    };
+    // Card 9f7c59f1: route a continuation nudge through the MCP-seen-gated + durable
+    // SessionService.enqueueDurableNudge when the caller wired it (production; index.ts), else fall back
+    // to the pre-9f7c59f1 raw `pty.enqueueStdin` — byte-identical for every existing hermetic test double
+    // that doesn't pass `enqueueDurableNudge`. See CrashRecoveryDeps.enqueueDurableNudge's own doc.
+    const dispatchNudge = (sessionId: string, role: SessionRole | null, text: string, taskId: string | null): void => {
+      if (enqueueDurableNudge && role) { enqueueDurableNudge(sessionId, role, text, taskId); return; }
+      if (!pty) return;
+      try { pty.enqueueStdin(sessionId, text); } catch { /* not ready yet — the resume stands */ }
     };
 
     // Candidate set (bf0b902c): derive it from ONE indexed query over the trigger kinds
@@ -369,7 +415,7 @@ export class CrashRecoveryWatcher {
       // (it can't see a resume's direct setBusy(false)). So nudge it to actually continue, mirroring
       // resumeFleetOnBoot's per-role continuation nudges. Ready-gated (host.ts queues it until the resumed
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
-      if (started && pty) {
+      if (started && (pty || enqueueDurableNudge)) {
         if (s.role === "worker" || s.role === "assistant" || s.role === "operator") {
           // Worker/assistant/operator nudges stay UNCONDITIONAL w.r.t. the stake-aware silencing below
           // (card c9e51581 scopes THAT to manager/platform only — none of the three has a board/idle-nudge
@@ -419,7 +465,7 @@ export class CrashRecoveryWatcher {
           // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
           // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
           if (note) {
-            try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+            dispatchNudge(s.id, s.role, note + RESUME_NUDGE_TAIL, s.taskId ?? null);
           }
         } else {
           // manager or platform — card c9e51581 (Path C extension of 61cc91c6): a manager/platform with NO
@@ -464,7 +510,7 @@ export class CrashRecoveryWatcher {
                 : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-check your ` +
                   `workers' state AND worktrees (some may need attention) and continue orchestrating from where ` +
                   `you left off.`;
-            try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+            dispatchNudge(s.id, s.role, note + RESUME_NUDGE_TAIL, s.taskId ?? null);
           }
         }
       }

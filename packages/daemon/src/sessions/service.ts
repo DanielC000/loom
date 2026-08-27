@@ -4413,8 +4413,14 @@ export class SessionService {
    * the same reasoning `enqueueDurableMessage`'s own doc gives for every other sentinel-sender call site:
    * `db.getSession("system")` returns undefined, so `handleGiveUpExhausted`'s sender-facing PARKED notice
    * is skipped, never thrown.
+   *
+   * Card 9f7c59f1: NOT `private` — also wired into `CrashRecoveryDeps.enqueueDurableNudge` (index.ts, at
+   * `CrashRecoveryWatcher` construction, via an arrow wrapper) so the THIRD resume-and-nudge path reuses
+   * this same MCP-seen-gated + durable dispatch instead of the raw `pty.enqueueStdin` it used to call
+   * directly — see that class's own doc for why its old dispatch was a real, if narrower, instance of the
+   * exact gap this method was built to close.
    */
-  private enqueueDurableNudge(id: string, role: SessionRole | null, text: string, taskId: string | null = null): void {
+  enqueueDurableNudge(id: string, role: SessionRole | null, text: string, taskId: string | null = null): void {
     const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind: "warning", taskId }); };
     if (this.usesOrchestrationMcp(role)) {
       void this.pty.waitForMcpSeen(id).then(dispatch).catch((e: unknown) => {
@@ -4429,7 +4435,51 @@ export class SessionService {
    * Boot-time fleet resume (the resume half of P1 17df54c5) — re-spawn the WHOLE captured fleet after a
    * `daemon_restart`, injecting NOTHING into the resume itself (the resume-injects-nothing invariant;
    * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
-   * dismiss, mode convergence). Continuation NUDGES are post-resume enqueues (a resumed session gets no
+   * dismiss, mode convergence).
+   *
+   * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED (read this before changing any one
+   * of the three in isolation) — NOT a claim these are the only sessionService/watcher sites that resume a
+   * not-live session and then enqueue.** `orchestration/wake.ts`, `orchestration/poll.ts`, and
+   * `orchestration/event-triggers.ts` each do the same shape too, independently, and are KNOWN,
+   * UNCONVERGED siblings this card never touched (`event-triggers.ts`'s own gap is carded separately) —
+   * report-resolution.ts's own header doc already tells this exact story once (card cfffeda6: a
+   * three-way enumeration that read as exhaustive and wasn't); don't repeat it by reading "three" here as
+   * a completeness claim. Of the three THIS doc block is about: this is the DELIBERATE-RESTART path
+   * (`daemon_restart`), STRICTLY mutually exclusive per boot with
+   * {@link SessionService.recoverCrashOrphanedWorkers} (the crash / OS-restart / clean-stop path —
+   * `index.ts`'s boot branch runs exactly one of the two); the third, `CrashRecoveryWatcher.tick`
+   * (`orchestration/crash-recovery-watcher.ts`), is a continuous RUNTIME per-session auto-resume that runs
+   * on every boot regardless of which of these two fired, recovering an isolated session that died while
+   * the daemon stayed healthy. All three answer genuinely different questions, so they are NOT expected to
+   * converge on everything — differences are ruled per-facet below, not assumed to be bugs:
+   *   - **report-state handling (`blocked`/`done`):** CONVERGED — all three call the same
+   *     {@link deriveAwaitingReview} (report-resolution.ts) and give a `blocked` worker its own
+   *     re-state-your-blocker nudge, and a `done` worker SILENCE (nothing left for it to continue; see the
+   *     worker branch below). `merge_rejected` never resolves a report, for all three, by the same shared
+   *     predicate.
+   *   - **worker nudge text (`blocked` case):** CONVERGED — all three build from the shared
+   *     `buildBlockedResumeNudgeBody` (orchestration/resume-nudge.ts).
+   *   - **durability of the enqueue itself:** INTENTIONALLY DIFFERENT for this path vs.
+   *     `recoverCrashOrphanedWorkers`, RULED — this function's continuation nudges route through
+   *     `enqueueNudge` (MCP-seen-gated for manager/worker/assistant, but NOT durable-on-give-up-exhaustion);
+   *     `recoverCrashOrphanedWorkers`'s route through `enqueueDurableNudge` (same MCP-seen gate, PLUS a
+   *     durable `session_message_queued`/give-up-remint record). Card 597903fc's own stated rationale for
+   *     adding that durability ("a boot-time notice ... must not vanish ... exactly the contended moment
+   *     [give-up exhaustion] is most likely") reads as though it should apply here too — a whole-fleet
+   *     `daemon_restart` is at least as contended as a crash-orphaned recovery — and no comment anywhere
+   *     claims the split is deliberate. **Left UNCONVERGED in card 9f7c59f1, on purpose:** converting this
+   *     function's 10 `enqueueNudge` call sites is a real, if mechanically simple, behavior change to the
+   *     daemon's own self-hosting deploy-restart path, touched by ~18 test files — outside what this
+   *     enumeration card judged safe to land silently alongside its other fixes. Flagged here as a NAMED,
+   *     likely-accidental gap for a dedicated follow-up card, not as "ruled intentional."
+   *   - **ordering:** INTENTIONAL, for a documented reason — this function resumes everyone EXCEPT the
+   *     requesting manager first, then the requester LAST (its own summary nudge needs the rest of the
+   *     fleet's resume outcome, e.g. `failed.length`, already computed). `recoverCrashOrphanedWorkers`
+   *     resumes each candidate's MANAGER before its own workers (a worker's manager must be live before the
+   *     worker un-archives into a parent that can see it) — see that function's own doc. `CrashRecoveryWatcher`
+   *     has no cross-session ordering at all: it recovers one isolated dead session per candidate, with no
+   *     "fleet" or "manager-then-workers" concept to order.
+   * Continuation NUDGES are post-resume enqueues (a resumed session gets no
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
@@ -4701,21 +4751,30 @@ export class SessionService {
         // per boot) — until this fix it never consulted report state at all, so a `blocked` worker got this
         // SAME generic "continue your assigned task" text ruling 2 says it must not get. Apply ruling 2 here
         // too, via the SAME shared `deriveAwaitingReview` the crash path calls, so both boot paths give a
-        // blocked worker identical treatment. Deliberately NOT also silencing the `done`-awaiting-review
-        // case on this path (the crash path does — card 959a5fb7) — that asymmetry PRE-DATES this card
-        // (959a5fb7 only ever touched the crash path either) and is being carded separately as the broader
-        // two-path convergence; widening this fix to cover it too would exceed this card's scope.
-        const { reportedState } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
-        this.enqueueNudge(
-          e.sessionId, e.role,
-          reportedState === "blocked"
-            ? buildBlockedResumeNudgeBody(
-                "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
-              ) + RESUME_NUDGE_TAIL + draftNote
-            : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
-              `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
-              `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
-        );
+        // blocked worker identical treatment.
+        //
+        // Card 9f7c59f1 (closing the gap the paragraph above used to leave open): a `done`-awaiting-review
+        // worker is now ALSO silenced here, mirroring recoverCrashOrphanedWorkers's identical branch (see
+        // its own doc, and deriveAwaitingReview's contract in report-resolution.ts) — its last report is an
+        // unconsumed `done`, it has nothing left to continue, and the report already stands; the manager's
+        // move is next, not the worker's. A lost draft is still new, actionable information (draftNote's
+        // own additive contract above) and is sent standalone rather than swallowed by this silence, exactly
+        // like the no-op manager/platform branch below does for the same reason.
+        const { reportedState, awaitingReview } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
+        if (awaitingReview && reportedState === "done") {
+          if (draftNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+        } else {
+          this.enqueueNudge(
+            e.sessionId, e.role,
+            reportedState === "blocked"
+              ? buildBlockedResumeNudgeBody(
+                  "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
+                ) + RESUME_NUDGE_TAIL + draftNote
+              : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
+                `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
+                `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
+          );
+        }
       } else if (e.role === "manager" || e.role === "platform") {
         const impact = wakeImpact(e.sessionId, e.role);
         // Card a1b79655: same ADDITIVE treatment as draftNote — a dropped cap-queued spawn intent is new,
@@ -4965,6 +5024,18 @@ export class SessionService {
    * `recoverStaleSessions()` snapshot. The caller invokes this ONLY when no RestartIntent was captured
    * this boot — the exit-75 path already recovers its own fleet (incl. these same workers) via
    * resumeFleetOnBoot, so running both would double-nudge the same sessions.
+   *
+   * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT a claim these are the only
+   * such sites** (`orchestration/wake.ts`/`poll.ts`/`event-triggers.ts` do the same shape too, and are
+   * KNOWN, UNCONVERGED siblings this card never touched — see `resumeFleetOnBoot`'s own doc for the full
+   * caveat and why "three" isn't repeated as a completeness claim here). Of the three THIS doc block is
+   * about: STRICTLY mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot} (the
+   * deliberate `daemon_restart` path — see ITS doc for the full per-facet ruling: report-state handling
+   * and worker nudge text are CONVERGED between the two; durability (`enqueueDurableNudge` here vs. plain
+   * `enqueueNudge` there) and ordering (manager-before-its-workers here vs. requester-resumed-last there)
+   * are each ruled separately there). The THIRD path, `CrashRecoveryWatcher.tick`, is the continuous
+   * runtime per-session auto-resume that runs on every boot regardless of which of these two fired — see
+   * its own doc for how it mirrors this function's report-state ruling on an isolated worker.
    *
    * Resumes each candidate's MANAGER first (`resume()` no-ops if already alive) — a worker whose manager
    * can't be resumed (dead transcript, gone worktree, superseded) is left UNTOUCHED in its clean
