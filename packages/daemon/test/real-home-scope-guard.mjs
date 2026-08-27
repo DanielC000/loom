@@ -148,8 +148,13 @@ function classifyFile(file) {
   return { reads, violations };
 }
 
-// ── Population sanity (per this card's own DoD, and the guard-authoring precedent throughout this
-// directory): prove the pattern isn't silently vacuous BEFORE trusting a clean scan. ──────────────────
+// ── Population sanity: prove the pattern isn't silently vacuous BEFORE trusting a clean scan (per this
+// card's own DoD). NOT "the guard-authoring precedent throughout this repo" — that claim describes this
+// file's own pattern, not the repo's: measured against STATIC_GUARD_REPO_PATHS (2026-08-27), only
+// deploy-staleness-fixture-guard.mjs cites this file by name (authored the same day), and 5 of the 9
+// listed guards carry some population-floor sanity check at all — mostly propagated from one author's
+// habit rather than a repo-wide convention (fixed-wait-witness-guard.mjs reaches the same property by an
+// unrelated mechanism, so it isn't even a case of copying this one). ──────────────────────────────────
 const files = walkTestFiles();
 const rawMentions = files
   .flatMap((f) => fs.readFileSync(path.join(TEST_DIR, f), "utf8").split("\n").filter((l) => l.includes("LOOM_REAL_HOME")))

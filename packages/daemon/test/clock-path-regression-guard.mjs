@@ -87,7 +87,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // and a line-numbered key would turn every such shift into a spurious NEW violation. Editing the flagged
 // line itself (renaming the variable, changing the literal prefix, adding/removing the pid suffix) is
 // exactly the moment a human is already looking at the site and should re-audit it — so invalidation and
-// the correct re-audit trigger coincide by construction, same as the precedent file.
+// the correct re-audit trigger coincide by construction, same as fixed-wait-negative-guard.mjs.
 //
 // ✅ POSITIVE CONTROL (run manually, not part of this file's own execution — pasted in the task report):
 //   1. `git show d1dddb65~1:packages/daemon/test/merge-spawn-tracked.mjs > packages/daemon/test/merge-spawn-tracked.mjs`
