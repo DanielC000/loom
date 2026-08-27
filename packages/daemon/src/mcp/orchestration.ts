@@ -19,6 +19,7 @@ import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spil
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
+import { computeGateTimingBand } from "../orchestration/gate-timing-band.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
@@ -253,7 +254,35 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "used its one-time auto-extend — `true` means a stall from here would be killed at the NEXT deadline, " +
       "not given another reprieve. Still not a " +
       "replacement for the completion nudge — check this when you're unsure whether to keep waiting, don't " +
-      "poll it on a timer."
+      "poll it on a timer. " +
+      "On a `settled` row with a recorded verdict, ALSO carries `timingBand?` (card 19c0ef1e) — a " +
+      "stratified comparison against this project's OWN gate-timing history, computed ONLY when this " +
+      "op's own `run-summary` row is found in the timing NDJSON (never fabricated otherwise, so its " +
+      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, testCount, " +
+      "testCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
+      "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
+      "dominates run duration more than population size does — a smaller pool at a bigger testCount can " +
+      "run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a category " +
+      "error, not a convenience). `testCount` starts as an EXACT match but widens outward to the nearest " +
+      "neighbouring testCount values when the exact match alone has fewer than a named floor (8) of clean " +
+      "samples — measured live: `testCount` increments on every single test file added or removed, so an " +
+      "exact-only match is statistically empty (n<5) for the large majority of real strata, emptiest right " +
+      "after someone changes the suite, exactly when a duration comparison matters most. `testCountSpan` " +
+      "(`[min,max]`) is the ACTUAL testCount range the band below was computed over — equal to " +
+      "`[testCount,testCount]` when no widening happened, a real range when it did; always read this " +
+      "before trusting `n` describes an exact match. `n` counts runs across `testCountSpan` (same " +
+      "`poolSize`, excluding every row this op's own opId ever wrote — a retried op can leave more than " +
+      "one) that were BOTH complete and zero-failure — `minSec`/`medianSec`/`maxSec` are computed over " +
+      "exactly that filtered population; `nUnfiltered` is the same (possibly widened) population before " +
+      "that filter, so you can see how much a few flaky/failing runs would otherwise have skewed the " +
+      "median slow; `nExact` is the clean count for the EXACT testCount match alone, reported regardless " +
+      "of whether widening happened, so a widened band never hides how thin the exact match actually was. " +
+      "`instrument`/`filter` name what produced the numbers (never read a duration without its producer " +
+      "— `run-summary.durationMs` is NOT the same clock as this tool's own `durationMs`/`totalDurationMs` " +
+      "above) and `filter` also states in plain text whether/why widening happened. " +
+      "`readWindowTruncated:true` means older history outside a bounded tail " +
+      "read was never considered — `n`/`nUnfiltered`/`nExact` may undercount the true population, never " +
+      "overcount it."
     : "Read-only status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
       "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
       "daemon's gate concurrency cap, actually executing, or has already reached a terminal state, WITHOUT " +
@@ -375,7 +404,34 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "gate-idle threshold is the real warning sign, not `elapsedMs`. `extended` (present, always " +
       "`true`/`false`, only while `queued`/`running`) tells you whether the CURRENT step has already used " +
       "its one-time auto-extend — `true` means a stall from here would be killed at the next deadline, not " +
-      "given another reprieve.";
+      "given another reprieve. " +
+      "On a `settled` row with a recorded verdict, ALSO carries `timingBand?` (card 19c0ef1e) — a " +
+      "stratified comparison against this project's OWN gate-timing history, computed ONLY when this " +
+      "op's own `run-summary` row is found in the timing NDJSON (never fabricated otherwise, so its " +
+      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, testCount, " +
+      "testCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
+      "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
+      "dominates run duration more than population size does — a smaller pool at a bigger testCount can " +
+      "run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a category " +
+      "error, not a convenience). `testCount` starts as an EXACT match but widens outward to the nearest " +
+      "neighbouring testCount values when the exact match alone has fewer than a named floor (8) of clean " +
+      "samples — measured live: `testCount` increments on every single test file added or removed, so an " +
+      "exact-only match is statistically empty (n<5) for the large majority of real strata, emptiest right " +
+      "after someone changes the suite, exactly when a duration comparison matters most. `testCountSpan` " +
+      "(`[min,max]`) is the ACTUAL testCount range the band below was computed over — equal to " +
+      "`[testCount,testCount]` when no widening happened, a real range when it did; always read this " +
+      "before trusting `n` describes an exact match. `n` counts runs across `testCountSpan` (same " +
+      "`poolSize`, excluding every row this op's own opId ever wrote — a retried op can leave more than " +
+      "one) that were BOTH complete and zero-failure — `minSec`/`medianSec`/`maxSec` are computed over " +
+      "exactly that filtered population; `nUnfiltered` is the same (possibly widened) population before " +
+      "that filter, so you can see how much a few flaky/failing runs would otherwise have skewed the " +
+      "median slow; `nExact` is the clean count for the EXACT testCount match alone, reported regardless " +
+      "of whether widening happened, so a widened band never hides how thin the exact match actually was. " +
+      "`instrument`/`filter` name what produced the numbers (never read a duration without its producer " +
+      "— `run-summary.durationMs` is NOT the same clock as `totalDurationMs`/`Σ(steps)` above) and " +
+      "`filter` also states in plain text whether/why widening happened. " +
+      "`readWindowTruncated:true` means older history outside a bounded tail read was never considered — " +
+      "`n`/`nUnfiltered`/`nExact` may undercount the true population, never overcount it.";
   server.registerTool(
     "gate_status",
     {
@@ -394,6 +450,20 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
         // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
         // needed here any more (card 8052977a's in-process cache/reclassification is removed).
+        // Card 19c0ef1e: only a settled row with a recorded verdict can even have a matching gate-timing
+        // NDJSON `run-summary` row to join against — best-effort and ADDITIVE (never fabricated, never
+        // able to fail this call): `computeGateTimingBand` itself already returns `undefined` on every
+        // "nothing to report" case (no NDJSON, opId outside the read window, a non-Loom gate command), and
+        // the outer catch here is belt-and-suspenders against an unexpected read/parse failure.
+        if (result.state === "settled" && result.outcome !== undefined) {
+          try {
+            const timingBand = await computeGateTimingBand(opId);
+            if (timingBand) return ok({ ...result, timingBand });
+          } catch {
+            // Advisory only — an observability read must never turn a real gate_status answer into an
+            // error. Fall through and return the plain result below.
+          }
+        }
         return ok(result);
       } catch (e) {
         return ok({ error: (e as Error).message });
