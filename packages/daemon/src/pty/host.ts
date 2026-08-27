@@ -7672,8 +7672,39 @@ export class PtyHost {
     // (just the repaste, assuming the clear landed) alongside `composerDirtyLen`'s unchanged `88606`
     // (assuming it didn't) — an honest range instead of one number silently picking neither story. This
     // does NOT resolve which of (a)/(b) actually happened; it only stops the number from claiming to.
+    //
+    // Card 4796f999: `b9b8f8db`'s ASSUMPTION above ("the composer still holds THIS message's own physical
+    // write") has no way to verify itself, and is invalidated the instant an INTERVENING generation's own
+    // clear-then-repaste (the `else if` branch below) fails to actually erase the terminal — CONFIRMED
+    // end-to-end from two real specimens (docs/investigations/f779b3da-giveup-redrain-race/findings.md):
+    // one a silent fusion of two messages' content, one a silently and permanently LOST message. Neither
+    // this branch's own code nor `3ce3fa39`'s ever checked the OTHER's precondition.
+    // THE FIX reuses `composerDirtyLenBelieved` (card c148f118, see its own doc above) — it already tracks
+    // exactly the signal needed and was simply never consulted here: `composerDirtyLenBelieved ===
+    // composerDirtyLen` means no OTHER generation's clear is currently unresolved, i.e. nothing has
+    // touched the composer since THIS message's own last write — Enter-only is genuinely safe. A gap
+    // between them means an intervening clear's outcome is unverified, and this redelivery must NOT trust
+    // whatever is actually sitting in the composer — fall through to the full clear+repaste branch below
+    // instead, which re-pastes THIS redelivery's own real body: `text` here is `joinSubmittedText(drained,
+    // …)` over the SAME `drained` array passed through as `origin`, so it always CONTAINS this redelivery's
+    // own body. (It is not necessarily EXCLUSIVELY this message's body — `drainPending`'s run-collection
+    // can splice several entries into one `drained`/`origin` for a `"warning"`-kind head, or with
+    // `coalesceAgentMessages` on; only the default one-per-turn `"agent"`-kind splice is guaranteed
+    // single-entry. Either way `text` still carries this redelivery's real content, which is what the
+    // safety of this fallback actually rests on.) Per this card's own DoD: a correct fallback matters more
+    // than avoiding the re-paste — an unnecessary backspace+repaste is cheap; silently fusing or losing
+    // another message's content is not.
+    // ⚠️ BOUNDED, not closed, by the SAME known gap `a6c1d413` already tracks: `composerDirtyLenBelieved`
+    // and `composerDirtyLen` are reset TOGETHER by `composerDirtyMarkedForGen`'s single-scalar confirm gate
+    // (see `clearComposerDirtyOnConfirm`), which can zero an EARLIER, still-genuinely-unresolved
+    // contribution when a LATER generation alone confirms. If that fires wrongly here, both fields read 0
+    // together, the gap this fix checks for reads as "nothing to doubt" when there still is, and Enter-only
+    // fires anyway — but that is NEVER worse than today's unconditional Enter-only, only less protective
+    // than this fix otherwise is. Do not read a green here as `a6c1d413` also being fixed; it isn't, and
+    // this card does not widen scope to fix it.
     const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
-    if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery) {
+    const composerBelievedTrustworthy = live.composerDirtyLenBelieved === live.composerDirtyLen;
+    if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery && composerBelievedTrustworthy) {
       // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
       // the turn was submitted, i.e. the composer is now genuinely empty — see composerDirtyLenClearedByGen's
       // doc. True regardless of whether we backspaced or not; the confirmation is what proves it either way.
@@ -7684,6 +7715,10 @@ export class PtyHost {
       const reassertWrittenAt = Date.now();
       this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
     } else if (live.composerDirtyLen > 0 && live.composerLen === 0) {
+      // Card 4796f999: this branch now ALSO catches a give-up redelivery whose composer trust is broken
+      // (isGiveUpRedelivery true but composerBelievedTrustworthy false, above) — `text` here is still this
+      // redelivery's own real body (see the comment above `isGiveUpRedelivery`), so the backspace+repaste
+      // below correctly re-asserts it instead of blindly trusting whatever the composer currently holds.
       const dirty = live.composerDirtyLen;
       // Stamp WHICH generation is attempting this clear — the confirming-hook sites only reset
       // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
@@ -8052,6 +8087,15 @@ export class PtyHost {
    * way `submit()`'s own dirty-branch stamps it, so a genuine confirmation correctly clears
    * `composerDirtyLen` through the SAME gated path every other clear in this file uses — this call does
    * not invent a new clear mechanism.
+   *
+   * ⚠️ Card 4796f999: DELIBERATELY does NOT take `submit()`'s own `composerDirtyLenBelieved ===
+   * composerDirtyLen` trust check before this bare Enter — this is a human/manager-initiated "press Enter
+   * and see what's actually there" affordance (`worker_flush`), not an automated redelivery guessing at
+   * what the composer holds. Submitting whatever is genuinely sitting there IS the point of an operator
+   * flush; gating it on the same trust signal would silently swap a requested action for a repaste nobody
+   * asked for. So the "exact mechanism" claim above is about the verify-and-retry LADDER only, not the
+   * trust gate submit()'s own give-up redelivery now adds ahead of it — this call stays a bare Enter-only
+   * reassert regardless of composer trust.
    *
    * Does NOT generalize into "this always recovers a stranded worker" (DoD-5) — it is exactly the
    * press-Enter remedy, nothing more; a worker whose composer holds genuinely lost/corrupted state is

@@ -178,18 +178,50 @@ try {
     // THE POSITIVE CONTROL (this check is only meaningful if it CAN fail): assert against the ORIGINAL,
     // still-unbounded formula the incident measured — backspace(priorDirty) + repaste(current), compounding
     // every cycle — to prove this specific run genuinely drove multiple redelivery cycles (not just one).
-    check("(1) POSITIVE CONTROL: this run drove at least 3 distinct generations (multiple redelivery cycles actually happened)",
-      genSizes.size >= 3);
+    //
+    // Card 4796f999 CODE REVIEW FINDING: raised from >=3 to >=4. A run truncated to exactly 3 generations
+    // (a slow/loaded host losing one cycle to this suite's own 15s wall-clock window) would otherwise PASS
+    // this control while the FIX check below ALSO passes on the fully-defective (pre-b9b8f8db) code — see
+    // the measured three-tree series in that check's own comment: the pre-b9b8f8db defect's own 3-generation
+    // max (6237 B) clears the fix check's bound too, so a truncated run must fail LOUDLY here instead of
+    // silently passing with the defect fully present.
+    check("(1) POSITIVE CONTROL: this run drove at least 4 distinct generations (multiple redelivery cycles actually happened)",
+      genSizes.size >= 4);
 
     // THE FIX ITSELF: the largest single-generation write must be bounded to roughly "one real fresh paste
     // plus a small fixed clear-prefix overhead" — NEVER the ever-growing multiple-of-the-original the
-    // incident measured (4x in that live specimen). A generous bound (3x the kickoff length) still easily
-    // distinguishes "bounded" from "compounding": an unfixed system run for this many cycles would exceed
-    // it comfortably (a single re-mint's own full clear+repaste plus the ORIGINAL's own dirty contribution
-    // is already ~2x; a fixed regression would keep growing past that on every further cycle).
+    // incident measured (4x in that live specimen).
+    //
+    // Card 4796f999 (2026-08-27): bumped from 3x to 3.5x, and the positive control above from >=3 to >=4 —
+    // NEITHER alone is enough; both together are what keeps this a real discriminator. Code review built
+    // the actual positive control this suite lacked: forced `isGiveUpRedelivery = false` in `dist` to
+    // resurrect the ORIGINAL pre-b9b8f8db defect and measured all three trees against this SAME suite,
+    // KICKOFF = 2031 B, series reproduced identically across runs:
+    //   POST-FIX (this card)       gens [2083, 52, 4166, 6237]   max 6237 B = 3.07x
+    //   PRE-4796f999 (b9b8f8db)    gens [2083, 52, 4166,   52]   max 4166 B = 2.05x
+    //   PRE-b9b8f8db (THE DEFECT) gens [2083, 4166, 6237, 8308]  max 8308 B = 4.09x
+    // The card's own legitimate fallback (3.07x) is real: this suite's StrayOutputPtyHost provokes a mix
+    // of GIVE-UP SUPPRESSED/RECOVERY on EVERY Enter attempt — exactly the adversarial shape where an
+    // intervening generation's own clear-then-repaste is left genuinely unresolved, and card 4796f999 made
+    // a give-up REDELIVERY verify composer trust (composerDirtyLenBelieved === composerDirtyLen) before
+    // taking the Enter-only shortcut, falling back to a real clear+repaste of ITS OWN body whenever that
+    // trust is broken — see submit()'s own doc. Confirmed STABLE (not a further-compounding regression):
+    // re-run with the stress window extended 3x (15s -> 45s, a scratch probe, not committed) and the max
+    // never exceeded 6237 B — the pre-existing chainDepth/requeue-budget mechanism (unrelated to this card)
+    // permanently parks the kickoff after its one re-mint's own second exhaustion, so there is nothing left
+    // to retry past 4 generations, let alone compound further.
+    // ⚠️ 4x (the first-cut bound) was WRONG: the defect's own max (8308 B) sits only 184 B (2.3%) below a
+    // 4x bound of 8124 B — the guard would have been pinned to the defect's own asymptote, discriminating
+    // only because the re-mint's `[loom:possible-duplicate root:<uuid>]` wrapper happens to add exactly
+    // enough bytes; reword that tag or shorten the root id and the guard goes silently blind, no test ever
+    // failing. 3.5x (7108.5 B) instead gives the legitimate 3.07x fallback 12.3% headroom and catches the
+    // defect's 4.09x with 16.9% margin — balanced against BOTH real trees, not pinned to either one. See
+    // this card's own regression suite (pty-enter-only-verifies-composer-trust.mjs scenario 3) for the
+    // direct, isolated proof that the single-message-no-intervening-clear case (the scenario b9b8f8db
+    // itself targets) remains completely untouched: Enter-only, body written exactly once, zero backspaces.
     check(`(1) THE FIX: the composer STOPS GROWING — the largest single-generation write (${maxGenBytes} B) stays "` +
-      `well under 3x the kickoff body (${KICKOFF.length * 3} B), never compounding cycle over cycle`,
-      maxGenBytes < KICKOFF.length * 3);
+      `well under 3.5x the kickoff body (${KICKOFF.length * 3.5} B), never compounding cycle over cycle`,
+      maxGenBytes < KICKOFF.length * 3.5);
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
     try { db.close(); } catch { /* ignore */ }
