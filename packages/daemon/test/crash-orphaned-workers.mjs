@@ -81,6 +81,7 @@ const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } = await import
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { snapshotAndArchiveRecovered } = await import("../dist/sessions/boot-backstop.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } = await import("../dist/orchestration/resume-nudge.js");
 
 // Capture console.log/warn (the exclusion + resume-failure reasons are logged, never silent) — restore
 // the real functions in `finally` so genuine test output still shows.
@@ -909,6 +910,17 @@ try {
     !pty.getPending(id15.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
   check("(15) the worker DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
     pty.getPending(id15.wkr).some((m) => m.includes("[loom:crash-recovered]") && /blocked/i.test(m) && /re-state your blocker/i.test(m)));
+  // card cfffeda6 (DoD-3): a loose regex can't catch wording DRIFT between this path's copy and the
+  // daemon-restart/watchdog copies — pin the shared builder's exact wording. bootDiagnosticsClause is
+  // genuinely dynamic (a real timestamp) so only THAT slice is shape-checked, not byte-compared.
+  {
+    const prefix15 = "[loom:crash-recovered] The daemon crashed and Loom auto-resumed you on relaunch.";
+    const bodyNoExtra15 = buildBlockedResumeNudgeBody(prefix15, "");
+    const msg15 = pty.getPending(id15.wkr).find((m) => m.includes("[loom:crash-recovered]") && /re-state your blocker/i.test(m));
+    check("(15) the nudge body is byte-identical to buildBlockedResumeNudgeBody's output (boot-diagnostics clause aside)",
+      !!msg15 && msg15.startsWith(bodyNoExtra15) && msg15.endsWith(RESUME_NUDGE_TAIL) &&
+      /^ Boot started .+\.$/.test(msg15.slice(bodyNoExtra15.length, msg15.length - RESUME_NUDGE_TAIL.length)));
+  }
 
   // (15b) ALSO FIX (review round): the clean-stop variant of the blocked nudge was unexercised — every
   // sibling branch (generic continue-nudge) has a clean-stop/[loom:daemon-restarted] test, this one didn't.
@@ -924,6 +936,15 @@ try {
     pty.getPending(id15b.wkr).some((m) => m.includes("[loom:daemon-restarted]") && /blocked/i.test(m) && /re-state your blocker/i.test(m)));
   check("(15b) CLEAN-STOP variant: it still does NOT get the generic continue-your-task nudge",
     !pty.getPending(id15b.wkr).some((m) => /continue your assigned task/i.test(m)));
+  // card cfffeda6 (DoD-3): same pin as (15), for the OTHER cleanStop branch's copy.
+  {
+    const prefix15b = "[loom:daemon-restarted] The daemon was stopped and restarted (not a crash).";
+    const bodyNoExtra15b = buildBlockedResumeNudgeBody(prefix15b, "");
+    const msg15b = pty.getPending(id15b.wkr).find((m) => m.includes("[loom:daemon-restarted]") && /re-state your blocker/i.test(m));
+    check("(15b) the nudge body is byte-identical to buildBlockedResumeNudgeBody's output (boot-diagnostics clause aside)",
+      !!msg15b && msg15b.startsWith(bodyNoExtra15b) && msg15b.endsWith(RESUME_NUDGE_TAIL) &&
+      /^ Boot started .+\.$/.test(msg15b.slice(bodyNoExtra15b.length, msg15b.length - RESUME_NUDGE_TAIL.length)));
+  }
 
 } finally {
   console.log = realLog;

@@ -25,7 +25,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
 import { CrashRecoveryWatcher, recordUnexpectedExit, recordUndeliveredReport } from "../dist/orchestration/crash-recovery-watcher.js";
-import { RESUME_NUDGE_TAIL } from "../dist/orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } from "../dist/orchestration/resume-nudge.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 import { SESSION_ROLES } from "@loom/shared";
@@ -590,6 +590,15 @@ function cleanup(e) {
   check("(16a) a blocked-and-unresolved worker does NOT get the generic continue-your-task nudge", !nudge || !/continue your assigned task/i.test(nudge.text));
   check("(16a) it DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
     !!nudge && /blocked/i.test(nudge.text) && /re-state your blocker/i.test(nudge.text));
+  // card cfffeda6 (DoD-3): a loose /re-state your blocker/i match cannot detect wording DRIFT between the
+  // four call sites that build this sentence — pin the SHARED CONSTANT itself, so a divergent copy (one
+  // that reworded this path without going through buildBlockedResumeNudgeBody, or without updating it)
+  // fails this exact-text check even though it would still pass the loose regex above.
+  const expectedBody = buildBlockedResumeNudgeBody(
+    "[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it.",
+  );
+  check("(16a) the nudge body is BYTE-IDENTICAL to buildBlockedResumeNudgeBody's output (not just regex-shaped)",
+    !!nudge && nudge.text === expectedBody + RESUME_NUDGE_TAIL);
   cleanup(e);
 }
 

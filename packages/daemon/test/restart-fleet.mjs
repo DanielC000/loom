@@ -32,6 +32,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } = await import("../dist/orchestration/resume-nudge.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -190,6 +191,12 @@ try {
     blockedWq.length === 1 && !/continue your assigned task/i.test(blockedWq[0]));
   check("(2) it DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
     /worker_report\(blocked\)/.test(blockedWq[0]) && /re-state your blocker/i.test(blockedWq[0]) && blockedWq[0].includes("[loom:daemon-restarted]"));
+  // card cfffeda6 (DoD-3): a loose regex can't catch wording DRIFT between this path's copy and the crash
+  // path's/watchdog's copies — pin the shared constant itself so a divergent re-wording fails here.
+  check("(2) the blocked nudge body is BYTE-IDENTICAL to buildBlockedResumeNudgeBody's output",
+    blockedWq[0] === buildBlockedResumeNudgeBody(
+      "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
+    ) + RESUME_NUDGE_TAIL);
 
   // ============================ (3) PROTECTION — full set keeps every project's worktree ===========
   // Two real repos, each with a CLEAN (0-commit, safe-to-discard) worktree of an EXITED worker — i.e.

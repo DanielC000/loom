@@ -47,7 +47,7 @@ import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestrati
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
-import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
@@ -4709,10 +4709,9 @@ export class SessionService {
         this.enqueueNudge(
           e.sessionId, e.role,
           reportedState === "blocked"
-            ? `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed. Your last ` +
-              `report to your manager was worker_report(blocked) — you are still waiting on an answer, not ` +
-              `mid-work. Re-state your blocker to your manager (worker_report again) rather than resuming the ` +
-              `task as if nothing happened.` + RESUME_NUDGE_TAIL + draftNote
+            ? buildBlockedResumeNudgeBody(
+                "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
+              ) + RESUME_NUDGE_TAIL + draftNote
             : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
               `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
               `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
@@ -5127,14 +5126,14 @@ export class SessionService {
               this.enqueueDurableNudge(
                 w.workerSessionId, "worker",
                 cleanStop
-                  ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash). Your last ` +
-                    `report to your manager was worker_report(blocked) — you are still waiting on an answer, ` +
-                    `not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
-                    `resuming the task as if nothing happened.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
-                  : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch. Your last ` +
-                    `report to your manager was worker_report(blocked) — you are still waiting on an answer, ` +
-                    `not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
-                    `resuming the task as if nothing happened.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL,
+                  ? buildBlockedResumeNudgeBody(
+                      "[loom:daemon-restarted] The daemon was stopped and restarted (not a crash).",
+                      bootDiagnosticsClause,
+                    ) + RESUME_NUDGE_TAIL
+                  : buildBlockedResumeNudgeBody(
+                      `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch.`,
+                      bootDiagnosticsClause,
+                    ) + RESUME_NUDGE_TAIL,
                 this.db.getSession(w.workerSessionId)?.taskId ?? null,
               );
             } catch { /* not ready yet — the resume stands */ }

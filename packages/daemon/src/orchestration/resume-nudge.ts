@@ -80,3 +80,29 @@ export const DRAFT_LOSS_NOTE =
   'draft did NOT survive the restart. If it comes up, or you see any "[Pasted text #N]"-style mention with ' +
   'no real content behind it, do not guess at what it said — tell whoever is asking that it was lost in the ' +
   'restart and ask them to resend it.)';
+
+/**
+ * The shared body of the "you reported blocked, don't resume as if nothing happened" nudge (card
+ * cfffeda6, review follow-up to db05e657/24ed1edc). `deriveAwaitingReview` (report-resolution.ts)
+ * unified WHETHER a worker resumes into this branch, but the resume TEXT itself stayed four independent
+ * literal copies across three call sites — the daemon-restart boot path, the crash boot path's two
+ * `cleanStop` variants, and the crash-recovery watchdog's isolated-resume path (each in `sessions/
+ * service.ts` or `orchestration/crash-recovery-watcher.ts`) — so a re-wording on one path could silently
+ * drift from the others with nothing to catch it. This function is now the ONE place that sentence is
+ * written.
+ *
+ * `prefix` carries everything that's genuinely specific to the call site — the `[loom:tag]` and the
+ * lead-in sentence describing HOW the daemon/session came back (e.g. "The daemon was rebuilt + restarted
+ * and you were resumed.", or "Your session died unexpectedly and Loom auto-resumed it.") — and is
+ * prepended verbatim, with a separating space. `extra` is appended after the final period with NO
+ * separator (matching every existing call site's own concatenation, e.g. the boot-diagnostics clause,
+ * which already opens with its own leading space); omit it where a call site has nothing to add.
+ * Deliberately does NOT include {@link RESUME_NUDGE_TAIL} or `draftNote` — callers append those
+ * themselves, since not every call site attaches them the same way (the watchdog path appends
+ * RESUME_NUDGE_TAIL to the built note afterward rather than inline).
+ */
+export function buildBlockedResumeNudgeBody(prefix: string, extra = ""): string {
+  return `${prefix} Your last report to your manager was worker_report(blocked) — you are still waiting ` +
+    `on an answer, not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
+    `resuming the task as if nothing happened.${extra}`;
+}

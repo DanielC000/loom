@@ -3,7 +3,7 @@ import { resolveConfig, type SessionRole, type OrchestrationEvent } from "@loom/
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { deriveAwaitingReview } from "./report-resolution.js";
-import { RESUME_NUDGE_TAIL } from "./resume-nudge.js";
+import { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } from "./resume-nudge.js";
 import { isNoOpManagerWake } from "./restart.js";
 import { computeWakeImpact } from "./wake-impact.js";
 
@@ -392,10 +392,9 @@ export class CrashRecoveryWatcher {
               // Mirrors recoverCrashOrphanedWorkers's identical `blocked` branch (sessions/service.ts): the
               // worker stopped and asked its manager for something, and the manager hasn't answered yet — it
               // CAN'T continue. A distinct nudge asks it to re-state its blocker, not to carry on.
-              note = `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it. Your last ` +
-                `report to your manager was worker_report(blocked) — you are still waiting on an answer, not ` +
-                `mid-work. Re-state your blocker to your manager (worker_report again) rather than resuming ` +
-                `the task as if nothing happened.`;
+              note = buildBlockedResumeNudgeBody(
+                "[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it.",
+              );
             } else if (awaitingReview && reportedState === "done") {
               // NAMED DECISION (the card requires this be explicit, not accidental): SILENCE, matching the
               // boot path's identical done-awaiting-review case (recoverCrashOrphanedWorkers's `if

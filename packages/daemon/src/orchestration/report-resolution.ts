@@ -45,15 +45,29 @@ import type { OrchestrationEvent } from "@loom/shared";
  * a manager is least equipped to notice the gap itself. Adding a new resolving event kind here should be
  * checked against BOTH consumers' actual failure directions, not just the original one.
  *
- * A THIRD site reads a related-but-narrower shape and deliberately does NOT call {@link deriveAwaitingReview}
- * or this allowlist: `SessionService.classifyIdleWorker`'s `ackedSince` local (sessions/service.ts) — it
- * answers "has this worker's report been directly acknowledged", for STRANDED-worker detection, not "is a
- * manager still awaiting review". Two real differences, not an oversight: it also treats `progress` as a
- * reportable status (this allowlist's callers only ever care about `done`/`blocked`), and its ack check is
- * a 2-kind subset (`message_worker`/`redirect_worker` only) — no `merge_done`/`recycle_begin`/`stop_worker`,
- * since a worker that's about to be merged/recycled/stopped isn't the "still working, still stranded" case
- * this classifier is asking about. Don't fold it into `deriveAwaitingReview` — it is a genuinely different
- * question — but a change to what "resolves" a report here is worth a glance at that site too.
+ * OTHER sites read related-but-narrower shapes and deliberately do NOT call {@link deriveAwaitingReview}
+ * or this allowlist — each answers a genuinely different question, so none is a candidate to fold in, but
+ * each is a place a change to what "resolves" a report here is worth checking against (card cfffeda6:
+ * this used to name only the first of these three, which read as an exhaustive list and wasn't — exactly
+ * the drift this card family exists to catch; enumerate here rather than re-claim completeness):
+ *   - `SessionService.classifyIdleWorker`'s `ackedSince` local (sessions/service.ts) — answers "has this
+ *     worker's report been directly acknowledged", for STRANDED-worker detection, not "is a manager still
+ *     awaiting review". It also treats `progress` as a reportable status (this allowlist's callers only
+ *     ever care about `done`/`blocked`), and its ack check is a 2-kind subset (`message_worker`/
+ *     `redirect_worker` only) — no `merge_done`/`recycle_begin`/`stop_worker`, since a worker about to be
+ *     merged/recycled/stopped isn't the "still working, still stranded" case this classifier asks about.
+ *   - `SessionService.workerReportedComplete` (sessions/service.ts) — the merge gate's own raw scan for
+ *     the worker's MOST RECENT `worker_report` status (done/blocked, else null), used to tell an orphaned
+ *     commit-to-main (0-ahead branch while the worker claimed work) from a genuine empty no-op. It never
+ *     looks past that one event for a resolving kind at all — it isn't answering "still awaiting review",
+ *     it's answering "did this worker ever claim to be finished".
+ *   - The auto-recovery re-report dedupe scan (sessions/service.ts, `reportWorker`) — walks a worker's
+ *     history for its last `worker_report` on the SAME task plus whether a `session_resume_attempt` and/or
+ *     `message_worker`/`redirect_worker` happened since, to collapse a crash-loop's byte-identical repeat
+ *     reports into one. It's asking "is this report a stale echo of one I already saw", not "is a manager
+ *     still awaiting review" — a genuinely different predicate over an overlapping but not identical event
+ *     set (resume attempts matter here and don't to {@link deriveAwaitingReview}; recycle/stop don't matter
+ *     here and do there).
  *
  * `message_worker`/`redirect_worker` are a PROXY for the doc's actual stated condition ("resumes a
  * turn"), not the thing itself — Loom records the SEND here, not a confirmed turn resumption. Right in
