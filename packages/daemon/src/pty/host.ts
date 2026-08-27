@@ -2819,7 +2819,16 @@ interface Live {
   // merely more-recent BENIGN one (e.g. this field's own "not an established loss" reading). A
   // non-blocking `warning` surfaced at merge-confirm time (an ACTION a manager was already taking),
   // additive to this worker_list/worker_status pull surface, never a replacement for it.
-  lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number } | null;
+  // Card d0952a73: `explainedBenign` threads the SAME `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/
+  // `confirmedWrapperAwareFusion` verdict the session-facing notice below already branches on
+  // (deliverHook, ~host.ts:6012-6036) onto this manager-facing pull surface — until this card that
+  // classification was computed and then DISCARDED: `worker_status`/`worker_list` showed only the raw
+  // replay (the alarm) with no way to tell it apart from a genuinely UNEXPLAINED one (the same alarm with
+  // no acquittal). `null` means no independent classifier explained this replay as benign — it stays exactly
+  // as loud as an established/possible loss, unchanged from before this field existed. Set at the SAME
+  // detection point as the rest of this object, once the three `confirmed*` locals it reads are available
+  // (see the assignment site's own doc for why the assignment moved rather than the locals).
+  lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null } | null;
   // Card f5f6515a DoD-4: the SENDER-directed arm for a FUSED match — `lastMismatchReplay` above only ever
   // fires on a byte-for-byte match against ONE single prior generation's own write; it stays null for a
   // mismatch whose reported text is a CONCATENATION of more than one generation's writes (the composer
@@ -5805,13 +5814,17 @@ export class PtyHost {
                 // Card 68459420 — DoD-1: the SENDER-directed arm. When `replayedEntry` is found, the
                 // notice's own replayNote below already asserts this as a replay of a prior generation —
                 // an ESTABLISHED loss, not a possible one — but the RECIPIENT can never verify that: it
-                // only ever sees what arrived, never what was intended for it. Record it here (read-only
+                // only ever sees what arrived, never what was intended for it. Record it (read-only
                 // PULL surface, see getLastMismatchReplay) so the party who CAN act — this session's
                 // manager/parent, via worker_list/worker_status — learns of it the next time it already
                 // looks, per DoD-4 (a precondition at the point of use beats a longer advisory).
-                if (replayedEntry !== undefined) {
-                  live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now() };
-                }
+                // Card d0952a73: the ACTUAL `live.lastMismatchReplay` assignment moved past
+                // `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`
+                // below (it used to fire right here, unconditionally on `replayedEntry !== undefined`,
+                // BEFORE any of those three locals existed) — this pull surface needs their verdict to
+                // populate its own `explainedBenign` discriminant, and none of the three exists yet at
+                // this point in the block. Nothing between here and there reads `live.lastMismatchReplay`,
+                // so moving the write is safe; see the assignment's own new site for the field it sets.
                 // Card f5f6515a DoD-4: the FUSED counterpart to the single-entry replay above — reuses the
                 // SAME `accumulation` result `detectComposerAccumulation` already computed (no second
                 // matcher), captured ONCE here and reused below for BOTH the pull-surface field and the
@@ -5891,6 +5904,25 @@ export class PtyHost {
                   // `checkPromptMismatchUnresolved` timer for either finds it and stays silent.
                   live.mismatchResolvedGens.add(confirmedWrapperAwareFusion.recognizedGen);
                   live.mismatchResolvedGens.add(live.submitGeneration);
+                }
+                // Card d0952a73: the actual `live.lastMismatchReplay` write, moved here (see the DoD-1
+                // comment above, where it used to fire) so `explainedBenign` can read the SAME three
+                // `confirmed*` verdicts the session-facing notice below already branches on
+                // (`confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`) —
+                // no new detection, just threading an already-computed classification onto a field that
+                // used to discard it. `confirmedFusion`/`confirmedDivergedPrior` are deliberately excluded
+                // from this discriminant: both REQUIRE `replayedEntry === undefined` (see their own
+                // conditions above), so on this `replayedEntry !== undefined` branch they are always null
+                // and could never be the explanation for THIS replay. `null` — no independent classifier
+                // fired — leaves this exactly as loud as before the field existed: an unexplained replay
+                // still reads as an unresolved possible/established loss on every consumer of this field.
+                if (replayedEntry !== undefined) {
+                  const explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null =
+                    confirmedWrapperDeficit ? "wrapper-deficit"
+                    : confirmedAnsiStripDeficit ? "ansi-strip"
+                    : confirmedWrapperAwareFusion ? "wrapper-aware-fusion"
+                    : null;
+                  live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now(), explainedBenign };
                 }
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The

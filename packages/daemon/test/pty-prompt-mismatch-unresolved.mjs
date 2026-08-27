@@ -323,6 +323,12 @@ try {
     // (a timer that WOULD have armed on the replay condition alone stays unarmed).
     check("17: sanity — the recognized-replay shape fired (gen=1's own bare write matched)",
       host.getLastMismatchReplay(sid)?.gen === 2 && host.getLastMismatchReplay(sid)?.replayedGen === 1);
+    // Card d0952a73 DoD-4, positive polarity: this specimen is BOTH a recognized replay AND a confirmed
+    // wrapper-deficit (by construction — see this scenario's own header comment) — `lastMismatchReplay`
+    // must now carry `explainedBenign:"wrapper-deficit"`, threading the SAME classification the
+    // session-facing notice below already gets right, instead of discarding it as before this card.
+    check("17b: card d0952a73 — a confirmed wrapper-deficit replay reports explainedBenign:\"wrapper-deficit\"",
+      host.getLastMismatchReplay(sid)?.explainedBenign === "wrapper-deficit");
 
     // RED-PROOF: no timer was armed for this mismatch at all — checked SYNCHRONOUSLY, immediately, no wait
     // needed (this is what actually distinguishes the pre-fix vs post-fix code: pre-fix this set would hold

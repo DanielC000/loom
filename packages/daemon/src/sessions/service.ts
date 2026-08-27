@@ -1129,10 +1129,21 @@ function composerIntegrityWarning(pty: PtyHost, workerSessionId: string): string
   const candidates: Array<{ gen: number; detectedAt: number; text: string }> = [];
   const replay = typeof pty.getLastMismatchReplay === "function" ? pty.getLastMismatchReplay(workerSessionId) : undefined;
   if (replay) {
-    candidates.push({
-      gen: replay.gen, detectedAt: replay.detectedAt,
-      text: `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — not an established loss (a later generation may still fuse it back in whole); if generation ${replay.replayedGen}'s own turn already ran, check whether you're about to see it acted on a second time`,
-    });
+    // Card d0952a73: branch on the SAME `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/
+    // `confirmedWrapperAwareFusion` verdict `pty/host.ts` already computed at detection time
+    // (`explainedBenign`) — this replay's own generic fallback wording used to be the ONLY text ever
+    // shown here, even when an independent classifier had already established the replay as benign, so
+    // a manager confirming a merge saw the alarm with no acquittal. `explainedBenign: null` (no
+    // classifier fired) keeps the ORIGINAL, byte-identical wording — this must stay exactly as loud on a
+    // genuinely unexplained replay as it was before this field existed.
+    const text = replay.explainedBenign === "wrapper-deficit"
+      ? `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — EXPLAINED as a benign wrapper-deficit stale confirmation (card 854d1632): an independent classifier confirmed the engine's report matches generation ${replay.replayedGen}'s own recorded text with a possible-duplicate tag stripped, byte-for-byte. Every byte of that earlier write did arrive; this is an attribution/ordering artifact, not a loss — no duplicate-check action needed for this event.`
+      : replay.explainedBenign === "ansi-strip"
+        ? `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — EXPLAINED as a benign ANSI/CSI-strip echo artifact (card a640c110): an independent classifier confirmed the engine's report matches that generation's own recorded text with escape sequences stripped, byte-for-byte. Every byte of the actual content did arrive; no duplicate-check action needed for this event.`
+        : replay.explainedBenign === "wrapper-aware-fusion"
+          ? `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — EXPLAINED as a benign wrapper-aware fusion (card c23e2869): an independent classifier confirmed the engine's report is exactly generation ${replay.replayedGen}'s own recorded write plus this turn's own intended text with a redelivery tag stripped, byte-for-byte. Both generations' content did arrive; if generation ${replay.replayedGen}'s own turn already ran, check whether you're about to see it acted on a second time.`
+          : `a prompt REPLAY at gen=${replay.gen} of generation ${replay.replayedGen}'s own text — not an established loss (a later generation may still fuse it back in whole); if generation ${replay.replayedGen}'s own turn already ran, check whether you're about to see it acted on a second time`;
+    candidates.push({ gen: replay.gen, detectedAt: replay.detectedAt, text });
   }
   const fusion = typeof pty.getLastMismatchFusion === "function" ? pty.getLastMismatchFusion(workerSessionId) : undefined;
   if (fusion) {

@@ -443,6 +443,13 @@ try {
         replay?.gen === 2 && replay?.replayedGen === 1);
       check("7d: it records both the reported and intended lengths",
         replay?.reportedLen === genAText.length && replay?.intendedLen === genBText.length);
+      // Card d0952a73 DoD-4, negative polarity: no `[loom:possible-duplicate root:…]` wrapper (or
+      // ANSI/wrapper-aware-fusion shape) is present on this specimen — `confirmedWrapperDeficit`/
+      // `confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion` all stay null for it — so
+      // `explainedBenign` must stay `null` too: a genuinely UNEXPLAINED replay must read exactly as it
+      // did before this field existed, still an unresolved possible/established loss to every consumer.
+      check("7d: card d0952a73 — a genuinely UNEXPLAINED replay reports explainedBenign:null (stays loud)",
+        replay?.explainedBenign === null);
     }
   }
 
