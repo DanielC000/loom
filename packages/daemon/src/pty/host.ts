@@ -389,6 +389,64 @@ function detectPossibleDuplicateWrapperDeficit(reported: string, intended: strin
 }
 
 /**
+ * Card c23e2869 — d005f55b's own Candidate #3 ("a Loom redelivery wrapper"), arithmetically confirmed on a
+ * real specimen (session `daf64e68`, gen=10): `9,709 + 1,640 = 11,349` (recognized entry's own length plus
+ * the current write's stripped length equals `reported`'s length) and, independently, `1,680 − 40 = 1,640`
+ * (the current write's own intended length minus the fixed 40-char redelivery-tag length). Both exact.
+ *
+ * {@link detectPossibleDuplicateWrapperDeficit} above only tests whether `reported` equals the CURRENT
+ * generation's own intended text with its wrapper stripped, IN FULL — it cannot confirm a specimen where
+ * `reported` is that PLUS an EARLIER generation's own recorded WRITTEN text fused onto it, the shape this
+ * card measured: `reported` matched an entry in `window` as a leading/trailing SUBSTRING (what
+ * `findRecognizedSubstring` below already recognizes), with the REMAINDER left unaccounted for — even
+ * though that remainder is itself exactly explainable as the current write's own wrapper-stripped text.
+ *
+ * Tries EACH window entry (most-recent-first, mirroring `findRecognizedSubstring`'s own precedent) in
+ * BOTH concatenation orders — `[entry][strippedCurrent]` and `[strippedCurrent][entry]` — since either can
+ * legitimately sit first depending on when the redelivered wrapper was drained relative to the earlier
+ * generation's own content. EXACT-EQUALITY, not sum+hash: a literal `===` comparison is strictly stronger
+ * than a 32-bit hash (no collision is possible) — this is the exact-match discipline this card's own DoD-1
+ * requires preserved, never loosened (d005f55b's standing bound).
+ *
+ * Returns `null` immediately if the current write carries no recognizable wrapper to strip — an unwrapped
+ * current write can never satisfy this candidate, so it is a no-op on every ordinary (non-redelivered)
+ * turn, same posture as `detectPossibleDuplicateWrapperDeficit`.
+ *
+ * ⚠️ Code Review (manager, card c23e2869): ALSO returns `null` when the stripped current write is EMPTY —
+ * a bare tag with no body (`currentIntendedText` is exactly the 40-char tag and nothing else). Without
+ * this, `strippedCurrent === ""` and the loop below degenerates: the length check becomes
+ * `entry.text.length === reported.length` and `reported === entry.text + ""` collapses to
+ * `reported === entry.text` — the PLAIN `replayedEntry` whole-string-match condition — so this function
+ * would fire "NOT A LOSS, fused with a zero-char stripped write" for what is actually an ordinary
+ * unresolved replay, silently disarming its own follow-up loss timer (`isRecognizedReplayAwaitingResolution`
+ * guards against `confirmedWrapperAwareFusion` alongside its siblings). `entry.text.length === 0` below
+ * protects the WINDOW side of this same degeneracy; nothing protected the CURRENT side until this line —
+ * the asymmetry was the whole bug. A bare-tag-only write looks impossible today; that is exactly why this
+ * guard must stay even though it looks like it protects nothing.
+ */
+function detectRecognizedFusionWithWrapperStrippedCurrent(
+  reported: string,
+  currentIntendedText: string,
+  window: ReadonlyArray<{ gen: number; text: string }>,
+): { recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number } | null {
+  const strippedCurrent = stripPossibleDuplicateFrame(currentIntendedText);
+  if (strippedCurrent === currentIntendedText) return null; // no tag was present to strip
+  if (strippedCurrent.length === 0) return null; // a bare tag with no body — see this function's own doc
+  for (let idx = window.length - 1; idx >= 0; idx--) {
+    const entry = window[idx];
+    if (!entry || entry.text.length === 0) continue;
+    if (entry.text.length + strippedCurrent.length !== reported.length) continue;
+    if (reported === entry.text + strippedCurrent) {
+      return { recognizedGen: entry.gen, matchedLen: entry.text.length, leadingRemainderLen: 0, trailingRemainderLen: strippedCurrent.length };
+    }
+    if (reported === strippedCurrent + entry.text) {
+      return { recognizedGen: entry.gen, matchedLen: entry.text.length, leadingRemainderLen: strippedCurrent.length, trailingRemainderLen: 0 };
+    }
+  }
+  return null;
+}
+
+/**
  * Card a640c110: a sibling to {@link detectPossibleDuplicateWrapperDeficit} — a DIFFERENT benign
  * byte-pattern that otherwise presents as an ordinary mismatch. Measured specimen (worker
  * `671766c9…`, gen=3, from `daemon-output.log`): `reportedLen=4106 intendedLen=4115 lenDelta=-9
@@ -3194,8 +3252,21 @@ export interface PtyHostEvents {
    * captured values (see the `UserPromptSubmit` call site's own doc for why they're captured in a closure
    * rather than re-read off `live` at fire time). OPTIONAL, same rationale as its siblings above: every
    * existing `PtyHostEvents` test double is unaffected until it opts in.
+   *
+   * Card c23e2869 DoD-2 (non-content half only — never the matched/remainder TEXT itself, only lengths and
+   * a gen number, same posture as `intendedLen`/`writtenHash` above): `recognizedGen`/`matchedLen` name
+   * WHICH earlier generation this mismatch replayed and how much of it matched — `replayedEntry`, already
+   * computed at the `UserPromptSubmit` call site for this exact branch (this branch is reachable only when
+   * `replayedEntry !== undefined` — see `isRecognizedReplayAwaitingResolution`'s own doc), so this is
+   * pass-through of data already in scope, not a new detector. Because `replayedEntry` is by construction a
+   * WHOLE-string match (`reported === entry.text` exactly — see its own `.findLast` definition), there is
+   * never anything left unaccounted for on this branch: `leadingRemainderLen`/`trailingRemainderLen` are
+   * always `0` here. Named the same as `findRecognizedSubstring`'s own result fields (pty/host.ts) so a
+   * future widening of WHICH mismatches reach this event (a durability-boundary policy call this card
+   * explicitly defers — see its own DoD-3) can populate non-zero remainders under the same field names
+   * without a schema change.
    */
-  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number }): void;
+  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number }): void;
   /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
@@ -5546,6 +5617,20 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-ansi-strip] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedAnsiLen=${ansiStripDeficit.strippedAnsiLen} — the engine's report matches EXACTLY this generation's own intended text with all ANSI/CSI escape sequences stripped (byte-for-byte). Card a640c110 (measured, not a guess): the engine's own echo strips ANSI/CSI styling — NOT corruption, NOT content loss.`);
               }
+              // Card c23e2869 (d005f55b candidate #3, arithmetically confirmed on a real specimen:
+              // `9,709 + 1,640 = 11,349` and `1,680 − 40 = 1,640`, both exact — session daf64e68, gen=10):
+              // sibling diagnostic to `wrapperDeficit` just above, but for the FUSED shape that detector
+              // cannot confirm — `reported` equal to an EARLIER generation's own recorded WRITTEN text plus
+              // THIS generation's own intended text with a recognized redelivery wrapper stripped, in
+              // either order. See detectRecognizedFusionWithWrapperStrippedCurrent's own doc. Logged
+              // unconditionally here (independent signal), same posture as every other diagnostic in this
+              // block; the SESSION-facing notice's own priority (below) still defers to a stronger exact
+              // match when one also applies.
+              const wrapperAwareFusion = detectRecognizedFusionWithWrapperStrippedCurrent(reported, intended, live.recentWrittenTurns.slice(0, -1));
+              if (wrapperAwareFusion) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-wrapper-aware-fusion] ${sessionId} gen=${live.submitGeneration} recognizedGen=${wrapperAwareFusion.recognizedGen} matchedLen=${wrapperAwareFusion.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${wrapperAwareFusion.leadingRemainderLen} trailingRemainderLen=${wrapperAwareFusion.trailingRemainderLen} — the engine's report is EXACTLY generation ${wrapperAwareFusion.recognizedGen}'s own recorded write plus THIS generation's own intended text with a possible-duplicate tag stripped, byte-for-byte (card c23e2869). NOT A LOSS — every byte of both generations' content did arrive.`);
+              }
               // Card 201d0d95 Q1: SURFACE the mismatch to the session itself — until now every branch above
               // was LOG-ONLY (daemon-output.log), and the shipped doctrine (orchestrate/SKILL.md) only ever
               // documented the byteIdentical=true happy path, so a manager had no way to learn a submission
@@ -5594,7 +5679,10 @@ export class PtyHost {
               // generation's own just-pushed entry, always the ring's last) — see findRecognizedSubstring's
               // own doc for why including the current generation would trivially "recognize" the caller's
               // own turn on nearly every unmatched-longer mismatch and never surface a genuinely prior one.
-              const unmatchedRecognized = (replayedEntry === undefined && !accumulation?.confirmed && !divergedPriorAccumulation)
+              // Card c23e2869: also skip when `wrapperAwareFusion` (above) already FULLY explains `reported`
+              // — a stronger, CONFIRMED result than this fallback's own partial "remainder unaccounted for"
+              // framing would give the same specimen; avoids logging both for the same mismatch.
+              const unmatchedRecognized = (replayedEntry === undefined && !accumulation?.confirmed && !divergedPriorAccumulation && !wrapperAwareFusion)
                 ? findRecognizedSubstring(reported, live.recentWrittenTurns.slice(0, -1))
                 : null;
               if (unmatchedRecognized) {
@@ -5778,6 +5866,21 @@ export class PtyHost {
                 // write. Guarded against `confirmedWrapperDeficit` too so the two exact-strip shapes stay
                 // mutually exclusive in the vanishingly-unlikely case both matched.
                 const confirmedAnsiStripDeficit = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && ansiStripDeficit) ? ansiStripDeficit : null;
+                // Card c23e2869 — same precedence posture as `confirmedAnsiStripDeficit` just above (a
+                // stronger exact match, were one to also apply, wins) — reuses `wrapperAwareFusion`,
+                // already computed above alongside its own diagnostic log. `wrapperAwareFusion` fully
+                // explains `reported` byte-for-byte (an earlier recorded write plus this generation's own
+                // wrapper-stripped text) — a stronger, CONFIRMED result than the plain unmatched-remainder
+                // fallback (`unmatchedRecognized`, below) would give the same specimen.
+                const confirmedWrapperAwareFusion = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && wrapperAwareFusion) ? wrapperAwareFusion : null;
+                if (confirmedWrapperAwareFusion) {
+                  // Card c23e2869 — mirrors `confirmedFusion`'s own resolution-marking above: this just
+                  // ESTABLISHED that both the recognized earlier generation's own content AND this
+                  // generation's own intended content arrived — record both as resolved so a still-pending
+                  // `checkPromptMismatchUnresolved` timer for either finds it and stays silent.
+                  live.mismatchResolvedGens.add(confirmedWrapperAwareFusion.recognizedGen);
+                  live.mismatchResolvedGens.add(live.submitGeneration);
+                }
                 // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
                 // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
                 // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
@@ -5838,7 +5941,7 @@ export class PtyHost {
                 // detection time and discarded milliseconds later"). See `Live.lastMismatchUnmatched`'s own
                 // doc for the storage/decidability contract (stored in full, no head-bounding; `null`/
                 // `undefined` are the only "not captured" states).
-                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit;
+                const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
                 if (isUnmatchableMismatch) {
                   live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
                 }
@@ -5909,15 +6012,26 @@ export class PtyHost {
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
                       `What YOU can check yourself: nothing — this shape has no duplicate-check or re-send action to take; the content for this turn is confirmed complete.`
+                  // Card c23e2869 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
+                  // own branch above (never patched onto `lossClause`/`replayNote`, never worded as a
+                  // possible LOSS): the engine's report is EXACTLY generation
+                  // `confirmedWrapperAwareFusion.recognizedGen`'s own recorded write plus THIS generation's
+                  // own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte —
+                  // both generations' content is fully accounted for, distinct from `confirmedWrapperDeficit`
+                  // (a single generation's own stale confirmation) since this fuses TWO generations' text.
+                    : confirmedWrapperAwareFusion
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — the engine's report is EXACTLY generation ${confirmedWrapperAwareFusion.recognizedGen}'s own recorded write (${confirmedWrapperAwareFusion.matchedLen} chars) plus THIS turn's own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte. Every byte of both generations' content did arrive; this is an attribution/ordering artifact, not corruption. ` +
+                      `What YOU can check yourself: if generation ${confirmedWrapperAwareFusion.recognizedGen}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that.`
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
                 // Card f9b1ea00 — Code Review CRITICAL (confirmed, board card f9b1ea00): arm the follow-up
                 // timer iff `mismatchText` just above ACTUALLY made the "wait one generation and re-check"
                 // promise — i.e. iff `lossClause` took its `replayedEntry !== undefined` branch, which only
-                // happens in `mismatchText`'s own FINAL fallback arm (none of the four confirmed/benign
+                // happens in `mismatchText`'s own FINAL fallback arm (none of the five confirmed/benign
                 // shapes above matched: `confirmedFusion`/`confirmedDivergedPrior`/`confirmedWrapperDeficit`/
-                // `confirmedAnsiStripDeficit`). The ORIGINAL cut of this card armed on the broader
+                // `confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`, card c23e2869). The ORIGINAL cut of this card armed on the broader
                 // `replayedEntry !== undefined` alone, at the point `live.lastMismatchReplay` is set, well
                 // BEFORE `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are even computed — but both of
                 // those are, by construction (see each's own doc above), ALSO `replayedEntry !== undefined`
@@ -5930,13 +6044,15 @@ export class PtyHost {
                 // the exact opposite.
                 //
                 // This condition is deliberately `isUnmatchableMismatch`'s own structural TWIN, above — the
-                // SAME four negations with the OPPOSITE `replayedEntry` polarity — rather than a fresh
-                // "exclude the current benign shapes" redraw: a future 6th benign shape only needs its own
-                // `confirmed<X>` local threaded into BOTH twins (the same way `confirmedWrapperDeficit`/
-                // `confirmedAnsiStripDeficit` already are here) to stay correct on both sides, instead of this
-                // arming condition needing its own independently-driftable update.
+                // SAME five negations with the OPPOSITE `replayedEntry` polarity (card c23e2869 added
+                // `confirmedWrapperAwareFusion` as the predicted 6th — see the comment this replaced) —
+                // rather than a fresh "exclude the current benign shapes" redraw: a future 7th benign shape
+                // only needs its own `confirmed<X>` local threaded into BOTH twins (the same way
+                // `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`
+                // already are here) to stay correct on both sides, instead of this arming condition needing
+                // its own independently-driftable update.
                 const isRecognizedReplayAwaitingResolution = replayedEntry !== undefined
-                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit;
+                  && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
                 if (isRecognizedReplayAwaitingResolution) {
                   // Schedule the follow-up: after `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (see that constant's
                   // own sizing doc), `checkPromptMismatchUnresolved` re-checks whether THIS gen has since been
@@ -5949,6 +6065,12 @@ export class PtyHost {
                   const pendingWrittenHash = sigWritten.hash;
                   const pendingReportedHash = sigReported.hash;
                   const pendingIntendedLen = intended.length;
+                  // Card c23e2869 DoD-2: `replayedEntry` is non-undefined on this branch by construction
+                  // (`isRecognizedReplayAwaitingResolution`'s own condition, just above) — carry WHICH
+                  // earlier generation this mismatch replayed into the durable event too, not just that a
+                  // replay happened (see `PtyHostEvents.onPromptMismatchUnresolved`'s own doc).
+                  const pendingRecognizedGen = replayedEntry.gen;
+                  const pendingMatchedLen = replayedEntry.text.length;
                   // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
                   // pendingMismatchUnresolvedTimers` (see that field's own doc) so `spawn()`/`onExit` can
                   // clear it before a resume/recycle/restart/exit invalidates this session's own tracking —
@@ -5961,7 +6083,7 @@ export class PtyHost {
                   // resolution.
                   const timer: NodeJS.Timeout = setTimeout(() => {
                     live.pendingMismatchUnresolvedTimers.delete(timer);
-                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen);
+                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen, pendingRecognizedGen, pendingMatchedLen);
                   }, PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
                   live.pendingMismatchUnresolvedTimers.add(timer);
                 }
@@ -9587,13 +9709,16 @@ export class PtyHost {
    * as the real defect). PtyHost itself has no DB/manager lookup (same layering boundary as
    * `onPasteLengthLoss`/`onKickoffGiveUpExhausted`), so it only ever hands off the raw facts.
    */
-  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number): void {
+  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number, recognizedGen: number, matchedLen: number): void {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.mismatchResolvedGens.has(gen)) return;
     // eslint-disable-next-line no-console
-    console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
-    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen });
+    console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} recognizedGen=${recognizedGen} matchedLen=${matchedLen} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
+    // Card c23e2869 DoD-2: `recognizedGen`/`matchedLen` are `replayedEntry`'s own gen/length, captured at
+    // the ORIGINAL detection's own call site (see this method's own doc) — this branch is reachable only
+    // when `replayedEntry !== undefined`, a WHOLE-string match, so there is never a remainder to name here.
+    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0 });
   }
 
   /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s

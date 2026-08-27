@@ -144,6 +144,16 @@ try {
       typeof evs[0]?.info.writtenHash === "string" && evs[0].info.writtenHash.length > 0
       && typeof evs[0]?.info.reportedHash === "string" && evs[0].info.reportedHash.length > 0
       && evs[0]?.info.intendedLen === gen2Text.length);
+    // Card c23e2869 DoD-2 (non-content half): the durable event also carries WHICH earlier generation
+    // this mismatch replayed (`recognizedGen`) and how much of it matched (`matchedLen`) — data already
+    // computed at detection time (`replayedEntry`) but, until now, never threaded past the console log.
+    // `replayedEntry` is a WHOLE-string match by construction (`reported === entry.text` exactly — see its
+    // own `.findLast` definition), so there is never anything left unaccounted for on this branch: both
+    // remainder lengths are always 0 here.
+    check("6b: carries WHICH earlier generation this mismatch replayed (recognizedGen=1) and how much of it matched (matchedLen=gen1Text.length)",
+      evs[0]?.info.recognizedGen === 1 && evs[0]?.info.matchedLen === gen1Text.length);
+    check("6c: a whole-string replay leaves no remainder — both lengths are 0",
+      evs[0]?.info.leadingRemainderLen === 0 && evs[0]?.info.trailingRemainderLen === 0);
   }
 
   // ===== PART 2 — THE MANDATORY OTHER DIRECTION (DoD-3): a recognized-replay mismatch that DOES resolve —

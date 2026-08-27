@@ -8022,13 +8022,21 @@ export class SessionService {
    *     manager, a `run`/plain session, the platform lead) has no programmatic sender Loom can identify —
    *     the durable event below still records the gap for a human auditing the log, but there is no live
    *     party to nudge, the same structural limit `handlePasteLengthLoss`'s own doc names above.
+   *
+   * Card c23e2869 DoD-2 (non-content half only — see `PtyHostEvents.onPromptMismatchUnresolved`'s own
+   * doc): `recognizedGen`/`matchedLen`/`leadingRemainderLen`/`trailingRemainderLen` name WHICH earlier
+   * generation this mismatch replayed and how much of it matched — lengths and a generation number, never
+   * the matched/remainder TEXT itself, consistent with `intendedLen`/`writtenHash` already stored here.
    */
-  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number }): void {
+  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number }): void {
     const s = this.db.getSession(sessionId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
-      kind: "prompt_mismatch_unresolved", detail: { gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen },
+      kind: "prompt_mismatch_unresolved", detail: {
+        gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen,
+        recognizedGen: info.recognizedGen, matchedLen: info.matchedLen, leadingRemainderLen: info.leadingRemainderLen, trailingRemainderLen: info.trailingRemainderLen,
+      },
     });
     const recipientMsg = `[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mismatch] notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No confirming later generation ever arrived — that content is now the best available evidence of a genuine loss, not merely a possible one. If you are a Loom-driven session, say so in your next report up.`;
     this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
