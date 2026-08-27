@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
 import { simpleGit, type SimpleGit } from "simple-git";
@@ -52,6 +52,42 @@ function escapeRegExp(s: string): string {
  */
 const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
 
+/**
+ * Ceiling for `VaultVersioner.flushSync()`'s two WORKING-TREE-SCALE `execSync` calls (`git add -A`, which
+ * hashes every new/changed blob across the whole vault, and `git commit`, which runs the user's own
+ * hooks — the actual named hang vector in card 816f0056 — plus writes tree objects). Deliberately much
+ * larger than {@link VAULT_GIT_OP_TIMEOUT_MS}: the goal on this path is "no INFINITE hang", not "fail
+ * fast" — flushSync's timeout throwing lands in its own best-effort `catch` and SILENTLY DROPS the
+ * commit (now at least logged — see `flushSync`'s own doc), so a bound tight enough to fail a real,
+ * still-progressing flush on a large or network-backed vault would trade a rare hang risk for a routine,
+ * guaranteed data-loss failure. See `flushSync`'s own doc for why the THIRD call (`git status
+ * --porcelain`, a cheap stat-based comparison) is bound by {@link VAULT_GIT_OP_TIMEOUT_MS} instead.
+ *
+ * **Sizing (card 816f0056 review round 2 — corrects an earlier, wrong appeal to convention): this is NOT
+ * sized to match `git checkout`.** This repo's own `GIT_LOCAL_TIMEOUT_MS` (git/writer.ts) bounds
+ * `checkout` at the SAME 15s as {@link VAULT_GIT_OP_TIMEOUT_MS} — citing it as precedent for "5 min is
+ * generous" was backwards. The real basis: a cold `git add -A` over a 20k-file vault measured ~11.6s on
+ * local NVMe ALONE — comfortably eating a 15s bound with zero margin left for a slower disk or a bigger
+ * vault — so this needs to be in the same league as this codebase's OTHER genuinely-large working-tree
+ * op, `git/worktrees.ts`'s `PROVISION_TIMEOUT_MS` (3 min, for a full dependency install into a fresh
+ * worktree). 5 minutes sits comfortably above both.
+ */
+const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * `maxBuffer` for all three of `flushSync`'s `execSync` calls (card 816f0056 review round 2, finding 1).
+ * Node's 1 MiB default covers combined stdout+stderr, and `git add -A` emits ONE "LF will be replaced by
+ * CRLF" warning line to stderr PER FILE when `core.autocrlf=true` — the Git-for-Windows installer
+ * default. Measured with the exact options this file uses: 8,000 files OK; 12,000 files → ENOBUFS +
+ * SIGTERM at 1,048,645 bytes of stderr → throws → the existing `catch` → a SILENTLY DROPPED commit on an
+ * ORDINARY ~10k-note Obsidian vault — precisely the large-vault data-loss failure
+ * {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} exists to prevent, just via a different option on the SAME
+ * calls. `git status --porcelain`'s stdout was separately measured at ~290KB on a first-ever 20k-file
+ * flush (~1 MiB at ~70k files), so it needs headroom too, not only the two working-tree calls. 100MB is
+ * a one-shot allocation on a rare shutdown-only path — cheap insurance, not a resource concern.
+ */
+const VAULT_FLUSH_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
+
 /** Reject `p` after `ms` if it hasn't settled — same belt-and-suspenders race as git/worktrees.ts's and
  *  git/writer.ts's own `withTimeout`: the simpleGit `block` timeout (set on the instance below) also
  *  kills the hung child in production, but this guarantees the FUNCTION returns within the window
@@ -75,6 +111,19 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 export interface VaultGitDeps {
   gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">;
   timeoutMs?: number;
+  /**
+   * Test-only, `flushSync`-specific override for its `git add -A` call, INDEPENDENT of `timeoutMs` /
+   * {@link flushCommitTimeoutMs} (card 816f0056 review round 2, finding 7 — `timeoutMs` alone collapses
+   * BOTH working-tree calls onto one injected value, so a test could never tell "add and commit share a
+   * timeout" apart from "they're bound independently", and a bug that swapped which production constant
+   * backs which call would go undetected). Lets a test set a LARGE `add` bound alongside a TINY `commit`
+   * bound (or vice versa) to prove the two are genuinely separate code paths. Falls back to `timeoutMs`,
+   * then {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS}, when unset — real callers never pass this.
+   */
+  flushAddTimeoutMs?: number;
+  /** Test-only, `flushSync`-specific override for its `git commit` call — see {@link flushAddTimeoutMs}.
+   *  Real callers never pass this. */
+  flushCommitTimeoutMs?: number;
 }
 
 /** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's defaults. */
@@ -382,6 +431,26 @@ async function hasConfiguredGitIdentity(git: SimpleGit): Promise<boolean> {
   try {
     const name = (await git.raw(["config", "user.name"])).trim();
     const email = (await git.raw(["config", "user.email"])).trim();
+    return !!name && !!email;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SYNCHRONOUS mirror of {@link hasConfiguredGitIdentity}, for `flushSync`'s `execSync` path (card
+ * 816f0056 review round 2, finding 2): `flushSync` never had an identity fallback at all, so on a host
+ * with no global/system/local git identity configured, EVERY shutdown flush failed silently, forever —
+ * measured: `fatal: empty ident name (for <>) not allowed` — while the async `commit()`/`commitVault`
+ * path succeeded via its own fallback. This file's own doc on `commitVault` (below) already anticipates
+ * exactly this kind of host ("may have no global/system git identity at all"), so the gap was not
+ * hypothetical. Same "unset → false" semantics as the async version: `git config user.<key>` exits
+ * non-zero when unset, which `execSync` throws for — caught here and treated as unresolved.
+ */
+function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeout: number; env: NodeJS.ProcessEnv; maxBuffer: number }): boolean {
+  try {
+    const name = execSync("git config user.name", opts).toString().trim();
+    const email = execSync("git config user.email", opts).toString().trim();
     return !!name && !!email;
   } catch {
     return false;
@@ -829,20 +898,123 @@ export class VaultVersioner {
    * never throws. Returns true iff it committed. Mirrors the shared `commitVault` semantics, but
    * synchronous by necessity. Also honors the advisory pause lease (card 614dfbef) — a shutdown mid
    * sanctioned git surgery must not force a commit the lease was meant to prevent.
+   *
+   * **Bounded (card 816f0056):** unlike the async git calls elsewhere in this file, `execSync` can't use
+   * the `withTimeout` Promise race above — it's synchronous by necessity (see the class doc above for
+   * why `flushSync` can't be made async). `execSync`'s own native `timeout` option is the bound instead,
+   * plus `GIT_TERMINAL_PROMPT=0` so a credential prompt can't hang either, plus a generous
+   * {@link VAULT_FLUSH_MAX_BUFFER_BYTES} (a large vault's `git add -A` can emit megabytes of per-file
+   * `autocrlf` warnings on Windows — see that constant's own doc; a too-small `maxBuffer` drops a commit
+   * exactly like a too-small timeout does). **`execSync` THROWS on timeout expiry, same as any other
+   * execSync failure** — it lands in the `catch` below and returns `false` exactly like a missing
+   * identity or a plain git error would. That is the intended trade: a dropped shutdown auto-commit beats
+   * a wedged `gracefulShutdown` (which would otherwise hang `loom stop` and, worse, `daemon_restart`'s
+   * exit `75` — see the card for why that stalls the whole fleet). The pre-existing `try/catch` here
+   * guards THROWN errors, not hangs — it's the timeout option above that turns a hang into a throw.
+   *
+   * **A timeout here ABANDONS the child, it does not always STOP it (card 816f0056 review round 2,
+   * finding 4) — and this differs between the shell-string calls and the argument-array one (round 3).**
+   * `git add -A`/`git status --porcelain` still run via shell-string `execSync` (`cmd.exe` on Windows,
+   * spawned by Node as the immediate child); a timeout kills only THAT shell — there is no job object, no
+   * tree kill — so the REAL `git.exe` it launched (a grandchild of Node) survives and keeps running in the
+   * background. Measured against `git add -A` this way: a `git commit` blocked in a `sleep` hook, timed
+   * out at 500ms via a shell-wrapped call, still landed its commit ~8 seconds later. `git commit` itself
+   * is different: it now runs via `execFileSync` (no shell — see the "Identity fallback" paragraph below
+   * for why), so `git.exe` IS the immediate child Node kills directly on timeout. A hook grandchild it had
+   * already spawned (a real `sh`/`sleep`) can still survive and run to completion harmlessly, with nothing
+   * left alive to receive its result. **Whether the commit OBJECT itself lands is a RACE, not a fixed
+   * outcome (card 816f0056, test/vault-flush-sync-hang-bound.mjs) — it depends on how far `git.exe` had
+   * progressed (had it already written the commit object and updated the ref?) before the kill signal
+   * reached it.** Observed both ways on this exact test: in an ordinary worktree run the commit did not
+   * land; under merge-gate conditions (different host/scheduling timing) it did. Neither outcome is
+   * assertable, and this file does not claim either. Either way, "bounds a true hang" means bounds how
+   * long THIS FUNCTION waits, not a guarantee about what the underlying git process does afterward — and a
+   * warn saying a commit "may have been dropped" stays the honest framing rather than a certainty, since
+   * the shell-wrapped calls can still complete moments later, racing whatever touches the repo next.
+   *
+   * **The three calls are deliberately NOT all bound by the same ceiling.** The goal here is "no INFINITE
+   * hang", not "fail fast" — a bound whose only job is to stop a wait that would otherwise never end does
+   * not need to be tight, and a TIGHT one is actively worse: it converts a slow-but-working flush into a
+   * GUARANTEED failure, and on this path failure means the commit is silently DROPPED (the timeout throws
+   * into the same best-effort `catch` a real git error would) — the exact data loss this function exists
+   * to prevent. `git status --porcelain` is a cheap, stat-based comparison (no hashing), the same cost
+   * class as this module's other bounded plumbing (`ls-files`/`checkIsRepo`/`revparse`), so it keeps their
+   * existing {@link VAULT_GIT_OP_TIMEOUT_MS} (15s) ceiling. `git add -A` and `git commit` (runs the
+   * user's hooks — e.g. a pre-commit hook — the actual named hang vector in this card, plus writes tree
+   * objects) are working-tree-scale and get {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} (5 min) instead —
+   * see that constant's own doc for the sizing basis (a real measurement, NOT "same class as checkout" —
+   * that appeal to convention was wrong, see the correction there).
+   *
+   * **Identity fallback (card 816f0056 review round 2, finding 2):** mirrors `commitVault`'s fallback (see
+   * that function's own doc for why `-c` ARGS, not an env override) via {@link hasConfiguredGitIdentitySync}
+   * — this path never had one at all, so a host with no configured git identity silently failed EVERY
+   * shutdown flush, forever, while the async `commit()` path succeeded. **Genuinely ARGS, not a shell
+   * string (round 3 correction):** the first cut of this fix interpolated the fallback identity into a
+   * shell-string `execSync` call — safe only BY COINCIDENCE, because {@link FALLBACK_GIT_IDENTITY} happens
+   * to contain no spaces today. `execFileSync("git", [...])` passes each piece as a real argument instead,
+   * so a future edit to that constant (e.g. adding a space) can never re-open the exact silent-drop failure
+   * this card exists to close.
    */
   flushSync(): boolean {
     if (this.externallyManaged) return false;
     if (isVaultAutoCommitPaused(this.commitPath)) return false;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+    // Tracks the call currently in flight so the `catch` below can name WHICH op timed out and at what
+    // bound (card 816f0056 review round 2, finding 5) — `execSync`'s own timeout error just names the
+    // shell (`spawnSync ... cmd.exe ETIMEDOUT`), not the git command or the ceiling that fired.
+    let currentOp: { label: string; timeoutMs: number } | undefined;
     try {
-      const opts = { cwd: this.commitPath, stdio: "pipe" as const };
-      execSync("git add -A", opts);
-      const staged = execSync("git status --porcelain", opts).toString().trim();
+      const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+      const cheapTimeoutMs = this.gitDeps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
+      // flushAddTimeoutMs/flushCommitTimeoutMs (test-only, see VaultGitDeps) each fall back to the shared
+      // `timeoutMs` override, then to the real production default — see VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS.
+      const addTimeoutMs = this.gitDeps.flushAddTimeoutMs ?? this.gitDeps.timeoutMs ?? VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS;
+      const commitTimeoutMs = this.gitDeps.flushCommitTimeoutMs ?? this.gitDeps.timeoutMs ?? VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS;
+      const cheapOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: cheapTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
+      const addOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: addTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
+      const commitOpts = { cwd: this.commitPath, stdio: "pipe" as const, timeout: commitTimeoutMs, env, maxBuffer: VAULT_FLUSH_MAX_BUFFER_BYTES };
+
+      currentOp = { label: "git add -A", timeoutMs: addTimeoutMs };
+      execSync("git add -A", addOpts);
+      currentOp = { label: "git status --porcelain", timeoutMs: cheapTimeoutMs };
+      const staged = execSync("git status --porcelain", cheapOpts).toString().trim();
       if (!staged) return false; // nothing to commit — no-op
-      execSync(`git commit -m "loom: auto-commit ${new Date().toISOString()} (shutdown flush)"`, opts);
+      const message = `loom: auto-commit ${new Date().toISOString()} (shutdown flush)`;
+      currentOp = { label: "git commit", timeoutMs: commitTimeoutMs };
+      // execFileSync, not execSync (card 816f0056 review round 3): the identity-fallback branch
+      // interpolates FALLBACK_GIT_IDENTITY into the command — safe TODAY only because that constant
+      // happens to contain no spaces/shell metacharacters. A future edit to it (e.g. "Loom Daemon") would
+      // silently break the shell-string form (`-c user.name=Loom Daemon` splits at the space, git sees a
+      // stray `Daemon` argument, the commit fails) and land in the catch below as a SILENTLY DROPPED
+      // shutdown commit — the exact failure class this card exists to close, reopened one constant edit
+      // away. execFileSync passes each argument as a real array element, with no shell parsing at all, so
+      // this is genuinely argument-safe rather than safe-by-coincidence — real ARGS, matching what this
+      // doc's "Identity fallback" paragraph below claims. `git add -A`/`git status --porcelain` above stay
+      // on shell-string `execSync`: both are fixed literals with no interpolation, so there is nothing for
+      // an argument boundary to protect there.
+      if (hasConfiguredGitIdentitySync(cheapOpts)) {
+        execFileSync("git", ["commit", "-m", message], commitOpts);
+      } else {
+        execFileSync(
+          "git",
+          ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`, "commit", "-m", message],
+          commitOpts,
+        );
+      }
       return true;
-    } catch {
-      return false; // best-effort — a missing identity / no-repo / git error must never block exit
+    } catch (err) {
+      // best-effort — a missing identity / no-repo / plain git error, OR a bound timeout (execSync
+      // throws on timeout expiry, see the doc above) — must never block exit. Card 816f0056 follow-up:
+      // this used to be silent, indistinguishable from the benign early-return no-ops above (paused /
+      // externally-managed / nothing staged) — but a bound timeout on the WORKING-TREE-SCALE calls can
+      // now drop a real, still-in-progress commit here, which is the one cause that represents actual
+      // user data not reaching git. One warn line, no restructuring, still never throws.
+      const timeoutHit = (err as NodeJS.ErrnoException)?.code === "ETIMEDOUT" && currentOp;
+      const detail = timeoutHit
+        ? `the "${currentOp!.label}" call exceeded its ~${currentOp!.timeoutMs}ms bound (hung git child? — see this method's own doc for exactly what survives the kill and what doesn't)`
+        : ((err as Error)?.message ?? String(err));
+      console.warn(`[vault-versioner] ${this.commitPath} shutdown flush FAILED — a pending commit may have been dropped: ${detail}`);
+      return false;
     }
   }
 }
