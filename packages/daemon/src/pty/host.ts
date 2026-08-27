@@ -8556,9 +8556,18 @@ export class PtyHost {
    *   defensive clear-prefix genuinely landed (a botched clear would have left stray older text glued
    *   onto `gen`'s paste, making the reported prompt diverge from `gen`'s clean signature, and this
    *   content-match would simply never have fired — see this file's own "stray text glued onto a later
-   *   submit" specimens, card 3ce3fa39). Every submit() UNCONDITIONALLY runs its own defensive
-   *   clear-prefix for whatever `composerDirtyLen` already held BEFORE its own paste (see submit()'s own
-   *   doc) — so `gen`'s OWN submission already attempted to backspace away every OLDER still-marked
+   *   submit" specimens, card 3ce3fa39). submit() does NOT unconditionally run a defensive clear-prefix —
+   *   two of its branches skip it (card 2a7f8040; see submit()'s own doc for both): the Enter-only
+   *   redelivery branch (`isGiveUpRedelivery && composerBelievedTrustworthy`) writes no clear-prefix and
+   *   repastes nothing at all, and the plain `else` taken when `composerLen > 0` (a human typing at the
+   *   raw terminal) also skips the clear-prefix even though `composerDirtyLen` can still be `> 0` there.
+   *   The Enter-only skip is harmless HERE ONLY because such a `gen` can never reach this branch with its
+   *   own entry present in the first place — see the early-return just below for why. The `composerLen >
+   *   0` skip is NOT similarly protected: that branch still stamps `composerBodyWrittenForGen`, so it CAN
+   *   acquire an entry and later be decisively resolved despite never having attempted a clear — a
+   *   genuine false-zero gap, pre-existing (not introduced by this re-shape) and tracked by card
+   *   ef78c885. Setting that gap aside, for every `gen` that DOES reach this branch with an
+   *   entry present, `gen`'s OWN submission already attempted to backspace away every OLDER still-marked
    *   contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text. `gen`'s own
    *   exact-match confirmation is therefore transitive proof of the WHOLE preceding write chain, not just
    *   `gen`'s own slice — resolve every entry with generation `<= gen`. A STRICTLY LATER entry (a
@@ -8570,8 +8579,15 @@ export class PtyHost {
    *   for a bare Stop hook (not a new gap this fix introduces), but not license to also discharge OTHER
    *   generations' marks on its say-so. Resolve ONLY `gen`'s own entry.
    *
-   * If `gen` has no entry at all (never marked, or already resolved by an earlier call), this is a no-op —
-   * mirrors the old gate's behavior for an unmatched/stale generation.
+   * If `gen` has no entry at all, the early return below is NOT a mere no-op for an unmatched/stale
+   * generation — for the Enter-only redelivery branch above it is LOAD-BEARING: that branch never sets
+   * `composerBodyWrittenForGen = gen` (contrast the two branches that DO write a fresh body), so a
+   * generation that took it can never acquire an entry here, which is what stops ITS OWN decisive
+   * confirmation from being wrongly read as transitive proof that a clear-prefix it never ran succeeded.
+   * ⛔ DO NOT make the Enter-only branch stamp `composerBodyWrittenForGen` as a drive-by — doing so would
+   * let that generation acquire an entry and silently turn its own future decisive confirmation into a
+   * false-zero machine, discharging earlier generations' marks that its submission never attempted to
+   * clear. (Card 2a7f8040.)
    */
   private clearComposerDirtyOnConfirm(sessionId: string, live: Live, gen: number, decisive: boolean): void {
     if (!live.composerDirtyMarkedGens.has(gen)) return;
