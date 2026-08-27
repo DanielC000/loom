@@ -13979,7 +13979,7 @@ export class SessionService {
     // this hold can never outlive a single bounded git operation plus the (synchronous, or near-instant)
     // bookkeeping above it in this same try.
     if (gateRan) this.gateSemaphore.beginSquash(repoPath, thisOpId);
-    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead);
+    merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead, thisOpId);
     } finally {
       // Mirrors the `beginSquash` guard above exactly — `gateRan` is the same precise proxy for "this op
       // actually holds (or could hold) repoPath via `runExclusive`/`admit`", so a reuse/gateless op never

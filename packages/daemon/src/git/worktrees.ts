@@ -7,6 +7,7 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
+import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 
 export interface WorktreeInfo {
@@ -4102,19 +4103,22 @@ export async function mergeMainIntoWorktree(
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string,
+  gateBaseBranchHead?: string, opId?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
   // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
   // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
-  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead));
+  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead, opId));
 }
 
+// `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
+// merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
+// unattributed window entry (repo/branch only), never a functional difference in what this function does.
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-  gateBaseBranchHead?: string,
+  gateBaseBranchHead?: string, opId?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
@@ -4362,114 +4366,127 @@ async function mergeBranchLocked(
     }
   }
 
-  let rawError = false;
+  // Danger-window tracking (board card 5a7692a4): from HERE — just before the first mutating git
+  // call this attempt makes — through every exit below (success, or a handled
+  // conflict/rawError/probe-failure exit, each via its own resetOrSkip cleanup call INSIDE this same
+  // try, so the window stays marked active until that cleanup has itself settled, never cleared before
+  // it) is the interval a process death can leave the canonical repo with staged, uncommitted residue
+  // ("trigger-3") that never auto-clears. See merge-danger-window.ts for the full doc + how
+  // gracefulShutdown uses this to bound its own exit.
+  enterMergeDangerWindow(repoPath, branch, opId);
   try {
-    await withTimeout(git.raw(["merge", "--squash", branch]), timeoutMs, "git merge --squash (canonical)");
-  } catch {
-    rawError = true; // a conflict OR a real failure — the explicit checks below decide
+    let rawError = false;
+    try {
+      await withTimeout(git.raw(["merge", "--squash", branch]), timeoutMs, "git merge --squash (canonical)");
+    } catch {
+      rawError = true; // a conflict OR a real failure — the explicit checks below decide
+    }
+    // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
+    // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
+    // This probe used to be bare/uncaught (card 9e77050f): a throw here rejected mergeBranchLocked with no
+    // cleanup, leaving the squash staged — exactly the residue class the entry check above now exists to
+    // catch on a LATER call, but there is no reason to manufacture that gap when we can just close it here.
+    // The reset --hard on catch is safe for a SCOPE reason, not just a timing one: the entry check above
+    // observed the whole tracked working tree (`git status`, staged + unstaged) clean before this squash
+    // began, and `reset --hard`'s own blast radius is exactly that same tracked working tree — no wider. A
+    // precondition only licenses the operation over the state it actually observed; because the two match
+    // here, whatever is dirty now is provably ours (this squash's own output) to discard.
+    let conflicted: boolean;
+    try {
+      conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
+    } catch (e) {
+      const cleanupIssue = await resetOrSkip("post-squash-probe-failure cleanup");
+      return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
+    }
+    if (conflicted) {
+      // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
+      // read-only tree); swallowing it would assert a clean "conflict" while the repo is left with unmerged/
+      // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
+      // rather than trusting the (now false) "untouched" guarantee.
+      const cleanupIssue = await resetOrSkip("conflict cleanup");
+      if (cleanupIssue) return { ok: false, conflict: true, reason: cleanupIssue };
+      return { ok: false, conflict: true };
+    }
+    // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
+    // squash never definitively landed — whatever IS (or isn't) currently staged cannot be trusted as OURS.
+    // Under the race the mutex above now closes, that "something staged" could be a DIFFERENT concurrent
+    // op's leftover, and the old code below this point would have blindly committed it under THIS branch's
+    // subject/trailer (the exact incident: a commit bearing one branch's trailer, another's content) — fail
+    // loud UNCONDITIONALLY on rawError, never fall through to "well, something's staged, ship it." The mutex
+    // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
+    // anything outside it.
+    if (rawError) {
+      const cleanupIssue = await resetOrSkip("rawError cleanup");
+      return { ok: false, reason: cleanupIssue ? `git merge --squash failed (${cleanupIssue})` : "git merge --squash failed" };
+    }
+    // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
+    // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
+    // Also previously bare/uncaught (card 9e77050f) — same reasoning as the conflict probe above: wrap it so a
+    // throw can't reject with a staged index left behind, and the reset --hard on catch is safe for the same
+    // SCOPE reason (the entry check's `git status` probe covers exactly what `reset --hard` touches, so a
+    // precondition observed there licenses this operation too — see that check's own comment).
+    let staged: boolean;
+    try {
+      staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
+    } catch (e) {
+      const cleanupIssue = await resetOrSkip("staged-probe-failure cleanup");
+      return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
+    }
+    if (!staged) {
+      // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
+      // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD
+      // AND that commit's content is verified to actually contain the branch's own changes (see
+      // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
+      const landed = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
+      // `sha` rides along on the ALREADY_MERGED case (card 1eebc46a) — `landed` IS the commit's sha,
+      // already resolved by the lookup just above; surfacing it costs no extra git call, just returning
+      // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
+      // a redundant lookup of its own.
+      return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined };
+    }
+    // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
+    // Card 7a1a76e9 DoD-3: the task title still wins unconditionally when a task exists (⛔ do not regress
+    // the tasked path) — a taskless worker now derives a real subject from its own branch tip commit instead
+    // of falling back straight to the branch name; see deriveTasklessSubject's own doc for the tip-vs-first
+    // decision. The branch name stays the LAST-RESORT fallback (an empty/unreadable branch, or the derive
+    // call itself failing).
+    const taskSubject = taskTitle ? taskTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
+    const rawSubject = taskSubject || (await deriveTasklessSubject(repoPath, branch, deps)) || branch;
+    const subject = toConventionalSubject(rawSubject);
+    // Stamp a second trailer (card f621f185): the branch's own touched-path-set digest, computed HERE from
+    // the branch ref directly (HEAD hasn't moved yet — `--squash` never advances it) so it reflects what the
+    // branch itself actually changed, independent of whatever ended up staged. This is what lets a LATER
+    // determination verify a landed commit purely from its own ancestry (sha^..sha) once the branch ref is
+    // gone — see changedPathSetDigest's doc for why a full content hash doesn't work here and a path-set does.
+    // Best-effort: a capture failure just omits the trailer (falls back to the pre-fix degraded behavior for
+    // THIS commit) rather than blocking a real, already-successful merge.
+    let pathSetTrailer = "";
+    try {
+      const mergeBaseForPathSet = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, path-set fingerprint)")).trim();
+      const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch, timeoutMs);
+      pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
+    } catch (e) {
+      // Best-effort; the commit still lands, just without this trailer — but this IS a real degradation of a
+      // brand-new, live commit (not a legacy artifact), so it must be logged here, at the moment it happens —
+      // findLandedSquashCommit/scanMergedCommitMap only ever see the trailer's ABSENCE later and can't tell a
+      // capture failure apart from genuinely predating the trailer (card 9f776570).
+      // eslint-disable-next-line no-console
+      console.warn(`[git] mergeBranchLocked: Loom-Worker-PathSet capture failed for ${branch} — commit lands ` +
+        `without the trailer: ${(e as Error).message}`);
+    }
+    const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
+    try {
+      await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
+    } catch (e) {
+      const cleanupIssue = await resetOrSkip("commit-failure cleanup");
+      return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
+    }
+    const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
+    return { ok: true, sha, subject };
+
+  } finally {
+    exitMergeDangerWindow(repoPath);
   }
-  // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
-  // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
-  // This probe used to be bare/uncaught (card 9e77050f): a throw here rejected mergeBranchLocked with no
-  // cleanup, leaving the squash staged — exactly the residue class the entry check above now exists to
-  // catch on a LATER call, but there is no reason to manufacture that gap when we can just close it here.
-  // The reset --hard on catch is safe for a SCOPE reason, not just a timing one: the entry check above
-  // observed the whole tracked working tree (`git status`, staged + unstaged) clean before this squash
-  // began, and `reset --hard`'s own blast radius is exactly that same tracked working tree — no wider. A
-  // precondition only licenses the operation over the state it actually observed; because the two match
-  // here, whatever is dirty now is provably ours (this squash's own output) to discard.
-  let conflicted: boolean;
-  try {
-    conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
-  } catch (e) {
-    const cleanupIssue = await resetOrSkip("post-squash-probe-failure cleanup");
-    return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
-  }
-  if (conflicted) {
-    // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
-    // read-only tree); swallowing it would assert a clean "conflict" while the repo is left with unmerged/
-    // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
-    // rather than trusting the (now false) "untouched" guarantee.
-    const cleanupIssue = await resetOrSkip("conflict cleanup");
-    if (cleanupIssue) return { ok: false, conflict: true, reason: cleanupIssue };
-    return { ok: false, conflict: true };
-  }
-  // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
-  // squash never definitively landed — whatever IS (or isn't) currently staged cannot be trusted as OURS.
-  // Under the race the mutex above now closes, that "something staged" could be a DIFFERENT concurrent
-  // op's leftover, and the old code below this point would have blindly committed it under THIS branch's
-  // subject/trailer (the exact incident: a commit bearing one branch's trailer, another's content) — fail
-  // loud UNCONDITIONALLY on rawError, never fall through to "well, something's staged, ship it." The mutex
-  // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
-  // anything outside it.
-  if (rawError) {
-    const cleanupIssue = await resetOrSkip("rawError cleanup");
-    return { ok: false, reason: cleanupIssue ? `git merge --squash failed (${cleanupIssue})` : "git merge --squash failed" };
-  }
-  // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
-  // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
-  // Also previously bare/uncaught (card 9e77050f) — same reasoning as the conflict probe above: wrap it so a
-  // throw can't reject with a staged index left behind, and the reset --hard on catch is safe for the same
-  // SCOPE reason (the entry check's `git status` probe covers exactly what `reset --hard` touches, so a
-  // precondition observed there licenses this operation too — see that check's own comment).
-  let staged: boolean;
-  try {
-    staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
-  } catch (e) {
-    const cleanupIssue = await resetOrSkip("staged-probe-failure cleanup");
-    return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
-  }
-  if (!staged) {
-    // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
-    // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD
-    // AND that commit's content is verified to actually contain the branch's own changes (see
-    // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
-    const landed = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
-    // `sha` rides along on the ALREADY_MERGED case (card 1eebc46a) — `landed` IS the commit's sha,
-    // already resolved by the lookup just above; surfacing it costs no extra git call, just returning
-    // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
-    // a redundant lookup of its own.
-    return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined };
-  }
-  // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
-  // Card 7a1a76e9 DoD-3: the task title still wins unconditionally when a task exists (⛔ do not regress
-  // the tasked path) — a taskless worker now derives a real subject from its own branch tip commit instead
-  // of falling back straight to the branch name; see deriveTasklessSubject's own doc for the tip-vs-first
-  // decision. The branch name stays the LAST-RESORT fallback (an empty/unreadable branch, or the derive
-  // call itself failing).
-  const taskSubject = taskTitle ? taskTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
-  const rawSubject = taskSubject || (await deriveTasklessSubject(repoPath, branch, deps)) || branch;
-  const subject = toConventionalSubject(rawSubject);
-  // Stamp a second trailer (card f621f185): the branch's own touched-path-set digest, computed HERE from
-  // the branch ref directly (HEAD hasn't moved yet — `--squash` never advances it) so it reflects what the
-  // branch itself actually changed, independent of whatever ended up staged. This is what lets a LATER
-  // determination verify a landed commit purely from its own ancestry (sha^..sha) once the branch ref is
-  // gone — see changedPathSetDigest's doc for why a full content hash doesn't work here and a path-set does.
-  // Best-effort: a capture failure just omits the trailer (falls back to the pre-fix degraded behavior for
-  // THIS commit) rather than blocking a real, already-successful merge.
-  let pathSetTrailer = "";
-  try {
-    const mergeBaseForPathSet = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, path-set fingerprint)")).trim();
-    const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch, timeoutMs);
-    pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
-  } catch (e) {
-    // Best-effort; the commit still lands, just without this trailer — but this IS a real degradation of a
-    // brand-new, live commit (not a legacy artifact), so it must be logged here, at the moment it happens —
-    // findLandedSquashCommit/scanMergedCommitMap only ever see the trailer's ABSENCE later and can't tell a
-    // capture failure apart from genuinely predating the trailer (card 9f776570).
-    // eslint-disable-next-line no-console
-    console.warn(`[git] mergeBranchLocked: Loom-Worker-PathSet capture failed for ${branch} — commit lands ` +
-      `without the trailer: ${(e as Error).message}`);
-  }
-  const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
-  try {
-    await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
-  } catch (e) {
-    const cleanupIssue = await resetOrSkip("commit-failure cleanup");
-    return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
-  }
-  const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
-  return { ok: true, sha, subject };
 }
 
 /**

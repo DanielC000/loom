@@ -65,6 +65,8 @@ import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
+import { waitForMergeDangerWindowsToClear } from "./git/merge-danger-window.js";
+import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
 
 async function main(): Promise<void> {
   // Card 572dd777 DoD-3: this boot's own start time, captured as the very first statement of main() so
@@ -969,6 +971,19 @@ async function main(): Promise<void> {
         console.warn(`[boot] canonical repo has unstaged tracked changes at ${d.repoPath} — this is ordinary uncommitted work-in-progress in the canonical checkout, NOT staged, so it will NOT block the next merge attempt; no action needed unless it's unexpected (a common benign cause: a submodule whose checked-out commit is ahead of its recorded pointer, which shows up here but is normal steady state, not residue):\n${d.status}`);
       }
     }
+    // Merge-danger LATCH cross-reference (card 5a7692a4 DoD-2): deliberately sequenced HERE, inside the
+    // SAME .then() as the residue scan above, not as an independent parallel probe — the scan above
+    // answers a STATE question ("is the tree dirty right now") and can't tell a dead squash's own residue
+    // apart from a human's unrelated WIP, nor say anything when the tree came back clean. A latch answers
+    // the EVENT question ("did THIS process die inside a merge squash") and supplies the attribution the
+    // scan structurally cannot: cross-referencing against `dirty` (already resolved at this point) is what
+    // lets the two messages below differ correctly. Consume-on-read: readAndClearMergeDangerLatches deletes
+    // each latch file it returns, so a normal graceful stop (which always clears its own latch on exit —
+    // see merge-danger-window.ts) never leaves anything here to find; only a hard death does.
+    const latches = readAndClearMergeDangerLatches();
+    for (const latch of latches) {
+      console.warn(describeMergeDangerLatchAtBoot(latch, dirty));
+    }
   }).catch((err) => {
     console.warn(`[boot] canonical-repo merge-residue scan failed (continuing boot): ${(err as Error).message}`);
   });
@@ -1405,7 +1420,15 @@ async function main(): Promise<void> {
     void companionController.stop().catch(() => { /* never block the exit */ });
     scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
-    process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
+    // Gate-aware exit (board card 5a7692a4): this path used to `process.exit(0)` unconditionally, with
+    // zero awareness of an in-flight canonical merge squash — a measured ~92s-margin near-miss. Delay the
+    // actual exit by a SHORT, BOUNDED grace ONLY if a merge is currently inside its danger window (the
+    // common case — nothing in flight — resolves this synchronously, so an ordinary stop's exit latency is
+    // unchanged). Fail-open: never a hard refusal of the owner's stop, always exits within the grace
+    // ceiling regardless of what the merge does. See merge-danger-window.ts for the full mechanism.
+    void waitForMergeDangerWindowsToClear().finally(() => {
+      process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
+    });
   };
   // SIGINT/SIGTERM plus SIGHUP — Node also emits SIGHUP for the Windows console-close case (closing the
   // terminal window) as well as the POSIX hangup case, so listing it here covers that win32 path too,
