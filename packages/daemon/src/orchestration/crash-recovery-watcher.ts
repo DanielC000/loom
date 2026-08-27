@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolveConfig, type SessionRole, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
+import { deriveAwaitingReview } from "./report-resolution.js";
 import { RESUME_NUDGE_TAIL } from "./resume-nudge.js";
 import { isNoOpManagerWake } from "./restart.js";
 import { computeWakeImpact } from "./wake-impact.js";
@@ -370,25 +371,57 @@ export class CrashRecoveryWatcher {
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
       if (started && pty) {
         if (s.role === "worker" || s.role === "assistant" || s.role === "operator") {
-          // Worker/assistant/operator nudges stay UNCONDITIONAL (card c9e51581 scopes the stake-aware
-          // silencing to manager/platform only — none of the three has a board/idle-nudge concept to
-          // classify against). `operator` joins here for the SAME reason (card a933613e, the RECOVERABLE_
-          // ROLES fix): it has no workers and isn't an orchestrator, so falling into the manager/platform
-          // branch below would misroute "re-check your workers... continue orchestrating" copy — and
-          // worse, hasPendingBoardWork reads the PROJECT's board regardless of role, so an operator could
-          // get a FULL nudge (or stay silent) based on board state it has nothing to do with.
-          const note = s.role === "worker"
-            ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-check your ` +
-              `worktree's state, then continue your assigned task from where you left off. If you had already ` +
-              `finished, call worker_report (done/blocked) so your manager isn't left waiting.`
-            : s.role === "assistant"
+          // Worker/assistant/operator nudges stay UNCONDITIONAL w.r.t. the stake-aware silencing below
+          // (card c9e51581 scopes THAT to manager/platform only — none of the three has a board/idle-nudge
+          // concept to classify against). `operator` joins here for the SAME reason (card a933613e, the
+          // RECOVERABLE_ROLES fix): it has no workers and isn't an orchestrator, so falling into the
+          // manager/platform branch below would misroute "re-check your workers... continue orchestrating"
+          // copy — and worse, hasPendingBoardWork reads the PROJECT's board regardless of role, so an
+          // operator could get a FULL nudge (or stay silent) based on board state it has nothing to do
+          // with. (The `worker` sub-branch below is a SEPARATE, report-state-aware condition — see card
+          // 24ed1edc just below — not a contradiction of "unconditional" here.)
+          // Card 24ed1edc — ruling 2 (db05e657) reaches this path too: a worker resume nudge must not tell
+          // a still-`awaitingReview` worker to "continue your assigned task" (it structurally can't — see
+          // that ruling's doc in report-resolution.ts). Reuse the SAME shared predicate the boot-time path
+          // (SessionService.recoverCrashOrphanedWorkers) already calls for this exact question — `events`
+          // is already in hand from line 287 (same loop body), so this costs zero extra queries.
+          let note: string | null;
+          if (s.role === "worker") {
+            const { reportedState, awaitingReview } = deriveAwaitingReview(events);
+            if (awaitingReview && reportedState === "blocked") {
+              // Mirrors recoverCrashOrphanedWorkers's identical `blocked` branch (sessions/service.ts): the
+              // worker stopped and asked its manager for something, and the manager hasn't answered yet — it
+              // CAN'T continue. A distinct nudge asks it to re-state its blocker, not to carry on.
+              note = `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it. Your last ` +
+                `report to your manager was worker_report(blocked) — you are still waiting on an answer, not ` +
+                `mid-work. Re-state your blocker to your manager (worker_report again) rather than resuming ` +
+                `the task as if nothing happened.`;
+            } else if (awaitingReview && reportedState === "done") {
+              // NAMED DECISION (the card requires this be explicit, not accidental): SILENCE, matching the
+              // boot path's identical done-awaiting-review case (recoverCrashOrphanedWorkers's `if
+              // (w.awaitingReview)` branch sends nothing when reportedState is "done") — this branch used to
+              // send the unconditional "continue your assigned task" nudge below even here. A worker still
+              // awaiting review on a `done` report has nothing left to continue: the report already stands
+              // and it's the manager's move next, not the worker's — "continue your assigned task" would
+              // misdirect it into re-touching work that's already finished and sitting on review.
+              note = null;
+            } else {
+              note = `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-check your ` +
+                `worktree's state, then continue your assigned task from where you left off. If you had already ` +
+                `finished, call worker_report (done/blocked) so your manager isn't left waiting.`;
+            }
+          } else {
+            note = s.role === "assistant"
               ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
                 `off with the human.`
               : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up your task ` +
                 `from where you left off.`;
+          }
           // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
           // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
-          try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+          if (note) {
+            try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+          }
         } else {
           // manager or platform — card c9e51581 (Path C extension of 61cc91c6): a manager/platform with NO
           // stake in this isolated crash resumes SILENTLY instead of the unconditional re-orient nudge below.

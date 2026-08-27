@@ -566,7 +566,80 @@ function cleanup(e) {
   cleanup(e2);
 }
 
+// ============================ (16) WORKER awaitingReview reaches the RUNTIME watcher too (card 24ed1edc) ===
+// The BOOT-time crash-recovery path (crash-orphaned-workers.mjs, deriveCrashOrphanedWorkers +
+// recoverCrashOrphanedWorkers) already applies db05e657's ruling 2: a blocked-and-unresolved worker must
+// not be told "continue your assigned task" (test (15) there), and a done-and-awaiting-review worker gets
+// no continue-nudge either (test (14b) there). CrashRecoveryWatcher — the CONTINUOUS runtime auto-resume,
+// a THIRD path entirely (it runs on every boot, not just the two mutually-exclusive BOOT branches
+// resumeFleetOnBoot/recoverCrashOrphanedWorkers) — never consulted report state at all before this fix:
+// RED under the pre-fix code, this branch sent the unconditional "continue your assigned task" nudge
+// regardless of report state, telling a blocked-and-unresolved worker to continue the task it structurally
+// cannot continue.
+
+// (16a) BLOCKED, unresolved: must NOT get "continue your assigned task"; must get the distinct
+// "re-state your blocker" nudge instead (mirrors crash-orphaned-workers.mjs test (15)).
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-16a", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-16a", { role: "worker", parentSessionId: "mgr-16a", taskId: "t16a" });
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16a", workerSessionId: "wkr-16a", taskId: "t16a", kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
+  die(e, "wkr-16a", at(1000));
+  e.watcher.tick(at(1100));
+  const nudge = e.enqueued.find((x) => x.id === "wkr-16a");
+  check("(16a) a blocked-and-unresolved worker does NOT get the generic continue-your-task nudge", !nudge || !/continue your assigned task/i.test(nudge.text));
+  check("(16a) it DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
+    !!nudge && /blocked/i.test(nudge.text) && /re-state your blocker/i.test(nudge.text));
+  cleanup(e);
+}
+
+// (16b) DONE, awaiting review: NAMED DECISION (the card requires this be explicit) — SILENCE, matching the
+// boot path's identical case (crash-orphaned-workers.mjs test (14b) — that worker gets no continue-nudge
+// either, only its manager's summary line changes).
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-16b", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-16b", { role: "worker", parentSessionId: "mgr-16b", taskId: "t16b" });
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16b", workerSessionId: "wkr-16b", taskId: "t16b", kind: "worker_report", detail: { status: "done" } });
+  die(e, "wkr-16b", at(1000));
+  e.watcher.tick(at(1100));
+  const nudge = e.enqueued.find((x) => x.id === "wkr-16b");
+  check("(16b) a done-and-awaiting-review worker gets NO nudge at all (silence, matching the boot path)", !nudge);
+  cleanup(e);
+}
+
+// (16c) POSITIVE CONTROL — polarity pair for (16a)/(16b)'s absence assertions: an ordinary worker with NO
+// report at all (the common case) still gets the unconditional continue-nudge. Proves the absences above
+// aren't from a blanket suppression that swallowed every worker nudge on this path.
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-16c", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-16c", { role: "worker", parentSessionId: "mgr-16c", taskId: "t16c" });
+  die(e, "wkr-16c", at(1000));
+  e.watcher.tick(at(1100));
+  const nudge = e.enqueued.find((x) => x.id === "wkr-16c");
+  check("(16c) CONTROL: an ordinary worker with no report at all still gets the continue-nudge", !!nudge && /continue your assigned task/i.test(nudge.text));
+  cleanup(e);
+}
+
+// (16d) CONSUMED report: a blocked report followed by a message_worker (the manager already answered) must
+// read as NOT awaitingReview — the worker gets the ordinary continue-nudge, not the "re-state your blocker"
+// one (mirrors crash-orphaned-workers.mjs test (14a)'s consumed-report shape, applied to `blocked` here).
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-16d", { role: "manager", processState: "live" });
+  seedSession(e, "wkr-16d", { role: "worker", parentSessionId: "mgr-16d", taskId: "t16d" });
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16d", workerSessionId: "wkr-16d", taskId: "t16d", kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16d", workerSessionId: "wkr-16d", taskId: "t16d", kind: "message_worker", detail: { text: "here's the key" } });
+  die(e, "wkr-16d", at(1000));
+  e.watcher.tick(at(1100));
+  const nudge = e.enqueued.find((x) => x.id === "wkr-16d");
+  check("(16d) a CONSUMED blocked report (a manager reply already sent) gets the ordinary continue-nudge, not the re-state-your-blocker one",
+    !!nudge && /continue your assigned task/i.test(nudge.text) && !/re-state your blocker/i.test(nudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional w.r.t. that stake-aware silencing. A resumed WORKER's nudge is now report-state-aware too (card 24ed1edc, applying db05e657's ruling 2 to this runtime path): a blocked-and-unresolved worker gets a distinct 're-state your blocker' nudge instead of the generic continue-nudge it structurally can't act on, and a done-and-awaiting-review worker gets NO nudge at all (silence, matching the boot path's identical case) — an ordinary worker with no unresolved report still gets the unconditional continue-nudge. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet. `operator` (card a933613e) is now equally recoverable — RECOVERABLE_ROLES is now a compiler-checked Record<SessionRole, boolean> so a future SESSION_ROLES addition can't silently go undecided again — and every role's disposition is pinned by an explicit runtime assertion, not an absence-shaped default."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
