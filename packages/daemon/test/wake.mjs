@@ -78,12 +78,20 @@ function makeEnv(opts = {}) {
     }
     return r;
   };
+  // Card 90b9e904: RECORDING stub for the optional `enqueueDurableNudge` dep — mirrors
+  // crash-recovery-watcher.mjs's (17a)/(17c) pattern. Only wired when the test opts in
+  // (`opts.enqueueDurableNudge`); every other test above omits it, so `tick()` falls back to the
+  // pre-90b9e904 `enqueueDurable` call, byte-identical.
+  const durableCalls = [];
   const wakes = new WakeService({
     db, pty, resume, enqueueDurable,
     isUsageLimited: () => !!opts.usageLimited,
+    ...(opts.enqueueDurableNudge ? {
+      enqueueDurableNudge: (id, role, text, taskId, dOpts) => { durableCalls.push({ id, role, text, taskId, opts: dOpts }); },
+    } : {}),
   });
   return {
-    dbFile, db, projId, agentId, sessId, alive, enqueued, resumed, wakes,
+    dbFile, db, projId, agentId, sessId, alive, enqueued, resumed, wakes, durableCalls,
     setOrigin: (o) => { origin = o; }, // flip the "current turn's route" between schedule() calls
   };
 }
@@ -176,6 +184,41 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   check("auto-resume: resume() called for the stopped session", e.resumed.length === 1 && e.resumed[0] === e.sessId);
   check("auto-resume: nudge delivered after resume", e.enqueued.length === 1);
   check("auto-resume: wake_fired recorded", events(e, "wake_fired").length === 1);
+  cleanupEnv(e);
+}
+
+// Card 90b9e904: with `enqueueDurableNudge` wired (production shape — index.ts passes
+// sessions.enqueueDurableNudge), a not-live wake fire's nudge routes through IT — MCP-seen-gated (on top
+// of enqueueDurable's existing durability) — instead of straight to `enqueueDurable`. POSITIVE CONTROL:
+// RED against pre-90b9e904 code, where `enqueueDurableNudge` was never provided as a dep at all, so this
+// call would have gone straight to `enqueueDurable` regardless of what's wired here.
+{
+  const e = makeEnv({ enqueueDurableNudge: true });
+  const t0 = new Date();
+  e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "wake up" }, t0);
+  e.alive.delete(e.sessId); // session stopped after scheduling
+  await e.wakes.tick(new Date(t0.getTime() + 61_000));
+  check("durable-dispatch: resumed the not-alive target first", e.resumed.length === 1 && e.resumed[0] === e.sessId);
+  check("durable-dispatch: the fire routes through enqueueDurableNudge, not raw enqueueDurable",
+    e.durableCalls.length === 1 && e.durableCalls[0].id === e.sessId && e.durableCalls[0].role === "manager"
+    && e.durableCalls[0].taskId === null && e.durableCalls[0].opts?.kind === "agent" && e.durableCalls[0].opts?.route === undefined
+    && e.durableCalls[0].text.includes("wake up"));
+  check("durable-dispatch: enqueueDurable (and so pty.enqueueStdin) is NOT also called for this same nudge (no double-dispatch)",
+    e.enqueued.length === 0);
+  check("durable-dispatch: wake_fired still recorded", events(e, "wake_fired").length === 1);
+  cleanupEnv(e);
+}
+
+// REGRESSION GUARD: with NO `enqueueDurableNudge` dep (every test above), the not-live path still falls
+// back to the pre-90b9e904 `enqueueDurable` call, byte-identical.
+{
+  const e = makeEnv(); // no enqueueDurableNudge — the default every other test uses
+  const t0 = new Date();
+  e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "wake up" }, t0);
+  e.alive.delete(e.sessId);
+  await e.wakes.tick(new Date(t0.getTime() + 61_000));
+  check("fallback: with no enqueueDurableNudge dep, the not-live fire still lands via enqueueDurable",
+    e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId && e.enqueued[0].kind === "agent");
   cleanupEnv(e);
 }
 

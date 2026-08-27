@@ -73,14 +73,22 @@ function makeEnv(opts = {}) {
   const control = new OrchestrationControl();
   if (opts.globalPaused) control.pause("global");
 
+  // Card 90b9e904: RECORDING stub for the optional `enqueueDurableNudge` dep — mirrors
+  // crash-recovery-watcher.mjs's (17a)/(17c) pattern. Only wired when the test opts in
+  // (`opts.enqueueDurableNudge`); every other test above omits it, so `fire()` falls back to the raw
+  // `pty.enqueueStdin` dispatch, byte-identical to before this card.
+  const durableCalls = [];
   const svc = new EventTriggerService({
     db, pty, control, resume, spawn,
     isUsageLimited: () => !!opts.usageLimited,
+    ...(opts.enqueueDurableNudge ? {
+      enqueueDurableNudge: (id, role, text, taskId, dOpts) => { durableCalls.push({ id, role, text, taskId, opts: dOpts }); },
+    } : {}),
   });
 
   return {
     dbFile, db, projId, otherProjId, wakeAgentId, spawnAgentId, sessId, otherSessId, alive, enqueued, resumed, spawned,
-    control, svc,
+    control, svc, durableCalls,
   };
 }
 function cleanupEnv(e) {
@@ -260,6 +268,38 @@ const emitEvent = (e, kind, managerSessionId, detail = {}, taskId = null, worker
   await e.svc.tick(new Date());
   check("resume: a not-alive wake target is resumed before delivery", e.resumed.length === 1 && e.resumed[0] === e.sessId);
   check("resume: then the turn is enqueued", e.enqueued.length === 1);
+  cleanupEnv(e);
+}
+
+// --- Card 90b9e904: with `enqueueDurableNudge` wired (production shape — index.ts passes
+// sessions.enqueueDurableNudge), a not-live wake-fire target's nudge routes through IT — MCP-seen-gated +
+// durable — instead of the raw `pty.enqueueStdin` this used to call directly (no gate, no durability;
+// byte-for-byte the shape card 9f7c59f1 removed from CrashRecoveryWatcher). POSITIVE CONTROL: RED against
+// pre-90b9e904 code, where `enqueueDurableNudge` was never provided as a dep at all, so this call would
+// have gone straight to raw `pty.enqueueStdin` regardless of what's wired here. ---
+{
+  const e = makeEnv({ deadSession: true, enqueueDurableNudge: true });
+  seedWakeTrigger(e, "trig-durable");
+  emitEvent(e, "worker_report", e.sessId, { status: "blocked" });
+  await e.svc.tick(new Date());
+  check("durable-dispatch: resumed the not-alive target first", e.resumed.length === 1 && e.resumed[0] === e.sessId);
+  check("durable-dispatch: the fire routes through enqueueDurableNudge, not raw pty.enqueueStdin",
+    e.durableCalls.length === 1 && e.durableCalls[0].id === e.sessId && e.durableCalls[0].role === "manager"
+    && e.durableCalls[0].taskId === null && e.durableCalls[0].opts?.kind === "agent");
+  check("durable-dispatch: raw pty.enqueueStdin is NOT also called for this same nudge (no double-dispatch)",
+    e.enqueued.length === 0);
+  cleanupEnv(e);
+}
+
+// --- REGRESSION GUARD: with NO `enqueueDurableNudge` dep (every test above), the not-live path still
+// falls back to the pre-90b9e904 raw `pty.enqueueStdin` dispatch, byte-identical. ---
+{
+  const e = makeEnv({ deadSession: true }); // no enqueueDurableNudge — the default every other test uses
+  seedWakeTrigger(e, "trig-fallback");
+  emitEvent(e, "worker_report", e.sessId, { status: "blocked" });
+  await e.svc.tick(new Date());
+  check("fallback: with no enqueueDurableNudge dep, the not-live fire still lands via raw pty.enqueueStdin",
+    e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId && e.enqueued[0].kind === "agent");
   cleanupEnv(e);
 }
 

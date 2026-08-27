@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import type { CompanionRoute, Wake } from "@loom/shared";
+import type { CompanionRoute, SessionRole, Wake } from "@loom/shared";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 
 /** The slice of PtyHost the WakeService needs (injectable so the tick logic unit-tests claude-free). */
@@ -52,6 +52,21 @@ export interface WakeServiceDeps {
    * recording stub (keeps this claude-free, mirrors `resume`).
    */
   enqueueDurable: (sessionId: string, text: string, ctx: { kind: "warning" | "agent"; route?: CompanionRoute }) => { delivered: boolean; position?: number };
+  /**
+   * OPTIONAL: dispatch a fired wake's nudge through `SessionService.enqueueDurableNudge` (MCP-seen-gated —
+   * on TOP of `enqueueDurable`'s existing durability, above) instead of going straight to `enqueueDurable`
+   * — card 90b9e904: `tick()`'s not-alive branch resumes the target then immediately dispatches, the SAME
+   * fresh-MCP-handshake race card 9f7c59f1 closed in `CrashRecoveryWatcher` (no comment anywhere ever
+   * claimed this omission here was deliberate — it simply predates the MCP-seen-gate concept, card
+   * 61a012ce's durability fix having shipped first). Prod-wired (index.ts) to `(id, role, text, taskId,
+   * opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts)`. ABSENT (every existing hermetic
+   * test double, incl. every test in wake.mjs above) falls back to the pre-90b9e904 `enqueueDurable` call,
+   * byte-identical — additive, never a hard dependency a test double must opt into.
+   */
+  enqueueDurableNudge?: (
+    sessionId: string, role: SessionRole | null, text: string, taskId: string | null,
+    opts?: { kind?: "warning" | "agent"; route?: CompanionRoute },
+  ) => void;
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly. */
   intervalMs?: number;
   /**
@@ -203,7 +218,16 @@ export class WakeService {
         // now persists a `session_message_queued` record on the held path, redriven by
         // `recoverUndeliveredMessagesOnBoot` — the wake row's lifecycle (anti-re-fire) and the message's
         // durability (anti-loss) are now separate, orthogonal mechanisms.
-        if (w.route) {
+        // Card 90b9e904: MCP-seen-gated dispatch via the injected enqueueDurableNudge (see its own doc)
+        // when wired (production); ABSENT falls back to the pre-90b9e904 enqueueDurable call, unchanged.
+        if (this.deps.enqueueDurableNudge) {
+          const role = this.deps.db.getSession(w.sessionId)?.role ?? null;
+          if (w.route) {
+            this.deps.enqueueDurableNudge(w.sessionId, role, framedReminder(w), null, { kind: "agent", route: w.route });
+          } else {
+            this.deps.enqueueDurableNudge(w.sessionId, role, framedNote(w), null, { kind: "agent" });
+          }
+        } else if (w.route) {
           this.deps.enqueueDurable(w.sessionId, framedReminder(w), { kind: "agent", route: w.route });
         } else {
           this.deps.enqueueDurable(w.sessionId, framedNote(w), { kind: "agent" });

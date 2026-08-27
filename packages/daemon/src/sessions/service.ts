@@ -4389,12 +4389,32 @@ export class SessionService {
    * of its continuation nudges through this same method too — the plain, non-durable `enqueueNudge`/
    * `deferredNudge` helpers this doc used to reference are gone; every boot-resume nudge in the codebase
    * now shares this one durable dispatch.
+   *
+   * Card 90b9e904: the optional 5th param `opts` generalizes this for THREE MORE resume-and-nudge sites —
+   * `orchestration/wake.ts` (`WakeService.tick`), `orchestration/poll.ts` (`PollService.fire`), and
+   * `orchestration/event-triggers.ts` (`EventTriggerService.fire`, wake mode) — each independently resumes
+   * a not-live session and then enqueues, and (before this card) did so via a bare `pty.enqueueStdin`
+   * (event-triggers, which ALSO lacked durability) or the durable-but-ungated `enqueueSystemNudge` (wake/
+   * poll) — the exact gap card 9f7c59f1 closed here, just unconverged at three more call sites. All three
+   * dispatch `kind: "agent"` (a wake note / poll item / matched event is its own turn, never coalesced with
+   * anything else queued), and a companion-origin wake also carries a `route` — neither fits this method's
+   * original `kind: "warning"` default, hence `opts` rather than a hardcoded value. Every PRE-EXISTING
+   * caller above (all `kind: "warning"`, no route) is unaffected: `opts` defaults to `{}`, reproducing the
+   * old hardcoded behavior byte-for-byte. Each of the three new call sites wires this in via its OWN
+   * optional injected dep (mirroring `CrashRecoveryDeps.enqueueDurableNudge`'s shape) with a byte-identical
+   * raw fallback for every existing hermetic test double that doesn't inject it — see each site's own dep
+   * doc.
    */
-  enqueueDurableNudge(id: string, role: SessionRole | null, text: string, taskId: string | null = null): void {
-    const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind: "warning", taskId }); };
+  enqueueDurableNudge(
+    id: string, role: SessionRole | null, text: string, taskId: string | null = null,
+    opts: { kind?: QueuedMessageKind; route?: CompanionRoute } = {},
+  ): void {
+    const kind = opts.kind ?? "warning";
+    const { route } = opts;
+    const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind, taskId, route }); };
     if (this.usesOrchestrationMcp(role)) {
       void this.pty.waitForMcpSeen(id).then(dispatch).catch((e: unknown) => {
-        console.warn(`[crash-recovery] deferred durable nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
+        console.warn(`[enqueue-durable-nudge] deferred durable nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
       });
     } else {
       dispatch();
@@ -4410,11 +4430,16 @@ export class SessionService {
    * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED (read this before changing any one
    * of the three in isolation) — NOT a claim these are the only sessionService/watcher sites that resume a
    * not-live session and then enqueue.** `orchestration/wake.ts`, `orchestration/poll.ts`, and
-   * `orchestration/event-triggers.ts` each do the same shape too, independently, and are KNOWN,
-   * UNCONVERGED siblings this card never touched (`event-triggers.ts`'s own gap is carded separately) —
-   * report-resolution.ts's own header doc already tells this exact story once (card cfffeda6: a
-   * three-way enumeration that read as exhaustive and wasn't); don't repeat it by reading "three" here as
-   * a completeness claim. Of the three THIS doc block is about: this is the DELIBERATE-RESTART path
+   * `orchestration/event-triggers.ts` each do the same shape too, independently — card 90b9e904 converged
+   * their durability + MCP-seen gate onto this SAME `enqueueDurableNudge` too (each via its own optional
+   * injected dep, byte-identical raw fallback for a test double that doesn't wire it) — but they are NOT a
+   * fourth/fifth/sixth instance of THIS function's per-facet ruling below: their nudge is a specific
+   * external signal (a wake note / poll item / matched event), not this function's generic "continue your
+   * task" continuation nudge, so report-state handling, worker nudge text, and ordering (below) do not
+   * apply to them at all — only durability + the gate are the shared facet. report-resolution.ts's own
+   * header doc already tells this exact "three read as exhaustive and wasn't" story once (card cfffeda6);
+   * don't repeat it by reading "three" here as a completeness claim. Of the three THIS doc block is about:
+   * this is the DELIBERATE-RESTART path
    * (`daemon_restart`), STRICTLY mutually exclusive per boot with
    * {@link SessionService.recoverCrashOrphanedWorkers} (the crash / OS-restart / clean-stop path —
    * `index.ts`'s boot branch runs exactly one of the two); the third, `CrashRecoveryWatcher.tick`
@@ -5043,10 +5068,11 @@ export class SessionService {
    * resumeFleetOnBoot, so running both would double-nudge the same sessions.
    *
    * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT a claim these are the only
-   * such sites** (`orchestration/wake.ts`/`poll.ts`/`event-triggers.ts` do the same shape too, and are
-   * KNOWN, UNCONVERGED siblings this card never touched — see `resumeFleetOnBoot`'s own doc for the full
-   * caveat and why "three" isn't repeated as a completeness claim here). Of the three THIS doc block is
-   * about: STRICTLY mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot} (the
+   * such sites** (`orchestration/wake.ts`/`poll.ts`/`event-triggers.ts` do the same shape too, and — since
+   * card 90b9e904 — share this SAME `enqueueDurableNudge` for durability + the MCP-seen gate too, though
+   * their nudge text/report-state/ordering facets don't apply to them at all — see `resumeFleetOnBoot`'s
+   * own doc for the full caveat and why "three" isn't repeated as a completeness claim here). Of the three
+   * THIS doc block is about: STRICTLY mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot} (the
    * deliberate `daemon_restart` path — see ITS doc for the full per-facet ruling: report-state handling,
    * worker nudge text, AND durability (both route through `enqueueDurableNudge` — card 06ebbb78 converged
    * this facet too) are CONVERGED between the two; only ordering (manager-before-its-workers here vs.

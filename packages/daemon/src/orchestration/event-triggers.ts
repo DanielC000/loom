@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import type { EventTrigger, OrchestrationEvent } from "@loom/shared";
+import type { EventTrigger, OrchestrationEvent, SessionRole } from "@loom/shared";
 import type { OrchestrationControl } from "./control.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 import { formatEventTriggerBlock } from "./event-trigger-format.js";
@@ -29,6 +29,20 @@ export interface EventTriggerServiceDeps {
   control: OrchestrationControl;
   /** Re-spawn a stopped-but-resumable wake-mode target. Prod-wired to SessionService.resume. */
   resume: (sessionId: string) => unknown;
+  /**
+   * OPTIONAL: dispatch a wake-mode fire's nudge through `SessionService.enqueueDurableNudge` (MCP-seen-
+   * gated + durable) instead of the bare `pty.enqueueStdin` `fire()` used to call directly — card 90b9e904,
+   * the SAME gap card 9f7c59f1 closed in `CrashRecoveryWatcher` (no `PtyHost.waitForMcpSeen` gate: a fresh
+   * MCP-client handshake can lose the race to an immediate `enqueueStdin`; no durable give-up-exhaustion
+   * record), just unconverged here until now. Prod-wired (index.ts) to
+   * `(id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts)`. ABSENT
+   * (every existing hermetic test double) falls back to the pre-90b9e904 raw `pty.enqueueStdin` dispatch,
+   * byte-identical — additive, never a hard dependency a test double must opt into.
+   */
+  enqueueDurableNudge?: (
+    sessionId: string, role: SessionRole | null, text: string, taskId: string | null,
+    opts?: { kind?: "warning" | "agent" },
+  ) => void;
   /** Spawn a fresh spawn-mode session with the matched event(s) as its kickoff (composed with the
    *  target agent's own startup prompt, same as PollService.spawn). Prod-wired to
    *  `(agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt })`. */
@@ -166,7 +180,14 @@ export class EventTriggerService {
       const sessionId = trigger.targetSessionId!;
       if (!this.deps.pty.isAlive(sessionId)) await this.deps.resume(sessionId);
       // kind:"agent" — a trigger-driven nudge is its own turn, never mashed with anything else queued.
-      this.deps.pty.enqueueStdin(sessionId, block, "system", undefined, undefined, "agent");
+      // Card 90b9e904: MCP-seen-gated + durable dispatch via the injected enqueueDurableNudge (see its own
+      // doc) when wired (production); ABSENT falls back to the pre-90b9e904 raw enqueueStdin, unchanged.
+      if (this.deps.enqueueDurableNudge) {
+        const role = this.deps.db.getSession(sessionId)?.role ?? null;
+        this.deps.enqueueDurableNudge(sessionId, role, block, null, { kind: "agent" });
+      } else {
+        this.deps.pty.enqueueStdin(sessionId, block, "system", undefined, undefined, "agent");
+      }
       return { sessionId };
     }
 

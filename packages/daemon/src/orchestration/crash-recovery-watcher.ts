@@ -231,10 +231,14 @@ export function isCrashRecoveryEligible(
 /**
  * Crash-recovery watchdog. **The THIRD of the three resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT
  * a claim these are the only such sites in the codebase.** `orchestration/wake.ts`, `orchestration/poll.ts`,
- * and `orchestration/event-triggers.ts` each resume a not-live session and then enqueue too, independently,
- * and are KNOWN, UNCONVERGED siblings this card never touched (`event-triggers.ts`'s own gap is carded
- * separately — do NOT converge them here). See `SessionService.resumeFleetOnBoot`'s own doc for the full
- * caveat and why "three" isn't a completeness claim.
+ * and `orchestration/event-triggers.ts` each resume a not-live session and then enqueue too, independently
+ * — card 90b9e904 converged their durability + MCP-seen gate onto the SAME `SessionService.
+ * enqueueDurableNudge` this watcher uses (each via its own optional injected dep, byte-identical raw
+ * fallback for a test double that doesn't wire it), but NOT their report-state handling / nudge text /
+ * ordering: those three facets don't apply to them at all (their nudge is a specific external signal — a
+ * wake note / poll item / matched event — not this watcher's generic continuation nudge). See
+ * `SessionService.resumeFleetOnBoot`'s own doc for the full caveat and why "three" isn't a completeness
+ * claim.
  * Where {@link SessionService.resumeFleetOnBoot} auto-resumes the whole fleet on a deliberate
  * `daemon_restart`, and {@link SessionService.recoverCrashOrphanedWorkers} does the same for a crash / OS-
  * restart / clean stop — the two are STRICTLY mutually exclusive per boot — THIS runs on EVERY boot

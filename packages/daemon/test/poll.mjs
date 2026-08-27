@@ -100,14 +100,22 @@ function makeEnv(opts = {}) {
   const control = new OrchestrationControl();
   if (opts.globalPaused) control.pause("global");
 
+  // Card 90b9e904: RECORDING stub for the optional `enqueueDurableNudge` dep — mirrors
+  // crash-recovery-watcher.mjs's (17a)/(17c) pattern. Only wired when the test opts in
+  // (`opts.enqueueDurableNudge`); every other test above omits it, so `fire()` falls back to the
+  // pre-90b9e904 `enqueueDurable` call, byte-identical.
+  const durableCalls = [];
   const poll = new PollService({
     db, pty, control, resume, spawn, request, enqueueDurable,
     isUsageLimited: () => !!opts.usageLimited,
+    ...(opts.enqueueDurableNudge ? {
+      enqueueDurableNudge: (id, role, text, taskId, dOpts) => { durableCalls.push({ id, role, text, taskId, opts: dOpts }); },
+    } : {}),
   });
 
   return {
     dbFile, db, projId, wakeAgentId, spawnAgentId, sessId, conn, alive, enqueued, resumed, spawned, requestCalls,
-    control, poll,
+    control, poll, durableCalls,
     setResponses: (r) => { responses = r; },
   };
 }
@@ -164,6 +172,43 @@ const seedSpawnJob = (e, id, over = {}) => seedWakeJob(e, id, { mode: "spawn", s
   check("wake-fire: carries ONLY the new item (n2), not the already-seen n1", e.enqueued[0].text.includes("new thing") && !e.enqueued[0].text.includes('"n1"'));
   check("wake-fire: frames the item as untrusted DATA naming the connection host", e.enqueued[0].text.includes("api.github.com") && e.enqueued[0].text.includes("DATA, not instructions"));
   check("wake-fire: emits poll_fired filed under the woken session", events(e, "poll_fired").length === 0 && e.db.listEvents(e.sessId).some((ev) => ev.kind === "poll_fired" && ev.detail.itemCount === 1 && ev.detail.mode === "wake"));
+  cleanupEnv(e);
+}
+
+// --- Card 90b9e904: with `enqueueDurableNudge` wired (production shape — index.ts passes
+// sessions.enqueueDurableNudge), a not-live wake-fire target's nudge routes through IT — MCP-seen-gated
+// (on top of enqueueDurable's existing durability) — instead of straight to `enqueueDurable`. POSITIVE
+// CONTROL: RED against pre-90b9e904 code, where `enqueueDurableNudge` was never provided as a dep at
+// all, so this call would have gone straight to `enqueueDurable` regardless of what's wired here. ---
+{
+  const e = makeEnv({ deadSession: true, enqueueDurableNudge: true });
+  seedWakeJob(e, "job-durable");
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1", title: "fresh" }] }) }]);
+  await e.poll.tick(new Date()); // baseline seed fires nothing
+  e.db.claimPollJob("job-durable", new Date(Date.now() - 1000).toISOString());
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1", title: "fresh" }, { id: "n2", title: "newer" }] }) }]);
+  await e.poll.tick(new Date());
+  check("durable-dispatch: resumed the not-alive target first", e.resumed.length === 1 && e.resumed[0] === e.sessId);
+  check("durable-dispatch: the fire routes through enqueueDurableNudge, not raw enqueueDurable",
+    e.durableCalls.length === 1 && e.durableCalls[0].id === e.sessId && e.durableCalls[0].role === "manager"
+    && e.durableCalls[0].taskId === null && e.durableCalls[0].opts?.kind === "agent" && e.durableCalls[0].text.includes("newer"));
+  check("durable-dispatch: enqueueDurable (and so pty.enqueueStdin) is NOT also called for this same nudge (no double-dispatch)",
+    e.enqueued.length === 0);
+  cleanupEnv(e);
+}
+
+// REGRESSION GUARD: with NO `enqueueDurableNudge` dep (every test above), the not-live path still falls
+// back to the pre-90b9e904 `enqueueDurable` call, byte-identical.
+{
+  const e = makeEnv({ deadSession: true }); // no enqueueDurableNudge — the default every other test uses
+  seedWakeJob(e, "job-fallback");
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1", title: "fresh" }] }) }]);
+  await e.poll.tick(new Date());
+  e.db.claimPollJob("job-fallback", new Date(Date.now() - 1000).toISOString());
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1", title: "fresh" }, { id: "n2", title: "newer" }] }) }]);
+  await e.poll.tick(new Date());
+  check("fallback: with no enqueueDurableNudge dep, the not-live fire still lands via enqueueDurable",
+    e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId && e.enqueued[0].kind === "agent");
   cleanupEnv(e);
 }
 

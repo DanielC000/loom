@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import type { PollJob } from "@loom/shared";
+import type { PollJob, SessionRole } from "@loom/shared";
 import type { AuthenticatedRequestResult } from "../connections/request.js";
 import type { OrchestrationControl } from "./control.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
@@ -52,6 +52,22 @@ export interface PollServiceDeps {
    * an omitted wiring would silently reintroduce this bug rather than fail to compile.
    */
   enqueueDurable: (sessionId: string, text: string, ctx: { kind: "warning" | "agent" }) => { delivered: boolean; position?: number };
+  /**
+   * OPTIONAL: dispatch a wake-mode fire's nudge through `SessionService.enqueueDurableNudge` (MCP-seen-
+   * gated — on TOP of `enqueueDurable`'s existing durability, above) instead of going straight to
+   * `enqueueDurable` — card 90b9e904, mirroring `WakeService`'s identical fix: `fire()`'s not-alive branch
+   * resumes the target then immediately dispatches, the SAME fresh-MCP-handshake race card 9f7c59f1 closed
+   * in `CrashRecoveryWatcher` (no comment anywhere ever claimed this omission here was deliberate — it
+   * simply predates the MCP-seen-gate concept, card 61a012ce's durability fix having shipped first).
+   * Prod-wired (index.ts) to `(id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role,
+   * text, taskId, opts)`. ABSENT (every existing hermetic test double, incl. every test in poll.mjs above)
+   * falls back to the pre-90b9e904 `enqueueDurable` call, byte-identical — additive, never a hard
+   * dependency a test double must opt into.
+   */
+  enqueueDurableNudge?: (
+    sessionId: string, role: SessionRole | null, text: string, taskId: string | null,
+    opts?: { kind?: "warning" | "agent" },
+  ) => void;
   /**
    * Spawn a fresh spawn-mode session, handing it `kickoffPrompt` (the untrusted-framed DATA block, as
    * plain text — NOT yet composed with the agent's own brief) as its kickoff. Prod-wired to
@@ -249,7 +265,15 @@ export class PollService {
       // Card 61a012ce: DURABLE dispatch (was a bare `pty.enqueueStdin`) — see `enqueueDurable`'s doc.
       // `fire()` still throws on genuine failure (caller's backoff path), but a HELD (busy) delivery no
       // longer relies on the cursor-commit timing alone to survive a restart before it drains.
-      this.deps.enqueueDurable(sessionId, `[loom:poll] New item(s) detected by a poll job.\n\n${block}`, { kind: "agent" });
+      // Card 90b9e904: MCP-seen-gated dispatch via the injected enqueueDurableNudge (see its own doc) when
+      // wired (production); ABSENT falls back to the pre-90b9e904 enqueueDurable call, unchanged.
+      const text = `[loom:poll] New item(s) detected by a poll job.\n\n${block}`;
+      if (this.deps.enqueueDurableNudge) {
+        const role = this.deps.db.getSession(sessionId)?.role ?? null;
+        this.deps.enqueueDurableNudge(sessionId, role, text, null, { kind: "agent" });
+      } else {
+        this.deps.enqueueDurable(sessionId, text, { kind: "agent" });
+      }
       return { sessionId };
     }
 

@@ -549,6 +549,8 @@ async function main(): Promise<void> {
     db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs,
     // Card 61a012ce: durable fire dispatch — see WakeServiceDeps.enqueueDurable's own doc.
     enqueueDurable: (id, text, ctx) => sessions.enqueueSystemNudge(id, text, ctx),
+    // Card 90b9e904: MCP-seen-gated dispatch — see WakeServiceDeps.enqueueDurableNudge's own doc.
+    enqueueDurableNudge: (id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts),
   });
   // The task MCP hosts the universal wake tools, so it takes the WakeService.
   const mcp = new TaskMcpRouter(db, wakes);
@@ -572,6 +574,8 @@ async function main(): Promise<void> {
     intervalMs: pollIntervalMs,
     // Card 61a012ce: durable fire dispatch — see PollServiceDeps.enqueueDurable's own doc.
     enqueueDurable: (id, text, ctx) => sessions.enqueueSystemNudge(id, text, ctx),
+    // Card 90b9e904: MCP-seen-gated dispatch — see PollServiceDeps.enqueueDurableNudge's own doc.
+    enqueueDurableNudge: (id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts),
   });
   // EventTriggerService (local event triggers, Loom Event Triggers subsystem T2) — ALWAYS ON like
   // PollService: with zero event_triggers rows every tick is a no-op, byte-identical to today until a
@@ -582,6 +586,8 @@ async function main(): Promise<void> {
     db, pty, control,
     resume: (id) => sessions.resume(id),
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
+    // Card 90b9e904: MCP-seen-gated + durable dispatch — see EventTriggerServiceDeps.enqueueDurableNudge's own doc.
+    enqueueDurableNudge: (id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts),
   });
   // Loom Companion (multi-companion runtime): ONE OR MORE chat-native companions, each a live `claude` PTY
   // session, served by the ChatGateway subsystem (registry of channel adapters + inbound routing + outbound
