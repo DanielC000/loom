@@ -695,8 +695,14 @@ try {
 
     // Negative control: the SAME candidate against REAL (non-hanging) git resolves normally and IS
     // offered — proves the fail-safe result above is the timeout firing, not safeToExcludeNames just
-    // always returning [] regardless of what git says.
-    const normal = await safeToExcludeNames(vaultTO, simpleGit(vaultTO), tinyMs);
+    // always returning [] regardless of what git says. Deliberately OMITS timeoutMs (falls back to
+    // safeToExcludeNames' own production default, VAULT_GIT_OP_TIMEOUT_MS = 15s) rather than reusing
+    // `tinyMs` — this control's job is "prove real git DOES offer the candidate", which needs headroom
+    // for a slow-but-correct `git ls-files` under host load; `tinyMs` exists only to keep the sibling
+    // hanging-git cases above fast, and sharing it here meant a saturated host could trip the SAME
+    // 200ms bound on a real (non-hanging) call, fail safe, and read as this control failing (card
+    // b3f7cd25 — cost a real 16.7-minute merge gate).
+    const normal = await safeToExcludeNames(vaultTO, simpleGit(vaultTO));
     check("negative control: the same candidate against REAL (non-hanging) git IS offered for exclusion", normal.includes("scratch"));
 
     // Site 1 + 2 (resolveVaultRepoContext's checkIsRepo/revparse, start()'s checkIsRepo/init): drive
