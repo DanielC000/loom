@@ -2007,10 +2007,16 @@ export interface PendingGateOpVerdict {
    *  SAME caveat `gate_history`'s own tool description already states for these two field names on that
    *  (separate, audit-event-backed) read path; repeated here because a `gate_status(opId)` reader may never
    *  see that other tool's description. Never combine these into a single derived "contention score" — that
-   *  would hide exactly the span ambiguity this doc exists to name. ⚠️ FOURTH CAVEAT: on a "merge" row that
-   *  carries `retriedFile` with a resulting pass (card 344ce950's single-file retry — which does NOT
-   *  re-admit through the gate semaphore), this triple describes only the FIRST, failed admission, never
-   *  the one the eventual pass is about — see `ConfirmMergeResult.gateCap`'s own doc for the full detail. */
+   *  would hide exactly the span ambiguity this doc exists to name. ⚠️ FOURTH CAVEAT, CORRECTED (card
+   *  b9e07a4a — an earlier version of this doc claimed the single-file retry does NOT re-admit through the
+   *  gate semaphore; that gap was FIXED, so the claim is now FALSE): on a "merge" row that carries
+   *  `retriedFile` (card 344ce950's single-file retry), the retry now re-admits through `runExclusive`
+   *  exactly like the TRANSIENT-KILL auto-retry, so on a resulting pass OR a resulting (still-failing)
+   *  retry this triple correctly describes the retry's OWN admission — the one the final verdict is
+   *  actually about, not the first failed one. The one remaining exception (card 318ac7b2): if the retry
+   *  itself is cancelled WHILE QUEUED, its own admission never happens, and this triple still describes
+   *  attempt 1 — the separate, earlier admission that genuinely ran and failed before the retry was ever
+   *  queued — see `ConfirmMergeResult.gateCap`'s own doc for the full detail. */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;

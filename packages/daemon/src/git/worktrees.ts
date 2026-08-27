@@ -2059,7 +2059,21 @@ async function changedPathSetDigest(
  * `assets/**` is markdown too, and IS heavily tested (10 test files reference it) — an extension check
  * would wrongly classify a `SKILL.md` change as inert. ⛔ Do not widen this list without re-running that
  * same grep against the new prefix first — the whole point is that every entry here is a MEASURED
- * absence, not an assumption. ⚠️ A future MULTI-SEGMENT entry (e.g. `"site/docs/"`) needs its OWN
+ * absence, not an assumption.
+ *
+ * ⭐ Card 9fcc29bb — WHY `assets/skills/**` IS DELIBERATELY EXCLUDED, NAMED: markdown under `assets/**` is
+ * product behaviour, not incidental content, and it IS asserted on by name — `redirect-discoverability.mjs`
+ * and `skills-seed-asset-override-default.mjs` both read real checked-in `assets/skills/<name>/SKILL.md` files
+ * as their comparison oracle. `packages/daemon/test/merge-gate-inert-diff.mjs` scenario (B) is the guard
+ * that ENFORCES this stays excluded — it commits a branch whose entire diff is one `SKILL.md` under
+ * `assets/skills/**` and asserts the gate command still genuinely RAN (a call counter, not a trusted
+ * return value). Extending this list to cover `assets/**` would require deliberately breaking that named
+ * safety case; see this list's own doc above, not a fresh investigation, before ever proposing it again.
+ * (The asymmetry is a deliberate trade, not an oversight: a merged `assets/skills/**` change isn't live
+ * until a daemon restart anyway, and only auto-advances there for a `customized:false` skill — a faster
+ * gate wouldn't make it ship any faster.)
+ *
+ * ⚠️ A future MULTI-SEGMENT entry (e.g. `"site/docs/"`) needs its OWN
  * re-measurement, not just a re-run of the same grep: {@link repoTreeReferencesInertPrefix}'s scan
  * requires `site/docs` to appear CONTIGUOUS on one line, which `path.join(__dirname, "site", "docs")` —
  * an entirely ordinary way to write that path — never produces, a silent false negative for exactly the
@@ -2355,6 +2369,20 @@ const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
  *  file that happens to match the name pattern and reverse this decision without anyone deciding it.
  *  Adding a guard here means deciding against the criterion above, never "the filename matches so it
  *  belongs."
+ *
+ *  ⚠️ Card 6bb60fd0 — THE GLOB IS WRONG IN A SECOND, MORE DANGEROUS DIRECTION TOO: it would also DROP
+ *  `fixed-wait-witness-guard.mjs` from this list. That guard is diff-scoped (it greps the real `git diff`,
+ *  not the test corpus) and so contains ZERO `readdirSync` occurrences — a `readdirSync` filter cannot
+ *  find it BY CONSTRUCTION. Dropping it would recreate exactly the defect card a18c39ba shipped to fix:
+ *  the guard silently inert on precisely the diff class it polices.
+ *
+ *  ⭐ THE SET RELATIONSHIP, ONCE: the `readdirSync` family and this list overlap in FOUR members and
+ *  NEITHER CONTAINS THE OTHER — the family adds `emit-compare-soundness-guard.mjs` (deliberately excluded
+ *  here, per the criterion above) and this list adds `fixed-wait-witness-guard.mjs` (deliberately included
+ *  despite not matching the family's own `readdirSync` discriminator). A reader who assumes one is a
+ *  subset of the other will reason wrongly in BOTH directions. Use `pnpm --filter @loom/daemon guards`
+ *  (card 245a3708, below) to run exactly this list — never re-derive it from `readdirSync` or any other
+ *  implementation detail that was never the membership criterion.
  *
  *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `GUARD_BASENAMES` (consumed by `emit-compare-
  *  gate.mjs` and its siblings to assert each guard actually appears in the reduced gate command

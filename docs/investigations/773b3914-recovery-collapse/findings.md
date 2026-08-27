@@ -240,8 +240,10 @@ separable fixes — noted here, not attempted:
 
 No `.mjs` under `packages/daemon/test/` was added or modified by this investigation — its scripts live
 under `docs/investigations/773b3914-recovery-collapse/scripts/` instead (log-forensics tooling, not test
-suite content), so the directory-scanning guards (`grep -l readdirSync packages/daemon/test/*guard*.mjs`)
-do not apply here. Stated explicitly per the card's own instruction not to silently skip this.
+suite content), so the static guards (run via `pnpm --filter @loom/daemon guards`, card 245a3708 — not the
+unmaintained `grep -l readdirSync packages/daemon/test/*guard*.mjs` recipe, which finds a different and
+wrong set of files; see `STATIC_GUARD_REPO_PATHS`'s own doc in `git/worktrees.ts`, card 6bb60fd0) do not
+apply here. Stated explicitly per the card's own instruction not to silently skip this.
 
 ## Scripts
 

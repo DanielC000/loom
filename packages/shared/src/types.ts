@@ -1706,16 +1706,25 @@ export interface GateHistoryRow {
    *  changed-test-files arm — a test-only diff has no compiled files to compare, so `0` means "nothing to
    *  check", NOT "the check found nothing". `identicalCount` non-zero paired with an EMPTY
    *  `emitCompareTestFiles` means the emit-identity arm, fully informative — zero test files ran, build +
-   *  static guards only. */
+   *  static guards only.
+   *  🔴 Card 0984260f — THE TWO ARMS ARE NOT MUTUALLY EXCLUSIVE: a diff can touch a compiled file AND a
+   *  changed test file in the same commit, firing BOTH at once — `identicalCount` non-zero paired with a
+   *  NON-EMPTY `emitCompareTestFiles` (measured live, merge gate op `b145371d`). That row is the MIXED
+   *  case: the count is fully INFORMATIVE (a compiled file really was proven byte-identical) AND the named
+   *  test files ran. ⛔ NEVER infer vacuity from `emitCompareTestFiles` being non-empty alone —
+   *  `identicalCount` is vacuous ONLY when it is `0` AND the diff contained no compiled file; a non-empty
+   *  `emitCompareTestFiles` sitting alongside a non-zero `identicalCount` does not make the count vacuous. */
   emitCompareIdenticalCount: number | null;
   /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.
    *  Present (as an array — possibly EMPTY on the emit-identity arm) whenever `emitCompareReduced: true`;
    *  `null` otherwise. Paired 1:1 with `emitCompareIdenticalCount` (both present together or both `null`,
    *  never one without the other) so that field's `0` is never misread in isolation — see its own doc for
-   *  the two-arm discipline this pairing exists to disambiguate. The cheapest way to tell the two arms
-   *  apart WITHOUT reading either field is the `[loom:merge-done]` nudge text this mirrors: "…+ N changed
-   *  test file(s)" names the changed-test-files arm; "…static guards only, skipped the full daemon test
-   *  suite" (no test-file clause) names the emit-identity arm. */
+   *  the two-arm (now three-shape, card 0984260f) discipline this pairing exists to disambiguate.
+   *  The `[loom:merge-done]` nudge text this mirrors ALWAYS prints the compiled-file count, including when
+   *  it is zero, so it fully discriminates all three shapes without reading either field: "0 compiled
+   *  file(s) … + N changed test file(s)" is the vacuous-zero (changed-test-files-alone) arm; ">0 compiled
+   *  file(s) … + N changed test file(s)" is the MIXED arm — the count is real; ">0 compiled file(s)" with
+   *  no changed-test-file clause is the emit-identity-alone arm. */
   emitCompareTestFiles: string[] | null;
 }
 
