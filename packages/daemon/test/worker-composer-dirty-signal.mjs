@@ -18,8 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // (composerDirtyLenClearedByGen gates the reset, ~line 4014/4191), or (b) card b932558c's
 // `clearComposerDirtyOnConfirm` — a confirming hook for THIS generation resolving through
 // `purgeConfirmedGiveUpRequeue` itself (content-match or its FIFO-position fallback), gated on
-// `composerDirtyMarkedForGen` (see pty-giveup-composerdirty-confirmed-clear.mjs for that path's own
-// coverage). Scenario (2) below exercises NEITHER path — it drives a genuine give-up (mirroring
+// `composerDirtyMarkedGens` (card a6c1d413's per-generation map — see pty-giveup-composerdirty-confirmed-
+// clear.mjs and pty-composerdirtymarkedgens-per-generation.mjs for that path's own coverage). Scenario (2)
+// below exercises NEITHER path — it drives a genuine give-up (mirroring
 // test/pty-giveup-clear.mjs's technique) on session SID, then DELIBERATELY never calls host.reconcile()
 // AND never delivers any confirming hook for SID at all, observing the value across a bounded window —
 // backed by a REQUIRED positive control that proves, on a SEPARATE session/PtyHost instance, that the

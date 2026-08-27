@@ -19,8 +19,9 @@
 //       gated path submit() itself uses (composerDirtyLenClearedByGen).
 //   (3) HONEST FAILURE (DoD-4): when the Enter does NOT confirm (mirrors "fails to confirm exactly as it
 //       did originally"), flushComposer reports confirmed:false rather than claiming success, and does NOT
-//       double-count composerDirtyLen on its own internal give-up — the existing composerDirtyMarkedForGen
-//       guard applies to a manager-triggered flush exactly as it does to an automatic redelivery.
+//       double-count composerDirtyLen on its own internal give-up — the existing composerDirtyMarkedGens
+//       guard (card a6c1d413's per-generation map, formerly a single composerDirtyMarkedForGen scalar)
+//       applies to a manager-triggered flush exactly as it does to an automatic redelivery.
 //
 // RUN (no daemon needed): node test/worker-flush-composer.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon, run `pnpm build`.

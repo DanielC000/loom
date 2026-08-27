@@ -2400,7 +2400,7 @@ interface Live {
   // (enrolling the SUPPRESSED mark into `ambiguousDispatches`/`giveUpConfirmQueue` the same way, minus the
   // `live.pending` requeue) was evaluated and REJECTED: `healIfStuck`'s own backstop unconditionally calls
   // `requeueGiveUpOrigin` for a still-unconfirmed generation regardless of whether it was already marked
-  // dirty (only the dirty-MARK is gated on `composerDirtyMarkedForGen`, not the requeue call) — so an
+  // dirty (only the dirty-MARK is gated on `composerDirtyMarkedGens`, not the requeue call) — so an
   // already-enrolled SUPPRESSED generation would get double-enrolled into `giveUpConfirmQueue`, corrupting
   // its FIFO-position correlation and risking a LATER, unrelated confirming hook being misattributed to an
   // already-resolved generation. The safe direction here is fail-toward-DIRTY: consumers must treat a
@@ -2424,7 +2424,7 @@ interface Live {
   // number the way the pre-c148f118 code did (see the specimen recorded in submit()'s own comment, card
   // 2960c3bf). Reset to 0 by the SAME three decisive-confirm sites that reset `composerDirtyLen` (the
   // `composerDirtyLenClearedByGen`-gated UserPromptSubmit/Stop hooks, and `clearComposerDirtyOnConfirm`'s
-  // `composerDirtyMarkedForGen` gate) — a genuine confirmation proves the WHOLE ordered byte stream
+  // `composerDirtyMarkedGens` gate) — a genuine confirmation proves the WHOLE ordered byte stream
   // landed, so both readings collapse back to the same true zero together. Like `composerDirtyLen`, this
   // is pure write-side bookkeeping, never a readback of real terminal content — "optimistic" describes
   // the ASSUMPTION, not a verification.
@@ -2439,20 +2439,25 @@ interface Live {
   // An ungated reset on that hook would silently un-mark the composer as dirty before the clear it's
   // supposedly proof of was ever even attempted — reopening exactly the hole this card closes.
   composerDirtyLenClearedByGen: number | null;
-  // Card 3ce3fa39: the `submitGeneration` (captured BEFORE any out-of-band bump) whose give-up has already
-  // contributed to `composerDirtyLen` — null when the current outstanding generation hasn't been marked
-  // yet. GATES the mark side the same way `composerDirtyLenClearedByGen` gates the reset side: a wrongly-
-  // SUPPRESSED give-up marks dirty immediately (see `fireEnterAndVerify` — it's the ONLY chance to catch a
-  // suppression whose busy later resolves via unrelated activity well before any staleness window, exactly
-  // specimen B's real shape), and `busy` deliberately stays true afterward — so `healIfStuck` can ALSO
-  // observe the SAME still-unconfirmed generation later (its own backstop for a suppression staleness
-  // itself never resolves). Without this guard both sites would mark the identical abandoned text twice.
-  composerDirtyMarkedForGen: number | null;
+  // Card 3ce3fa39, RE-SHAPED by card a6c1d413: per-generation record of which still-unconfirmed give-ups
+  // have contributed to `composerDirtyLen` — `gen -> chars that generation's give-up added`. GATES the
+  // mark side the same way `composerDirtyLenClearedByGen` gates the reset side: a wrongly-SUPPRESSED
+  // give-up marks dirty immediately (see `fireEnterAndVerify` — it's the ONLY chance to catch a suppression
+  // whose busy later resolves via unrelated activity well before any staleness window, exactly specimen B's
+  // real shape), and `busy` deliberately stays true afterward — so `healIfStuck` can ALSO observe the SAME
+  // still-unconfirmed generation later (its own backstop for a suppression staleness itself never
+  // resolves). `.has(gen)` is the guard against marking the identical abandoned text twice.
+  // ⛔ Card a6c1d413 (the bug this replaces): a SINGLE scalar `composerDirtyMarkedForGen: number | null`
+  // used to hold only the MOST RECENT contributor — a confirm of THAT generation blindly zeroed the WHOLE
+  // additive total, with no way to tell "the whole total is resolved" from "only the latest contributor
+  // is." A Map lets `clearComposerDirtyOnConfirm` (see its own doc) resolve exactly the contribution(s) a
+  // given confirmation actually proves, and leave the rest genuinely dirty.
+  composerDirtyMarkedGens: Map<number, number>;
   // Card b9b8f8db: the `submitGeneration` whose submit() actually wrote FRESH body bytes (the plain paste,
   // or the full defensive clear+repaste) — null/mismatched for a generation that took the Enter-only
   // redelivery path (a redrain of an already-attempted message; see submit()'s `isGiveUpRedelivery`), which
   // writes no body at all. GATES composerDirtyLen's ADDITIVE mark side (fireEnterAndVerify's SUPPRESSED/
-  // RECOVERY branches, healIfStuck) the same way `composerDirtyMarkedForGen` gates double-marking: an
+  // RECOVERY branches, healIfStuck) the same way `composerDirtyMarkedGens` gates double-marking: an
   // Enter-only generation that itself later gives up must NOT also add its (unwritten) body length to
   // composerDirtyLen — nothing new was physically typed, so nothing new is possibly stranded. Without this
   // gate, composerDirtyLen would still inflate by a further `lastPrompt.length` on every failed Enter-only
@@ -4553,7 +4558,7 @@ export class PtyHost {
       composerDirtyLen: 0,
       composerDirtyLenBelieved: 0,
       composerDirtyLenClearedByGen: null,
-      composerDirtyMarkedForGen: null,
+      composerDirtyMarkedGens: new Map(),
       composerBodyWrittenForGen: null,
       rawDraftText: "",
       pending: [],
@@ -4780,7 +4785,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -4865,7 +4870,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, ready: true, readyFallbackTimer: null, busySince: null, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, composerBodyWrittenForGen: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -5374,6 +5379,12 @@ export class PtyHost {
           live.composerDirtyLen = 0;
           live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
           live.composerDirtyLenClearedByGen = null;
+          // Card a6c1d413: this hook belongs to the CURRENT (`submitGeneration`) generation — by
+          // construction the latest one there can ever be — so its own clear-prefix (the thing that set
+          // `composerDirtyLenClearedByGen` in the first place) targeted the FULL total accumulated from
+          // every still-unresolved older generation. Clear the whole per-generation map alongside the
+          // scalars above, or an older entry would linger orphaned, unreachable by any future confirm.
+          live.composerDirtyMarkedGens.clear();
         }
         // Card 4a0af485: captured BEFORE the purge call below, which can itself delete an entry — if there
         // was NO ambiguity at all before this hook fired, this hook can only be about the CURRENT
@@ -6224,6 +6235,7 @@ export class PtyHost {
           live.composerDirtyLen = 0;
           live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
           live.composerDirtyLenClearedByGen = null;
+          live.composerDirtyMarkedGens.clear(); // card a6c1d413 — see the UserPromptSubmit hook's identical reset for why the whole map, not just the scalars
         }
         this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
         this.finalizingTurn = true;
@@ -7233,7 +7245,7 @@ export class PtyHost {
         // after output has been stale for a FULL staleMs window, i.e. the engine demonstrably isn't reading
         // right now — exactly when an immediate backspace burst is least trustworthy. The next submit()'s
         // own clear-prefix (see its doc) handles it once the engine is provably about to read again.
-        // GATED on composerDirtyMarkedForGen (using `gen`, captured BEFORE this method's own bump above) —
+        // GATED on composerDirtyMarkedGens (using `gen`, captured BEFORE this method's own bump above) —
         // a wrongly-SUPPRESSED give-up already marks dirty immediately at suppression time; without this
         // guard, THIS backstop firing later for the SAME still-unconfirmed generation would double-count
         // the identical abandoned text (see the field's doc). ALSO gated on `composerBodyWrittenForGen`
@@ -7241,12 +7253,12 @@ export class PtyHost {
         // `isGiveUpRedelivery` branch) never wrote a fresh body at all, so there is nothing NEW to mark —
         // doing so anyway would inflate composerDirtyLen for bytes that were never actually (re)typed,
         // reopening a smaller-scale version of the same unbounded-growth bug this card fixes.
-        if (live.composerDirtyMarkedForGen !== gen && live.composerBodyWrittenForGen === gen) {
+        if (!live.composerDirtyMarkedGens.has(gen) && live.composerBodyWrittenForGen === gen) {
           // eslint-disable-next-line no-console
           console.log(`[heal] ${sessionId} marking an orphaned give-up injection possibly-dirty (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
           live.composerDirtyLen += live.lastPrompt.length;
           live.composerDirtyLenBelieved += live.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
-          live.composerDirtyMarkedForGen = gen;
+          live.composerDirtyMarkedGens.set(gen, live.lastPrompt.length);
         }
         // Card 2c3c4aff: this out-of-band path is exactly a give-up that never reached fireEnterAndVerify's
         // own GIVE-UP RECOVERY branch (e.g. wrongly SUPPRESSED) — `live.giveUpOrigin` still holds the
@@ -7694,14 +7706,16 @@ export class PtyHost {
     // safety of this fallback actually rests on.) Per this card's own DoD: a correct fallback matters more
     // than avoiding the re-paste — an unnecessary backspace+repaste is cheap; silently fusing or losing
     // another message's content is not.
-    // ⚠️ BOUNDED, not closed, by the SAME known gap `a6c1d413` already tracks: `composerDirtyLenBelieved`
-    // and `composerDirtyLen` are reset TOGETHER by `composerDirtyMarkedForGen`'s single-scalar confirm gate
-    // (see `clearComposerDirtyOnConfirm`), which can zero an EARLIER, still-genuinely-unresolved
-    // contribution when a LATER generation alone confirms. If that fires wrongly here, both fields read 0
-    // together, the gap this fix checks for reads as "nothing to doubt" when there still is, and Enter-only
-    // fires anyway — but that is NEVER worse than today's unconditional Enter-only, only less protective
-    // than this fix otherwise is. Do not read a green here as `a6c1d413` also being fixed; it isn't, and
-    // this card does not widen scope to fix it.
+    // ⚠️ Card a6c1d413 (fixed): this check used to be BOUNDED, not closed, by that card's own gap —
+    // `composerDirtyLenBelieved`/`composerDirtyLen` were reset TOGETHER by `composerDirtyMarkedForGen`'s
+    // single-scalar confirm gate, which could zero an EARLIER, still-genuinely-unresolved contribution
+    // when a LATER generation alone confirmed, making the gap this fix checks for read "nothing to doubt"
+    // when there still was some. `clearComposerDirtyOnConfirm` now tracks per-generation contributions
+    // (`composerDirtyMarkedGens`) and only ever resolves an EARLIER generation's mark when the confirming
+    // generation's own confirmation is DECISIVE (content-matched — see that method's own doc for why that
+    // specifically is transitive proof); a content-blind (FIFO-position) confirmation now resolves only
+    // its own generation's contribution, never an earlier one's. This check's `composerBelievedTrustworthy`
+    // read is therefore no longer exposed to that false-"nothing to doubt" reading.
     const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
     const composerBelievedTrustworthy = live.composerDirtyLenBelieved === live.composerDirtyLen;
     if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery && composerBelievedTrustworthy) {
@@ -7969,14 +7983,14 @@ export class PtyHost {
           // (the next submit's clear-prefix floors to a safe no-op against an already-empty composer); a
           // wrong one is now covered instead of silently corrupting a later, unrelated turn. Same
           // composerLen===0 human-draft gate as every other clear in this file (card e1829591). Stamp
-          // `composerDirtyMarkedForGen` so healIfStuck's OWN later backstop (if this generation's busy
+          // `composerDirtyMarkedGens` so healIfStuck's OWN later backstop (if this generation's busy
           // never resolves any other way) doesn't double-count the identical text — see that field's doc.
           // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db) — an Enter-only redelivery generation
           // never wrote a fresh body, so there is nothing new here to mark; see that field's own doc.
-          if (l.composerLen === 0 && l.lastPrompt && l.composerDirtyMarkedForGen !== gen && l.composerBodyWrittenForGen === gen) {
+          if (l.composerLen === 0 && l.lastPrompt && !l.composerDirtyMarkedGens.has(gen) && l.composerBodyWrittenForGen === gen) {
             l.composerDirtyLen += l.lastPrompt.length;
             l.composerDirtyLenBelieved += l.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
-            l.composerDirtyMarkedForGen = gen;
+            l.composerDirtyMarkedGens.set(gen, l.lastPrompt.length);
           }
           return;
         }
@@ -8022,10 +8036,10 @@ export class PtyHost {
           // redelivery path never wrote a fresh body, so this give-up has nothing new to mark — marking it
           // anyway would inflate composerDirtyLen for bytes that were never actually (re)typed this
           // generation, which is exactly the wasted-byte accounting this card's fix removes.
-          if (l2.composerLen === 0 && l2.lastPrompt && l2.composerDirtyMarkedForGen !== gen && l2.composerBodyWrittenForGen === gen) {
+          if (l2.composerLen === 0 && l2.lastPrompt && !l2.composerDirtyMarkedGens.has(gen) && l2.composerBodyWrittenForGen === gen) {
             l2.composerDirtyLen += l2.lastPrompt.length;
             l2.composerDirtyLenBelieved += l2.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
-            l2.composerDirtyMarkedForGen = gen;
+            l2.composerDirtyMarkedGens.set(gen, l2.lastPrompt.length);
           }
           this.setBusy(sessionId, false, "give-up-recovery");
           this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
@@ -8067,7 +8081,7 @@ export class PtyHost {
    *
    * ⚠️ WHY `composerDirtyLen` CAN LAG `enterConfirmed` (traced during review, card 3e76ecad): a GIVE-UP
    * SUPPRESSED mark (`fireEnterAndVerify`'s "engine produced output after the final Enter write" branch)
-   * stamps `composerDirtyMarkedForGen` directly and returns WITHOUT calling `requeueGiveUpOrigin` — so
+   * stamps `composerDirtyMarkedGens` directly and returns WITHOUT calling `requeueGiveUpOrigin` — so
    * neither `live.giveUpConfirmQueue` nor `live.ambiguousDispatches` ever gets an entry for that mark, and
    * `clearComposerDirtyOnConfirm` (reached only via those two, from `purgeConfirmedGiveUpRequeue`) can
    * never fire for it. The ONLY thing that can still clear a SUPPRESSED-only mark is the inline
@@ -8534,40 +8548,53 @@ export class PtyHost {
    * gated on a fresh submit()'s own confirmation) never fired for a give-up resolved this way, since no
    * new submit() is involved: the ORIGINAL generation's own late-arriving hook is what confirms it.
    *
-   * GATED on `composerDirtyMarkedForGen === gen` — only touch what THIS generation actually marked,
-   * same discipline as the sibling clear-prefix gate. WHY A FULL RESET (not a partial subtract) IS SAFE
-   * when the gate matches — NOT because `gen` is the SOLE contributor (`composerDirtyLen` is ADDITIVE
-   * across stacked give-ups — see that field's own doc — so a later gen's mark can sit on top of an
-   * older one's; "sole contributor" would be false on its face): every submit() UNCONDITIONALLY runs
-   * its own defensive clear-prefix for whatever `composerDirtyLen` already held BEFORE its own paste
-   * (see submit()'s own doc) — so `gen`'s OWN submission already attempted to backspace away every
-   * OLDER stacked contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text.
-   * For the content-match branch specifically, confirming `gen` means the engine's reported prompt is
-   * an EXACT match for `gen`'s OWN pasted text alone — that could only be true if the preceding
-   * clear-prefix genuinely landed: a botched clear would have left stray older text glued onto `gen`'s
-   * paste, making the reported prompt diverge from `gen`'s clean signature, and this content-match
-   * would simply never have fired (see this file's own "stray text glued onto a later submit"
-   * specimens, card 3ce3fa39). So `gen`'s own exact-match confirmation is transitive proof of the
-   * WHOLE preceding write chain, not just `gen`'s own slice — a full reset is correct. The
-   * FIFO-position fallback (content-blind) does NOT carry this same transitive proof — it resolves by
-   * generation position alone, with no verification of what was actually echoed — but that is exactly
-   * the SAME trust level the PRE-EXISTING `composerDirtyLenClearedByGen` gate already accepted (it too
-   * is satisfied by a bare Stop hook with zero content check), not a new gap this fix introduces.
+   * Card a6c1d413 RE-SHAPE: only ever touches `gen`'s own entry (if any) in `composerDirtyMarkedGens` —
+   * never a blind whole-field reset. `decisive` selects HOW MUCH of the map that resolves:
    *
-   * If a LATER, still-unresolved give-up has since re-marked the field (`composerDirtyMarkedForGen`
-   * now pointing elsewhere), this confirmation is for an OLDER generation whose own clear-prefix chain
-   * a NEWER submission has since superseded — leave `composerDirtyLen` untouched; the newer
-   * generation's own eventual confirmation (following the exact same reasoning above) is what resolves
-   * the rest.
+   * - `decisive: true` (the content-match branch below): confirming `gen` means the engine's reported
+   *   prompt is an EXACT match for `gen`'s OWN pasted text alone — that could only be true if `gen`'s own
+   *   defensive clear-prefix genuinely landed (a botched clear would have left stray older text glued
+   *   onto `gen`'s paste, making the reported prompt diverge from `gen`'s clean signature, and this
+   *   content-match would simply never have fired — see this file's own "stray text glued onto a later
+   *   submit" specimens, card 3ce3fa39). Every submit() UNCONDITIONALLY runs its own defensive
+   *   clear-prefix for whatever `composerDirtyLen` already held BEFORE its own paste (see submit()'s own
+   *   doc) — so `gen`'s OWN submission already attempted to backspace away every OLDER still-marked
+   *   contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text. `gen`'s own
+   *   exact-match confirmation is therefore transitive proof of the WHOLE preceding write chain, not just
+   *   `gen`'s own slice — resolve every entry with generation `<= gen`. A STRICTLY LATER entry (a
+   *   still-unresolved give-up from a generation that hadn't happened yet when `gen` dispatched) reflects
+   *   a chain `gen`'s own clear-prefix never touched — leave it marked.
+   * - `decisive: false` (the FIFO-position fallback below, content-blind): resolves by generation position
+   *   alone, with no verification of what was actually echoed, so it carries none of the transitive proof
+   *   above — the SAME trust level the PRE-EXISTING `composerDirtyLenClearedByGen` gate already accepts
+   *   for a bare Stop hook (not a new gap this fix introduces), but not license to also discharge OTHER
+   *   generations' marks on its say-so. Resolve ONLY `gen`'s own entry.
+   *
+   * If `gen` has no entry at all (never marked, or already resolved by an earlier call), this is a no-op —
+   * mirrors the old gate's behavior for an unmatched/stale generation.
    */
-  private clearComposerDirtyOnConfirm(sessionId: string, live: Live, gen: number): void {
-    if (live.composerDirtyMarkedForGen === gen) {
-      // eslint-disable-next-line no-console
-      console.log(`[submit] ${sessionId} composerDirtyLen cleared at CONFIRMED (gen=${gen}) — decisive proof this generation's turn actually started, not stranded`);
-      live.composerDirtyLen = 0;
-      live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
-      live.composerDirtyMarkedForGen = null;
+  private clearComposerDirtyOnConfirm(sessionId: string, live: Live, gen: number, decisive: boolean): void {
+    if (!live.composerDirtyMarkedGens.has(gen)) return;
+    let resolved = 0;
+    if (decisive) {
+      for (const [g, len] of live.composerDirtyMarkedGens) {
+        if (g <= gen) {
+          resolved += len;
+          live.composerDirtyMarkedGens.delete(g);
+        }
+      }
+    } else {
+      resolved = live.composerDirtyMarkedGens.get(gen)!;
+      live.composerDirtyMarkedGens.delete(gen);
     }
+    // eslint-disable-next-line no-console
+    console.log(`[submit] ${sessionId} composerDirtyLen cleared at CONFIRMED (gen=${gen}, ${decisive ? "decisive" : "positional"}) — ${resolved} chars resolved (this generation's own turn actually started, not stranded)${live.composerDirtyMarkedGens.size > 0 ? `; ${live.composerDirtyMarkedGens.size} OTHER generation(s) still genuinely unresolved` : ""}`);
+    // Clamped, never negative: composerDirtyLenBelieved can already read lower than the sum of marked
+    // entries (its own doc — it's separately zeroed, optimistically, at every clear-prefix ATTEMPT, not
+    // just at a decisive confirm), so subtracting a resolved amount that outpaces its current value would
+    // otherwise drive it negative.
+    live.composerDirtyLen = Math.max(0, live.composerDirtyLen - resolved);
+    live.composerDirtyLenBelieved = Math.max(0, live.composerDirtyLenBelieved - resolved); // card c148f118: mirrors the same resolution onto the optimistic reading
   }
 
   private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
@@ -8609,7 +8636,7 @@ export class PtyHost {
         // submit() happens to clear it). `batchIds.size` is exactly 1 here: `matchedLogicalIds.length > 0`
         // (the `if` this sits inside) guarantees at least one, and the `batchIds.size > 1` branch above
         // already returned before this point for the only other case — never 0, never more than 1.
-        this.clearComposerDirtyOnConfirm(sessionId, live, [...batchIds][0]!);
+        this.clearComposerDirtyOnConfirm(sessionId, live, [...batchIds][0]!, true);
         const matchedSet = new Set(matchedLogicalIds);
         for (let i = live.pending.length - 1; i >= 0; i--) {
           if (matchedSet.has(live.pending[i]!.logicalId)) {
@@ -8652,11 +8679,11 @@ export class PtyHost {
           live.ambiguousDispatches.delete(dropped!.logicalId);
         }
       }
-      // Card b932558c: same fix as the content-match branch above — this generation is now decisively
-      // confirmed by the FIFO-position fallback too, so it should not have to wait for an unrelated
-      // later submit() to clear composerDirtyLen (gated on `composerDirtyMarkedForGen` still naming
-      // this gen — see clearComposerDirtyOnConfirm's own doc for why a full reset is safe there).
-      this.clearComposerDirtyOnConfirm(sessionId, live, gen);
+      // Card b932558c: same fix as the content-match branch above — this generation is now confirmed by
+      // the FIFO-position fallback too, so it should not have to wait for an unrelated later submit() to
+      // clear composerDirtyLen. `decisive: false` — this fallback is content-BLIND (see the method's own
+      // doc for why it resolves only `gen`'s own marked entry, never a whole-map/transitive clear).
+      this.clearComposerDirtyOnConfirm(sessionId, live, gen, false);
     } else {
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: a confirming hook arrived while generation ${gen} is still ambiguous, but generation ${live.submitGeneration} (a fresh, non-ambiguous submit) is now current — leaving generation ${gen}'s requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold`);
