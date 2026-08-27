@@ -7716,7 +7716,23 @@ export class PtyHost {
     // specifically is transitive proof); a content-blind (FIFO-position) confirmation now resolves only
     // its own generation's contribution, never an earlier one's. This check's `composerBelievedTrustworthy`
     // read is therefore no longer exposed to that false-"nothing to doubt" reading.
-    const isGiveUpRedelivery = origin?.some((m) => m.giveUpGen !== undefined) ?? false;
+    // Card fa27d262 (Code Review finding on 4796f999's branch, TRACED then REPRODUCED — see
+    // pty-enter-only-drops-coalesced-neighbour.mjs): this used to be `origin?.some(...)` — ANY member of
+    // `origin` carrying `giveUpGen` was enough to trust the WHOLE joined `text` as "already physically
+    // written, retry the Enter only". But `drainPending`'s run-collection loop can coalesce a
+    // `giveUpGen`-tagged entry together with a FRESH neighbour that has never been attempted before (same
+    // route + kind, neither held) into ONE `drained`/`origin` array — that fresh neighbour's real body was
+    // never written anywhere. `some` let that mixed batch take Enter-only too: zero body bytes written for
+    // the ENTIRE joined text, fresh neighbour included, while `drainPending` still unconditionally fires
+    // `onDeliver()` for every drained entry afterward — a silent loss the system believes it delivered.
+    // `every` requires EVERY member of this batch to have already been physically written once before
+    // trusting the composer still holds all of it; a single fresh member routes the WHOLE batch to the
+    // full clear+repaste branch below instead, which re-pastes the complete joined text (every member's
+    // real body, fresh ones included) rather than trusting nothing was ever written. Safe for the
+    // single-message case `b9b8f8db` exists to fix: `origin` is never empty (every call site passes either
+    // `undefined` or a non-empty array — see submit()'s own call sites), so `every`/`some` agree whenever
+    // origin has exactly one element, which is the only shape that case ever produces.
+    const isGiveUpRedelivery = origin?.every((m) => m.giveUpGen !== undefined) ?? false;
     const composerBelievedTrustworthy = live.composerDirtyLenBelieved === live.composerDirtyLen;
     if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery && composerBelievedTrustworthy) {
       // Stamp the same way the full-clear branch below does: a confirmed Enter for THIS generation proves
@@ -7733,6 +7749,10 @@ export class PtyHost {
       // (isGiveUpRedelivery true but composerBelievedTrustworthy false, above) — `text` here is still this
       // redelivery's own real body (see the comment above `isGiveUpRedelivery`), so the backspace+repaste
       // below correctly re-asserts it instead of blindly trusting whatever the composer currently holds.
+      // Card fa27d262: ALSO catches a mixed batch (isGiveUpRedelivery now false because at least one
+      // member of `origin` never gave up) — `text` here is `joinSubmittedText(drained, …)` over the SAME
+      // `drained` array, so it still carries every member's real body, fresh neighbour included; the
+      // backspace+repaste below writes all of it instead of silently dropping the fresh member's share.
       const dirty = live.composerDirtyLen;
       // Stamp WHICH generation is attempting this clear — the confirming-hook sites only reset
       // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
