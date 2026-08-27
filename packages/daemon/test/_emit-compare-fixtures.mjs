@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,13 +24,16 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const GIT_ID = "-c user.email=ecg@loom -c user.name=ecg";
 export const now = new Date().toISOString();
 export const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
-// ⚠️ HAND-MAINTAINED, NOT imported from the real STATIC_GUARD_REPO_PATHS (git/worktrees.ts) — a second
-// list that must be kept in sync by hand whenever a guard is added there. Nothing enforces this today (no
-// test, no lint, no comment on STATIC_GUARD_REPO_PATHS itself points back here); a merge gate rejection on
-// emit-compare-gate-not-hermetic.mjs's (O)/(P) checks — "an all-hermetic diff's command is BYTE-IDENTICAL"
-// — is the ONLY thing that currently catches a drift, and only at merge time, not before (card 2b099e48:
-// this is exactly how harness-adapter-claude-literal-guard.mjs's addition was caught, one gate cycle late).
-export const GUARD_BASENAMES = ["clock-path-regression-guard.mjs", "fixed-wait-negative-guard.mjs", "onexit-discard-guard.mjs", "codescape-privacy-guard.mjs", "fixed-wait-witness-guard.mjs", "real-home-scope-guard.mjs", "harness-adapter-claude-literal-guard.mjs"];
+// Card f645b481: DERIVED from the real STATIC_GUARD_REPO_PATHS (git/worktrees.ts), not hand-copied — same
+// shape as scripts/run-static-guards.mjs's own import (see that script's header for why a second hardcoded
+// copy of these paths would be strictly worse than not having this fixture at all). Reads the COMPILED
+// dist/git/worktrees.js, exactly like every other test file that needs something from that module (e.g.
+// `await import("../dist/git/worktrees.js")` throughout this test/ dir) — so, like those, this fixture
+// needs `pnpm --filter @loom/daemon build` to have run first; nothing here re-derives that freshness check.
+const { STATIC_GUARD_REPO_PATHS } = await import(
+  pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "git", "worktrees.js")).href
+);
+export const GUARD_BASENAMES = STATIC_GUARD_REPO_PATHS.map((p) => path.posix.basename(p));
 
 // Card 815b4b30: (I)/(J)/(K) (in emit-compare-gate-scope.mjs) need each fixture repo to carry a REAL,
 // importable packages/daemon/scripts/test-daemon.mjs so `loadExcludedTestDirNames` (git/worktrees.ts) can

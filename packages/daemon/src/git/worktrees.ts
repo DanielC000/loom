@@ -2356,14 +2356,10 @@ const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
  *  Adding a guard here means deciding against the criterion above, never "the filename matches so it
  *  belongs."
  *
- *  ⚠️ A SECOND LIST MUST STAY IN SYNC, AND THE CHECK IS ASYMMETRIC: `packages/daemon/test/emit-compare-
- *  gate.mjs` keeps its own `GUARD_BASENAMES` array mirroring this list, to assert each guard actually
- *  appears in the reduced gate command {@link buildReducedGateCommand} builds. REMOVING an entry from
- *  this list while `GUARD_BASENAMES` still names it fails that integration test loudly (the captured
- *  command stops containing a basename the test still expects). But ADDING an entry here without also
- *  adding its basename to `GUARD_BASENAMES` fails SILENTLY — the new guard genuinely runs (this list
- *  drives the real command), but nothing asserts it does, so a mis-registered addition ships green.
- *  Whoever adds a guard to this list must add the same basename to `GUARD_BASENAMES` in the same change.
+ *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `GUARD_BASENAMES` (consumed by `emit-compare-
+ *  gate.mjs` and its siblings to assert each guard actually appears in the reduced gate command
+ *  {@link buildReducedGateCommand} builds) is DERIVED from this list at test-load time, not hand-copied
+ *  (card f645b481) — so an addition or removal here needs no matching edit there; the two cannot drift.
  *
  *  EXPORTED (card 245a3708) so `scripts/run-static-guards.mjs` (the `pnpm guards` command) can run
  *  exactly this list without restating it — see that script's own header for why a second copy of these
