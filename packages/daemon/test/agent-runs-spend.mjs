@@ -133,6 +133,33 @@ try {
   check("2 computeRunCostUsd over the cumulative usage (0.004444)", approx(computeRunCostUsd(cum), 0.004444));
   // missing transcript → null (degrade path).
   check("2 missing transcript → null", readRunUsageFromFile(path.join(txDir, "nope.jsonl")) === null);
+
+  // (2b) card f10a6f40: readRunUsage must resolve via the SAME fallback-scan path readContextStats
+  // uses (resolveTranscriptFile), not the bare computed engineTranscriptPath — otherwise usage
+  // telemetry silently returns null in exactly the drift case context telemetry recovers from.
+  // Mirrors context-stats.mjs's (h) case: write a fixture under a DIFFERENT (wrong) computed dir
+  // than what encodeProjectDir(cwd) would produce for THIS cwd. The engine session id is a
+  // globally-unique UUID, so readRunUsage must still find + read it via the scan fallback.
+  const driftId = "drifted-run-id";
+  const wrongCwd = path.join(os.tmpdir(), `loom-spend-tx-WRONG-${Date.now()}-${process.pid}`);
+  const wrongDir = path.dirname(engineTranscriptPath(wrongCwd, driftId));
+  fs.mkdirSync(wrongDir, { recursive: true });
+  fs.writeFileSync(
+    engineTranscriptPath(wrongCwd, driftId),
+    [{ type: "assistant", message: { id: "drift-m0", model: "claude-opus-4-8", usage: { input_tokens: 42, output_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 8 } } }]
+      .map((l) => JSON.stringify(l)).join("\n") + "\n",
+  );
+  try {
+    // Ask with the ORIGINAL (correct) `cwd` — its computed dir does NOT contain this file (it was
+    // written under `wrongCwd`'s dir instead). Only the scan-by-id fallback can find it.
+    const drifted = readRunUsage(cwd, driftId);
+    // RunUsageStats.inputTokens is BILLED input only (unlike ContextStats, cache fields are separate) —
+    // so the expected value is the fixture's bare input_tokens (42), not input+cache_read.
+    check("2b drifted computed path: readRunUsage still found + read via the scan fallback (in 42)", drifted?.inputTokens === 42);
+  } finally {
+    fs.rmSync(wrongDir, { recursive: true, force: true });
+  }
+
   fs.rmSync(txDir, { recursive: true, force: true });
 
   // =====================================================================================================

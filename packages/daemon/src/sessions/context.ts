@@ -226,9 +226,18 @@ export function readRunUsageFromFile(file: string): RunUsageStats | null {
   return statsFromAccumulator(acc);
 }
 
-/** Cumulative run usage from a session's COMPUTED engine-transcript path (cwd + engine id). */
+/**
+ * Cumulative run usage for a session, resolved via {@link resolveTranscriptFile} — the computed path
+ * first, else the `~/.claude/projects` scan-by-id fallback (card f10a6f40: this used to resolve via the
+ * bare {@link engineTranscriptPath} alone, so in exactly the dir-encoding-drift cases the fallback exists
+ * to recover from, `readContextStats` (which already routes through `resolveTranscriptFile`) would find
+ * the transcript while this sibling silently returned null — no error, no log, the usage number just
+ * absent). Both readers now share one resolution strategy.
+ */
 export function readRunUsage(cwd: string, engineSessionId: string): RunUsageStats | null {
-  return readRunUsageFromFile(engineTranscriptPath(cwd, engineSessionId));
+  const file = resolveTranscriptFile(cwd, engineSessionId);
+  if (!file) return null;
+  return readRunUsageFromFile(file);
 }
 
 /** Per-session incremental parse state — carried across ticks so each tick only parses APPENDED bytes. */

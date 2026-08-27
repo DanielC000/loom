@@ -156,11 +156,19 @@ const KNOWN_BARE_DEBT = new Map([
   ]],
 ]);
 
-// The 66 pre-existing TIER-B-CANDIDATE sites, as of this card — auto-derived by the same walk+regex logic
+// The 67 pre-existing TIER-B-CANDIDATE sites, as of this card — auto-derived by the same walk+regex logic
 // this file runs (regenerate with the classification block below if this ever needs re-deriving; do not
 // hand-edit an entry without actually auditing that site's call count first, per the header note above).
 const KNOWN_TIER_B_DEBT = new Map([
-  ["agent-runs-spend.mjs", ["const cwd = path.join(os.tmpdir(), `loom-spend-tx-${Date.now()}-${process.pid}`);"]],
+  ["agent-runs-spend.mjs", [
+    "const cwd = path.join(os.tmpdir(), `loom-spend-tx-${Date.now()}-${process.pid}`);",
+    // card f10a6f40: mirrors context-stats.mjs's already-baselined `wrongCwd` drift-fixture line (same
+    // "write under a WRONG computed dir to exercise the fallback scan" shape). This whole file runs
+    // top-to-bottom exactly once per `node test/agent-runs-spend.mjs` process (no wrapping function/loop),
+    // so the same-process collision axis Tier-B guards against is structurally absent here — pid still
+    // discriminates cross-process, same reasoning as the file's own pre-existing `cwd` entry above.
+    "const wrongCwd = path.join(os.tmpdir(), `loom-spend-tx-WRONG-${Date.now()}-${process.pid}`);",
+  ]],
   ["audit-surface.mjs", [
     "const fixtureRoot = path.join(os.tmpdir(), `loom-p5-src-${Date.now()}-${process.pid}`);",
     "const outsideSecret = path.join(os.tmpdir(), `loom-p5-secret-${Date.now()}-${process.pid}.txt`);",
