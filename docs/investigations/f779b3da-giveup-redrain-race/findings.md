@@ -33,12 +33,46 @@ Every generation number, byte count, and hash cited below is quoted directly fro
 
 | gen | message | action | result |
 |---|---|---|---|
-| 1 | deploy-stale notice (root `ca4a43b7`), 42042 raw chars | fresh paste (`reason=kickoff-guarantee`) | 4 Enter attempts fail → **GIVE-UP RECOVERY** (real, not suppressed) → requeued, `giveUpGen=1`, held 20s |
+| 1 | deploy-stale notice (root `ca4a43b7`), 42042 raw chars — the **paste body**; the same notice is recorded elsewhere as **42082**, the **wrapped write** (reconciled immediately below the table) | fresh paste (`reason=kickoff-guarantee`) | 4 Enter attempts fail → **GIVE-UP RECOVERY** (real, not suppressed) → requeued, `giveUpGen=1`, held 20s |
 | 2 | `b889f8d7` (the `[loom:prompt-mismatch-unresolved]` notice), 444 raw chars | composerDirtyLen=42042>0 → **clear+repaste branch** (`host.ts:7686-7707`): backspace 42042, paste fresh 444 | 4 Enter attempts fail, but engine output *is* observed after the last one → **GIVE-UP SUPPRESSED** (`host.ts:7926-7947`) — busy left `true`, composerDirtyLen marked defensively: `42042+444=42486` |
 | 3 (out-of-band) | — | `healIfStuck` (`host.ts:7217-7263`) fires ~45s later: busy still stuck, `enterConfirmed` still false → bumps `submitGeneration` to 3 with **no submit() call**, restores `live.giveUpOrigin` (still `b889f8d7`, unchanged since gen2) via `requeueGiveUpOrigin(gen=2)` | `b889f8d7` **only now** gets `giveUpGen=2` stamped and is unshifted onto `pending`, held 20s from this instant — gen1's original message's own 20s hold had *already expired* by this point |
 | 4 | gen1's original message (redelivery, `giveUpGen=1`) | `pending` order: `[b889f8d7 (just-unshifted, HELD), gen1-original (hold long expired)]` → `drainPending`'s `startIdx` **skips the held head and picks gen1's message instead** → `isGiveUpRedelivery=true`, composerDirtyLen=42486>0 → **Enter-only** (`host.ts:7676-7685`, log line verbatim: *"redelivering an already-attempted message (composer possibly dirty, 42486 chars) — retrying the Enter only, not re-pasting the body (card b9b8f8db)"*) | **pastes nothing.** Whatever's really in the composer gets Entered. |
 
+### Gen1's notice carries two byte counts — `42042` and `42082` — and neither is wrong
+
+They are two instruments measuring two genuinely different quantities, and they should *not* be expected to match:
+
+```
+42042  (Loom's daemon log — the PASTE BODY)
+  + 40  (the wrapper "[loom:possible-duplicate root:ca4a43b7] ")
+= 42082  (the WRAPPED WRITE — gen4's redelivery, and the figure the peer's harness notice carries)
+```
+
+Both figures sit in the preserved trace. In `specimen2-fb924e0a-full-trace.txt`, the `33750:` line logs `len=42042` for gen1's fresh paste; the `33881:` line logs `len=42082` for gen4's redelivery, and its own `head=` shows the 40-character wrapper `[loom:possible-duplicate root:ca4a43b7] ` prepended to the identical body. The wrapper is added by `joinSubmittedText` only on a *second* attempt, once `giveUpGen` is set — the same mechanism that explains specimen 1's trailing fragment being unwrapped. The peer additionally reports that this wrapper's `root:` id is byte-identical to the `msgId` in their own notice for the same message, an independent join on a field neither side chose for the purpose; that is their reading, not one checkable from Loom's own artifacts.
+
+**A 40-byte gap you can attribute and a 40-byte gap you cannot are the same number and opposite epistemic objects.** An unexplained exact agreement — or an exact-N gap — is not corroboration; it is a coincidence pending explanation, and it is *more* dangerous than a rough one, because exactness feels like confirmation. This gap was in fact waved through as "probably the wrapper, so it corroborates" before anyone had attributed it. The repair is a named producer for each number, which is what the arithmetic above supplies.
+
 **What's actually in the composer at gen4's Enter:** gen2's own clear+repaste (backspace 42042, paste 444) is not shown to have failed here — and the observed result proves it *succeeded*: the reported content is **444 chars, byte-for-byte `b889f8d7`'s own content**, matching `logicalId=b889f8d7`'s independent content-match confirmation (`purgeConfirmedGiveUpRequeue`, `host.ts:8529-8591`) that fires two log lines later: *"CONFIRMED logicalId=b889f8d7-... latencyMs=49734 (content-matched...)"*. Gen1's own 42042-char stray was genuinely erased by gen2's backspace; gen3 and gen4 never touch the composer again (out-of-band bump and Enter-only respectively); so what gen4's blind Enter submits is exactly what gen2 left behind. **No fusion in this specimen — a clean substitution**, because the intervening clear happened to work.
+
+### Gen1's notice was never delivered — and the cost of that is unknowable
+
+**The 42042-char `[loom:deploy-stale]` notice erased by gen2's backspace is an established, permanent loss.** The reconstruction above, on its own, only shows the notice was gone from the composer by gen4 — which is still consistent with some later generation carrying it. Two further readings close that, both preserved in `specimen2-fb924e0a-full-trace.txt`:
+
+- The `33892:` line — gen=4's `[loom:prompt-mismatch]`: `intendedLen=42082` against `reportedLen=444`, `writtenHash=5a2d3b33` / `reportedHash=40ac358a`, `divergesAtChar=7`, `reportedAround="[loom:prompt-mismatch-unresolved] an earlier [l"`. The engine reported gen2's content — a replay of the immediately-preceding generation, which is this note's own reconstruction observed by a second instrument. The peer independently reported these same figures from their own end.
+- The `34128:` line — the later `[loom:prompt-mismatch-unresolved]` for gen=4: *"no confirming later generation resolved this within 600000ms; treating as an established loss and failing loud (card `f9b1ea00`)."* ⚠️ **Read at the claim, not in a footnote: this is a bounded-window determination made by the mechanism itself, not an observation that the notice was never delivered.** It is what upgrades the loss from *unobserved* to *permanent*, and it is strong — but it is not proof. (Separately checkable and consistent with it: the string `deploy-stale` occurs exactly twice in the session's whole lifetime trace — gen1's paste and gen4's redelivery — and never after.)
+
+⚠️ **Do not count these as three independent parties agreeing.** Loom's daemon log and the peer's report may well be the same instrument read twice. The arithmetic and the hashes are checkable; the independence is not, and an unaudited "they confirmed it too" is exactly how a claim acquires credibility it has not earned.
+
+**The cost of this loss is UNDETERMINED, and not merely unknown — it is UNKNOWABLE. The only artifact that could price a lost notice is the notice's own body, and that is precisely what was lost. The loss destroys the evidence required to measure the loss; it is self-sealing.**
+
+**A real 22-day-stale deploy did exist in that project at that time. Its TYPE (`[loom:deploy-stale]`) was read from a ~60-char head; its SUBJECT was never read and is now unrecoverable. The two facts have never been connected and both parties have declined to connect them.**
+
+Both directions out of that are unsupported, and this note refuses both — so the next reader inherits the refusal instead of re-deriving the temptation:
+
+- **Not "this failure class has now cost something real."** That asserts a causal chain between the lost notice and the stale deploy which nobody has established, and which the party best placed to assert it explicitly declined to assert. A further reading confirming the *loss* licenses no claim whatever about its *effect*.
+- **Not "it cost nothing" / "no impact" / "harmless".** Equally unsupported — and the easier of the two mistakes to make while trying to be conservative.
+
+**This is the strongest thing this note has to say about why the defect matters, and it needs no causal link at all: a failure whose damage cannot be priced after the fact must be PREVENTED rather than MONITORED.** That is the case for the fix card `4796f999`, and it rests only on what is actually in evidence here.
 
 ## Specimen 1 (`daf64e68`, gen=10, reportedLen=11349) — full reconstruction
 
@@ -68,7 +102,9 @@ This is exactly what happened in specimen 1's own gen4→gen5 sequence (not deta
 ## What this does and doesn't establish
 
 - **Established, from the raw log, not inferred:** both specimens' mismatched generation took the `b9b8f8db` Enter-only path. Both specimens' *other* fragment came from an immediately-preceding generation's own clear-then-repaste attempt, whose backspace success/failure is not directly observable in the log — only inferable from whether the *later* reported content still contains the *earlier* generation's bytes.
-- **Established, by exact arithmetic on preserved, quoted figures:** `9709+1640=11349` (specimen 1, backspace failed — fusion) and `42042` cleanly replaced by `444` (specimen 2, backspace succeeded — clean substitution, confirmed independently via content-match).
+- **Established, by exact arithmetic on preserved, quoted figures:** `9709+1640=11349` (specimen 1, backspace failed — fusion) and `42042` cleanly replaced by `444` (specimen 2, backspace succeeded — clean substitution, confirmed independently via content-match). Specimen 2's notice appears in the record under two byte counts, and the gap between them is arithmetic rather than a discrepancy: `42042 + 40 = 42082` — the paste body plus the 40-character `[loom:possible-duplicate root:ca4a43b7] ` wrapper carried by gen4's redelivery, two instruments measuring different quantities (see "Gen1's notice carries two byte counts" above). **That reconciliation is specimen 2's alone — do not apply the +40 anywhere else.** `9709+1640=11349` needs no wrapper term: the 1640-char trailing fragment there is explicitly a first-ever, *unwrapped* attempt, and the 9709 already has its own wrapper baked in at mint time.
+- **Established, with its limit stated at the claim:** specimen 2's gen1 `[loom:deploy-stale]` notice was permanently lost — never delivered in any generation. The gen=4 `[loom:prompt-mismatch]` is a direct log reading; the `[loom:prompt-mismatch-unresolved]` that makes the loss *permanent* is a bounded-window determination by the mechanism itself rather than an observation — strong, not proof, and not to be counted as an independent third party (see "Gen1's notice was never delivered" above).
+- **NOT established, and unknowable rather than merely unmeasured:** what this loss cost. This note asserts neither a consequence nor its absence — the only artifact that could price a lost notice is the notice's own body, which is what was lost.
 - **NOT established:** *why* the backspace succeeds sometimes and not others. That is exactly `3ce3fa39`'s own open question ("a live experiment is needed to discriminate" between the burst-misinterpreted-as-paste and engine-stopped-reading candidates) — this card does not add new evidence on that sub-question, and I did not attempt to (out of scope: this card is about the give-up-recovery/re-drain race, not the backspace-clear reliability question, which already has its own card history).
 - **NOT established:** whether this exact combination (Enter-only riding on top of an unverified prior clear) is *common* — I have two specimens, both now fully explained by the same combination, which is stronger than "co-located" but is still n=2. I did not run a corpus-wide sweep for this specific signature (composerDirtyLen at an Enter-only retry log line matching, or nearly matching, the eventual reportedLen) — that would be the natural next step if the owner wants an incidence estimate, and I flag it rather than claim it.
 
