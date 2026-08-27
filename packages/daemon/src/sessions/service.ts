@@ -8540,16 +8540,24 @@ export class SessionService {
       // (`columnEscalationStatus(...) !== "resolved"` below) — because that exact veto, applied to an
       // EXPLICIT request, is the bug this fixes: a Lead closing the thread must never silently change
       // what a manager's stated intent does.
-      const ownEscalationTasks: Task[] = [];
+      // DEDUPE BY TASK ID (card 83b243f8): `listEscalationsForProject` returns one ROW per escalation
+      // EVENT, never per distinct task — a thread with N follow-ups on the same task would otherwise push
+      // that task N times, and `getByIdPrefix`'s generic ambiguity check (correctly) can't tell "N
+      // identical candidates" from "N genuinely distinct ones" — every follow-up filed on a thread made
+      // that thread's own id-prefix harder to resolve. A `Map` keyed on taskId collapses the row-shaped
+      // list back to one entry per task (and skips the redundant `getTask` calls a repeat id would cause)
+      // WITHOUT touching `getByIdPrefix`/`resolveIdPrefix` themselves — those stay correct for reporting
+      // genuine ambiguity across genuinely distinct task ids elsewhere.
+      const ownEscalationTasks = new Map<string, Task>();
       for (const e of this.db.listEscalationsForProject(caller.projectId)) {
-        if (!e.taskId) continue;
+        if (!e.taskId || ownEscalationTasks.has(e.taskId)) continue;
         const t = this.db.getTask(e.taskId);
-        if (t) ownEscalationTasks.push(t);
+        if (t) ownEscalationTasks.set(e.taskId, t);
       }
       const resolved = getByIdPrefix(
         input.followUpOn,
-        (id) => ownEscalationTasks.find((t) => t.id === id),
-        () => ownEscalationTasks,
+        (id) => ownEscalationTasks.get(id),
+        () => [...ownEscalationTasks.values()],
         "escalation task to follow up on",
       );
       if ("error" in resolved) throw new Error(resolved.error);
