@@ -3725,7 +3725,11 @@ export class OrchestrationMcpRouter {
           "deploy going live also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this " +
           "daemon and is NOT re-execed by this restart), the success result additionally carries " +
           "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does a " +
-          "manual `pnpm daemon:stable`; never report that part of the change as fully live.",
+          "manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 062fa934: the " +
+          "post-restart resume nudge you receive may likewise WITHHOLD its usual 'your merged daemon code is " +
+          "now LIVE' assurance if the freshly-restarted process's own build signature can't be confirmed " +
+          "(`deploySignatureMismatch` — a turbo cache-replay signature; see `served_status`) — that is a notice " +
+          "about what's KNOWN, not a failed restart; verify behavior directly rather than assuming the merge landed.",
         inputSchema: strictShape({ reason: z.string() }),
       },
       async ({ reason }) => {

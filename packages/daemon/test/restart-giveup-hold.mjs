@@ -87,6 +87,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const restart = await import("../dist/orchestration/restart.js");
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -225,7 +226,13 @@ try {
   }); // NOT ready yet — mirrors a freshly re-spawned, not-yet-booted resumed pty (mgrId is deliberately
       // never spawned on hostPost: resumeFleetOnBoot's requester nudge no-ops harmlessly on a dead session)
 
-  const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  // Card 062fa934: resumeFleetOnBoot now reads a live `currentDeployStaleness()` (a real, bounded
+  // `execFileSync("git", ...)`) unless told otherwise — this test's whole point is the (3)/(4) HOLD_MS=350ms
+  // budget above, and that real git call's latency was observed to burn enough of that tight window to make
+  // the restored hold read as already-expired (a "~0ms remaining" flake, unrelated to the fix under test
+  // here). Inject the shared CLEAN_STALENESS fixture (see _deploy-staleness-fixture.mjs) so this test's
+  // timing stays hermetic and independent of real git call latency.
+  const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
   check("(3) setup: both sessions resumed, none failed", result.resumed.length === 2 && result.failed.length === 0);
   check("(3) setup: the persisted FIFO replayed onto the resumed (not-yet-ready) session",

@@ -28,6 +28,9 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+// Card 062fa934, Code Review CRITICAL — resumeFleetOnBoot must never read the real, unmocked
+// currentDeployStaleness() in this test corpus; see _deploy-staleness-fixture.mjs's own doc.
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -92,7 +95,7 @@ try {
       { sessionId: id.plain, role: null, parentSessionId: null },
     ],
   };
-  const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush(); // let every deferred manager/worker nudge settle
   check("(0) all 5 sessions resumed, none failed", result.resumed.length === 5 && result.failed.length === 0);
 

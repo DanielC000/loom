@@ -33,6 +33,11 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } = await import("../dist/orchestration/resume-nudge.js");
+// Card 062fa934, Code Review CRITICAL — every resumeFleetOnBoot call below must inject this explicitly;
+// see _deploy-staleness-fixture.mjs's own doc for the reproduced incident (a turbo cache-hit build
+// replaying a stale build-info.json flipped `deploySignatureMismatch:true`, withholding the "now LIVE"
+// wording several checks below assert unconditionally).
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -156,7 +161,7 @@ try {
 
   const resumeCalls = [];
   const resumeOne = (sid) => { resumeCalls.push(sid); return sid !== deadW; }; // dead worker is unresumable
-  const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
+  const result = sessions.resumeFleetOnBoot(intent, { resumeOne, deployStaleness: CLEAN_STALENESS });
   await flush(); // let every deferred (manager/worker) continuation nudge's waitForMcpSeen().then(...) settle
 
   check("(2) every non-dead session resumed (8)", result.resumed.length === 8 && !result.resumed.includes(deadW));
@@ -261,7 +266,7 @@ try {
   // Boot resume over an old-format intent must not crash and must route the requester/worker nudges.
   const pty2 = new PtyStub();
   const sessions2 = new SessionService(db, pty2, new OrchestrationControl());
-  const oldResult = sessions2.resumeFleetOnBoot(oldIntent, { resumeOne: () => true });
+  const oldResult = sessions2.resumeFleetOnBoot(oldIntent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush(); // let the deferred requester/worker nudges settle
   check("(4) old-format boot resume brings back the requester + its workers without crashing", oldResult.resumed.length === 2 && oldResult.failed.length === 0);
   check("(4) old-format requester gets the 'code is live' re-prompt", pty2.getPending(id.mgrB).some((m) => m.includes("now LIVE")));
@@ -396,7 +401,7 @@ try {
       { sessionId: cid.heldMgr, role: "manager", parentSessionId: null },
     ],
   };
-  sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true });
+  sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush(); // let every deferred manager/worker nudge settle
   const n6 = (i) => pty6.getPending(i);
 
@@ -490,7 +495,7 @@ try {
       { sessionId: f7c.wkrId, role: "worker", parentSessionId: f7c.mgrId },
     ],
   };
-  sessions7.resumeFleetOnBoot(intent7, { resumeOne: () => true });
+  sessions7.resumeFleetOnBoot(intent7, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
 
   const n7a = pty7.getPending(f7a.mgrId);
@@ -544,7 +549,7 @@ try {
         { sessionId: f.wkrId, role: "worker", parentSessionId: f.mgrId },
       ],
     };
-    sessionsReq.resumeFleetOnBoot(intentReq, { resumeOne: () => true });
+    sessionsReq.resumeFleetOnBoot(intentReq, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
     await flush();
     const reqMsg = ptyReq.getPending(f.mgrId);
     if (label === "7d") {
@@ -589,7 +594,7 @@ try {
       { sessionId: d1.mgr, role: "manager", parentSessionId: null },
       { sessionId: d1.dead, role: "worker", parentSessionId: id.mgrB, busy: true },
     ] },
-    { resumeOne: (sid) => sid !== d1.dead },
+    { resumeOne: (sid) => sid !== d1.dead, deployStaleness: CLEAN_STALENESS },
   );
   await flush();
   const msg8i = pty8i.getPending(d1.mgr);
@@ -632,7 +637,7 @@ try {
       { sessionId: d2.dead, role: "worker", parentSessionId: id.mgrB, busy: true },
       { sessionId: d2.lead, role: "platform", parentSessionId: null },
     ] },
-    { resumeOne: (sid) => sid !== d2.dead },
+    { resumeOne: (sid) => sid !== d2.dead, deployStaleness: CLEAN_STALENESS },
   );
   await flush();
   const msg8ii = pty8ii.getPending(d2.mgr);
@@ -664,7 +669,7 @@ try {
       { sessionId: d2.lead, role: "platform", parentSessionId: null },
       { sessionId: d3dead, role: "worker", parentSessionId: id.mgrB, busy: false },
     ] },
-    { resumeOne: (sid) => sid !== d3dead },
+    { resumeOne: (sid) => sid !== d3dead, deployStaleness: CLEAN_STALENESS },
   );
   await flush();
   const msg8iii = pty8iii.getPending(d2.lead);

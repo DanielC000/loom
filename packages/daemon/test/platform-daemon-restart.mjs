@@ -37,6 +37,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (N6) Card b2dcf930: the Lead branch's fleet-wide "whole fleet ... was resumed too" claim, RED-proofed
 //       for the platform requester specifically (restart-fleet.mjs's (2) section already covers the
 //       manager branch) — the Lead branch had NO ratio at all before the fix.
+//   (N7)/(N8) Card 062fa934: `deployStaleness.deploySignatureMismatch:true` (injected via resumeFleetOnBoot's
+//       new `deployStaleness` test seam) WITHHOLDS the unconditional "your merged daemon code is now LIVE"
+//       assurance for both the manager and platform-Lead requester branches — checked ahead of
+//       supervisorChanged (a stronger doubt: the build's own identity is in question). (N1)/(N2) are this
+//       finding's own negative control: they now pass an explicit CLEAN_STALENESS fixture and still assert
+//       the unconditional claim, proving the SAME branch emits normally when the signature is clean.
+//   (N9) Code Review BLOCKING MAJOR (card 062fa934): the ORDERING decision itself — deploySignatureMismatch
+//       checked ahead of supervisorChanged — was previously pinned by NOTHING: every (N7)/(N8) case leaves
+//       supervisorChanged unset, and every (N4)/(N5) case uses clean staleness, so inverting the precedence
+//       in service.ts left every prior check green. This sets BOTH flags at once and asserts the signature
+//       wording wins (present) while the supervisor wording loses (absent) — RED-proofed by inverting the
+//       real precedence and confirming this is the ONE case that then fails.
 // Run: 1) build daemon, 2) node test/platform-daemon-restart.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -74,6 +86,15 @@ const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
   return true;
 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+// Card 062fa934, Code Review CRITICAL — every (N*) section below now injects `deployStaleness` explicitly
+// rather than letting resumeFleetOnBoot fall back to the real `currentDeployStaleness()` (a live
+// `execFileSync("git", ...)` read of THIS checkout) — this test's whole point is a hermetic, deterministic
+// fixture, and a hidden dependency on real git/dist state would make it neither (worse: it was PROVEN to
+// actively lie on a turbo cache-hit build — see `_deploy-staleness-fixture.mjs`'s own doc for the
+// reproduced incident this shared fixture exists to prevent). CLEAN_STALENESS/MISMATCH_STALENESS are
+// shared with every other file exercising this same call, not a per-file copy.
+const { CLEAN_STALENESS, MISMATCH_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 function tmpDbFile(tag) {
   return path.join(os.tmpdir(), `loom-platrestart-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
@@ -208,7 +229,7 @@ class ControllableMcpPty {
   const sessions = new SessionService(db, pty, new OrchestrationControl());
   const intent = { reason: "deploy", managerSessionId: "reqMgr", requestedAt: now, resume: [{ sessionId: "reqMgr", role: "manager", parentSessionId: null }] };
 
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
   check("(N1) a MANAGER requester's nudge is WITHHELD while its MCP-seen wait is unsettled (load-bearing, unchanged)",
     pty.getPending("reqMgr").length === 0);
@@ -240,7 +261,7 @@ class ControllableMcpPty {
   const sessions = new SessionService(db, pty, new OrchestrationControl());
   const intent = { reason: "deploy", managerSessionId: "reqPlat", requestedAt: now, resume: [{ sessionId: "reqPlat", role: "platform", parentSessionId: null }] };
 
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
   const platMsgs = pty.getPending("reqPlat");
   check("(N2) a PLATFORM requester's nudge is delivered IMMEDIATELY — no markMcpSeen ever called, no wait",
@@ -273,7 +294,7 @@ class ControllableMcpPty {
   const sessions = new SessionService(db, pty, new OrchestrationControl());
   const intent = { reason: "deploy touching the supervisor", managerSessionId: "reqMgrSC", requestedAt: now, supervisorChanged: true, resume: [{ sessionId: "reqMgrSC", role: "manager", parentSessionId: null }] };
 
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   pty.markMcpSeen("reqMgrSC"); // manager requester's nudge is gated behind waitForMcpSeen — see (N1)
   await flush();
   const msgs = pty.getPending("reqMgrSC");
@@ -300,11 +321,99 @@ class ControllableMcpPty {
   const sessions = new SessionService(db, pty, new OrchestrationControl());
   const intent = { reason: "deploy touching the supervisor", managerSessionId: "reqPlatSC", requestedAt: now, supervisorChanged: true, resume: [{ sessionId: "reqPlatSC", role: "platform", parentSessionId: null }] };
 
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
   const msgs = pty.getPending("reqPlatSC");
   check("(N5) supervisorChanged:true — the platform Lead requester's nudge ALSO says the supervisor part is NOT live",
     msgs.length === 1 && /EXCEPT the supervisor script itself/.test(msgs[0]) && /pnpm daemon:stable/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N7) card 062fa934: deploySignatureMismatch:true — a MANAGER requester's "code is live" claim is
+// WITHHELD (not a refusal — the restart already happened; only the assurance is gated). Checked FIRST,
+// ahead of supervisorChanged (a strictly stronger doubt — see service.ts's own comment at the liveClaim
+// ternary). RED-PROOF pairing with the (N1) positive control above: (N1) already proves the SAME manager
+// branch emits the unconditional claim when deployStaleness is clean; this proves the identical branch
+// withholds it when the signature disagrees — same code path, both directions independently asserted. ---
+{
+  const file = tmpDbFile("nudge-mgr-dsm");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npdsm", name: "NPDSM", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nadsm", projectId: "npdsm", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqMgrDSM", projectId: "npdsm", agentId: "nadsm", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy", managerSessionId: "reqMgrDSM", requestedAt: now, resume: [{ sessionId: "reqMgrDSM", role: "manager", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: MISMATCH_STALENESS });
+  pty.markMcpSeen("reqMgrDSM"); // manager requester's nudge is gated behind waitForMcpSeen — see (N1)
+  await flush();
+  const msgs = pty.getPending("reqMgrDSM");
+  check("(N7) deploySignatureMismatch:true — the unconditional 'now LIVE' assurance is WITHHELD",
+    msgs.length === 1 && !/now LIVE in the running daemon/.test(msgs[0]) && !/EXCEPT the supervisor script itself/.test(msgs[0]));
+  check("(N7) it says what is actually known instead — the build signature could not be confirmed",
+    /could NOT be confirmed as your merged code/.test(msgs[0]) && /deploySignatureMismatch/.test(msgs[0]));
+  check("(N7) it is a NOTICE, not a refusal — the requester still gets its full continue/verify nudge",
+    /\[loom:daemon-restarted\]/.test(msgs[0]) && /Continue\./.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N8) card 062fa934: deploySignatureMismatch:true — the PLATFORM (Lead) requester gets the SAME
+// withheld claim as the manager branch above (both branches share the one ternary in service.ts). ---
+{
+  const file = tmpDbFile("nudge-plat-dsm");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npdsm2", name: "NPDSM2", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nadsm2", projectId: "npdsm2", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqPlatDSM", projectId: "npdsm2", agentId: "nadsm2", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy", managerSessionId: "reqPlatDSM", requestedAt: now, resume: [{ sessionId: "reqPlatDSM", role: "platform", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: MISMATCH_STALENESS });
+  await flush();
+  const msgs = pty.getPending("reqPlatDSM");
+  check("(N8) deploySignatureMismatch:true — the platform Lead requester's nudge ALSO withholds the claim",
+    msgs.length === 1 && !/now LIVE in the running daemon/.test(msgs[0]) && /could NOT be confirmed as your merged code/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N9) Code Review BLOCKING MAJOR (card 062fa934): BOTH deploySignatureMismatch:true AND
+// supervisorChanged:true at once. The precedence decision (signature checked FIRST) was previously
+// unpinned by any test — every (N7)/(N8) case leaves supervisorChanged unset and every (N4)/(N5) case uses
+// clean staleness, so a reviewer inverting the real precedence still passed everything. This is the ONE
+// case that discriminates: the signature wording must win, and the supervisor wording must NOT appear
+// (a caveated "live EXCEPT the supervisor" would still assert the very identity now in doubt). ---
+{
+  const file = tmpDbFile("nudge-mgr-both");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npboth", name: "NPBOTH", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "naboth", projectId: "npboth", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqMgrBoth", projectId: "npboth", agentId: "naboth", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy", managerSessionId: "reqMgrBoth", requestedAt: now, supervisorChanged: true, resume: [{ sessionId: "reqMgrBoth", role: "manager", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: MISMATCH_STALENESS });
+  pty.markMcpSeen("reqMgrBoth"); // manager requester's nudge is gated behind waitForMcpSeen — see (N1)
+  await flush();
+  const msgs = pty.getPending("reqMgrBoth");
+  check("(N9) both flags set — the signature-mismatch wording WINS (precedence proven, not assumed)",
+    msgs.length === 1 && /could NOT be confirmed as your merged code/.test(msgs[0]));
+  check("(N9) both flags set — the supervisor-caveat wording does NOT also appear",
+    !/EXCEPT the supervisor script itself/.test(msgs[0]) && !/pnpm daemon:stable/.test(msgs[0]));
 
   db.close();
   rmDb(file);
@@ -331,7 +440,7 @@ class ControllableMcpPty {
     ],
   };
   const resumeOne = (id) => id !== "some-dead-session";
-  const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
+  const result = sessions.resumeFleetOnBoot(intent, { resumeOne, deployStaleness: CLEAN_STALENESS });
   await flush();
   check("(N6) the unresumable session lands in `failed`", result.failed.includes("some-dead-session") && result.failed.length === 1);
   const msgs = pty.getPending("reqPlatFailed");
@@ -363,7 +472,7 @@ class ControllableMcpPty {
   // unconditional `resumeOne(reqId)` call).
   const intent = { reason: "deploy", managerSessionId: "reqPlatOmitted", requestedAt: now, resume: [] };
 
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush();
   const omittedMsgs = pty.getPending("reqPlatOmitted");
   check("(N3) a platform requester OMITTED from intent.resume is still resolved via the DB — delivered immediately",

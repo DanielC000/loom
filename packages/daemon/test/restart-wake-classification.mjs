@@ -52,6 +52,9 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
 const { isNoOpManagerWake, extractCommitShas } = await import("../dist/orchestration/restart.js");
+// Card 062fa934, Code Review CRITICAL — resumeFleetOnBoot must never read the real, unmocked
+// currentDeployStaleness() in this test corpus; see _deploy-staleness-fixture.mjs's own doc.
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -223,7 +226,7 @@ try {
       { sessionId: id.busyReviewer, role: "auditor", parentSessionId: null, busy: true },
     ],
   };
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flush(); // let every deferred manager/worker nudge settle
   const q = (i) => pty.getPending(i);
 

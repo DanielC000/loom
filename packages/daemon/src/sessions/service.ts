@@ -41,6 +41,8 @@ import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
+import { currentDeployStaleness } from "../served-status.js";
+import type { DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
@@ -4527,9 +4529,15 @@ export class SessionService {
    */
   resumeFleetOnBoot(
     intent: RestartIntent,
-    opts: { resumeOne?: (id: string) => boolean; now?: Date } = {},
+    // Card 062fa934 — `deployStaleness` is a TEST SEAM (mirrors `composeManagerStartupPrompt`'s own
+    // `stalenessOverride`): a real caller (index.ts, the one production call site) always omits it and
+    // gets the live `currentDeployStaleness()` read of THIS (freshly-booted, post-restart) process's own
+    // signature; a hermetic test injects a fixed result so it can assert the withheld-vs-emitted "code is
+    // live" wording deterministically, without a real git checkout + rebuilt dist.
+    opts: { resumeOne?: (id: string) => boolean; now?: Date; deployStaleness?: DeployStalenessResult } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[] } {
     const now = opts.now ?? new Date();
+    const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
     const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
       try { this.resume(id); return true; } catch { return false; }
     });
@@ -4988,7 +4996,22 @@ export class SessionService {
         // where the wording is unchanged. (The skill-store adopt half of the same finding is left
         // out-of-scope here — plumbing `skillStoreStaleness` to this notice-building site was judged not
         // worth its cost; see the card.)
-        const liveClaim = intent.supervisorChanged
+        //
+        // Card 062fa934 — `deploySignatureMismatch` is checked FIRST, ahead of `supervisorChanged`: it is
+        // a strictly stronger doubt (a turbo cache-replay signature — see deploy-staleness.ts's module
+        // doc — means this process's OWN build identity can't be trusted, so a caveated "code is live
+        // EXCEPT the supervisor" would still be asserting the one thing now in question). This gates the
+        // CLAIM, not the restart itself — WHO reads this and WHEN: the requesting manager/platform Lead,
+        // in this exact post-`daemon_restart` nudge, every time this process's own resumeFleetOnBoot runs
+        // (the only place this codebase asserts "your merged code is live" to an agent). Per the card's
+        // DoD, this must NOT become a refusal — the restart already happened; only the ASSURANCE that
+        // follows it is withheld.
+        const liveClaim = deployStaleness.deploySignatureMismatch
+          ? `what this daemon process is now executing could NOT be confirmed as your merged code — its ` +
+            `own build artifact's baked commit sha disagrees with what the derived build clocks imply (a ` +
+            `turbo cache-replay signature; see \`deploySignatureMismatch\` on \`served_status\`). Verify ` +
+            `behavior directly rather than assuming the merge landed`
+          : intent.supervisorChanged
           ? `your merged daemon code is now live in the running daemon EXCEPT the supervisor script itself ` +
             `— a human must run \`pnpm daemon:stable\` for those lines to take effect`
           : `your merged daemon code is now LIVE in the running daemon`;

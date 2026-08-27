@@ -48,6 +48,10 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { CapQueueRejectedError } = await import("../dist/orchestration/cap-queue.js");
+// Card 062fa934, Code Review CRITICAL — every resumeFleetOnBoot call below must inject this explicitly;
+// see _deploy-staleness-fixture.mjs's own doc for why (a real, unmocked deploy-signature read can flip
+// the "now LIVE" wording this file's (B4) check asserts unconditionally).
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -268,7 +272,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
         // id.silentMgrClean deliberately has NO key — the (B2) control.
       },
     };
-    sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+    sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
     await flush();
     const q = (i) => pty.getPending(i);
     const hasNote = (i, n) => q(i).some((m) => /DROPPED by this restart/.test(m) && m.includes(`op-${i}-${n}`) && m.includes(`task-${i}-${n}`) && m.includes(`dropped kickoff for ${i} #${n}`));
@@ -334,7 +338,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
       },
     };
     let threw = null;
-    try { sessions.resumeFleetOnBoot(badIntent, { resumeOne: () => true }); } catch (e) { threw = e; }
+    try { sessions.resumeFleetOnBoot(badIntent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS }); } catch (e) { threw = e; }
     await flush();
     check("(C) resumeFleetOnBoot did NOT throw on malformed capQueued entries — THE BLOCKING code-review finding",
       threw === null);
