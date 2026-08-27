@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -26,10 +25,7 @@ import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { resolveWebDistDir } from "../paths.js";
-import { loomVersion } from "../version.js";
-import { computeDeployStaleness } from "../deploy-staleness.js";
-import { skillStoreStaleness } from "../skills/store.js";
+import { buildServedStatus } from "../served-status.js";
 import { lineageRootId } from "../sessions/platform-lead-prompt.js";
 import {
   authorCompanionSkill,
@@ -3703,8 +3699,42 @@ export class OrchestrationMcpRouter {
           "`deployStaleness` is the real signal for THE DAEMON PROCESS: " +
           "{available, stale, commitsBehind, distBuiltAt, processStartedAt, runningCodeBuiltAt, " +
           "distAheadOfProcess, mainlineHeadSha, mainlineHeadDate, webStale, webCommitsBehind, webDistBuiltAt, " +
-          "reason?} — DERIVED fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
-          "never cached/persisted). `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/" +
+          "distBuiltSha, distBuiltDirty, processBuiltSha, processBuiltDirty, distBuiltShaDiffersFromProcess, " +
+          "processBuiltShaMatchesHead, deploySignatureMismatch, webBuiltSha, webBuiltDirty, reason?}. Card " +
+          "f26339d7: every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
+          "are the BAKED signal, split into TWO questions on purpose: `distBuiltSha`/`distBuiltDirty` are a " +
+          "FRESH read of `dist/build-info.json` on EVERY call (\"what's on disk right now\" — a rebuild " +
+          "changes it immediately, even with no restart); `processBuiltSha`/`processBuiltDirty` are " +
+          "captured ONCE, at THIS PROCESS's own start (module load, never re-read), and answer \"what is " +
+          "this process actually executing\" — a `daemon_restart` with no rebuild cannot change them, only " +
+          "a real restart (which re-captures them fresh) can. `null` on any when built outside a git " +
+          "checkout (e.g. a packaged install) or unresolvable — NEVER a fabricated/stale value; these four " +
+          "fields survive even a `.git`-unavailable (`available:false`) result, since they need no git at " +
+          "all (a packaged install still ships `dist/build-info.json`). `dirty:true` (or `null`, unknown) " +
+          "means the build ran from an uncommitted-changes checkout — its sha does NOT actually represent " +
+          "what was compiled, so `processBuiltShaMatchesHead` can ONLY read `true` when `processBuiltDirty` " +
+          "is EXACTLY `false` (provably clean), never merely because the sha string happens to match. " +
+          "`distBuiltShaDiffersFromProcess:true` is a direct, CONTENT-based \"a rebuild landed that this " +
+          "process hasn't picked up\" signal — strictly stronger than the mtime-based `distAheadOfProcess`, " +
+          "which infers the same fact from clocks and can be fooled by a cache-replay's mtime bump. " +
+          "`processBuiltShaMatchesHead` is \"is `processBuiltSha` a provably-clean match for " +
+          "`mainlineHeadSha`\" — often `false` in ordinary healthy operation (mainline moves on unrelated " +
+          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. " +
+          "`deploySignatureMismatch:true` is the actual defect detector, fed from `processBuiltSha` " +
+          "(deliberately, not `distBuiltSha` — the question is what THIS PROCESS is running): the date-" +
+          "based clock claims `stale:false` (caught up) BUT `processBuiltSha`'s own real commit date " +
+          "proves a restart-relevant commit landed after it — i.e. the mtime clock and the baked-sha " +
+          "ground truth disagree, the exact signature of a turbo cache-replay that bumps dist's mtime " +
+          "without rebuilding from current source. `webBuiltSha`/`webBuiltDirty` are the WEB analogue of " +
+          "`distBuiltSha`/`distBuiltDirty` (fresh every call, no process/dist split — `packages/web/dist` " +
+          "is already served live with no " +
+          "restart needed) — informational only, no mismatch detector for web in this card. ⭐ This same " +
+          "payload is ALSO reachable from OUTSIDE any agent session, on the plain unprivileged loopback " +
+          "`GET /api/deploy-status` — useful specifically when the daemon itself is what's under " +
+          "suspicion and you can't trust a signal that only an agent inside it can read. " +
+          "DERIVED fields are fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
+          "never cached/persisted) — `processBuiltSha`/`processBuiltDirty` alone are captured once at " +
+          "process start by design (never a fresh read; see their own field docs). `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/" +
           "`packages/shared/src` commits — this is CORRECT and DELIBERATE for what it answers (\"does the " +
           "daemon PROCESS need a restart\"), and an assets/docs/vault-only merge correctly never counts " +
           "toward it. ⛔ Card e8697dd3: do NOT read that as \"an assets-only merge never needs a restart\" " +
@@ -3744,23 +3774,7 @@ export class OrchestrationMcpRouter {
           "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached.",
         inputSchema: strictShape({}),
       },
-      async () => {
-        const webDist = resolveWebDistDir();
-        let webBundle: string | null = null;
-        try {
-          const assetsDir = path.join(webDist, "assets");
-          webBundle = fs.readdirSync(assetsDir).find((f) => /^index-.*\.js$/.test(f)) ?? null;
-        } catch { /* dist not built / no assets dir — webBundle stays null */ }
-        const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
-        return ok({
-          version: loomVersion(),
-          webBundle,
-          uptimeSeconds: Math.round(process.uptime()),
-          liveSessionCount,
-          deployStaleness: computeDeployStaleness(),
-          skillStoreStaleness: skillStoreStaleness(),
-        });
-      },
+      async () => ok(buildServedStatus(db)),
     );
 
     server.registerTool(

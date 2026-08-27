@@ -28,11 +28,20 @@
     "@loom/daemon#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"],
-      // @loom/daemon's build script runs scripts/sync-claude-skills.mjs (outside this package's own
-      // file tree), so it needs its own inputs entry keying the cache on that script too — otherwise a
-      // script-only change is invisible to turbo and a bare `pnpm build` can replay a stale cache hit
-      // without re-running the sync. $TURBO_DEFAULT$ preserves the normal git-tracked-files inputs.
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/sync-claude-skills.mjs"]
+      // @loom/daemon's build script runs scripts/sync-claude-skills.mjs and scripts/write-build-info.mjs
+      // (both outside this package's own file tree), so it needs its own inputs entry keying the cache on
+      // those scripts too — otherwise a script-only change is invisible to turbo and a bare `pnpm build`
+      // can replay a stale cache hit without re-running them. $TURBO_DEFAULT$ preserves the normal
+      // git-tracked-files inputs.
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/sync-claude-skills.mjs", "$TURBO_ROOT$/scripts/write-build-info.mjs"]
+    },
+    "@loom/web#build": {
+      "dependsOn": ["^build", "clean"],
+      "outputs": ["dist/**"],
+      // @loom/web's build script also runs scripts/write-build-info.mjs (card f26339d7) — same reasoning
+      // as @loom/daemon#build above: a script outside this package's own file tree is invisible to turbo's
+      // default inputs, so it needs to be named explicitly to key the cache on it too.
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/write-build-info.mjs"]
     },
     "typecheck": {
       "dependsOn": ["^build"]

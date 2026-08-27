@@ -10,6 +10,7 @@ import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, 
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
+import { buildServedStatus } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
@@ -855,6 +856,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // web footer fetches it. ⚠️ Part 2 must keep a `name:"loom"` package.json on the daemon's walk-up path
   // (or set LOOM_VERSION) so this still resolves from the PACKAGED form, not just the monorepo. ---
   app.get("/api/version", async () => ({ version: loomVersion() }));
+  // --- Card f26339d7: the EXTERNALLY-readable twin of the agent-facing MCP tool `served_status` — a
+  // plain, unprivileged, loopback GET (no Authorization header needed; see the loopback-secret hook above,
+  // which explicitly does NOT gate GET on /api/*). This is the property a signal readable only from inside
+  // an agent session can't give you: checking what this daemon is ACTUALLY running from OUTSIDE it, which
+  // is exactly the position you're in when the daemon itself is what's under suspicion. Shares ONE
+  // composition (`buildServedStatus`) with the MCP tool so the two surfaces can never drift apart — see
+  // that function's own doc. ---
+  app.get("/api/deploy-status", async () => buildServedStatus(deps.db));
   // --- Update availability (Epic 2c-2, UI half) — READ-ONLY: the daemon's last npm-registry check on the
   // persisted release channel. The web reads this and shows an unobtrusive "Update available" banner ONLY
   // when `updateAvailable` (which requires `packaged:true` — a from-source daemon always reports

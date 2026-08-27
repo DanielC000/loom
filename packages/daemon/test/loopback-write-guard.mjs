@@ -172,6 +172,20 @@ try {
   check("(E) GET /api/projects with NO auth header still succeeds (guard is write-only by design)",
     readNoAuth.statusCode === 200);
 
+  // (E2) card f26339d7 — GET /api/deploy-status is the plain, unprivileged, loopback-only twin of the
+  // agent-facing MCP tool `served_status`: it must be reachable from a bare loopback caller with NO
+  // Authorization header (same guard-scope proof as (E)), and return the SAME shape (deployStaleness
+  // carrying distBuiltSha/processBuiltSha/webBuiltSha) rather than a hand-duplicated, potentially-drifted copy.
+  const deployStatusNoAuth = await appWithSecret.inject({ method: "GET", url: "/api/deploy-status", headers: H });
+  check("(E2) GET /api/deploy-status with NO auth header still succeeds (the externally-readable twin of served_status is not gated)",
+    deployStatusNoAuth.statusCode === 200);
+  const deployStatusBody = deployStatusNoAuth.json();
+  check("(E2) the response carries deployStaleness.distBuiltSha AND processBuiltSha (the two baked-at-build-time fields, not a hand-duplicated shape)",
+    Object.prototype.hasOwnProperty.call(deployStatusBody.deployStaleness ?? {}, "distBuiltSha") &&
+    Object.prototype.hasOwnProperty.call(deployStatusBody.deployStaleness ?? {}, "processBuiltSha"));
+  check("(E2) and version/skillStoreStaleness alongside it — the SAME composition served_status uses, not a narrower one",
+    typeof deployStatusBody.version === "string" && "skillStoreStaleness" in deployStatusBody);
+
   // (F) THE v1 GAP: a Tier-1 write (trust-tier.ts's own "safe for an authenticated REMOTE human"
   // allowlist — a materially different predicate from "safe from an unauthenticated co-resident agent",
   // which is what v1 conflated) is NOW gated too.

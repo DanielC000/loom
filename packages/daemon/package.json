@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ../../scripts/sync-claude-skills.mjs",
+    "build": "tsc -p tsconfig.json && node ../../scripts/sync-claude-skills.mjs && node ../../scripts/write-build-info.mjs packages/daemon/dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",

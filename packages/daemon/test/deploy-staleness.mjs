@@ -124,8 +124,12 @@ const { computeDeployStaleness: computeDeployStalenessRaw, newestMtimeMs: newest
 // before this card; only (11)/(11n) call `computeDeployStalenessRaw` directly with an explicit override to
 // actually exercise the new axis.
 const FAR_FUTURE_PROCESS_START = "2030-01-01T00:00:00Z";
-const computeDeployStaleness = (distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride) =>
-  computeDeployStalenessRaw(distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride ?? FAR_FUTURE_PROCESS_START);
+// Card f26339d7: 6th/7th params (processBuiltShaOverride/processBuiltDirtyOverride) forwarded verbatim
+// (undefined stays undefined, since computeDeployStalenessRaw's own default for an omitted arg — "the
+// caller didn't tell me" — is exactly right; there is no FAR_FUTURE-style neutral default for a sha/dirty
+// flag the way there is for a clock).
+const computeDeployStaleness = (distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride, processBuiltShaOverride, processBuiltDirtyOverride) =>
+  computeDeployStalenessRaw(distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride ?? FAR_FUTURE_PROCESS_START, processBuiltShaOverride, processBuiltDirtyOverride);
 
 const repo = trackDir(path.join(os.tmpdir(), `loom-dpstl-repo-${Date.now()}-${process.pid}`));
 fs.mkdirSync(path.join(repo, "packages", "daemon", "src"), { recursive: true });
@@ -513,6 +517,221 @@ try {
   check("(12-after) the unavailable reason names the dist directory specifically, not a generic message", /dist directory/.test(rDistUnreadable.reason ?? ""));
   check("(12-after) unavailable ⇒ stale:false, commitsBehind:0 (never a false-positive OR false-negative claim)", rDistUnreadable.stale === false && rDistUnreadable.commitsBehind === 0);
   check("(12-after) unavailable ⇒ distBuiltAt/runningCodeBuiltAt are null, never an epoch/invalid-date string", rDistUnreadable.distBuiltAt === null && rDistUnreadable.runningCodeBuiltAt === null);
+
+  // ===================== (13)-(17) CARD f26339d7 — distBuiltSha / processBuiltSha / deploySignatureMismatch =====================
+  // AMENDMENT 1 (owner correction): computeDeployStaleness stays PURE — `processBuiltSha` is never read or
+  // cached by this function itself, only ECHOED from the explicit `processBuiltShaOverride` param (the 6th
+  // positional arg). The REAL "captured once at process start" mechanism lives in served-status.ts's own
+  // top-level module load (proven separately, against the real production module, by
+  // served-status-process-sha.mjs) — this file only proves computeDeployStaleness's own pure logic: given
+  // the same inputs, always the same outputs, with no hidden module-level state to reset between sections.
+  //
+  // A dedicated corpus with REAL commit shas (git rev-parse, not a fixture string) since
+  // `processBuiltSha`'s "does this resolve as a real commit" path (commitDateMs) needs an actual object in
+  // the repo.
+  const shaCorpusRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-shacorpus-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(shaCorpusRepo, "packages", "daemon", "src"), { recursive: true });
+  const gitSha = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: shaCorpusRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  const headShaOf = (repoDir) => execSync("git rev-parse HEAD", { cwd: repoDir }).toString().trim();
+
+  gitSha("init -q");
+  gitSha('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-01-01T00:00:00Z");
+
+  fs.writeFileSync(path.join(shaCorpusRepo, "packages", "daemon", "src", "old.ts"), "export const old = 1;\n");
+  gitSha("add packages/daemon/src/old.ts");
+  gitSha('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add old"', "2027-01-02T00:00:00Z"); // T1
+  const commitOldSha = headShaOf(shaCorpusRepo); // the commit a not-yet-restarted process is (correctly) still running
+
+  fs.writeFileSync(path.join(shaCorpusRepo, "packages", "daemon", "src", "new.ts"), "export const isNew = 1;\n");
+  gitSha("add packages/daemon/src/new.ts");
+  gitSha('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add new"', "2027-01-03T00:00:00Z"); // T2, AFTER T1
+  const commitNewSha = headShaOf(shaCorpusRepo); // the real latest restart-relevant commit / mainline HEAD
+
+  const shaDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-shadist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(shaDistDir, { recursive: true });
+  const shaDistEntry = path.join(shaDistDir, "index.js");
+  const buildShaDistAt = (iso, bakedSha, dirty = false) => {
+    fs.writeFileSync(shaDistEntry, "// fixture dist entry\n");
+    fs.writeFileSync(path.join(shaDistDir, "build-info.json"), JSON.stringify({ sha: bakedSha, dirty }));
+    fs.utimesSync(shaDistEntry, new Date(iso), new Date(iso));
+  };
+
+  // ---- (13) plain read, healthy/matching case (a PROVABLY CLEAN build) ----
+  buildShaDistAt("2027-01-03T12:00:00Z", commitNewSha); // built AFTER both commits, baking the real HEAD
+  const r13 = computeDeployStaleness(shaDistEntry, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(13) distBuiltSha reads the sha baked into build-info.json" + reasonSuffix(r13), r13.distBuiltSha === commitNewSha);
+  check("(13) distBuiltDirty reads the dirty flag baked into build-info.json", r13.distBuiltDirty === false);
+  check("(13) processBuiltSha echoes the override exactly", r13.processBuiltSha === commitNewSha);
+  check("(13) processBuiltDirty echoes the override exactly", r13.processBuiltDirty === false);
+  check("(13) distBuiltShaDiffersFromProcess:false when both agree", r13.distBuiltShaDiffersFromProcess === false);
+  check("(13) processBuiltShaMatchesHead:true when processBuiltSha equals the real mainline HEAD AND the build is provably clean", r13.processBuiltShaMatchesHead === true);
+  check("(13) a healthy build (processBuiltSha==HEAD, dist built after both commits) ⇒ stale:false", r13.stale === false);
+  check("(13) and deploySignatureMismatch:false — no disagreement to surface (processBuiltShaMatchesHead is true)", r13.deploySignatureMismatch === false);
+
+  // ---- (14) THE REBUILD-WITHOUT-RESTART CASE — the actual property this amendment introduces ----
+  // SAME setup as (13): a rebuild has landed on disk (build-info.json now bakes commitNewSha, mtime after
+  // both commits so the mtime clock reads "caught up"). But THIS CALL passes processBuiltShaOverride =
+  // commitOldSha — simulating "the real running process captured its OWN sha at start, before this
+  // rebuild happened, and hasn't restarted since". Because computeDeployStaleness is PURE, this is a
+  // ONE-CALL proof: there is no cache to poison, no first-call-timing race — the two values are simply
+  // whatever this call was told, which is exactly the point (see the module doc's AMENDMENT 1 section for
+  // why a cache-based version of this field was WRONG).
+  const r14 = computeDeployStaleness(shaDistEntry, shaCorpusRepo, undefined, undefined, undefined, commitOldSha, false);
+  check("(14) distBuiltSha reflects the REBUILD that landed on disk (fresh read, unaffected by processBuiltShaOverride)" + reasonSuffix(r14),
+    r14.distBuiltSha === commitNewSha);
+  check("(14) processBuiltSha reports what the caller says THIS PROCESS is running — commitOldSha, NOT the on-disk rebuild",
+    r14.processBuiltSha === commitOldSha);
+  check("(14) distBuiltShaDiffersFromProcess:true — THE definitive, content-based 'a rebuild landed, this process hasn't restarted' signal",
+    r14.distBuiltShaDiffersFromProcess === true);
+
+  // ---- (15) graceful degradation: processBuiltShaOverride omitted / explicitly null ----
+  const r15omitted = computeDeployStaleness(shaDistEntry, shaCorpusRepo); // no 6th/7th arg at all
+  check("(15) processBuiltShaOverride OMITTED ⇒ processBuiltSha:null — never falls back to distBuiltSha's value" + reasonSuffix(r15omitted),
+    r15omitted.processBuiltSha === null && r15omitted.distBuiltSha === commitNewSha);
+  check("(15) processBuiltDirty OMITTED ⇒ null", r15omitted.processBuiltDirty === null);
+  check("(15) processBuiltSha:null ⇒ processBuiltShaMatchesHead:null and deploySignatureMismatch:false (never fabricated without proof)",
+    r15omitted.processBuiltShaMatchesHead === null && r15omitted.deploySignatureMismatch === false);
+  check("(15) distBuiltShaDiffersFromProcess:false when processBuiltSha is unresolved (never a positive claim without both sides)",
+    r15omitted.distBuiltShaDiffersFromProcess === false);
+  const r15null = computeDeployStaleness(shaDistEntry, shaCorpusRepo, undefined, undefined, undefined, null, null);
+  check("(15) processBuiltShaOverride/processBuiltDirtyOverride explicitly null ⇒ identical degradation to omitting them",
+    r15null.processBuiltSha === null && r15null.processBuiltDirty === null && r15null.processBuiltShaMatchesHead === null && r15null.deploySignatureMismatch === false);
+
+  // ---- (16) no build-info.json at all (an old dist built before this card) ----
+  const shaDistDir3 = trackDir(path.join(os.tmpdir(), `loom-dpstl-shadist3-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(shaDistDir3, { recursive: true });
+  const shaDistEntry3 = path.join(shaDistDir3, "index.js");
+  fs.writeFileSync(shaDistEntry3, "// fixture dist entry 3, no build-info.json\n");
+  fs.utimesSync(shaDistEntry3, new Date("2027-01-03T12:00:00Z"), new Date("2027-01-03T12:00:00Z"));
+  const r16 = computeDeployStaleness(shaDistEntry3, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(16) no build-info.json at all ⇒ distBuiltSha:null, never a throw or a fabricated value" + reasonSuffix(r16), r16.available === true && r16.distBuiltSha === null);
+  check("(16) no build-info.json at all ⇒ distBuiltDirty:null too", r16.distBuiltDirty === null);
+  check("(16) processBuiltSha is UNAFFECTED by a missing distBuiltSha — it still echoes the override", r16.processBuiltSha === commitNewSha);
+  check("(16) distBuiltShaDiffersFromProcess:false when distBuiltSha is unresolved (never a positive claim without both sides)", r16.distBuiltShaDiffersFromProcess === false);
+
+  // ---- (16b) Code Review "ALSO REQUIRED" (a) — the LITERAL {"sha":null,"dirty":null} JSON shape ----
+  // write-build-info.mjs's own real degradation output (git unavailable at BUILD time) — a DIFFERENT case
+  // from (16)'s missing file entirely, and the PRIMARY production degradation path (a packaged tarball's
+  // own build, or any build run outside a git checkout).
+  const shaDistDir3b = trackDir(path.join(os.tmpdir(), `loom-dpstl-shadist3b-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(shaDistDir3b, { recursive: true });
+  const shaDistEntry3b = path.join(shaDistDir3b, "index.js");
+  fs.writeFileSync(shaDistEntry3b, "// fixture dist entry 3b\n");
+  fs.writeFileSync(path.join(shaDistDir3b, "build-info.json"), JSON.stringify({ sha: null, dirty: null })); // write-build-info.mjs's REAL degraded output
+  fs.utimesSync(shaDistEntry3b, new Date("2027-01-03T12:00:00Z"), new Date("2027-01-03T12:00:00Z"));
+  const r16b = computeDeployStaleness(shaDistEntry3b, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(16b) the literal {sha:null,dirty:null} JSON write-build-info.mjs produces when git is unavailable ⇒ distBuiltSha:null, never a throw" + reasonSuffix(r16b),
+    r16b.available === true && r16b.distBuiltSha === null && r16b.distBuiltDirty === null);
+
+  // ---- (17) THE ACTUAL DEFECT — deploySignatureMismatch: the cache-replay signature (DoD #4) ----
+  // Simulates a turbo cache-replay: dist mtime bumped AFTER both commits (so the mtime-based clock reads
+  // stale:false — "caught up"). `deploySignatureMismatch` is fed from `processBuiltSha`, not `distBuiltSha`
+  // (see the module doc) — so what matters here is that the CALLER (a not-yet-restarted real process)
+  // still reports commitOldSha as what it's executing, exactly the shape a cache-replay produces in
+  // production (the replay's mtime bump fools the date clock; the process's own captured sha does not).
+  const shaDistDir4 = trackDir(path.join(os.tmpdir(), `loom-dpstl-shadist4-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(shaDistDir4, { recursive: true });
+  const shaDistEntry4 = path.join(shaDistDir4, "index.js");
+  fs.writeFileSync(shaDistEntry4, "// fixture dist entry 4 — cache-replay simulation\n");
+  fs.utimesSync(shaDistEntry4, new Date("2027-01-04T00:00:00Z"), new Date("2027-01-04T00:00:00Z")); // mtime AFTER commitNewSha (T2)
+  const r17 = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitOldSha, false);
+  check("(17-setup) the mtime-based clock reads stale:false — the replay's mtime bump fools it, exactly as designed" + reasonSuffix(r17),
+    r17.stale === false && r17.commitsBehind === 0);
+  check("(17) THE DEFECT DETECTED: deploySignatureMismatch:true — processBuiltSha (the OLD commit) proves the mtime clock's 'caught up' claim is FALSE",
+    r17.deploySignatureMismatch === true);
+  check("(17) processBuiltShaMatchesHead:false (the process is genuinely behind real HEAD)", r17.processBuiltShaMatchesHead === false);
+
+  // ---- (17n) CLEAN control, same shape — the process reports it's running the TRUE latest commit ----
+  const r17n = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(17n) CLEAN control: stale:false AND deploySignatureMismatch:false when the process genuinely IS running the latest commit (the detector goes both ways)" + reasonSuffix(r17n),
+    r17n.stale === false && r17n.deploySignatureMismatch === false);
+  check("(17n) processBuiltShaMatchesHead:true in the clean case", r17n.processBuiltShaMatchesHead === true);
+
+  // ---- (18) Code Review BLOCKING 3 — a DIRTY (or unknown-dirtiness) build must NEVER read as a clean match ----
+  // Same corpus, SAME sha as HEAD (commitNewSha) — the ONLY thing that varies below is the dirty flag. If
+  // dirty gating weren't wired, ALL THREE would read processBuiltShaMatchesHead:true (sha equality alone).
+  const r18dirty = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, true);
+  check("(18) processBuiltDirty:true, sha EQUALS mainline HEAD ⇒ processBuiltShaMatchesHead:false anyway — a dirty build can never claim a clean match" + reasonSuffix(r18dirty),
+    r18dirty.processBuiltShaMatchesHead === false);
+  const r18unknown = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, null);
+  check("(18) processBuiltDirty:null (UNKNOWN, not merely absent-of-proof-of-dirty) ⇒ ALSO processBuiltShaMatchesHead:false — unknown is treated the same as dirty, never assumed clean" + reasonSuffix(r18unknown),
+    r18unknown.processBuiltShaMatchesHead === false);
+  const r18clean = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(18) POSITIVE CONTROL: the SAME sha with processBuiltDirty EXACTLY false ⇒ processBuiltShaMatchesHead:true — proves (18)'s two FALSE results above are the dirty gate, not a broken sha comparison",
+    r18clean.processBuiltShaMatchesHead === true);
+
+  // ---- (19) Code Review "ALSO REQUIRED" (b) — an UNRESOLVABLE baked sha (shallow clone / pruned object) ----
+  // A real-looking 40-hex string that is NOT actually an object in shaCorpusRepo — commitDateMs's own
+  // `git log -1 <sha>` lookup fails, and that failure must degrade the mismatch check to false, never throw
+  // and never fabricate a positive.
+  const unresolvableSha = "f".repeat(40);
+  const r19 = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, unresolvableSha, false);
+  check("(19) an unresolvable baked sha ⇒ processBuiltShaMatchesHead:false (it genuinely doesn't match real HEAD)" + reasonSuffix(r19),
+    r19.processBuiltShaMatchesHead === false);
+  check("(19) THE FIX: an unresolvable sha ⇒ deploySignatureMismatch stays false — commitDateMs fails closed, never a fabricated positive without a resolvable date",
+    r19.deploySignatureMismatch === false);
+
+  // ---- (20) Code Review "ALSO REQUIRED" (c) — CRY-WOLF CONTROL: the COMMON healthy state ----
+  // Mainline moved via a commit that does NOT touch a restart-relevant path (docs/assets-only — same
+  // exclusion section (2) above already proves at the commitsBehind level) — so processBuiltShaMatchesHead
+  // is correctly false (the sha genuinely differs from the NEW mainline HEAD) but deploySignatureMismatch
+  // must stay false too: this is NOT a cache-replay, it's just mainline moving on unrelated work while the
+  // daemon is genuinely fine. Given this module's own 637558ca cry-wolf precedent, nothing pinned this
+  // false-positive direction before.
+  fs.mkdirSync(path.join(shaCorpusRepo, "assets", "skills", "demo2"), { recursive: true });
+  fs.writeFileSync(path.join(shaCorpusRepo, "assets", "skills", "demo2", "SKILL.md"), "# demo2\n");
+  gitSha("add assets/skills/demo2/SKILL.md");
+  gitSha('-c user.email=t@loom -c user.name=t commit -q -m "docs(assets): add demo2 skill"', "2027-01-05T00:00:00Z"); // T3, AFTER commitNewSha (T2) — mainline HEAD is now this commit, but it's assets-only (excluded)
+  const r20 = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, undefined, undefined, commitNewSha, false);
+  check("(20-setup) mainline HEAD moved (an assets-only commit AFTER commitNewSha) — processBuiltSha genuinely no longer equals HEAD" + reasonSuffix(r20),
+    r20.processBuiltShaMatchesHead === false);
+  check("(20-setup) and stale:false — the assets-only commit is correctly excluded from the restart-relevant count (same exclusion as section (2))",
+    r20.stale === false);
+  check("(20) CRY-WOLF CONTROL: deploySignatureMismatch:false — a legitimate cache hit / genuinely fine daemon whose only 'staleness' is mainline moving on unrelated docs work, NOT a false positive",
+    r20.deploySignatureMismatch === false);
+
+  // ---- (21) Code Review "ALSO REQUIRED" (d) — webBuiltSha has NO caching to regress into ----
+  // Two calls, SAME repo/process args, but the web dist's OWN build-info.json is rewritten between them —
+  // webBuiltSha must reflect the NEW value on the very next call. A future "consistency" refactor that
+  // accidentally caches webBuiltSha the way `builtSha` used to be cached (AMENDMENT 1's own mistake) would
+  // fail this silently otherwise, since every OTHER webBuiltSha assertion in this suite only ever checks
+  // ONE value in isolation.
+  const webPinDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-webpin-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(webPinDir, { recursive: true });
+  fs.writeFileSync(path.join(webPinDir, "build-info.json"), JSON.stringify({ sha: commitOldSha, dirty: false }));
+  const rWebPinBefore = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, webPinDir, undefined, commitNewSha, false);
+  check("(21-setup) webBuiltSha reads the web dist's OWN baked sha" + reasonSuffix(rWebPinBefore), rWebPinBefore.webBuiltSha === commitOldSha);
+  fs.writeFileSync(path.join(webPinDir, "build-info.json"), JSON.stringify({ sha: commitNewSha, dirty: false })); // rewrite — NO restart/reset of any kind between calls
+  const rWebPinAfter = computeDeployStaleness(shaDistEntry4, shaCorpusRepo, undefined, webPinDir, undefined, commitNewSha, false);
+  check("(21) PINNED: webBuiltSha reflects the rewrite on the VERY NEXT call — it is never cached, unlike processBuiltSha's deliberate module-load capture",
+    rWebPinAfter.webBuiltSha === commitNewSha);
+
+  // ---- (22) Code Review "ALSO REQUIRED" (final) — baked info survives the NO-.git bail (packaged install) ----
+  // The exact case DoD-1 names explicitly: a published npm tarball's own build ships dist/build-info.json
+  // but has no .git at all. "What commit is this artifact/process?" must still be answerable even though
+  // every git-derived comparison field is correctly unavailable.
+  const noGitRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-nogitrepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(noGitRepo, { recursive: true }); // deliberately NEVER git-init'd
+  const packagedDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-packageddist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(packagedDistDir, { recursive: true });
+  const packagedDistEntry = path.join(packagedDistDir, "index.js");
+  fs.writeFileSync(packagedDistEntry, "// fixture packaged dist entry\n");
+  fs.writeFileSync(path.join(packagedDistDir, "build-info.json"), JSON.stringify({ sha: commitOldSha, dirty: false })); // baked at RELEASE build time, ships in the tarball
+  const r22 = computeDeployStaleness(packagedDistEntry, noGitRepo, undefined, undefined, undefined, commitOldSha, false);
+  check("(22) no .git at all ⇒ available:false (unchanged behavior)" + reasonSuffix(r22), r22.available === false);
+  check("(22) THE FIX: distBuiltSha/distBuiltDirty are STILL populated from the real, already-shipped dist/build-info.json — not thrown away just because git is unavailable",
+    r22.distBuiltSha === commitOldSha && r22.distBuiltDirty === false);
+  check("(22) processBuiltSha/processBuiltDirty are STILL populated too — they never depended on git at all",
+    r22.processBuiltSha === commitOldSha && r22.processBuiltDirty === false);
+  check("(22) distBuiltShaDiffersFromProcess is STILL computed — this comparison needs no git either",
+    r22.distBuiltShaDiffersFromProcess === false); // both sides are commitOldSha here — a genuinely non-diverged packaged install
+  check("(22) but every GIT-derived field correctly stays unavailable — mainlineHeadSha:null, processBuiltShaMatchesHead:null, deploySignatureMismatch:false",
+    r22.mainlineHeadSha === null && r22.processBuiltShaMatchesHead === null && r22.deploySignatureMismatch === false);
+
+  try { fs.rmSync(shaCorpusRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
   // Sweeps EVERY fixture root registered via trackDir() above, not just this section's own —
   // the per-section rmSync calls above only run on the happy path; a thrown error anywhere in the
@@ -524,6 +743,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, and (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer."
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer, and (card f26339d7) distBuiltSha reads the build-time-baked sha FRESH every call while processBuiltSha is a PURE echo of the caller-supplied processBuiltShaOverride (no caching inside computeDeployStaleness itself — see AMENDMENT 1), distBuiltShaDiffersFromProcess correctly flags a rebuild-without-restart in one call with no cache-timing race, both degrade to null/false gracefully when build-info.json or the override is absent, and deploySignatureMismatch correctly flags a simulated turbo cache-replay (mtime says fresh, the process's own baked sha proves it's genuinely behind) while staying false on a clean, matching process. (The 'captured once at REAL process start, frozen despite a later on-disk change' property this amendment introduces is proven separately, against the actual production module, by served-status-process-sha.mjs.)"
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
