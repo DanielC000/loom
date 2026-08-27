@@ -416,6 +416,157 @@ try {
     }
   }
 
+  // FINDING-3 REGRESSION TEST (card 687d2a47, round-4 review): `.gitignore` matching honors
+  // `core.ignorecase` (default TRUE on Windows — the owner's own platform — and macOS); `git ls-files`
+  // PATHSPEC matching does not. A gitignore entry whose case differs from the actually-tracked name must
+  // still be recognized as tracked (case-insensitively), or a genuinely tracked directory gets wrongly
+  // offered for exclusion. Reproduced at the git-pathspec level directly — this is a property of git's
+  // pathspec engine, not filesystem case-sensitivity, so it reproduces platform-independently (live-
+  // verified on this host: `git ls-files -- notes` against a tracked `Notes/b.md` returns EMPTY).
+  {
+    const vaultS = path.join(root, "vaultS");
+    initVault(vaultS);
+    fs.mkdirSync(path.join(vaultS, "Notes"));
+    fs.writeFileSync(path.join(vaultS, "Notes", "b.md"), "tracked, different case than the .gitignore entry\n");
+    git(vaultS, "add Notes/b.md");
+    git(vaultS, "commit -m init");
+    fs.writeFileSync(path.join(vaultS, ".gitignore"), "notes\n"); // lowercase — the tracked dir is "Notes"
+
+    const gitS = simpleGit(vaultS);
+    const safeS = await safeToExcludeNames(vaultS, gitS);
+    check("a case-differing gitignore entry for a TRACKED name is NOT offered for exclusion (case-insensitive compare)", !safeS.includes("notes"));
+
+    const vs = new VaultVersioner(vaultS, 150);
+    await vs.start();
+    try {
+      await vs.whenReady();
+      const allTrackedNamesS = Object.values(vs.watchedSnapshot ?? {}).flat();
+      check("the tracked 'Notes' directory is still watched despite the case-differing gitignore entry", allTrackedNamesS.includes("Notes"));
+    } finally {
+      await vs.stop();
+    }
+  }
+
+  // FINDING-1 REGRESSION TEST (card 687d2a47, round-4 review): a `:`-leading gitignore line survives the
+  // parser (unlike glob/negation lines, `:` is not filtered there — the fix lives at the git-query SINK,
+  // see gitTrackedTopLevelNames' doc) and, fed to `git ls-files` as a bare pathspec, is git PATHSPEC MAGIC
+  // (e.g. `:!` excludes everything), silently, exit 0 — not rejected as a bogus name. Batched into the SAME
+  // ls-files call as other candidates, it can empty the whole tracked result and cause a genuinely-tracked
+  // OTHER candidate to be misreported as untracked and excluded. This check only proves SOME wrapper at the
+  // sink closes it (an OR-guard, not a which-magic-word-did-it proof) — per gitTrackedTopLevelNames' own
+  // doc, live-verification there attributes the actual closure to `:(icase)`: each `:(...)`-wrapped
+  // pathspec's magic is scoped to that one pathspec, so `:!` no longer corrupts its siblings in the batch.
+  // `,literal` is additional, currently-unreachable belt-and-braces, not what closes this specific case.
+  {
+    const vaultP = path.join(root, "vaultP");
+    initVault(vaultP);
+    fs.mkdirSync(path.join(vaultP, "_external"));
+    fs.writeFileSync(path.join(vaultP, "_external", "a.md"), "tracked\n");
+    git(vaultP, "add _external/a.md");
+    git(vaultP, "commit -m init");
+    fs.writeFileSync(path.join(vaultP, ".gitignore"), "_external/\n:!\n");
+
+    const namesP = gitignoredTopLevelNames(vaultP);
+    check("gitignoredTopLevelNames DOES generate a ':'-leading candidate (the fix is at the git-query sink, not here)", namesP.includes(":!"));
+    check("gitignoredTopLevelNames still generates the genuine _external candidate", namesP.includes("_external"));
+
+    const gitP = simpleGit(vaultP);
+    const safeP = await safeToExcludeNames(vaultP, gitP);
+    check("a ':'-leading candidate does NOT corrupt the batched tracked-check for other candidates — TRACKED _external stays offered as NOT safe to exclude", !safeP.includes("_external"));
+  }
+
+  // FINDING-2 REGRESSION TEST (card 687d2a47, round-4 review): a `name/`-form gitignore line is git's
+  // DIRECTORY-ONLY pattern, but the exclusion regex built from a bare candidate name matches a FILE of
+  // that name too — a disk check is needed to tell the two apart. That check is a THREE-way discriminator
+  // via lstatSync (real directory / plain file / link-like — a symlink or junction), not a two-way
+  // directory-vs-file split: the link-like case deliberately resolves to "not a directory" even for a
+  // Windows junction git itself WOULD ignore, an accepted under-generation cost (see versioner.ts's own
+  // doc). This block only covers the plain-FILE case of that discriminator.
+  {
+    const vaultQ = path.join(root, "vaultQ");
+    initVault(vaultQ);
+    fs.writeFileSync(path.join(vaultQ, ".gitignore"), "thing/\n");
+    fs.writeFileSync(path.join(vaultQ, "thing"), "an untracked top-level FILE named exactly like the entry\n");
+
+    const namesQ = gitignoredTopLevelNames(vaultQ);
+    check("a 'name/' entry contributes NO candidate when 'name' is currently a FILE, not a directory", !namesQ.includes("thing"));
+
+    const vq = new VaultVersioner(vaultQ, 150);
+    await vq.start();
+    try {
+      await vq.whenReady();
+      const allTrackedNamesQ = Object.values(vq.watchedSnapshot ?? {}).flat();
+      check("the top-level FILE 'thing' is still watched (not wrongly excluded by the dir-only pattern)", allTrackedNamesQ.includes("thing"));
+    } finally {
+      await vq.stop();
+    }
+  }
+  {
+    // Contrast case: when 'name' really IS a directory, the candidate is still (correctly) generated and
+    // the live watcher still excludes it — proves the fix is a precise directory-vs-file discriminator,
+    // not a blanket disabling of the 'name/'-form.
+    const vaultR = path.join(root, "vaultR");
+    initVault(vaultR);
+    fs.writeFileSync(path.join(vaultR, ".gitignore"), "thing/\n");
+    fs.mkdirSync(path.join(vaultR, "thing"));
+    fs.writeFileSync(path.join(vaultR, "thing", "x.md"), "untracked, inside a real ignored dir\n");
+    fs.writeFileSync(path.join(vaultR, "keep.md"), "# still watched\n");
+
+    const namesR = gitignoredTopLevelNames(vaultR);
+    check("a 'name/' entry DOES contribute a candidate when 'name' is currently a real directory", namesR.includes("thing"));
+
+    const vr = new VaultVersioner(vaultR, 150);
+    await vr.start();
+    try {
+      await vr.whenReady();
+      const allTrackedNamesR = Object.values(vr.watchedSnapshot ?? {}).flat();
+      check("the real, untracked 'thing/' directory is excluded from the live watcher", !allTrackedNamesR.includes("thing"));
+      check("a sibling non-excluded file is still watched", allTrackedNamesR.includes("keep.md"));
+    } finally {
+      await vr.stop();
+    }
+  }
+
+  // SYMLINK-TO-DIR OVER-GENERATION FIX, junction regression (round-4 review, BLOCKING): finding 2's
+  // directory check must use fs.lstatSync, never fs.statSync — an UNTRACKED symlink to a directory is NOT
+  // ignored by git's `name/` pattern (git check-ignore exits 1 for it) and `git add .` DOES stage it, but
+  // fs.statSync FOLLOWS the link and reports it as a directory, which would over-exclude live, staged
+  // content. fs.lstatSync correctly reports it as not-a-directory. The accepted, priced-out cost of that
+  // fix is a WINDOWS JUNCTION: git's `name/` pattern DOES ignore a junction (it behaves like a real
+  // directory to git — check-ignore exits 0), but fs.lstatSync ALSO reports a junction as not-a-directory
+  // (live-verified on this host: `fs.lstatSync(junctionPath).isDirectory()` is false while
+  // `fs.statSync(...).isDirectory()` is true) — so a junction's candidate is never generated either. That
+  // is strictly under-generating (leaves it watched, a few extra handles), never the reverse, so it's safe
+  // to pay. (A real symlink-to-dir fixture needs elevation/Developer Mode to create on Windows — confirmed
+  // unavailable in this environment, `mklink /D` refused with an access-denied error — so only the
+  // junction side of this fix is pinned here; the symlink side is covered by the reviewer's live-verified
+  // transcript, not re-derived from documentation.) Windows-only: junctions have no POSIX analogue, and
+  // fs.symlinkSync(..., "junction") needs no elevation (unlike a plain directory symlink).
+  if (process.platform === "win32") {
+    const vaultT = path.join(root, "vaultT");
+    initVault(vaultT);
+    const realDirT = path.join(root, "vaultT-junction-target"); // outside vaultT — just needs to exist
+    fs.mkdirSync(realDirT, { recursive: true });
+    fs.writeFileSync(path.join(realDirT, "x.md"), "real content reachable only through the junction\n");
+    fs.writeFileSync(path.join(vaultT, ".gitignore"), "thingj/\n");
+    fs.symlinkSync(realDirT, path.join(vaultT, "thingj"), "junction");
+
+    const namesT = gitignoredTopLevelNames(vaultT);
+    check("a 'name/' entry pointing at a WINDOWS JUNCTION contributes NO candidate (lstatSync sees it as not-a-directory) — the accepted under-generation cost", !namesT.includes("thingj"));
+
+    const vt = new VaultVersioner(vaultT, 150);
+    await vt.start();
+    try {
+      await vt.whenReady();
+      const allTrackedNamesT = Object.values(vt.watchedSnapshot ?? {}).flat();
+      check("the junction is left watched, not wrongly excluded", allTrackedNamesT.includes("thingj"));
+    } finally {
+      await vt.stop();
+    }
+  } else {
+    console.log("SKIP  windows-junction lstatSync regression — junctions are a Windows-only concept (process.platform !== 'win32' here)");
+  }
+
   // ABSENT-.gitignore regression (review finding): the four hardcoded exclusions must survive even when
   // there is no .gitignore at all — previously only ever asserted WITH one present.
   {
@@ -489,6 +640,34 @@ try {
       await vm.stop();
     }
     check("a genuinely empty (brand-new) vault does NOT trigger the zero-entries dead-watcher warning", !warnings.some((w) => w.includes("[vault-versioner]") && w.includes("ZERO entries")));
+  }
+
+  // ZERO-ENTRIES TRIPWIRE, POSITIVE CONTROL (card 687d2a47 finding 5): the false-positive test above only
+  // proves the branch stays silent on a legitimately empty vault — nothing in this suite previously proved
+  // the warn branch can fire AT ALL, so a tripwire that can never fire would have passed identically.
+  // Force the exact dead-watcher SHAPE directly (count===0 while real, non-excluded content exists): TS
+  // `private` is compile-time only, so this .mjs suite (running the compiled JS) can read/write the field
+  // like any ordinary property.
+  {
+    const vaultN = path.join(root, "vaultN");
+    initVault(vaultN);
+    fs.writeFileSync(path.join(vaultN, "keep.md"), "# real content — must trigger the zero-entries tripwire\n");
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    const vn2 = new VaultVersioner(vaultN, 150);
+    try {
+      await vn2.start();
+      await vn2.whenReady();
+      const realWatcher = vn2.watcher;
+      vn2.watcher = { getWatched: () => ({}) };
+      vn2.warnIfLarge();
+      vn2.watcher = realWatcher; // restore before stop() so the real chokidar handle actually gets closed
+    } finally {
+      console.warn = origWarn;
+      await vn2.stop();
+    }
+    check("the zero-entries dead-watcher warning DOES fire when count===0 and real content exists (positive control)", warnings.some((w) => w.includes("[vault-versioner]") && w.includes("ZERO entries")));
   }
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }

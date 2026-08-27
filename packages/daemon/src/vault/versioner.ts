@@ -60,6 +60,39 @@ function escapeRegExp(s: string): string {
  * watching it (today's status quo) — so a false negative here only costs us the handles we already had; it
  * can never mis-translate into excluding something that WOULD have been committed. Best-effort: a
  * missing/unreadable `.gitignore` returns `[]`.
+ *
+ * **A `:`-leading line is NOT specially rejected here (card 687d2a47 finding 1) — see
+ * {@link gitTrackedTopLevelNames}'s doc for why the fix lives at the git-query SINK instead.** A one-line
+ * `if (lineRaw.startsWith(":")) continue;` here was considered (cheapest, matches this parser's own
+ * "unknown → leave watched" doctrine) and rejected: finding 3 (below) independently forces
+ * `gitTrackedTopLevelNames` to wrap every candidate in git pathspec magic anyway (`:(icase)`, to get
+ * case-insensitive matching), and folding `,literal` into that SAME wrapper closes finding 1 for free, at
+ * the one place that actually talks to git, with no separate parser rule to keep in sync. Prefer this
+ * over a source-side skip that would become the odd one out once the sink already treats candidate text
+ * as opaque literal data.
+ *
+ * **A `name/`-form line is git's DIRECTORY-ONLY pattern (card 687d2a47 finding 2), live-verified:** with
+ * `.gitignore` = `thing/` and a top-level FILE named `thing`, `git check-ignore -v thing` exits 1 — NOT
+ * ignored; only a same-named DIRECTORY is ignored by that pattern. This parser strips the trailing slash
+ * unconditionally, and the exclusion regex built from the result (`buildIgnoredPattern`) matches a bare
+ * file of that name too (its `([/\\]|$)` alternative), which would over-exclude a top-level, extension-less
+ * FILE sharing a `name/` entry's name. Requiring `name` to CURRENTLY be a real directory on disk before
+ * emitting the candidate closes the plain-file case, but "real directory" must be judged by
+ * **`fs.lstatSync`, not `fs.statSync`** (round-4 review, live-verified on WSL Ubuntu 22.04/git 2.34.1,
+ * Windows can't create the fixture): an UNTRACKED **symlink to a directory** is NOT ignored by a `name/`
+ * pattern (`git check-ignore -v thing` exits 1 for `thing` → `realdir/`, vs. exit 0 for a real directory)
+ * and `git add .` DOES stage it — but `fs.statSync` (which follows symlinks) reports it as a directory,
+ * so a `statSync`-based check would emit the candidate anyway and over-exclude live, staged content.
+ * `fs.lstatSync` (which does NOT follow symlinks) correctly reports the symlink as not-a-directory, so the
+ * candidate is left un-generated for it — matching git's own real behavior. **Accepted, priced-out cost:**
+ * a Windows **junction** IS ignored by git's `name/` pattern (behaves like a real directory to git) but
+ * `lstatSync` also reports it as not-a-directory, so a junction's candidate is never generated either —
+ * under-generating (leaves it watched, a few extra handles), never the reverse. Do not special-case
+ * junctions back in to reclaim those handles; that reopens the exact symlink-to-dir over-generation this
+ * fix closes, since Node's `fs` has no portable way to tell "junction" (git-ignorable) apart from "symlink
+ * to dir" (NOT git-ignorable) without shelling out. A bare `name` line (no trailing slash) is unaffected —
+ * git already matches it against both a file and a directory of that name, which is exactly what the
+ * existing regex does.
  */
 export function gitignoredTopLevelNames(repoRoot: string): string[] {
   let raw: string;
@@ -71,8 +104,16 @@ export function gitignoredTopLevelNames(repoRoot: string): string[] {
     if (lineRaw.startsWith("#") || lineRaw.startsWith("!")) continue;
     if (/[*?[\]\\]/.test(lineRaw)) continue; // glob syntax or a backslash escape we don't interpret — leave watched
     if (lineRaw.startsWith("/")) continue; // root-anchored — narrower semantics than we implement; leave watched
+    const hasTrailingSlash = /\/$/.test(lineRaw);
     const stripped = lineRaw.replace(/\/$/, ""); // strip only a trailing directory-marker slash
     if (!stripped || stripped.includes("/") || /\s$/.test(stripped)) continue; // nested path or unhandled trailing whitespace — leave watched
+    if (hasTrailingSlash) {
+      // git's directory-only form — only a real, CURRENT directory qualifies (see doc above). lstatSync,
+      // NOT statSync: a symlink-to-dir must NOT count as a directory here (git itself doesn't ignore one).
+      let isDir = false;
+      try { isDir = fs.lstatSync(path.join(repoRoot, stripped)).isDirectory(); } catch { /* leave watched */ }
+      if (!isDir) continue;
+    }
     names.push(stripped);
   }
   return names;
@@ -102,19 +143,60 @@ export function gitignoredTopLevelNames(repoRoot: string): string[] {
  *
  * Fails SAFE: any git error (a corrupt repo, git not on PATH, whatever) treats every candidate as tracked
  * — i.e. excludes NOTHING — rather than risk silently dropping history for a name we couldn't verify.
+ *
+ * **Each candidate is queried via `:(icase,literal)<name>` pathspec magic (card 687d2a47, findings 1 + 3).
+ * `icase` is what actually closes BOTH findings; `literal` is additional, currently-unreachable
+ * belt-and-braces — see finding 1 below for why it doesn't get sole credit:**
+ *
+ * - **Finding 3 — `core.ignorecase` (default TRUE on Windows, the owner's own platform, and macOS):**
+ *   `.gitignore` matching honors it; plain `git ls-files` pathspec matching does NOT, live-verified —
+ *   `.gitignore` = `Notes`, tracked `notes/b.md`: `git check-ignore -v notes/new.md` exits 0 (git DOES
+ *   ignore it), but `git ls-files -z -- Notes` returns EMPTY (`git ls-files -z -- notes` finds it).
+ *   **Also verified a scoped `git -c core.ignorecase=true ls-files -- Notes` still returns EMPTY** — the
+ *   config knob does not reach pathspec matching at all, so a config override can't fix this; only pathspec
+ *   magic can. `:(icase)Notes` DOES match `notes/b.md`, live-verified. A directory case-renamed on a
+ *   case-insensitive filesystem — index holds `Notes/b.md`, disk shows `notes/`, `.gitignore` names it
+ *   `notes` — would otherwise make this tracked-check MISS while the (itself case-sensitive) exclusion
+ *   regex still matches the on-disk `notes` path, silently dropping history for tracked content. No exotic
+ *   `.gitignore` line needed — an ordinary folder rename triggers it.
+ * - **Finding 1 — `:`-leading candidate text:** without this wrapper, a candidate is fed to git as a bare
+ *   pathspec, and any pathspec starting with `:` is git "magic" (`:!foo`, `:(exclude)foo`, …), not a
+ *   literal name — live-verified: with `_external/a.md` tracked, `git ls-files -- _external ':!'` returns
+ *   EMPTY (exit 0, no error) for the WHOLE batched call, because `:!` deselects everything. A `.gitignore`
+ *   containing both `_external/` and `:!` would silently report the genuinely-tracked `_external` as
+ *   untracked and offer it for exclusion — Critical-1's failure shape, a new trigger. **The long-form
+ *   `:(icase)` wrapper alone is what actually closes this** — live-verified batched: `_external` and
+ *   `Notes` (case-differing) both still resolve correctly with a bogus `:!` candidate present in the same
+ *   call, with or without `,literal`, because each `:(...)`-wrapped pathspec's magic is scoped to that one
+ *   pathspec, not the whole batch. `,literal` is kept anyway as unreachable belt-and-braces (round-4
+ *   review, live-verified): it disables WILDCARD reinterpretation of the candidate text, but the parser
+ *   already rejects any line containing `* ? [ ] \`, so no wildcard can ever reach this call — it cannot
+ *   over-generate (git docs: `literal` only affects glob-vs-literal matching), so there is no cost to
+ *   keeping it, but finding 1 itself is closed by `icase` alone.
+ *
+ * Lowercasing the returned first-segment names (paired with lowercasing the candidate at the
+ * {@link safeToExcludeNames} comparison) is still needed ALONGSIDE `:(icase)`: icase makes the QUERY find
+ * a case-differing tracked entry, but the returned path keeps its OWN on-disk casing (e.g. `notes/b.md`
+ * for a `Notes` candidate) — the set-membership check still needs both sides folded to the same case. On a
+ * case-SENSITIVE filesystem this can only ever mark MORE candidates "tracked" than an exact compare would
+ * — i.e. leave MORE watched, never less — so it is strictly under-generating on every platform. A
+ * `:`-leading candidate that fails to resolve to anything real (the overwhelmingly common case, since `:`
+ * is not a legal filename character on Windows) simply isn't added to `tracked` — same under-generating
+ * direction as every other branch here.
  */
 async function gitTrackedTopLevelNames(git: SimpleGit, candidates: string[]): Promise<Set<string>> {
   if (candidates.length === 0) return new Set();
   try {
-    const out = await git.raw(["ls-files", "-z", "--", ...candidates]);
+    const pathspecs = candidates.map((c) => `:(icase,literal)${c}`);
+    const out = await git.raw(["ls-files", "-z", "--", ...pathspecs]);
     const tracked = new Set<string>();
     for (const rel of out.split("\0")) {
       if (!rel) continue;
-      tracked.add(rel.split(/[\\/]/)[0] ?? rel);
+      tracked.add((rel.split(/[\\/]/)[0] ?? rel).toLowerCase());
     }
     return tracked;
   } catch {
-    return new Set(candidates);
+    return new Set(candidates.map((c) => c.toLowerCase()));
   }
 }
 
@@ -131,7 +213,9 @@ export async function safeToExcludeNames(commitPath: string, git: SimpleGit): Pr
   const candidates = gitignoredTopLevelNames(commitPath);
   if (candidates.length === 0) return [];
   const tracked = await gitTrackedTopLevelNames(git, candidates);
-  return candidates.filter((n) => !tracked.has(n));
+  // .toLowerCase() here pairs with gitTrackedTopLevelNames' own lowercasing — see that function's doc
+  // (card 687d2a47 finding 3) for why the comparison must be case-insensitive.
+  return candidates.filter((n) => !tracked.has(n.toLowerCase()));
 }
 
 /**
@@ -513,7 +597,11 @@ export class VaultVersioner {
       // its fix was "never rethrow, swallow and continue"; ignorePermissionErrors:true goes one step
       // earlier and stops chokidar from even EMITTING "error" for the common EPERM/EACCES transient-race
       // class in the first place (e.g. a short-lived temp dir vanishing mid-stat), rather than relying
-      // solely on the "error" listener below to catch it after the fact.
+      // solely on the "error" listener below to catch it after the fact. Also makes chokidar's own
+      // _hasReadPermissions() return true unconditionally (chokidar 4.0.3 index.js:674-676), so the
+      // watcher now ATTEMPTS entries it previously skipped on permission grounds — a small INCREASE in
+      // watched-entry count, the opposite direction from this file's exclusion logic; verified this can
+      // only ever push the count UP, never down, so it cannot mask the zero-entries tripwire below.
       ignorePermissionErrors: true,
     });
     // Resolves ONLY on "ready" — deliberately does NOT reject on "error". Matching liveness.ts's
@@ -570,10 +658,17 @@ export class VaultVersioner {
    *
    * Also warns (the DISCRIMINATING form, not a naive one) when the watcher tracks exactly ZERO entries —
    * the signature of the Critical-2 dead-watcher class (now structurally prevented, see
-   * {@link buildIgnoredMatcher}, but this is a cheap tripwire for any FUTURE cause of the same failure
-   * shape). A naive "count===0 ⇒ warn" false-positives on a legitimately brand-new, empty vault (no notes
-   * yet) — so this only warns when the count is zero AND `commitPath` actually has top-level content the
-   * matcher does NOT exclude (i.e. content that SHOULD have produced at least one watched entry).
+   * {@link buildIgnoredMatcher}). **This is NOT a tripwire for "any future cause of the same failure
+   * shape" (card 687d2a47 finding 4) — it only catches a scan that dies while the MATCHER STILL ADMITS
+   * top-level content.** It has a real, named blind spot: an OVER-BROAD matcher (one that itself excludes
+   * every top-level name) defeats it completely, because {@link hasUnexcludedTopLevelEntry} below reuses
+   * that SAME matcher to decide whether to warn — chokidar reporting zero entries AND the discriminator
+   * agreeing "nothing unexcluded exists" produces total, silent agreement, not a warning. An over-broad
+   * matcher is exactly this card family's own primary failure class, so don't read this tripwire as a
+   * backstop against it. A naive "count===0 ⇒ warn" false-positives on a legitimately brand-new, empty
+   * vault (no notes yet) — so this only warns when the count is zero AND `commitPath` actually has
+   * top-level content the matcher does NOT exclude (i.e. content that SHOULD have produced at least one
+   * watched entry).
    *
    * Best-effort: swallows any error from `getWatched()`/`watchedEntryCount`/the zero-entry directory read
    * rather than risking the ready handler itself.
