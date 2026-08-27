@@ -490,7 +490,11 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
 // incident: two concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while
 // its op still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own
 // belief — see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never
-// merged.
+// merged. Card cffa71e6 (docs-only): the description below now spells out that `since`/`elapsedMs` change
+// MEANING (not just clock) across the queued->running transition, that a queued row's `since` is NOT
+// `gate_status`'s `admittedAt`, and cross-references the three duration tiers (run-summary / gate_history /
+// gate_status) so a caller doesn't difference a command-span field against itself expecting a queue-wait
+// figure — the exact mistake that card's own investigation made and had to retract.
 function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, sessionId: string): void {
   server.registerTool(
     "gate_queue",
@@ -531,7 +535,17 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "queuePosition, repoContended} — " +
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
         "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
-        "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
+        "SAME entry RE-BASES to admission time and they measure time RUNNING instead. " +
+        "⚠️ Card cffa71e6: a QUEUED entry's `since` is only APPROXIMATELY queue-entry time — do not read it " +
+        "as, and never substitute it for, `gate_status`'s `admittedAt` (that field is MINT time, stamped " +
+        "when the op's durable record is first created, and measured running a couple of SECONDS ahead of " +
+        "this entry's `since` — whatever setup work, e.g. worktree prep, happens between minting the op and " +
+        "actually enqueueing it into this semaphore). Once the SAME entry flips to `running`, its `since` " +
+        "re-bases again, to the real command-start instant (genuine semaphore admission) — measured MINUTES " +
+        "after the queued-side `since` on a contended op. So one op's life can show THREE distinct, " +
+        "non-interchangeable timestamps: `gate_status.admittedAt` (mint) → this tool's queued-row `since` " +
+        "(queue entry) → this tool's running-row `since` (command start). " +
+        "Don't read a `queued` " +
         "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
         "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
         "hardest on the op that's MOST expensive to wrongly cancel. ⚠️ AND EVEN A `running` ENTRY'S LARGE " +
@@ -587,7 +601,26 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "same as `running`/`queued`'s own redaction; `repoPath` is an absolute host filesystem path, never " +
         "disclosed cross-project). Explains a queued `merge`-kind entry above reporting " +
         "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
-        "contending holder is here, not there. Cancel a QUEUED one via `gate_cancel(opId)` - see that tool's own doc for the fallback " +
+        "contending holder is here, not there. " +
+        "⛔ WHAT THIS TOOL STOPS BEING ABLE TO TELL YOU THE MOMENT A ROW LEAVES `queued` (card cffa71e6): " +
+        "once an entry is admitted (or has already settled and dropped out of this snapshot entirely), " +
+        "NOTHING here recovers how long it actually waited — queue wait is only ever legible from the " +
+        "queued side, and only approximately (see the `since` caveat above). For a settled op's real span, " +
+        "read `gate_status(opId)` instead: its `admittedAt`/`settledAt`/`totalDurationMs` triple covers the " +
+        "WHOLE op (worktree prep + queue wait + gate command + squash) — see that tool's own description " +
+        "for exactly what `totalDurationMs` does and doesn't include. `gate_history` (the separate, durable " +
+        "audit series) carries NEITHER `admittedAt` NOR `settledAt` — only `durationMs`, the gate COMMAND " +
+        "span alone — so it cannot answer a queue-wait question either; it's for a cross-op duration TREND, " +
+        "not one op's wait time. Picking a duration source deliberately means picking among THREE tiers, " +
+        "not one: `run-summary` (test execution only) → `gate_history.durationMs` (the full gate command: " +
+        "build + guards + tests) → `gate_status.totalDurationMs` (the whole op: command PLUS queue wait " +
+        "PLUS worktree/squash overhead). A duration SERIES (e.g. \"is the gate getting slower\") wants the " +
+        "COMMAND tier — `totalDurationMs` will show a spike from a busy fleet, not from the code under " +
+        "test. ⚠️ Agreement between two tiers on any GIVEN op is NOT evidence you picked the right one: a " +
+        "never-queued op's envelope is small enough that its whole-op and command tiers nearly coincide, so " +
+        "a wrong-tier reading can pass undetected on exactly that op (n=1, a named gap from this same " +
+        "card's own investigation — not promoted to a general rule). " +
+        "Cancel a QUEUED one via `gate_cancel(opId)` - see that tool's own doc for the fallback " +
         "resolution it uses.",
       inputSchema: strictShape({}),
     },
