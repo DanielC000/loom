@@ -669,6 +669,59 @@ try {
     }
     check("the zero-entries dead-watcher warning DOES fire when count===0 and real content exists (positive control)", warnings.some((w) => w.includes("[vault-versioner]") && w.includes("ZERO entries")));
   }
+
+  // BOUNDED GIT (card 509716cc): every SimpleGit call in this module must be bounded — a hung child must
+  // not hang the caller forever. Two of the three sites named on the card, each proven against a git
+  // stand-in whose call NEVER resolves (simulating a wedged child on a busy/locked disk).
+  {
+    // Site 3 (safeToExcludeNames → gitTrackedTopLevelNames's `git ls-files`): a real .gitignore candidate
+    // so the ls-files call actually happens (an empty-candidates vault would short-circuit before ever
+    // touching git, proving nothing about the timeout).
+    const vaultTO = path.join(root, "vaultTimeout");
+    initVault(vaultTO);
+    fs.writeFileSync(path.join(vaultTO, ".gitignore"), "scratch/\n");
+    fs.mkdirSync(path.join(vaultTO, "scratch"));
+    fs.writeFileSync(path.join(vaultTO, "scratch", "ignored.txt"), "untracked\n");
+    check("timeout fixture actually produces a real gitignore candidate to bound against", gitignoredTopLevelNames(vaultTO).includes("scratch"));
+
+    const neverGit = { raw: () => new Promise(() => {}) }; // never resolves — simulates a wedged `git ls-files`
+    const tinyMs = 200;
+    const t0 = performance.now(); // MONOTONIC
+    const timedOut = await safeToExcludeNames(vaultTO, neverGit, tinyMs);
+    const elapsed = performance.now() - t0;
+    check("safeToExcludeNames RETURNS despite a never-resolving `git ls-files` (bounded, not an infinite hang)", Array.isArray(timedOut));
+    check(`safeToExcludeNames bounded by timeoutMs — returned in ${Math.round(elapsed)}ms (cap ${tinyMs}ms)`, elapsed < tinyMs * 5 + 1500);
+    check("a timed-out ls-files fails SAFE — treats the candidate as TRACKED, excludes NOTHING (same direction as any other git error)", timedOut.length === 0);
+
+    // Negative control: the SAME candidate against REAL (non-hanging) git resolves normally and IS
+    // offered — proves the fail-safe result above is the timeout firing, not safeToExcludeNames just
+    // always returning [] regardless of what git says.
+    const normal = await safeToExcludeNames(vaultTO, simpleGit(vaultTO), tinyMs);
+    check("negative control: the same candidate against REAL (non-hanging) git IS offered for exclusion", normal.includes("scratch"));
+
+    // Site 1 + 2 (resolveVaultRepoContext's checkIsRepo/revparse, start()'s checkIsRepo/init): drive
+    // through the public VaultVersioner surface with an injected gitFactory whose checkIsRepo never
+    // resolves — proves the boot-awaited start() path returns instead of hanging forever.
+    const vaultTO2 = path.join(root, "vaultTimeout2");
+    fs.mkdirSync(vaultTO2, { recursive: true }); // deliberately NOT git-inited
+    let checkIsRepoCalls = 0;
+    const hangingFactory = () => {
+      checkIsRepoCalls++;
+      return {
+        checkIsRepo: () => new Promise(() => {}), // never resolves — simulates a wedged checkIsRepo/rev-parse
+        revparse: async () => "",
+        init: async () => {},
+        raw: async () => "",
+      };
+    };
+    const vto = new VaultVersioner(vaultTO2, 150, undefined, { gitFactory: hangingFactory, timeoutMs: tinyMs });
+    const t1 = performance.now(); // MONOTONIC
+    await vto.start();
+    const elapsed2 = performance.now() - t1;
+    check("checkIsRepo was actually invoked via the injected factory (not skipped)", checkIsRepoCalls >= 2); // resolveVaultRepoContext + start() each build their own bounded git
+    check(`VaultVersioner.start() RETURNS despite a never-resolving checkIsRepo (bounded boot path) — took ${Math.round(elapsed2)}ms (cap ~${tinyMs * 2}ms across the two bounded call sites)`, elapsed2 < tinyMs * 8 + 2000);
+    await vto.stop();
+  }
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }
   // root's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup

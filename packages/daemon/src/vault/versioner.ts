@@ -35,6 +35,59 @@ function escapeRegExp(s: string): string {
 }
 
 /**
+ * Per-git-op ceiling for the three bounded call sites in this module (card 509716cc):
+ * `resolveVaultRepoContext`'s checkIsRepo/revparse, `VaultVersioner.start()`'s checkIsRepo/init, and
+ * `gitTrackedTopLevelNames`'s ls-files — all reachable from `startVaultVersioners`, which is AWAITED at
+ * boot (index.ts, ahead of `sessions.resumeFleetOnBoot`). A hang on any of these previously blocked the
+ * whole daemon's post-restart fleet resume, invisibly (HTTP stays up — `app.listen` runs earlier). Same
+ * value + same convention as `GIT_OP_TIMEOUT_MS` (git/worktrees.ts) and `GIT_LOCAL_TIMEOUT_MS`
+ * (git/writer.ts) — a local plumbing op is normally sub-second, this is generous headroom, but bounded
+ * so a wedged child (a repo on a busy/locked disk) can't hang the caller forever.
+ *
+ * Not imported FROM those modules: neither exports its bounding helpers, and git/writer.ts already
+ * imports FROM this module (`recordGitPushOutcome`, `pauseVaultAutoCommit`, …) — importing back would be
+ * circular. git/writer.ts itself already carries its own independent copy of the identical
+ * block-timeout + race pattern rather than importing git/worktrees.ts's, so this module doing the same
+ * is the established convention, not a new mechanism.
+ */
+const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
+
+/** Reject `p` after `ms` if it hasn't settled — same belt-and-suspenders race as git/worktrees.ts's and
+ *  git/writer.ts's own `withTimeout`: the simpleGit `block` timeout (set on the instance below) also
+ *  kills the hung child in production, but this guarantees the FUNCTION returns within the window
+ *  regardless. Timer cleared on the winning path. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+/**
+ * Injectable seam mirroring git/worktrees.ts's `BoundedGitDeps` — lets a test simulate a hanging git
+ * child with a tiny budget and assert a call returns within the window instead of hanging forever.
+ * `gitFactory` defaults to a simpleGit whose `block` timeout kills a no-output (hung) child; `timeoutMs`
+ * bounds both that block timeout and the {@link withTimeout} race. Real callers never pass this.
+ */
+export interface VaultGitDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">;
+  timeoutMs?: number;
+}
+
+/** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's defaults. */
+function boundedVaultGit(
+  repoPath: string,
+  deps: VaultGitDeps,
+): { git: Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
+
+/**
  * Card 39ceb732 (chokidar opens one OS handle per watched entry, no cap): CANDIDATE top-level entries a
  * repo's own root `.gitignore` lists — a bare, non-root-anchored name or `name/`, no wildcards, no
  * negation, no nested path (e.g. `_external/`). **These are CANDIDATES ONLY, not yet safe to exclude from
@@ -143,6 +196,9 @@ export function gitignoredTopLevelNames(repoRoot: string): string[] {
  *
  * Fails SAFE: any git error (a corrupt repo, git not on PATH, whatever) treats every candidate as tracked
  * — i.e. excludes NOTHING — rather than risk silently dropping history for a name we couldn't verify.
+ * A call that exceeds `timeoutMs` (card 509716cc — this ls-files call previously had no bound at all)
+ * lands in the exact same catch, the exact same way: a hung git child fails safe identically to any
+ * other git error.
  *
  * **Each candidate is queried via `:(icase,literal)<name>` pathspec magic (card 687d2a47, findings 1 + 3).
  * `icase` is what actually closes BOTH findings; `literal` is additional, currently-unreachable
@@ -184,11 +240,15 @@ export function gitignoredTopLevelNames(repoRoot: string): string[] {
  * is not a legal filename character on Windows) simply isn't added to `tracked` — same under-generating
  * direction as every other branch here.
  */
-async function gitTrackedTopLevelNames(git: SimpleGit, candidates: string[]): Promise<Set<string>> {
+async function gitTrackedTopLevelNames(
+  git: Pick<SimpleGit, "raw">,
+  candidates: string[],
+  timeoutMs: number = VAULT_GIT_OP_TIMEOUT_MS,
+): Promise<Set<string>> {
   if (candidates.length === 0) return new Set();
   try {
     const pathspecs = candidates.map((c) => `:(icase,literal)${c}`);
-    const out = await git.raw(["ls-files", "-z", "--", ...pathspecs]);
+    const out = await withTimeout(git.raw(["ls-files", "-z", "--", ...pathspecs]), timeoutMs, "git ls-files (vault safeToExcludeNames)");
     const tracked = new Set<string>();
     for (const rel of out.split("\0")) {
       if (!rel) continue;
@@ -208,11 +268,19 @@ async function gitTrackedTopLevelNames(git: SimpleGit, candidates: string[]): Pr
  * `start()` — like `commitPath`/`externallyManaged` elsewhere in this class, this does not react to a
  * LATER `.gitignore` edit or a file being un-tracked without a versioner restart (a daemon restart or vault
  * re-provision); accepted, consistent with the rest of this class's resolve-once-at-start design.
+ *
+ * `timeoutMs` (card 509716cc) bounds the underlying `git ls-files` call — see
+ * {@link gitTrackedTopLevelNames}'s doc for the fail-safe behavior on timeout. Defaults to
+ * {@link VAULT_GIT_OP_TIMEOUT_MS}; real callers never override it.
  */
-export async function safeToExcludeNames(commitPath: string, git: SimpleGit): Promise<string[]> {
+export async function safeToExcludeNames(
+  commitPath: string,
+  git: Pick<SimpleGit, "raw">,
+  timeoutMs: number = VAULT_GIT_OP_TIMEOUT_MS,
+): Promise<string[]> {
   const candidates = gitignoredTopLevelNames(commitPath);
   if (candidates.length === 0) return [];
-  const tracked = await gitTrackedTopLevelNames(git, candidates);
+  const tracked = await gitTrackedTopLevelNames(git, candidates, timeoutMs);
   // .toLowerCase() here pairs with gitTrackedTopLevelNames' own lowercasing — see that function's doc
   // (card 687d2a47 finding 3) for why the comparison must be case-insensitive.
   return candidates.filter((n) => !tracked.has(n.toLowerCase()));
@@ -405,14 +473,20 @@ export async function commitVault(
  * iff the Obsidian Git plugin — the thing that creates the external committer — is installed for that
  * vault) and is one cheap `fs.existsSync`; preferred over a commit-message heuristic, which is fragile
  * (depends on the user's message template, reads empty on a fresh repo, false +/-).
+ *
+ * **Bounded (card 509716cc)** — this is reached from `startVaultVersioners`, AWAITED at boot ahead of
+ * `sessions.resumeFleetOnBoot`. A timeout on either op lands in the SAME `.catch(() => false/"")` the
+ * pre-existing git-error path already used, so a hung repo degrades exactly like a non-repo/no-toplevel
+ * one does today — "no governing repo, commit at the vault folder itself" — never a hang.
  */
 async function resolveVaultRepoContext(
   vaultPath: string,
+  deps: VaultGitDeps = {},
 ): Promise<{ commitPath: string; externallyManaged: boolean }> {
-  const git = simpleGit(vaultPath);
-  const isRepo = await git.checkIsRepo().catch(() => false);
+  const { git, timeoutMs } = boundedVaultGit(vaultPath, deps);
+  const isRepo = await withTimeout(git.checkIsRepo(), timeoutMs, "git check-is-repo (vault resolve)").catch(() => false);
   if (!isRepo) return { commitPath: vaultPath, externallyManaged: false }; // no repo → we git-init it
-  const root = (await git.revparse(["--show-toplevel"]).catch(() => "")).trim();
+  const root = (await withTimeout(git.revparse(["--show-toplevel"]), timeoutMs, "git rev-parse --show-toplevel (vault resolve)").catch(() => "")).trim();
   if (!root) return { commitPath: vaultPath, externallyManaged: false };
   const commitPath = path.resolve(root);
   // Obsidian-Git-managed → a real external auto-committer owns history; back off (no double-commit).
@@ -548,7 +622,7 @@ function isVaultAutoCommitPaused(commitPath: string): boolean {
 const LARGE_VAULT_WATCH_WARN_THRESHOLD = 20_000;
 
 export class VaultVersioner {
-  private git: SimpleGit;
+  private git: Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">;
   private watcher?: FSWatcher;
   private timer?: NodeJS.Timeout;
   private externallyManaged = false;
@@ -567,9 +641,12 @@ export class VaultVersioner {
      *  (same override-for-testability shape as `commitVault`'s `opts.maxFileBytes`; a real threshold this
      *  large would need a slow, wasteful real fixture to exercise the warning path at all). */
     private watchWarnThreshold = LARGE_VAULT_WATCH_WARN_THRESHOLD,
+    /** Test-only bounded-git injection seam (card 509716cc) — real callers never pass this; see
+     *  {@link VaultGitDeps}. */
+    private gitDeps: VaultGitDeps = {},
   ) {
     this.commitPath = vaultPath;
-    this.git = simpleGit(vaultPath);
+    this.git = boundedVaultGit(vaultPath, gitDeps).git;
   }
 
   /** The resolved governing repo root this instance watches + commits (valid after `start()`). */
@@ -578,17 +655,22 @@ export class VaultVersioner {
   }
 
   async start(): Promise<void> {
-    const ctx = await resolveVaultRepoContext(this.vaultPath);
+    const ctx = await resolveVaultRepoContext(this.vaultPath, this.gitDeps);
     this.commitPath = ctx.commitPath;
     this.externallyManaged = ctx.externallyManaged;
-    this.git = simpleGit(this.commitPath);
+    const { git, timeoutMs } = boundedVaultGit(this.commitPath, this.gitDeps);
+    this.git = git;
     if (!this.externallyManaged) {
       // git-init a bare vault folder that has no repo (resolveVaultRepoContext leaves commitPath as the
       // vault folder in that case). A real repo (own root / plain-repo root) already exists — no-op.
-      const isRepo = await this.git.checkIsRepo().catch(() => false);
-      if (!isRepo) await this.git.init();
+      // Bounded (card 509716cc): this is the boot-awaited path (startVaultVersioners → index.ts, ahead
+      // of sessions.resumeFleetOnBoot) — a hung checkIsRepo degrades to "not a repo" (same as the
+      // pre-existing .catch(() => false)) rather than wedging the whole daemon's post-restart fleet
+      // resume.
+      const isRepo = await withTimeout(this.git.checkIsRepo(), timeoutMs, "git check-is-repo (vault start)").catch(() => false);
+      if (!isRepo) await withTimeout(this.git.init(), timeoutMs, "git init (vault start)");
     }
-    const safeNames = await safeToExcludeNames(this.commitPath, this.git);
+    const safeNames = await safeToExcludeNames(this.commitPath, this.git, timeoutMs);
     this.matcher = buildIgnoredMatcher(this.commitPath, safeNames);
     this.watcher = chokidar.watch(this.commitPath, {
       ignoreInitial: true,
@@ -837,20 +919,25 @@ export interface VaultPushStatus {
  * shape already used (and unit-tested) for worktree branches in `git/worktrees.ts`
  * (`mayRecutOntoMain` / the ahead-checks around lines 434-437, 911-918) — never a fetch, never a write,
  * never a push.
+ *
+ * **Bounded (card 509716cc)** — `index.ts` UNCONDITIONALLY awaits this (via `logVaultPushStatus`) at
+ * boot, 27 lines before `sessions.resumeFleetOnBoot`, wrapped only in a `try/catch` that catches a THROW
+ * — never a HANG. A timeout lands in the SAME catch every other git error here already does, returning
+ * `null` ("status unknown"), exactly like today's no-upstream/malformed-count paths.
  */
-export async function checkVaultPushStatus(commitPath: string): Promise<VaultPushStatus | null> {
+export async function checkVaultPushStatus(commitPath: string, deps: VaultGitDeps = {}): Promise<VaultPushStatus | null> {
   try {
     // simpleGit() itself throws synchronously for a non-existent baseDir — construct it INSIDE the try
     // so a stale/bogus commitPath degrades to "nothing to report", same as any other git error here.
-    const git = simpleGit(commitPath);
-    const upstream = (await git.raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])).trim();
+    const { git, timeoutMs } = boundedVaultGit(commitPath, deps);
+    const upstream = (await withTimeout(git.raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), timeoutMs, "git rev-parse @{u} (vault push status)")).trim();
     if (!upstream) return null;
-    const ahead = parseInt((await git.raw(["rev-list", "--count", `${upstream}..HEAD`])).trim(), 10);
+    const ahead = parseInt((await withTimeout(git.raw(["rev-list", "--count", `${upstream}..HEAD`]), timeoutMs, "git rev-list --count (vault push status)")).trim(), 10);
     if (!Number.isFinite(ahead)) return null; // malformed count — fail safe to "nothing to report"
     const lastFailure = getGitPushFailure(commitPath);
     return lastFailure ? { commitPath, upstream, ahead, lastFailure } : { commitPath, upstream, ahead };
   } catch {
-    return null; // no upstream configured (fatal: no upstream for branch) — or any other git error
+    return null; // no upstream configured (fatal: no upstream for branch), a timeout, or any other git error
   }
 }
 

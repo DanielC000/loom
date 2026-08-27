@@ -129,6 +129,26 @@ git(noUpstream, "commit", "-m", "solo");
   check("a subsequent successful push clears the failure", okPush.ok === true);
   const statusAfterSuccess = await checkVaultPushStatus(pushRecordRoot);
   check("checkVaultPushStatus no longer reports a failure after the successful push", statusAfterSuccess !== null && statusAfterSuccess.ahead === 0 && statusAfterSuccess.lastFailure === undefined);
+
+  // 8. BOUNDED GIT (card 509716cc addition): checkVaultPushStatus sits on the boot-awaited path
+  // (index.ts unconditionally awaits it, via logVaultPushStatus, ~27 lines before
+  // sessions.resumeFleetOnBoot) inside a try/catch that only ever catches a THROW — never a HANG. A
+  // never-resolving git call here previously had no bound at all and could block boot forever.
+  {
+    const neverGit = { raw: () => new Promise(() => {}) }; // never resolves — simulates a wedged git child
+    const tinyMs = 200;
+    const t0 = performance.now(); // MONOTONIC
+    const timedOut = await checkVaultPushStatus(withUpstream, { gitFactory: () => neverGit, timeoutMs: tinyMs });
+    const elapsed = performance.now() - t0;
+    check("checkVaultPushStatus RETURNS despite a never-resolving git op (bounded, not an infinite hang)", timedOut === null);
+    check(`checkVaultPushStatus bounded by timeoutMs — returned in ${Math.round(elapsed)}ms (cap ${tinyMs}ms)`, elapsed < tinyMs * 5 + 1500);
+
+    // Negative control: the SAME repo against REAL (non-hanging) git still resolves normally — proves
+    // the null above is the timeout firing, not checkVaultPushStatus just always returning null
+    // regardless of what git says.
+    const normal = await checkVaultPushStatus(withUpstream);
+    check("negative control: the same repo against REAL (non-hanging) git resolves normally (not null)", normal !== null && normal.upstream === "origin/main");
+  }
 }
 // root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).
