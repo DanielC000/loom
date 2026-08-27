@@ -219,13 +219,52 @@ try {
       pending: { [wkr]: snap } }; // ONLY the plain nudge — the durable msg is intentionally absent
     sessionsPost.resumeFleetOnBoot(intent, { resumeOne: () => true });
     await flushB(); // let every deferred manager/worker nudge settle
+    // Card 06ebbb78 CR follow-up: THE NEW FACET, asserted BEFORE the boot scan even runs, via the DB row
+    // itself — a `session_message_queued` row is EXACTLY what "durable" means in this codebase, so its
+    // presence (not a FIFO-content `.some()`, which the deleted plain `enqueueNudge` would ALSO have
+    // satisfied) is what a durable dispatch — and ONLY a durable dispatch — can produce. EXACT counts, not
+    // `.some()`: this positive-controls itself — under the pre-06ebbb78 code (enqueueNudge, no DB write at
+    // all) both `wkrOwnNudgeRows`/`mgrOwnNudgeRows` below would be 0, and this check would fail.
+    const preScanUndelivered = db.listUndeliveredQueuedMessages();
+    const wkrOwnNudgeRows = preScanUndelivered.filter((e) => e.workerSessionId === wkr && e.detail?.text?.includes("[loom:daemon-restarted]")).length;
+    const mgrOwnNudgeRows = preScanUndelivered.filter((e) => e.workerSessionId === mgr && e.detail?.text?.includes("[loom:daemon-restarted]")).length;
+    check("(B-b) THE NEW FACET: the worker's OWN daemon-restarted continuation nudge is a genuine durable DB record — EXACTLY 1, present before the boot scan even runs", wkrOwnNudgeRows === 1);
+    check("(B-b) THE NEW FACET: the manager's OWN daemon-restarted summary nudge is a genuine durable DB record — EXACTLY 1, present before the boot scan even runs", mgrOwnNudgeRows === 1);
+    check("(B-b) THE NEW FACET: exactly 3 undelivered durable records total pre-scan (1 pre-existing RESTART DISPATCH + the worker's + the manager's own new nudges)", preScanUndelivered.length === 3);
+
     const m = sessionsPost.recoverUndeliveredMessagesOnBoot();
-    check("(B-b) boot scan re-enqueued the undelivered durable message", m.reEnqueued === 1);
+    // Card 06ebbb78: resumeFleetOnBoot's OWN continuation nudges now route through the SAME durable
+    // enqueueDurableNudge helper (converging the gap this card was filed to close) — so, on TOP of the
+    // pre-existing "RESTART DISPATCH" record, mgr/wkr are both still busy (not-ready) when their own
+    // fresh "[loom:daemon-restarted]" nudges are dispatched, and EACH of those is now ALSO a genuine,
+    // separate held session_message_queued record this boot scan picks up: 1 (RESTART DISPATCH, pre-
+    // existing) + 1 (wkr's own daemon-restarted continue-nudge) + 1 (mgr's own daemon-restarted summary
+    // nudge) = 3. This is NOT a duplicate of the same message — three DISTINCT msgIds, asserted below —
+    // it's the direct, intended consequence of the convergence: before card 06ebbb78 this would have been
+    // 1 (the other two nudges dispatched via the old non-durable enqueueNudge, invisible to this scan).
+    // DEPENDS ON THE TEST-ONLY `await flushB()` above (line ~221): it's what lets the mgr/worker roles'
+    // DEFERRED `enqueueDurableNudge` dispatch (they mount loom-orchestration, so it waits on
+    // PtyStub.waitForMcpSeen — resolved instantly here) actually WRITE its DB record before this line
+    // reads it. Production has NO such await between resumeFleetOnBoot (index.ts ~:1278) and
+    // recoverUndeliveredMessagesOnBoot (~:1311) — see that call site's own comment: for these two DEFERRED
+    // roles the real `waitForMcpSeen` genuinely waits on a real async MCP handshake, so in production the
+    // scan normally completes and returns LONG before either deferred dispatch even runs — this exact `3`
+    // is a test-harness artifact of resolving the wait instantly, not something to expect in a real boot
+    // trace. If a future edit moves or removes `flushB`, RE-DERIVE this count from the new timing rather
+    // than relaxing the assertion to whatever the harness happens to produce.
+    check("(B-b) boot scan re-enqueued the pre-existing dispatch PLUS resumeFleetOnBoot's own two now-durable nudges (card 06ebbb78)", m.reEnqueued === 3);
 
     const wkrPending = ptyPost.getPending(wkr);
     const dispatchCount = wkrPending.filter((t) => t.includes("RESTART DISPATCH")).length;
-    check("(B-b) recipient got the dispatch EXACTLY ONCE (no double from intent.pending + boot scan)", dispatchCount === 1);
+    check("(B-b) recipient got the ORIGINAL dispatch EXACTLY ONCE (no double from intent.pending + boot scan)", dispatchCount === 1);
     check("(B-b) the plain nudge was replayed by intent.pending (independent path intact)", wkrPending.filter((t) => t === "plain nudge").length === 1);
+    // Sanity only (the durability proof itself is the pre-scan DB row check above): the worker's + manager's
+    // own new durable nudges do also land in the FIFO once redriven.
+    check("(B-b) sanity: the worker's own daemon-restarted continuation nudge did reach its FIFO",
+      wkrPending.some((t) => t.includes("[loom:daemon-restarted]") && /continue your assigned task/i.test(t)));
+    const mgrPending = ptyPost.getPending(mgr);
+    check("(B-b) sanity: the manager's own daemon-restarted summary nudge did reach its FIFO",
+      mgrPending.some((t) => t.includes("[loom:daemon-restarted]")));
 
     // Drain the worker's FIFO to its turn boundary → the re-enqueued dispatch resolves its ORIGINAL record.
     let guard = 0; let drained;
@@ -404,6 +443,96 @@ try {
     const gaveUpEvt = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === legacyMsgId);
     check("(B-h) DEFAULT rootMsgId → self-rooted at the legacy record's OWN msgId (never recoverable, so it starts a fresh chain here)", gaveUpEvt?.detail?.rootMsgId === legacyMsgId);
     check("(B-h) DEFAULT chainDepth → 0 (a legacy redrive is treated as a fresh dispatch)", gaveUpEvt?.detail?.chainDepth === 0);
+  }
+
+  // ============================== PART C — card 06ebbb78 CR follow-up ==============================
+  // A REPRODUCED, real defect (not a hypothetical): resumeFleetOnBoot / recoverCrashOrphanedWorkers run
+  // BEFORE recoverUndeliveredMessagesOnBoot in the SAME boot (index.ts), with NO `await` between them. For
+  // a role that does NOT mount loom-orchestration (platform/auditor/workspace-auditor/setup/plain/run —
+  // `usesOrchestrationMcp` false), enqueueDurableNudge dispatches SYNCHRONOUSLY. A freshly (re)spawned real
+  // pty is NEVER `ready` this early (pty/host.ts's `live.ready` gate — SessionStart hasn't fired), so that
+  // synchronous dispatch is ALWAYS held and ALWAYS persists a fresh session_message_queued record — and
+  // WITHOUT the `mintedBefore` cutoff, the very next call (recoverUndeliveredMessagesOnBoot) would find
+  // that just-minted record (no in-flight marker — it was never itself a redrive) and re-enqueue it AGAIN,
+  // landing the SAME nudge twice in one coalesced turn. PtyStub (used everywhere above) does not model the
+  // real `ready` gate at all, so it cannot reproduce this — this section uses the REAL PtyHost, exactly
+  // like PART A above.
+  //
+  // This uses `resumeFleetOnBoot`'s own PLATFORM-role requester nudge (card 39fcaad3, `:5012`-ish in
+  // sessions/service.ts) as the concrete instance — the exact site named in Code Review — but the fix
+  // itself (recoverUndeliveredMessagesOnBoot's `mintedBefore` cutoff) is a CLASS fix at the shared boot
+  // scan, so this also protects every other immediate-dispatch site (the manager/platform no-op-with-note
+  // branch, the affected-platform branch, the fleet-resume-failure Lead notice, etc.) the same way.
+  {
+    const mkLeadFixture = async (label) => {
+      const fakes = [];
+      class TestPtyHost extends createSeamHost(PtyHost) {
+        createPty(opts) {
+          const base = super.createPty(opts);
+          const writes = [];
+          const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+          fakes.push(fake);
+          return fake;
+        }
+      }
+      const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+      const host = new TestPtyHost(events);
+      const sessions = new SessionService(db, host, new OrchestrationControl());
+      const lead = `qmd-c-${label}-lead-${sfx}`;
+      mkSession({ id: lead, role: "platform" });
+      host.spawn({ sessionId: lead, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
+      return { host, sessions, lead, writtenText: () => fakes[0].writes.join("") };
+    };
+    const countOfIn = (text, needle) => text.split(needle).length - 1;
+
+    // ---- (C-fixed) WITH the mintedBefore cutoff wired (exactly as index.ts wires it) → single delivery ----
+    {
+      const { host, sessions, lead, writtenText } = await mkLeadFixture("fixed");
+      const bootStartedAt = new Date();
+      const intent = { reason: "deploy merged code", managerSessionId: lead, requestedAt: now, resume: [{ sessionId: lead, role: "platform", parentSessionId: null }] };
+      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+      check("(C-fixed) setup: the requester's own nudge is a genuine held durable record right after resumeFleetOnBoot",
+        db.listUndeliveredQueuedMessages().some((e) => e.workerSessionId === lead && e.detail.text.includes("now LIVE")));
+      // Mirrors index.ts EXACTLY: no await between resumeFleetOnBoot and this call.
+      const m = sessions.recoverUndeliveredMessagesOnBoot(bootStartedAt);
+      check("(C-fixed) THE FIX: the boot scan SKIPPED the just-minted record (not reEnqueued, not retired)", m.reEnqueued === 0 && m.retired === 0);
+      host.deliverHook(lead, { hook_event_name: "SessionStart" }); // now ready → drains
+      const written = writtenText();
+      check("(C-fixed) THE FIX: the requester's nudge reaches the real pty EXACTLY ONCE", countOfIn(written, "[loom:daemon-restarted]") === 1);
+      check("(C-fixed) THE FIX: NO possible-duplicate frame was ever written (nothing to frame — only one dispatch happened)", countOfIn(written, "[loom:possible-duplicate") === 0);
+    }
+
+    // ---- (C-mechanism) THE SAME setup WITHOUT the cutoff → proves the check above is not vacuous: it can, ----
+    // ---- and does, fail when the fix is bypassed (the positive control the fix itself needed). ----
+    {
+      const { host, sessions, lead, writtenText } = await mkLeadFixture("mech");
+      const intent = { reason: "deploy merged code", managerSessionId: lead, requestedAt: now, resume: [{ sessionId: lead, role: "platform", parentSessionId: null }] };
+      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+      const m = sessions.recoverUndeliveredMessagesOnBoot(); // mintedBefore OMITTED — the pre-fix call shape
+      check("(C-mechanism) NEGATIVE CONTROL: without the cutoff, the boot scan DOES re-enqueue the just-minted record", m.reEnqueued === 1);
+      host.deliverHook(lead, { hook_event_name: "SessionStart" });
+      const written = writtenText();
+      check("(C-mechanism) NEGATIVE CONTROL: without the cutoff, the SAME nudge reaches the pty TWICE (the reproduced defect)", countOfIn(written, "[loom:daemon-restarted]") === 2);
+      check("(C-mechanism) NEGATIVE CONTROL: the second copy is framed as a possible duplicate (redriveQueuedMessage's own tagging)", countOfIn(written, "[loom:possible-duplicate") === 1);
+    }
+
+    // ---- (C-predates) a record that genuinely PREDATES this boot is NOT skipped — the cutoff is surgical ----
+    // Recipient left NOT-ready (no deliverHook yet, same shape as C-fixed) so the redrive HOLDS it — the
+    // established pattern every other test in this file uses for "still-undelivered, redrive resolves it".
+    {
+      const { host, sessions, lead, writtenText } = await mkLeadFixture("predates");
+      const staleTs = new Date(Date.now() - 60_000).toISOString(); // 1 minute before "now" — well before bootStartedAt below
+      db.appendEvent({
+        id: `qmd-c-predates-evt-${sfx}`, ts: staleTs, managerSessionId: "system", workerSessionId: lead, taskId: null,
+        kind: "session_message_queued", detail: { msgId: `qmd-c-predates-msg-${sfx}`, text: "PRE-BOOT LEFTOVER", sender: "system", kind: "warning" },
+      });
+      const bootStartedAt = new Date(); // strictly AFTER staleTs
+      const m = sessions.recoverUndeliveredMessagesOnBoot(bootStartedAt);
+      check("(C-predates) a record from BEFORE this boot is NOT skipped by the cutoff — still redriven normally", m.reEnqueued === 1);
+      host.deliverHook(lead, { hook_event_name: "SessionStart" }); // now ready → drains the held redrive
+      check("(C-predates) the pre-boot leftover reaches the pty", writtenText().includes("PRE-BOOT LEFTOVER"));
+      check("(C-predates) delivery resolves it (zero undelivered for it)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text === "PRE-BOOT LEFTOVER"));
+    }
   }
 
   db.close();

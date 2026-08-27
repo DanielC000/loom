@@ -81,8 +81,9 @@ export interface CrashRecoveryDeps {
    * this tick used to call directly for its worker/assistant/operator and manager/platform continuation
    * nudges (card 9f7c59f1) — see this file's own class doc for why that raw call was a real, narrower
    * instance of the exact gap `enqueueDurableNudge` exists to close: no `PtyHost.waitForMcpSeen` gate (a
-   * fresh MCP-client handshake can lose the race to an immediate `enqueueStdin`, same as `deferredNudge`'s
-   * own doc describes) and no durable give-up-exhaustion record. ABSENT (e.g. every existing hermetic test
+   * fresh MCP-client handshake can lose the race to an immediate `enqueueStdin`, same role-gated defer
+   * `enqueueDurableNudge` itself applies via `usesOrchestrationMcp`) and no durable give-up-exhaustion
+   * record. ABSENT (e.g. every existing hermetic test
    * double that doesn't pass it) falls back to the pre-9f7c59f1 raw `pty.enqueueStdin` dispatch, byte-
    * identical — additive, never a hard dependency a test double must opt into. The one-shot crash-loop
    * heads-up below (`session_recovery_abandoned`) is DELIBERATELY NOT routed through this — see its own
@@ -245,9 +246,11 @@ export function isCrashRecoveryEligible(
  *     treatment (re-state-your-blocker nudge / silence, respectively — see the worker branch's own comment).
  *   - **durability of the enqueue:** WAS a real, undeclared gap, CONVERGED by card 9f7c59f1 — this tick used
  *     to call `pty.enqueueStdin` directly for its continuation nudges, with NEITHER the MCP-seen gate NOR
- *     the durable give-up-exhaustion record its two siblings apply (via `enqueueNudge`/`enqueueDurableNudge`
- *     respectively). Now routed through the SAME `SessionService.enqueueDurableNudge` `recoverCrashOrphanedWorkers`
- *     uses, via the optional `CrashRecoveryDeps.enqueueDurableNudge` — see that field's own doc. The ONE
+ *     the durable give-up-exhaustion record its sibling `recoverCrashOrphanedWorkers` applied (via
+ *     `enqueueDurableNudge`). Now routed through the SAME `SessionService.enqueueDurableNudge`
+ *     `recoverCrashOrphanedWorkers` uses (and, since card 06ebbb78, `resumeFleetOnBoot` too — all THREE
+ *     resume-and-nudge paths now share this one durable dispatch), via the optional
+ *     `CrashRecoveryDeps.enqueueDurableNudge` — see that field's own doc. The ONE
  *     deliberate exception is the crash-loop escalation heads-up below (`session_recovery_abandoned`),
  *     which stays on raw `pty.enqueueStdin` ON PURPOSE — see its own comment.
  *   - **ordering:** N/A — this watcher has no cross-session ordering concept at all (it recovers one

@@ -1199,10 +1199,9 @@ async function main(): Promise<void> {
     resume: (id) => { sessions.resume(id); return true; },
     // Card 9f7c59f1: route this watcher's continuation nudges through the SAME MCP-seen-gated + durable
     // dispatch `recoverCrashOrphanedWorkers` already uses, instead of the raw pty.enqueueStdin it used to
-    // call directly — see CrashRecoveryDeps.enqueueDurableNudge's own doc. NOT the same as
-    // `resumeFleetOnBoot`: that path's own `enqueueNudge` is MCP-seen-gated too, but deliberately NOT YET
-    // durable-on-give-up-exhaustion — see service.ts's `resumeFleetOnBoot` doc (durability bullet) and
-    // card 06ebbb78 (the filed follow-up to converge it).
+    // call directly — see CrashRecoveryDeps.enqueueDurableNudge's own doc. `resumeFleetOnBoot` now routes
+    // through the SAME durable helper too (card 06ebbb78 converged that last gap) — see service.ts's
+    // `resumeFleetOnBoot` doc (durability bullet) for the ruling.
     enqueueDurableNudge: (id, role, text, taskId) => sessions.enqueueDurableNudge(id, role, text, taskId),
   });
   crashRecoveryWatcher.start();
@@ -1305,11 +1304,17 @@ async function main(): Promise<void> {
   // HELD in a busy recipient's FIFO and never delivered before this process died — a sender death (API 529)
   // or a daemon restart used to drop it silently (it lost a P1 cross-project dispatch twice). Runs on EVERY
   // boot, AFTER the fleet resume above (so resumed recipients are live to re-enqueue onto) and unconditional
-  // of a restart intent (covers crash / OS-service restart too). The single re-enqueue owner — the intent
-  // snapshot now excludes these (getPersistablePendingSnapshot), so no double on a normal restart. Best-effort:
-  // never gate boot.
+  // of a restart intent (covers crash / OS-service restart too). The re-enqueue owner for anything that
+  // PREDATES this boot — a plain restart's intent snapshot already excludes these (getPersistablePendingSnapshot),
+  // so no double there. Card 06ebbb78: `bootStartedAt` (captured as the first statement of `main()`, well
+  // before the fleet-resume call above) is passed as `mintedBefore` so this scan skips any durable record
+  // the fleet-resume call above JUST minted (its own now-durable continuation nudges, for a role that
+  // dispatches immediately rather than deferring) — such a record already has a live in-memory FIFO entry
+  // from that same dispatch, so re-driving it here would land the SAME nudge twice in one turn. See
+  // `recoverUndeliveredMessagesOnBoot`'s own doc for the full reasoning and the reproduced defect this
+  // closes. Best-effort: never gate boot.
   try {
-    const m = sessions.recoverUndeliveredMessagesOnBoot();
+    const m = sessions.recoverUndeliveredMessagesOnBoot(bootStartedAt);
     if (m.reEnqueued || m.retired || m.senderNudges) {
       console.log(`[boot] queued-message recovery: re-enqueued ${m.reEnqueued} undelivered message(s), retired ${m.retired} (recipient gone), surfaced ${m.senderNudges} to live sender(s)`);
     }

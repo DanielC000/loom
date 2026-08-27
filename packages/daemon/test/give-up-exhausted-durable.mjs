@@ -499,6 +499,11 @@ try {
   // ===== message with nothing but a console line (host.ts's "non-durable entry, nothing further to =====
   // ===== preserve" log) and ZERO session_message_gave_up event: a true silent loss, exactly the =====
   // ===== asymmetry the card found against this file's own population B (merge-orphaned's sibling). =====
+  // ===== HISTORICAL NOTE (card 06ebbb78): `enqueueNudge`/`deferredNudge` above name the two now-DELETED =====
+  // ===== private helpers `resumeFleetOnBoot` also used at the time this comment was written — they are =====
+  // ===== gone from the codebase (06ebbb78 converged resumeFleetOnBoot onto this SAME `enqueueDurableNudge` =====
+  // ===== too, leaving them with zero callers), so a grep for either name today finds nothing; this =====
+  // ===== paragraph describes the PRE-597903fc state, not a live code path. =====
   {
     const pty = new PtyStub();
     const sessions = new SessionService(db, pty, new OrchestrationControl());

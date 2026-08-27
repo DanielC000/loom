@@ -4352,30 +4352,6 @@ export class SessionService {
   }
 
   /**
-   * Card df5e37e7: shared by BOTH post-restart continuation-nudge paths (resumeFleetOnBoot's
-   * daemon_restart resume AND recoverCrashOrphanedWorkers' crash-recovery resume) — each injects a
-   * "continue where you left off" turn right after a resume, whose FIRST action is typically an
-   * immediate loom-orchestration tool call (worker_spawn/worker_report/…). `ready` (SessionStart,
-   * host.ts) only proves the TUI booted — it says nothing about whether the CLI's own async MCP-client
-   * handshake to loom-orchestration has finished, so submitting the nudge the moment the session becomes
-   * ready can race ahead of it and hard-fail with "MCP server 'loom-orchestration' is not connected"
-   * (observed after a fleet-wide daemon_restart, where many sessions' MCP handshakes contend at once).
-   * Delays only the STDIN DELIVERY of the nudge via PtyHost.waitForMcpSeen — bounded + NEVER-rejecting,
-   * so `.then()` firing unconditionally is always safe; the `.catch` here is belt-and-suspenders against
-   * enqueueStdin itself throwing (the M1/M2 invariant guards) rather than against the wait ever rejecting.
-   * A session that died mid-wait resolves the wait `false` (host.ts pty.onExit) and enqueueStdin then
-   * no-ops safely on the dead session (`!live?.alive` check) — no throw either way. Callers that already
-   * ran `resumeOne()`/`replayPending()` synchronously before calling this keep their ordering: those ran
-   * BEFORE this fires, so the pending-replay-before-nudge guarantee holds regardless of how long the wait
-   * takes. Never blocks its caller's own synchronous return.
-   */
-  private deferredNudge(id: string, text: string): void {
-    void this.pty.waitForMcpSeen(id).then(() => this.pty.enqueueStdin(id, text)).catch((e: unknown) => {
-      console.warn(`[resume] deferred nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
-    });
-  }
-
-  /**
    * Only manager/worker/assistant(Companion) sessions mount the loom-orchestration MCP server
    * (pty/host.ts buildMcpServers' `wantsOrch`) — platform/auditor/workspace-auditor/setup use their OWN
    * separate per-role MCP routers, not wired to markMcpSeen in this v1 (scoped to loom-orchestration, the
@@ -4387,40 +4363,32 @@ export class SessionService {
   }
 
   /**
-   * Route a post-resume continuation nudge: deferred (see {@link deferredNudge}) for a role that mounts
-   * loom-orchestration, delivered immediately (today's behavior, unchanged) for every other role — a
-   * platform/auditor/workspace-auditor/setup/plain/run session would otherwise wait out the full
-   * MCP_READY_TIMEOUT_MS for a `markMcpSeen` signal its own MCP route never produces.
-   */
-  private enqueueNudge(id: string, role: SessionRole | null, text: string): void {
-    if (this.usesOrchestrationMcp(role)) this.deferredNudge(id, text);
-    else this.pty.enqueueStdin(id, text);
-  }
-
-  /**
-   * Card 597903fc: durable counterpart to {@link enqueueNudge}, for a boot-time notice that must not be
-   * silently dropped if its in-session give-up budget exhausts. `enqueueNudge`'s dispatch (bare
+   * Card 597903fc: durable post-resume continuation-nudge dispatch — a boot-time notice that must not be
+   * silently dropped if its in-session give-up budget exhausts. Before this card, a boot-resume nudge (bare
    * `pty.enqueueStdin`, no `onGiveUpExhausted`) drops a message with nothing surviving but a console line
    * once its ONE give-up requeue is exhausted (host.ts's `submit()`: "non-durable entry, nothing further
    * to preserve") — exactly the asymmetry a card audit found between `[loom:crash-recovered]` (was routed
-   * through `enqueueNudge`) and its sibling `[loom:merge-orphaned]` (already routed through
-   * `enqueueDurableMessage`, below). This closes that gap the same way: on give-up exhaustion,
-   * `enqueueDurableMessage`'s wired `onGiveUpExhausted` hook (`handleGiveUpExhausted`) re-mints the
-   * dispatch (self-healing under exactly the contention a whole-fleet boot resume creates) and, if truly
-   * exhausted past `GIVE_UP_REMINT_LIMIT`, appends a durable `session_message_gave_up` (outcome:"parked")
-   * audit event UNCONDITIONALLY — never a silent loss, matching the bar every other daemon-originated
-   * settle nudge already meets. Mirrors `enqueueNudge`'s own role-gated defer (`waitForMcpSeen` for a role
-   * that mounts loom-orchestration) so the same resume race guard applies; dispatches immediately for
-   * every other role. `sender: "system"` (a daemon-generated notice, no originating session) — safe by
-   * the same reasoning `enqueueDurableMessage`'s own doc gives for every other sentinel-sender call site:
-   * `db.getSession("system")` returns undefined, so `handleGiveUpExhausted`'s sender-facing PARKED notice
-   * is skipped, never thrown.
+   * through a bare role-gated defer with no durability) and its sibling `[loom:merge-orphaned]` (already
+   * routed through `enqueueDurableMessage`, below). This closes that gap the same way: on give-up
+   * exhaustion, `enqueueDurableMessage`'s wired `onGiveUpExhausted` hook (`handleGiveUpExhausted`)
+   * re-mints the dispatch (self-healing under exactly the contention a whole-fleet boot resume creates)
+   * and, if truly exhausted past `GIVE_UP_REMINT_LIMIT`, appends a durable `session_message_gave_up`
+   * (outcome:"parked") audit event UNCONDITIONALLY — never a silent loss, matching the bar every other
+   * daemon-originated settle nudge already meets. Role-gated defer (`waitForMcpSeen` for a role that
+   * mounts loom-orchestration) so the resume race guard (see {@link usesOrchestrationMcp}) applies;
+   * dispatches immediately for every other role. `sender: "system"` (a daemon-generated notice, no
+   * originating session) — safe by the same reasoning `enqueueDurableMessage`'s own doc gives for every
+   * other sentinel-sender call site: `db.getSession("system")` returns undefined, so
+   * `handleGiveUpExhausted`'s sender-facing PARKED notice is skipped, never thrown.
    *
    * Card 9f7c59f1: NOT `private` — also wired into `CrashRecoveryDeps.enqueueDurableNudge` (index.ts, at
    * `CrashRecoveryWatcher` construction, via an arrow wrapper) so the THIRD resume-and-nudge path reuses
    * this same MCP-seen-gated + durable dispatch instead of the raw `pty.enqueueStdin` it used to call
    * directly — see that class's own doc for why its old dispatch was a real, if narrower, instance of the
-   * exact gap this method was built to close.
+   * exact gap this method was built to close. Card 06ebbb78: `resumeFleetOnBoot` (below) now routes ALL
+   * of its continuation nudges through this same method too — the plain, non-durable `enqueueNudge`/
+   * `deferredNudge` helpers this doc used to reference are gone; every boot-resume nudge in the codebase
+   * now shares this one durable dispatch.
    */
   enqueueDurableNudge(id: string, role: SessionRole | null, text: string, taskId: string | null = null): void {
     const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind: "warning", taskId }); };
@@ -4461,19 +4429,32 @@ export class SessionService {
    *     predicate.
    *   - **worker nudge text (`blocked` case):** CONVERGED — all three build from the shared
    *     `buildBlockedResumeNudgeBody` (orchestration/resume-nudge.ts).
-   *   - **durability of the enqueue itself:** INTENTIONALLY DIFFERENT for this path vs.
-   *     `recoverCrashOrphanedWorkers`, RULED — this function's continuation nudges route through
-   *     `enqueueNudge` (MCP-seen-gated for manager/worker/assistant, but NOT durable-on-give-up-exhaustion);
-   *     `recoverCrashOrphanedWorkers`'s route through `enqueueDurableNudge` (same MCP-seen gate, PLUS a
-   *     durable `session_message_queued`/give-up-remint record). Card 597903fc's own stated rationale for
-   *     adding that durability ("a boot-time notice ... must not vanish ... exactly the contended moment
-   *     [give-up exhaustion] is most likely") reads as though it should apply here too — a whole-fleet
-   *     `daemon_restart` is at least as contended as a crash-orphaned recovery — and no comment anywhere
-   *     claims the split is deliberate. **Left UNCONVERGED in card 9f7c59f1, on purpose:** converting this
-   *     function's 10 `enqueueNudge` call sites is a real, if mechanically simple, behavior change to the
-   *     daemon's own self-hosting deploy-restart path, touched by ~18 test files — outside what this
-   *     enumeration card judged safe to land silently alongside its other fixes. Flagged here as a NAMED,
-   *     likely-accidental gap for a dedicated follow-up card, not as "ruled intentional."
+   *   - **durability of the enqueue itself:** CONVERGED (card 06ebbb78) — this function's continuation
+   *     nudges now route through `enqueueDurableNudge`, the SAME MCP-seen-gated + durable helper
+   *     `recoverCrashOrphanedWorkers` already used, instead of the plain `enqueueNudge`. Card 06ebbb78
+   *     RULED this split accidental, not a considered asymmetry: card 597903fc's own stated rationale for
+   *     adding durability to the crash path ("a boot-time notice ... must not vanish ... exactly the
+   *     contended moment [give-up exhaustion] is most likely") applies at least as strongly here — a
+   *     whole-fleet `daemon_restart` is at least as contended as a crash-orphaned recovery, and it is the
+   *     MORE common path (it runs after every deliberate `daemon_restart`, i.e. every self-hosting deploy),
+   *     yet card 9f7c59f1 (which converged the other two paths) left this one on the old, non-durable
+   *     dispatch — no comment anywhere ever claimed that split was deliberate. Worker nudges pass the
+   *     worker's own `taskId` (mirroring `recoverCrashOrphanedWorkers`'s worker-branch calls); every other
+   *     role omits it (defaults to `null`), also mirroring that function's manager-notice call. A held
+   *     nudge now persists a `session_message_queued` record and, on give-up exhaustion, re-mints (or
+   *     durably PARKS) instead of vanishing with nothing but a console line — see `enqueueDurableNudge`'s
+   *     own doc for the mechanism. **CORRECTED (was wrong in the first draft of this card): a freshly-
+   *     resumed session's pty is NEVER `ready` this early** (`pty/host.ts`'s `live.ready` gate — SessionStart
+   *     hasn't fired yet), so EVERY continuation nudge dispatched here is ALWAYS held and therefore ALWAYS
+   *     persists a fresh `session_message_queued` record — this is the COMMON case, not the rare one. That
+   *     in turn means `recoverUndeliveredMessagesOnBoot` (index.ts, run right after this function in the
+   *     SAME boot with no `await` between them) would otherwise find that just-minted record and redrive
+   *     it AGAIN — a real, reproduced duplicate delivery (see that method's own doc, card 06ebbb78 CR
+   *     follow-up). `recoverUndeliveredMessagesOnBoot`'s `mintedBefore` cutoff (index.ts passes its own
+   *     `bootStartedAt`) is what actually guarantees single delivery: it skips any undelivered record
+   *     minted during THIS boot's own resume pass, since such a record already has a live in-memory FIFO
+   *     entry from its own dispatch and needs no help. A record genuinely predating this boot (a real
+   *     crash/sender-death leftover) is unaffected and still redrives normally.
    *   - **ordering:** INTENTIONAL, for a documented reason — this function resumes everyone EXCEPT the
    *     requesting manager first, then the requester LAST (its own summary nudge needs the rest of the
    *     fleet's resume outcome, e.g. `failed.length`, already computed). `recoverCrashOrphanedWorkers`
@@ -4769,10 +4750,22 @@ export class SessionService {
         // own additive contract above) and is sent standalone rather than swallowed by this silence, exactly
         // like the no-op manager/platform branch below does for the same reason.
         const { reportedState, awaitingReview } = deriveAwaitingReview(this.db.listEventsForWorker(e.sessionId));
+        // Card 06ebbb78: taskId for the durable record, mirroring recoverCrashOrphanedWorkers's own
+        // worker-branch enqueueDurableNudge calls (w.taskId ?? null). NOTED, NOT ACTED ON (Code Review):
+        // a non-null taskId arms `staleQueuedMessageReason`'s "already-reported" retire arm (below,
+        // `if (e.taskId) { ... ev.kind === "worker_report" && ev.taskId === e.taskId ... }`) — if THIS
+        // worker's draft-loss-only nudge (the `if (draftNote)` branch just below) is ever still held when
+        // a LATER worker_report for the SAME taskId lands, a boot-scan redrive would retire it as
+        // "already-reported" and silently drop the draft-loss disclosure, which isn't actually superseded
+        // by a new report on an unrelated fact. Real but narrow (requires the notice to still be held at
+        // exactly the wrong moment); left as-is rather than special-cased — no reachable production window
+        // was constructed for it, and this mirrors the SAME coupling recoverCrashOrphanedWorkers's own
+        // worker-branch calls already carry.
+        const workerTaskId = this.db.getSession(e.sessionId)?.taskId ?? null;
         if (awaitingReview && reportedState === "done") {
-          if (draftNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          if (draftNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`, workerTaskId);
         } else {
-          this.enqueueNudge(
+          this.enqueueDurableNudge(
             e.sessionId, e.role,
             reportedState === "blocked"
               ? buildBlockedResumeNudgeBody(
@@ -4781,6 +4774,7 @@ export class SessionService {
               : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
                 `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
                 `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
+            workerTaskId,
           );
         }
       } else if (e.role === "manager" || e.role === "platform") {
@@ -4813,7 +4807,7 @@ export class SessionService {
           // suppress its live nudge to a Lead that never actually saw it — the sender read `boarded` and
           // stood down believing the report was durably filed, with no way to tell that apart from a
           // genuinely offline Lead. See the `else` branch below for the one place this record IS correct.
-          if (draftNote || capNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}${capNote}`);
+          if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
@@ -4838,14 +4832,14 @@ export class SessionService {
             // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
             // like a manager. Re-orient it from the board + its own living resume doc instead of the
             // manager-shaped worktree/worker phrasing.
-            this.enqueueNudge(
+            this.enqueueDurableNudge(
               e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
               `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           } else {
-            this.enqueueNudge(
+            this.enqueueDurableNudge(
               e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
@@ -4866,7 +4860,7 @@ export class SessionService {
         // only burned a wasted turn every restart. Silencing blindly would strand a genuinely mid-run one,
         // so nudge ONLY the busy-at-capture case; the idle case falls through to a silent resume.
         if (e.busy) {
-          this.enqueueNudge(
+          this.enqueueDurableNudge(
             e.sessionId, e.role,
             `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
             `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
@@ -4874,14 +4868,15 @@ export class SessionService {
         } else if (draftNote) {
           // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
           // new, actionable information a silent resume would otherwise never surface at all.
-          this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         }
       } else if (draftNote) {
         // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
         // — but a lost draft still needs surfacing, since nothing else will ever tell this session about it.
-        // enqueueNudge's role gate never defers here (null/"run" don't mount loom-orchestration) — same as
-        // today's immediate enqueueStdin.
-        this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+        // enqueueDurableNudge's role gate never defers here (null/"run" don't mount loom-orchestration) —
+        // same as today's immediate enqueueStdin (wrapped in the durable helper for the same never-vanish
+        // guarantee — card 06ebbb78).
+        this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
       }
     }
 
@@ -4906,12 +4901,11 @@ export class SessionService {
         // Card 39fcaad3: the requester is no longer ALWAYS a manager — the platform Lead can now request
         // its own restart too (RestartIntent.managerSessionId is kept named for on-disk compat; read it as
         // "the requester" — see its doc in orchestration/restart.ts). Dispatch via the role-aware
-        // `enqueueNudge` (already used for the non-requester manager/platform branch above) rather than
-        // calling `deferredNudge` directly: for role "manager" `enqueueNudge` calls that SAME
-        // `deferredNudge` (waits on `waitForMcpSeen`), so the manager path stays byte-identical; a
-        // platform-Lead requester never mounts loom-orchestration (see `usesOrchestrationMcp`), so
-        // `waitForMcpSeen` could never see it — `enqueueNudge` correctly delivers immediately instead of
-        // waiting out the MCP-ready timeout for a signal that would never fire.
+        // `enqueueDurableNudge` (already used for the non-requester manager/platform branch above): for
+        // role "manager" it defers on `waitForMcpSeen` (see `usesOrchestrationMcp`), so the manager path
+        // stays byte-identical; a platform-Lead requester never mounts loom-orchestration, so
+        // `waitForMcpSeen` could never see it — `enqueueDurableNudge` correctly delivers immediately
+        // instead of waiting out the MCP-ready timeout for a signal that would never fire.
         // Derive from the DB (the authoritative, live source), NOT from `entries` alone: `entries` comes
         // from `liveFleetResumeSet()`'s capture-time snapshot, which filters on `fs.existsSync(s.cwd)` —
         // a platform Lead whose project home is transiently unreachable (network/removable path, an
@@ -4944,7 +4938,7 @@ export class SessionService {
         //
         // The platform Lead is NOT bound by that same restriction — `list_all_sessions` already grants
         // it cross-project visibility, so it's the correct, sole owner of the identifying detail. It is
-        // notified with the full detail (project/session/role/task/in-flight state) via `enqueueNudge`
+        // notified with the full detail (project/session/role/task/in-flight state) via `enqueueDurableNudge`
         // below, using the SAME role-branching (`reqRole === "platform"` vs. not) this site already
         // uses elsewhere.
         let leadNotified = false;
@@ -4974,7 +4968,7 @@ export class SessionService {
               // of sending it a redundant second nudge.
               leadOwnFailureDetail = failureNoticeText;
             } else {
-              this.enqueueNudge(liveLead.id, "platform", `[loom:fleet-resume-failure] ${failureNoticeText}`);
+              this.enqueueDurableNudge(liveLead.id, "platform", `[loom:fleet-resume-failure] ${failureNoticeText}`);
             }
             leadNotified = true;
           }
@@ -5032,7 +5026,7 @@ export class SessionService {
             `${reqWorkersResumed}/${reqWorkers.length} of your live ` +
             `workers were resumed (${fleetParenthetical}).${reqWorktreeNote ? ` ${reqWorktreeNote}.` : ""} You can now ` +
             `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
-        this.enqueueNudge(reqId, reqRole, reqText);
+        this.enqueueDurableNudge(reqId, reqRole, reqText);
       }
     } else {
       failed.push(reqId);
@@ -5053,10 +5047,10 @@ export class SessionService {
    * KNOWN, UNCONVERGED siblings this card never touched — see `resumeFleetOnBoot`'s own doc for the full
    * caveat and why "three" isn't repeated as a completeness claim here). Of the three THIS doc block is
    * about: STRICTLY mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot} (the
-   * deliberate `daemon_restart` path — see ITS doc for the full per-facet ruling: report-state handling
-   * and worker nudge text are CONVERGED between the two; durability (`enqueueDurableNudge` here vs. plain
-   * `enqueueNudge` there) and ordering (manager-before-its-workers here vs. requester-resumed-last there)
-   * are each ruled separately there). The THIRD path, `CrashRecoveryWatcher.tick`, is the continuous
+   * deliberate `daemon_restart` path — see ITS doc for the full per-facet ruling: report-state handling,
+   * worker nudge text, AND durability (both route through `enqueueDurableNudge` — card 06ebbb78 converged
+   * this facet too) are CONVERGED between the two; only ordering (manager-before-its-workers here vs.
+   * requester-resumed-last there) is ruled separately there). The THIRD path, `CrashRecoveryWatcher.tick`, is the continuous
    * runtime per-session auto-resume that runs on every boot regardless of which of these two fired — see
    * its own doc for how it mirrors this function's report-state ruling on an isolated worker.
    *
@@ -5345,10 +5339,42 @@ export class SessionService {
    * Durable queued-message recovery (card 2ca18433) — re-drive every still-undelivered `session_message_
    * queued` so a SENDER DEATH (API 529) or a DAEMON RESTART before the recipient's next turn boundary can't
    * have silently dropped a dispatch (it lost a P1 cross-project dispatch twice). Runs ONCE at boot
-   * (index.ts), AFTER the fleet is resumed, and is the SINGLE re-enqueue owner for these messages: the
-   * daemon_restart intent snapshot now EXCLUDES them (getPersistablePendingSnapshot), so there's no double on a
-   * normal restart, and this also covers the crash / OS-service-restart / non-live-recipient paths the
-   * intent snapshot never reached. Per still-undelivered message:
+   * (index.ts), AFTER the fleet is resumed. This is the SINGLE re-enqueue owner for a message that predates
+   * THIS boot: the daemon_restart intent snapshot EXCLUDES durable messages (getPersistablePendingSnapshot),
+   * so a plain restart never double-delivers one via intent.pending, and this also covers the crash /
+   * OS-service-restart / non-live-recipient paths the intent snapshot never reached.
+   *
+   * Card 06ebbb78 (CR follow-up — a real, reproduced defect, not a hypothetical): `resumeFleetOnBoot` /
+   * `recoverCrashOrphanedWorkers` run BEFORE this, in the SAME boot, with NO `await` between them and this
+   * call (index.ts) — and their own continuation nudges for a role that does NOT mount loom-orchestration
+   * (platform/auditor/workspace-auditor/setup/plain/run — `usesOrchestrationMcp` false) dispatch
+   * SYNCHRONOUSLY via `enqueueDurableNudge`. A freshly (re)spawned pty is never `ready` this early
+   * (`pty/host.ts`'s `live.ready` gate — SessionStart hasn't fired yet), so that synchronous dispatch is
+   * ALWAYS held and ALWAYS persists a fresh `session_message_queued` record, milliseconds before this scan
+   * runs. Without the `mintedBefore` cutoff below, this scan would find that brand-new record — which
+   * ALREADY has a live in-memory FIFO entry from its own original dispatch moments earlier — and redrive it
+   * AGAIN (`redriveQueuedMessage` has no way to know a record with no in-flight marker is actually this
+   * fresh), landing the SAME nudge twice in one coalesced turn (the second copy `framePossibleDuplicate`-
+   * tagged). Reproduced directly against a real `PtyHost` (a platform-Lead requester's own "code is live"
+   * nudge, card 39fcaad3): 2 occurrences of the nudge text written to the pty's stdin in one turn. `taskId`
+   * is unaffected here — this is purely a same-boot re-drive timing gap, orthogonal to which taskId a
+   * record carries.
+   *
+   * `mintedBefore` (index.ts passes its own `bootStartedAt`, captured as literally the first statement of
+   * `main()` — i.e. strictly before ANY nudge this boot could mint) is the fix: any undelivered record
+   * whose OWN `ts` is at or after `mintedBefore` was minted by THIS SAME BOOT'S OWN resume/recovery pass —
+   * it is, BY CONSTRUCTION, still correctly sitting in its recipient's live in-memory FIFO (nothing has had
+   * a chance to crash or die between its creation and this call), so redriving it would only duplicate a
+   * delivery that is already going to happen on its own. Such a record is SKIPPED entirely here (not
+   * counted in `reEnqueued`/`retired`/`senderNudges` — it isn't "stuck", it's simply too recent for this
+   * scan to have any business touching it) and is picked up correctly by a LATER boot if this process dies
+   * before it drains. A record from BEFORE this boot (a genuine crash/sender-death leftover) always has
+   * `ts < mintedBefore` and is unaffected — this guarantees each SUCH message is redriven at most once by
+   * this scan, exactly as promised below. Omitted (undefined) ⇒ no filtering, byte-identical to before this
+   * card — every existing caller that has no stake in this exact race (a test constructing its OWN boot
+   * sequence with a synthetic `ts`, e.g.) is unaffected; only `index.ts`'s real boot wires it.
+   *
+   * Per still-undelivered message NOT skipped by the cutoff above:
    *   • recipient is LIVE → re-enqueue with the SAME msgId (no new queued event), so it drains on the
    *     recipient's next turn and onDeliver resolves it. Delivery is proven at the TURN BOUNDARY, never
    *     assumed at dispatch — a board card moving to in_progress means nothing here.
@@ -5359,11 +5385,17 @@ export class SessionService {
    * Then every STILL-stuck outbound message (recipient not live, not retired) is surfaced to its LIVE
    * SENDER so it can re-send. Best-effort + never throws (must not gate boot). Returns counts for the log.
    */
-  recoverUndeliveredMessagesOnBoot(): { reEnqueued: number; retired: number; senderNudges: number } {
+  recoverUndeliveredMessagesOnBoot(mintedBefore?: Date): { reEnqueued: number; retired: number; senderNudges: number } {
     let reEnqueued = 0, retired = 0, senderNudges = 0;
     // recipientId → sender(s) of messages we couldn't re-enqueue (stuck) → surfaced to live senders below.
     const stuckBySender = new Map<string, Set<string>>();
+    const cutoffMs = mintedBefore?.getTime();
     for (const e of this.db.listUndeliveredQueuedMessages()) {
+      // Card 06ebbb78: this record was minted by THIS SAME BOOT'S OWN resume/recovery pass, so it's still
+      // correctly sitting in a live in-memory FIFO already — see this method's own doc for the full
+      // reasoning. Skip outright: not reEnqueued, not retired, not stuck — a later boot re-drives it if
+      // this process dies before it drains on its own.
+      if (cutoffMs !== undefined && new Date(e.ts).getTime() >= cutoffMs) continue;
       const outcome = this.redriveQueuedMessage(e);
       if (outcome === "reEnqueued") { reEnqueued++; continue; }
       if (outcome === "retired") { retired++; continue; }
