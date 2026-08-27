@@ -5,7 +5,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // afterward, unlike `deployStaleness.distBuiltSha`, which is a fresh read on every call.
 //
 // WHY THIS TEST EXISTS SEPARATELY FROM deploy-staleness.mjs: that file proves `computeDeployStaleness`
-// itself is PURE (given the same `processBuiltShaOverride`, always the same answer) — it never touches
+// itself is PURE (given the same `processBuiltSha` option, always the same answer) — it never touches
 // this "read once at module load" mechanism at all, by design (see deploy-staleness.ts's own module doc:
 // this function does its own caching of nothing, the caller does). The "captured once, frozen despite a
 // later on-disk change" property lives ENTIRELY in served-status.ts's top-level assignment, which a

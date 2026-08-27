@@ -100,10 +100,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *   - `distBuiltSha` — a FRESH read on every call, like every other field in this module (DoD #4). Answers
  *     "what's on disk right now". Computed HERE, from `distDir`, unconditionally.
  *   - `processBuiltSha` — captured EXACTLY ONCE, at PROCESS START (module load time, not first use),
- *     by the CALLER (`served-status.ts`'s own top-level capture) and threaded in via
- *     `processBuiltShaOverride`. This function does NOT read it, cache it, or know how it was captured —
+ *     by the CALLER (`served-status.ts`'s own top-level capture) and threaded in via the
+ *     `processBuiltSha` option. This function does NOT read it, cache it, or know how it was captured —
  *     it stays PURE, so the existing `distDir` test seam keeps testing it trivially, with no module-level
- *     state of its own to reset between test sections. See `computeDeployStaleness`'s own param doc.
+ *     state of its own to reset between test sections. See `ComputeDeployStalenessOptions`'s own doc.
  * They are DELIBERATELY allowed to diverge — `distBuiltShaDiffersFromProcess` (distinct from
  * `distAheadOfProcess`, which infers the same fact from clocks and can be fooled by a mtime-bumping
  * cache-replay) is the CONTENT-BASED, direct answer to "has a rebuild landed that this process hasn't
@@ -220,8 +220,8 @@ export interface DeployStalenessResult {
   distBuiltDirty: boolean | null;
   /** Card f26339d7, AMENDMENT 1 — the git commit sha THIS PROCESS is actually executing: captured ONCE,
    * at process start (module load), by the caller — see `served-status.ts`'s top-level capture — and
-   * passed in via `processBuiltShaOverride` (this function itself stays PURE and does no caching of its
-   * own; see that param's own doc). `null` when the caller didn't provide one, or it couldn't be resolved
+   * passed in via the `processBuiltSha` option (this function itself stays PURE and does no caching of its
+   * own; see `ComputeDeployStalenessOptions`'s own doc). `null` when the caller didn't provide one, or it couldn't be resolved
    * at that process's start — NEVER a fabricated or stale substitute. A rebuild that lands after this
    * process started does NOT change this value; only a restart (which re-captures it fresh) can. */
   processBuiltSha: string | null;
@@ -352,7 +352,17 @@ export interface BuildInfo {
  * non-string/empty `sha` / non-boolean `dirty` all degrade to `null` — never a fabricated or stale
  * substitute (card f26339d7 DoD #1). Exported so `served-status.ts` can reuse this exact parsing for its
  * OWN "once at process start" capture (`processBuiltSha`/`processBuiltDirty`) — one parser, not two
- * hand-maintained copies. */
+ * hand-maintained copies.
+ * ⚠️ FROM-SOURCE INVARIANT (card 119fd301): the baked `build-info.json` this reads must exist ONLY inside a
+ * build OUTPUT dir (`packages/daemon/dist`, `packages/web/dist`) — NEVER anywhere a from-source run's own
+ * `__dirname` chain can reach (`src/`, the repo root). A dev boot runs from source (`tsx watch`), so a
+ * from-source caller's `__dirname` naturally misses the file and this correctly degrades to
+ * `{sha:null, dirty:null}` — an HONEST gap, not a wrong answer. That safety holds by STRUCTURE, not by a
+ * guard here: nothing stops a future edit from breaking it — (1) making this function walk UP looking for
+ * the file, (2) writing `build-info.json` outside `dist/`, or (3) defaulting a distDir override to a
+ * resolved `dist` path regardless of runtime — any of which would make a from-source run silently report a
+ * STALE BAKE as if it were current: present, well-formed, and WRONG, which reads as MORE trustworthy than
+ * an honest gap. Do not do any of those three without re-deriving this invariant first. */
 export function readBuildInfo(distDir: string): BuildInfo {
   try {
     const raw = fs.readFileSync(path.join(distDir, "build-info.json"), "utf8");
@@ -427,19 +437,44 @@ export function newestMtimeMs(dir: string): number | null {
 }
 
 /**
- * Compute the deploy-staleness signal fresh, right now — see the module doc for the design rationale.
- * `distEntryOverride`/`repoRootOverride`/`sharedDistOverride`/`webDistOverride` are test seams (a fixture
- * `dist/index.js` path, a fixture git repo, a fixture `packages/shared/dist` dir, and a fixture
- * `packages/web/dist` dir); production callers omit all four and get the real running daemon's own paths.
- * `processStartedAtOverride` (card 8ff7ccde) is a 5th test seam (a fixture ISO instant standing in for
- * this process's own start); a real caller omits it and gets the real `process.uptime()`-derived value.
- * `processBuiltShaOverride`/`processBuiltDirtyOverride` (card f26339d7, AMENDMENT 1) are a 6th/7th param —
- * NOT test-only seams, the REAL production plumbing: this function stays PURE and does no caching of its
- * own, so the caller (`served-status.ts`) is responsible for capturing "what this process is executing"
- * ONCE at its own module load and passing that SAME pair in on every call. Omitting them (the default)
- * means "the caller didn't tell me" — `processBuiltSha`/`processBuiltDirty`/`processBuiltShaMatchesHead`/
- * `deploySignatureMismatch` all degrade to null/false rather than falling back to a fresh disk read, which
- * would silently reintroduce the exact bug this amendment exists to prevent (see the module doc).
+ * Options for `computeDeployStaleness` (card 119fd301 — replaced the earlier seven-positional-param form:
+ * with all seven optional, a real production call site read as five consecutive `undefined`s whose only
+ * meaning was POSITIONAL — a param inserted, reordered, or miscounted was silently wrong, typechecked, ran,
+ * and returned a confident answer. A misspelled or omitted key here is a type error or an explicit `null`/
+ * `undefined` read, never a silently-wrong positional value.)
+ */
+export interface ComputeDeployStalenessOptions {
+  /** Test seam: a fixture `dist/index.js` path. Production callers omit this and get the real running
+   * daemon's own path. */
+  distEntry?: string;
+  /** Test seam: a fixture git repo root. Production callers omit this and get the real repo root. */
+  repoRoot?: string;
+  /** Test seam: a fixture `packages/shared/dist` dir. Production callers omit this and get the real one. */
+  sharedDist?: string;
+  /** Test seam: a fixture `packages/web/dist` dir. Production callers omit this and get the real one. */
+  webDist?: string;
+  /** Card 8ff7ccde — test seam: a fixture ISO instant standing in for this process's own start. A real
+   * caller omits this and gets the real `process.uptime()`-derived value. */
+  processStartedAt?: string;
+  /** Card f26339d7, AMENDMENT 1 — NOT a test-only seam, the REAL production plumbing: this function stays
+   * PURE and does no caching of its own, so the caller (`served-status.ts`) is responsible for capturing
+   * "what this process is executing" ONCE at its own module load and passing that SAME pair in on every
+   * call. Omitting it (the default) means "the caller didn't tell me" — `processBuiltSha`/`processBuiltDirty`/
+   * `processBuiltShaMatchesHead`/`deploySignatureMismatch` all degrade to null/false rather than falling
+   * back to a fresh disk read, which would silently reintroduce the exact bug this amendment exists to
+   * prevent (see the module doc). */
+  processBuiltSha?: string | null;
+  /** Card f26339d7, AMENDMENT 1 — see `processBuiltSha`'s own doc; the same "real production plumbing, not
+   * a test seam" applies here. */
+  processBuiltDirty?: boolean | null;
+}
+
+/**
+ * Compute the deploy-staleness signal fresh, right now — see the module doc for the design rationale, and
+ * `ComputeDeployStalenessOptions`'s own doc for what each option means and defaults to. A production caller
+ * passes only the option(s) it actually has (e.g. `computeDeployStaleness({ processBuiltSha, processBuiltDirty })`);
+ * a test passes whichever fixture seams that section needs; omitting the argument entirely (or passing `{}`)
+ * gets every real-production default.
  *
  * Code Review "ALSO REQUIRED" — `distBuiltSha`/`distBuiltDirty`/`processBuiltSha`/`processBuiltDirty`/
  * `webBuiltSha`/`webBuiltDirty` are resolved BEFORE the `.git`-availability bail (and threaded through
@@ -447,15 +482,16 @@ export function newestMtimeMs(dir: string): number | null {
  * but DOES ship `dist/build-info.json`, so "what commit is this artifact/process?" must not be thrown away
  * just because every git-derived comparison field is correctly unavailable.
  */
-export function computeDeployStaleness(
-  distEntryOverride?: string,
-  repoRootOverride?: string,
-  sharedDistOverride?: string,
-  webDistOverride?: string,
-  processStartedAtOverride?: string,
-  processBuiltShaOverride?: string | null,
-  processBuiltDirtyOverride?: boolean | null,
-): DeployStalenessResult {
+export function computeDeployStaleness(options: ComputeDeployStalenessOptions = {}): DeployStalenessResult {
+  const {
+    distEntry: distEntryOverride,
+    repoRoot: repoRootOverride,
+    sharedDist: sharedDistOverride,
+    webDist: webDistOverride,
+    processStartedAt: processStartedAtOverride,
+    processBuiltSha: processBuiltShaOverride,
+    processBuiltDirty: processBuiltDirtyOverride,
+  } = options;
   // Known immediately, regardless of dist/git state — just the caller's own override, not derived from
   // anything this function might fail to resolve below.
   const processBuiltSha = processBuiltShaOverride ?? null;

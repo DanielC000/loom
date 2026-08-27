@@ -10,6 +10,16 @@ import { skillStoreStaleness, type SkillStoreStaleness } from "./skills/store.js
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Card 119fd301 — ADJACENT OBSERVATION, recorded but not (yet) worth a code change: this `__dirname` and
+ * `deploy-staleness.ts`'s own `path.dirname(distEntryOverride ?? path.join(__dirname, "index.js"))` are
+ * TWO INDEPENDENTLY RESOLVED paths that agree only by construction — both compile to the same flat
+ * `packages/daemon/dist` today. `distBuiltSha` (read there) vs `processBuiltSha` (captured here) is a
+ * comparison BETWEEN them; if the build ever emitted either file into a subdirectory, the two would
+ * silently describe different dirs and `distBuiltShaDiffersFromProcess` would fire spuriously or not at
+ * all. Worth knowing before "just move this file" looks like a safe, purely-organizational change.
+ */
+
+/**
  * Card f26339d7, AMENDMENT 1 — the git commit sha (+ dirty flag) THIS PROCESS is actually executing,
  * captured EXACTLY ONCE, at MODULE LOAD (not at first use — see `deploy-staleness.ts`'s own module doc for
  * why that distinction is the whole point), from this compiled module's OWN directory (`served-status.js`
@@ -55,7 +65,7 @@ export function __setProcessBuiltInfoForTest(sha: string | null, dirty: boolean 
  * `computeDeployStaleness()` call site.
  */
 export function currentDeployStaleness(): DeployStalenessResult {
-  return computeDeployStaleness(undefined, undefined, undefined, undefined, undefined, processBuiltSha, processBuiltDirty);
+  return computeDeployStaleness({ processBuiltSha, processBuiltDirty });
 }
 
 export interface ServedStatus {
