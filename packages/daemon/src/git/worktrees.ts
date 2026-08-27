@@ -2399,6 +2399,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // computeEmitCompareGate's reduced path (which reasons about compiled-output/test-pass equivalence, not
   // raw bytes) without ever re-running the corpus-wide guards this array feeds the reduced gate too.
   "packages/daemon/test/working-tree-eol-guard.mjs",
+  // Card e211ec89: a corpus-wide source-text scan asserting no `packages/daemon/test/*.mjs` reaches the
+  // REAL `currentDeployStaleness()` (served-status.ts) unfixtured — either via a `resumeFleetOnBoot(...)`
+  // call omitting its `deployStaleness` test seam, or via a direct import/call of `currentDeployStaleness`
+  // itself (which has no override at all). Belongs here on the same ground as its siblings above: this is
+  // a source-TEXT property (an omitted argument, a bare identifier reference), not a compiled-output/
+  // test-pass-equivalence property `computeEmitCompareGate`'s reduced path can reason about — a diff that
+  // adds a new unfixtured `resumeFleetOnBoot` call could take the reduced path and never trip a single
+  // assertion, exactly the merge-gate incident (six assertions across four files, reproduced on card
+  // 062fa934's branch) this guard exists to stop from recurring. See the guard's own header for the full
+  // reproduced cache-replay chain and for what this guard deliberately does NOT flag (bare
+  // `computeDeployStaleness()` calls, and `buildServedStatus()`'s two deliberate real-tree tests).
+  "packages/daemon/test/deploy-staleness-fixture-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */

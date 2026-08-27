@@ -60,6 +60,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const restart = await import("../dist/orchestration/restart.js");
 const { buildPasteRecoveryText, PASTE_RECOVERY_TAG } = await import("../dist/orchestration/paste-tripwire.js");
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -263,7 +264,7 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     }); // NOT ready yet — mirrors a freshly re-spawned, not-yet-booted resumed pty
 
-    const result = sessions3.resumeFleetOnBoot(intent, { resumeOne: () => true });
+    const result = sessions3.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
     check("(3) setup: both sessions resumed, none failed", result.resumed.length === 2 && result.failed.length === 0);
 
     const replayed = hostPost.getPendingEntries(SID3).find((m) => m.text === RECOVERY_TEXT);

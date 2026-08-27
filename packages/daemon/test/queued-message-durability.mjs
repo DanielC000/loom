@@ -45,6 +45,7 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -217,7 +218,7 @@ try {
     const intent = { reason: "deploy", managerSessionId: mgr, requestedAt: now,
       resume: [{ sessionId: mgr, role: "manager", parentSessionId: null }, { sessionId: wkr, role: "worker", parentSessionId: mgr }],
       pending: { [wkr]: snap } }; // ONLY the plain nudge — the durable msg is intentionally absent
-    sessionsPost.resumeFleetOnBoot(intent, { resumeOne: () => true });
+    sessionsPost.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
     await flushB(); // let every deferred manager/worker nudge settle
     // Card 06ebbb78 CR follow-up: THE NEW FACET, asserted BEFORE the boot scan even runs, via the DB row
     // itself — a `session_message_queued` row is EXACTLY what "durable" means in this codebase, so its
@@ -490,7 +491,7 @@ try {
       const { host, sessions, lead, writtenText } = await mkLeadFixture("fixed");
       const bootStartedAt = new Date();
       const intent = { reason: "deploy merged code", managerSessionId: lead, requestedAt: now, resume: [{ sessionId: lead, role: "platform", parentSessionId: null }] };
-      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
       check("(C-fixed) setup: the requester's own nudge is a genuine held durable record right after resumeFleetOnBoot",
         db.listUndeliveredQueuedMessages().some((e) => e.workerSessionId === lead && e.detail.text.includes("now LIVE")));
       // Mirrors index.ts EXACTLY: no await between resumeFleetOnBoot and this call.
@@ -507,7 +508,7 @@ try {
     {
       const { host, sessions, lead, writtenText } = await mkLeadFixture("mech");
       const intent = { reason: "deploy merged code", managerSessionId: lead, requestedAt: now, resume: [{ sessionId: lead, role: "platform", parentSessionId: null }] };
-      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+      sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
       const m = sessions.recoverUndeliveredMessagesOnBoot(); // mintedBefore OMITTED — the pre-fix call shape
       check("(C-mechanism) NEGATIVE CONTROL: without the cutoff, the boot scan DOES re-enqueue the just-minted record", m.reEnqueued === 1);
       host.deliverHook(lead, { hook_event_name: "SessionStart" });

@@ -37,6 +37,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -170,7 +171,7 @@ try {
       { sessionId: id.requester, role: "manager", parentSessionId: null, hadUnsentDraft: true },
     ],
   };
-  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
   await flushC(); // let every deferred manager/worker nudge settle
   const q = (i) => pty.getPending(i);
   const hasNote = (i) => q(i).some((m) => /UNSENT draft/i.test(m) && /\[Pasted text #N\]/.test(m));

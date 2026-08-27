@@ -297,7 +297,7 @@ try {
       pending: { [BAD_ID]: ["ok before the malformed entry", null, "ok after the malformed entry"] },
     };
     let threw = null;
-    try { sessionsBad.resumeFleetOnBoot(badIntent, { resumeOne: () => true }); } catch (e) { threw = e; }
+    try { sessionsBad.resumeFleetOnBoot(badIntent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS }); } catch (e) { threw = e; }
     check("(5) resumeFleetOnBoot did NOT throw on a malformed (null) pending entry", threw === null);
     // BAD_ID is also its own requester (the sole entry in `resume`), so its "code is live" nudge lands as
     // a THIRD, later entry — irrelevant to what this check is about; just confirm the two REPLAYED

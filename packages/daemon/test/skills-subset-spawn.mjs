@@ -51,6 +51,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { injectSkills } = await import("../dist/skills/inject.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile } = await import("@loom/shared");
+const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 
@@ -209,7 +210,7 @@ try {
   host.capture.length = 0;
   const bootRes = svc.resumeFleetOnBoot(
     { managerSessionId: "mgr1", reason: "test", resume: [{ sessionId: sSub.id, role: null, parentSessionId: null }], pending: {} },
-    { resumeOne: (id) => { try { svc.resume(id); return true; } catch { return false; } } },
+    { resumeOne: (id) => { try { svc.resume(id); return true; } catch { return false; } }, deployStaleness: CLEAN_STALENESS },
   );
   check("(C) BOOT: resumeFleetOnBoot resumed the subset session", bootRes.resumed.includes(sSub.id));
   check("(C) BOOT: the resumed spawn carries the pinned subset (survives daemon restart)",
