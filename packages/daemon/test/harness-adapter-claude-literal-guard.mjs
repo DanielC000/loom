@@ -120,6 +120,13 @@ function isCommentLine(trimmed, state) {
 // real BEFORE trusting a zero elsewhere means absence — positive-controlled against the adapter module
 // itself, which is known to genuinely contain both shapes in CODE (not just comments).
 const files = walk(SRC_DIR, []);
+// Card 6e9a9209 (census 46d6fdb7, class B): the six "sanity:" checks below all test the regex against a
+// synthetic in-memory string or the ONE hardcoded pty/claude-doctrine.ts read directly — none of them
+// depend on `files` (walk(SRC_DIR)'s own result), so every one of them stays green even if this
+// traversal opened zero real files. `violations` (below) is the only thing keyed off `files`, and its
+// own check passes vacuously on an empty scan. This is the missing scan-level population control:
+// `files.length > 0`, not a hardcoded count — any legitimate new .ts file only grows this population.
+check(`the real corpus scan opened at least one src/**/*.ts file (found ${files.length})`, files.length > 0);
 const doctrineText = fs.readFileSync(path.join(SRC_DIR, "pty", "claude-doctrine.ts"), "utf8").split("\n");
 const dotHits = doctrineText.filter((l) => DOT_CLAUDE_RE.test(l)).length;
 const bareHits = doctrineText.filter((l) => BARE_CLAUDE_RE.test(l)).length;

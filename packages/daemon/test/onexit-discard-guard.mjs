@@ -394,6 +394,11 @@ function scanSnippet(text) {
 // =====================================================================================================
 
 const files = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".mjs") && f !== SELF_BASENAME);
+// Card 6e9a9209 (census 46d6fdb7, class B): `newViolations.length === 0` below passes VACUOUSLY if this
+// traversal opens zero files — the positive-control block above proves the SCANNER works, but never
+// proves the REAL corpus was actually reached. Scan-level population control, not a hardcoded floor:
+// `files.length > 0` only ever grows as test files are added.
+check(`the real corpus scan opened at least one test/*.mjs file (found ${files.length})`, files.length > 0);
 
 const newViolations = [];
 for (const file of files) {

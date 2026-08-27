@@ -533,6 +533,13 @@ function scanFile(file) {
 }
 
 const files = walkTestFiles();
+// Card 6e9a9209 (census 46d6fdb7, class B): every check below gates on newViolations/regressions/etc.
+// derived by iterating `files` — if walkTestFiles() opened ZERO files (TEST_DIR wrong, filter broken),
+// every one of those checks passes VACUOUSLY (an empty scan trivially satisfies "found 0"). This is the
+// scan-level population control: it fails loudly the moment the traversal itself opens nothing, instead
+// of silently certifying an empty scan as a clean corpus. `files.length > 0` (not a hardcoded count) —
+// any legitimate future test file only grows this population, never shrinks it toward the floor.
+check(`the corpus scan opened at least one test/*.mjs file (found ${files.length})`, files.length > 0);
 const newViolations = [];
 const badExemptions = [];
 const regressions = [];

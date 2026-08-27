@@ -390,6 +390,14 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
   const hits = realFiles ? scanDistForCodescapeMentions(rootDir, { files: realFiles }) : scanDistForCodescapeMentions(rootDir);
   const scannedCount = (realFiles ?? walkFiles(rootDir)).filter((f) => !BINARY_ASSET_EXT_RE.test(f)).length;
 
+  // Card 6e9a9209 (census 46d6fdb7, class B): the falsification block above proves the SCANNER can catch
+  // a leak in a synthetic fixture — it says nothing about whether THIS root's real traversal actually
+  // opened anything. `unknown.length === 0` below (the real assertion) passes VACUOUSLY on an empty
+  // `hits` array, and `hits` is empty both when the root is genuinely clean AND when `scannedCount` is 0
+  // (an existing-but-empty rootDir, or a `realFiles` list gone empty) — the two are indistinguishable
+  // without this. `scannedCount > 0`, not a hardcoded floor — any legitimate new shipped file only grows it.
+  check(`(B) ${label}: traversal opened at least one file to scan (found ${scannedCount})`, scannedCount > 0);
+
   const known = [];
   const unknown = [];
   for (const f of hits) {
@@ -429,6 +437,20 @@ if (observedKnownLeaks.length > 0) {
       "do NOT assume the baseline is obsolete."
   );
 }
+// Card 6e9a9209 (census 46d6fdb7, DoD-5 — the cheapest/highest-value item this card names): this
+// comparison used to be an UNWIRED console.log — a check whose green is indistinguishable from not
+// having run. `observedKnownLeaks` is a known-present-sentinel population, accumulated ACROSS every real
+// root scanned above (§ checkRootForCodescapeLeaks); a total absence of all `KNOWN_LEAKING_FILES` entries
+// combined is the population-vanished signal the per-root `scannedCount > 0` checks above already catch
+// directly (per-root) — this is the cross-root corroborating signal, wired to the actual exit condition
+// instead of a print. Not a hardcoded-count floor: the gate is presence (`> 0`), not a specific count, so
+// KNOWN_LEAKING_FILES growing or shrinking by an audited edit never breaks it.
+check(
+  KNOWN_LEAKING_FILES.length === 0
+    ? "(B) compiled-internal baseline is empty — nothing to gate on here (see the note above)"
+    : `(B) at least one of the ${KNOWN_LEAKING_FILES.length} known-present compiled-internal baseline files was found in the shipped output (found ${observedKnownLeaks.length})`,
+  KNOWN_LEAKING_FILES.length === 0 || observedKnownLeaks.length > 0
+);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — no codescape-named string reaches a user-visible surface, and the compiled-internal footprint matches the accepted baseline."
