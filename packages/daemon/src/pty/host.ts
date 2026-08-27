@@ -2475,6 +2475,14 @@ interface Live {
   // structured submit starting means any earlier raw baseline is now stale/superseded, and (b) after the
   // Stop/StopFailure chokepoint consumes it, so a leftover value never gets attributed to a LATER turn.
   // Best-effort by design, same spirit as composerLen/nextComposerLen — see nextRawDraftState.
+  // ⭐ RETENTION VERDICT (card 183de1a4, investigated so a future reader doesn't have to re-derive it): this
+  // IS the full content of a human raw-terminal paste, not merely a length — but retention is a SINGLE
+  // ephemeral slot with a ONE-TURN lifetime (overwritten/cleared per the two triggers above), never
+  // persisted to the DB, and reset to null on every spawn/resume/fork — it does NOT survive a daemon
+  // restart. That one-turn window is sufficient for the bare-placeholder tripwire + its one-shot recovery
+  // above (they consume it within the SAME turn it's set), but nothing downstream can recover an OLDER
+  // turn's raw paste once this slot has moved on — see detectPastePlaceholderLengthLoss's own doc for the
+  // resulting residual (a stale re-render several turns later, PASTE_LOSS_EXPLAIN_WINDOW-bounded).
   lastRawSubmit: string | null;
   // Card b4b9b707: mirrors lastRawSubmit's capture (same writeStdin call site, same nextRawDraftState
   // reconstruction) but is a SEPARATE field with its OWN lifecycle, dedicated to owner-text attribution —

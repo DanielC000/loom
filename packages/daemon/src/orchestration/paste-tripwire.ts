@@ -207,13 +207,29 @@ export function buildPasteRecoveryText(originalText: string): string {
 /**
  * Card b68d1f5b DoD-1 — the "compare the placeholder's stated line count against the delivered body"
  * check (adopted from a peer project manager's suggestion). Unlike `detectBarePastePlaceholderTripwire`
- * above (which needs `submittedText` — TEXT LOOM ITSELF WROTE — to compare against), this check works
- * from the RECORDED/delivered side alone: a `[Pasted text #N +M lines]` token surviving into the
- * transcript's recorded turn text always means those M lines never reached the engine (a placeholder is
- * never accompanied by its own expansion — if the paste had gone through, the placeholder wouldn't be
- * there at all). That is what makes it work "regardless of who wrote the text" (card's own framing) —
- * it covers the human-paste path `detectBarePastePlaceholderTripwire` structurally cannot see (a human
- * typing directly into their own terminal has no `submittedText` Loom ever captured).
+ * above, this check works from the RECORDED/delivered side alone: a `[Pasted text #N +M lines]` token
+ * surviving into the transcript's recorded turn text always means those M lines never reached the engine
+ * (a placeholder is never accompanied by its own expansion — if the paste had gone through, the
+ * placeholder wouldn't be there at all). That is what makes it work "regardless of who wrote the text"
+ * (card's own framing).
+ *
+ * ⚠️ CORRECTED (card 183de1a4, 2026-08-27): this doc used to claim the human/raw-terminal path has "no
+ * `submittedText` Loom ever captured." FALSE, and already stale when written — `Live.lastRawSubmit`
+ * (host.ts) has captured the raw channel's full composed TEXT (not just a length) since card `0f9268cc`
+ * (2026-07-23, twelve days before this doc's own `b68d1f5b`), and `detectBarePastePlaceholderTripwire`
+ * above already receives it via `live.lastRawSubmit ?? live.lastPrompt` at host.ts's Stop-hook call site —
+ * so the human/raw path already has BOTH detection and the one-shot auto-recovery through that mechanism,
+ * verified end-to-end (test (f), paste-placeholder-tripwire.mjs, drives `writeStdin` directly). Retention
+ * shape (see `Live.lastRawSubmit`'s own doc): a SINGLE ephemeral slot — overwritten by the next raw
+ * submit, cleared by any intervening `submit()`, unconditionally nulled right after the next Stop reads
+ * it. One turn's lifetime, never persisted, does NOT survive a daemon restart.
+ *
+ * The REAL, narrower gap this check exists to close: the raw/human path never gets an entry in
+ * `Live.recentWrittenLineCounts` — that history is pushed to ONLY by `submit()` (host.ts, alongside
+ * `live.lastPrompt = text`), never by `writeStdin`. So a STALE/delayed placeholder re-render, surfacing
+ * turns after the original raw paste (once its one-turn `lastRawSubmit` snapshot is long gone), has
+ * nothing in the write-count history to explain it against — THAT is the case only this check can catch,
+ * not "the human path has no captured text at all."
  *
  * ⛔ HARD CONSTRAINT (card `abeac33a`, folded into `b68d1f5b` 2026-08-04): a naive version of this check
  * — "placeholder present ⇒ report a loss" — FIRES ON A CORRECT SEND. A stale placeholder TOKEN can be a
@@ -234,11 +250,13 @@ export function buildPasteRecoveryText(originalText: string): string {
  *     known-delivered (Loom wrote it and, if it had actually collapsed back then, the tripwire above
  *     would have already caught and recovered THAT turn) — this later re-appearance is a harmless
  *     CLI-side artifact, not a new loss.
- * Only a placeholder matching NO entry in the history is genuinely UNEXPLAINED — Loom has no record of
- * ever having written text that would produce this token, which is exactly the human/raw-terminal-paste
- * gap this check exists to close (a raw `writeStdin` turn never pushes into this history — only
- * `submit()` does — so a human paste that collapsed client-side is unexplainable by construction and
- * always surfaces here).
+ * Only a placeholder matching NO entry in the history is genuinely UNEXPLAINED. A raw `writeStdin` turn
+ * never pushes into this history — only `submit()` does — so a raw-terminal placeholder never has an
+ * entry to match against here, REGARDLESS of whether Loom actually captured its content elsewhere (see
+ * the correction above: it usually did, in `Live.lastRawSubmit`, and `detectBarePastePlaceholderTripwire`
+ * already caught + recovered the CURRENT-gen case using it). What genuinely has no explanation left ANYWHERE
+ * by the time it reaches here is a STALE re-render of an OLDER raw turn, whose one-turn `lastRawSubmit`
+ * snapshot is long since overwritten — that's the case this check exists to surface.
  *
  * ⚠️ THE BOUND, STATED EXPLICITLY (Code Review, card b68d1f5b): silence above is guaranteed ONLY for a
  * placeholder whose explaining write is still inside `Live.recentWrittenLineCounts`'s
@@ -339,9 +357,14 @@ export interface PasteLengthLossCandidate {
  * `submittedText` is OPTIONAL and, when given, only feeds the SAME false-positive guard
  * `detectBarePastePlaceholderTripwire` already validated (card 0f9268cc, 18140 real transcript turns): a
  * placeholder-shaped substring the sender's own submitted text ALSO contains verbatim was typed/quoted,
- * not CLI-collapsed, and must not be reported as a loss. Passing `null`/`undefined` (the human-paste case
- * this detector exists for — Loom never captured what was typed) simply skips that guard; every other
- * guard (the `gen` discriminator) still applies in full.
+ * not CLI-collapsed, and must not be reported as a loss. Passing `null`/`undefined` simply skips that
+ * guard; every other guard (the `gen` discriminator) still applies in full. ⚠️ CORRECTED (card 183de1a4):
+ * this used to frame null/undefined as "the human-paste case this detector exists for — Loom never
+ * captured what was typed." That's not accurate as a generalization — the raw/human path usually DOES
+ * have a captured `submittedText` (`live.lastRawSubmit ?? live.lastPrompt`, host.ts's Stop-hook call
+ * site), same as any other caller; null/undefined here just means whichever caller passed it didn't have
+ * one available at that moment. See the corrected doc on `detectPastePlaceholderLengthLoss` above for
+ * the real reason the human path still needs this detector.
  *
  * `recentWrittenLineCounts` is `Live.recentWrittenLineCounts` — the dedicated, integer-only history (see
  * `PASTE_LOSS_EXPLAIN_WINDOW`'s doc), NOT card c2c750a9's `Live.recentWrittenTurns`.
