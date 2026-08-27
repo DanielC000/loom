@@ -172,6 +172,10 @@ try {
 
     const sizes = [...genSizes.values()];
     const maxGenBytes = Math.max(0, ...sizes);
+    // Ordered by ACTUAL generation number (not Map insertion order, which happens to match here but
+    // shouldn't be relied on) — this is the real per-generation series the incident's own growth curve
+    // (45,934 -> 91,908 -> 137,882 -> 184,967 B) is shaped like: every cycle strictly bigger than the last.
+    const genSeries = [...genSizes.entries()].sort((a, b) => a[0] - b[0]).map(([, len]) => len);
     console.log(`per-generation physical write sizes: ${JSON.stringify([...genSizes.entries()])}`);
     console.log(`largest single-generation write: ${maxGenBytes} B (the ORIGINAL kickoff is ${KICKOFF.length} B)`);
 
@@ -188,39 +192,55 @@ try {
     check("(1) POSITIVE CONTROL: this run drove at least 4 distinct generations (multiple redelivery cycles actually happened)",
       genSizes.size >= 4);
 
-    // THE FIX ITSELF: the largest single-generation write must be bounded to roughly "one real fresh paste
-    // plus a small fixed clear-prefix overhead" — NEVER the ever-growing multiple-of-the-original the
-    // incident measured (4x in that live specimen).
+    // THE FIX ITSELF (card 9fa4eb45 — SHAPE, not magnitude): the defect (pre-b9b8f8db) is a
+    // backspace-full-prior + repaste-current cycle where composerDirtyLen only ever GROWS between
+    // redeliveries (it's reset solely by a genuine confirmation, which can't happen while wedged) — so its
+    // per-generation series is STRICTLY INCREASING for as long as the run continues, unboundedly. A scaled
+    // MAX threshold only detects that once it crosses an arbitrarily-picked multiple (see the now-demoted
+    // check below and card 9fa4eb45's own history: 3x -> 4x -> 3.5x, argued over twice, and 4x once landed
+    // only 2.3% above the defect's own measured asymptote — a threshold pinned to the defect it's meant to
+    // catch). The fix's actual invariant is SHAPE: a give-up redelivery of the SAME already-attempted
+    // message now retries Enter-only (near-zero bytes — see `isGiveUpRedelivery` in pty/host.ts submit()),
+    // which breaks the compounding chain; only a genuinely NEW message (a fresh re-mint) gets a real
+    // clear+repaste, and that's budget-capped to one further generation by the pre-existing, unrelated
+    // chainDepth/requeue-budget mechanism (GIVE_UP_REQUEUE_LIMIT=1 at host.ts:584, GIVE_UP_REMINT_LIMIT=1
+    // at sessions/service.ts:1703) before the kickoff permanently parks. So a FIXED tree's series always
+    // contains at least one DROP (a reset to near-zero) somewhere in the run; the DEFECT's never does.
     //
-    // Card 4796f999 (2026-08-27): bumped from 3x to 3.5x, and the positive control above from >=3 to >=4 —
-    // NEITHER alone is enough; both together are what keeps this a real discriminator. Code review built
-    // the actual positive control this suite lacked: forced `isGiveUpRedelivery = false` in `dist` to
-    // resurrect the ORIGINAL pre-b9b8f8db defect and measured all three trees against this SAME suite,
-    // KICKOFF = 2031 B, series reproduced identically across runs:
-    //   POST-FIX (this card)       gens [2083, 52, 4166, 6237]   max 6237 B = 3.07x
-    //   PRE-4796f999 (b9b8f8db)    gens [2083, 52, 4166,   52]   max 4166 B = 2.05x
-    //   PRE-b9b8f8db (THE DEFECT) gens [2083, 4166, 6237, 8308]  max 8308 B = 4.09x
-    // The card's own legitimate fallback (3.07x) is real: this suite's StrayOutputPtyHost provokes a mix
-    // of GIVE-UP SUPPRESSED/RECOVERY on EVERY Enter attempt — exactly the adversarial shape where an
-    // intervening generation's own clear-then-repaste is left genuinely unresolved, and card 4796f999 made
-    // a give-up REDELIVERY verify composer trust (composerDirtyLenBelieved === composerDirtyLen) before
-    // taking the Enter-only shortcut, falling back to a real clear+repaste of ITS OWN body whenever that
-    // trust is broken — see submit()'s own doc. Confirmed STABLE (not a further-compounding regression):
-    // re-run with the stress window extended 3x (15s -> 45s, a scratch probe, not committed) and the max
-    // never exceeded 6237 B — the pre-existing chainDepth/requeue-budget mechanism (unrelated to this card)
-    // permanently parks the kickoff after its one re-mint's own second exhaustion, so there is nothing left
-    // to retry past 4 generations, let alone compound further.
-    // ⚠️ 4x (the first-cut bound) was WRONG: the defect's own max (8308 B) sits only 184 B (2.3%) below a
-    // 4x bound of 8124 B — the guard would have been pinned to the defect's own asymptote, discriminating
-    // only because the re-mint's `[loom:possible-duplicate root:<uuid>]` wrapper happens to add exactly
-    // enough bytes; reword that tag or shorten the root id and the guard goes silently blind, no test ever
-    // failing. 3.5x (7108.5 B) instead gives the legitimate 3.07x fallback 12.3% headroom and catches the
-    // defect's 4.09x with 16.9% margin — balanced against BOTH real trees, not pinned to either one. See
-    // this card's own regression suite (pty-enter-only-verifies-composer-trust.mjs scenario 3) for the
-    // direct, isolated proof that the single-message-no-intervening-clear case (the scenario b9b8f8db
-    // itself targets) remains completely untouched: Enter-only, body written exactly once, zero backspaces.
-    check(`(1) THE FIX: the composer STOPS GROWING — the largest single-generation write (${maxGenBytes} B) stays "` +
-      `well under 3.5x the kickoff body (${KICKOFF.length * 3.5} B), never compounding cycle over cycle`,
+    // Measured, all three trees, KICKOFF = 2031 B (card 9fa4eb45's own review, reproduced identically
+    // across runs). Listed in VALUE ORDER, not by generation number — `submitGeneration` increments by 1
+    // per submit() call (host.ts:7567) but only a generation that actually performs a physical write is
+    // captured in genSizes, so the numbers that appear are sparse; the shape check below only looks at
+    // consecutive VALUES in that sparse series, never at which generation numbers they came from:
+    //   POST-4796f999 (this tree) [2083, 52, 4166, 6237]   max 3.07x  — DROP at position 1->2 (2083->52)
+    //   PRE-4796f999 (b9b8f8db)   [2083, 52, 4166,   52]   max 2.05x  — DROPs at 1->2 and 3->4
+    //   PRE-b9b8f8db (THE DEFECT) [2083, 4166, 6237, 8308] max 4.09x  — NO drop anywhere, strictly ^
+    // The card's own legitimate fallback (POST-4796f999's 4166->6237 rise, position 3->4) is real and does
+    // not defeat this: it's a SECOND rise, not a second DROP, and the series still contains its one drop
+    // earlier (position 1->2) — the shape check only requires at least one drop across the whole run, not
+    // that the run be non-increasing throughout, which is exactly why "never increases" would be the wrong
+    // assertion (it would fail this correct tree at position 3->4).
+    const hasDrop = genSeries.some((v, i) => i > 0 && v < genSeries[i - 1]);
+    check(`(1) THE FIX (shape): the per-generation series ${JSON.stringify(genSeries)} contains at least one ` +
+      `drop (a reset) — the unbounded defect's signature is a chain that only ever grows for as long as the ` +
+      `run continues; a magnitude bound alone can't tell "grew past N" from "grows forever", so this checks ` +
+      `the growth SHAPE directly, independent of any threshold`,
+      hasDrop);
+
+    // THE MAGNITUDE BOUND — now belt-and-braces only, NOT load-bearing on its own (card 9fa4eb45): the
+    // shape check above is what actually discriminates the defect from a fix, at any threshold and at any
+    // truncation length. This bound is retained as a coarse sanity ceiling (catches a regression that grows
+    // unreasonably large even while still technically containing a drop) but is not trusted alone — see the
+    // shape check's own comment for why a scaled max is fragile: 4x once sat only 2.3% above the defect's
+    // own measured asymptote, and a wall-clock-truncated run (3 generations) can pass a magnitude bound
+    // while fully defective (the defect's own first-3-gens max, 6237 B, clears an 8124 B / 4x bound) —
+    // see the truncation positive-control in this card's own verification notes. 3.5x (7108.5 B) gives the
+    // legitimate 3.07x fallback 12.3% headroom and the defect's 4.09x 16.9% margin. See this card's own
+    // regression suite (pty-enter-only-verifies-composer-trust.mjs scenario 3) for the direct, isolated
+    // proof that the single-message-no-intervening-clear case (the scenario b9b8f8db itself targets)
+    // remains completely untouched: Enter-only, body written exactly once, zero backspaces.
+    check(`(1) THE FIX (magnitude, belt-and-braces): the largest single-generation write (${maxGenBytes} B) stays ` +
+      `well under 3.5x the kickoff body (${KICKOFF.length * 3.5} B)`,
       maxGenBytes < KICKOFF.length * 3.5);
 
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
