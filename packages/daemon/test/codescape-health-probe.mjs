@@ -942,8 +942,18 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   await sup.start(["/fake/repo/version-retry-success"]);
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
 
-  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
-  check("(13) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
+  // Card 3ce4e749: was `waitForCompletedCondition(() => getCompletedProbeTickCount() >= 1, ...)` — "ANY
+  // completed tick", never necessarily the tick whose OWN loop ran the version probe. Under load the FIRST
+  // completed tick can be one whose `/graph/health` fetch itself missed `healthProbeTimeoutMs` and never
+  // reached `checkBuildDrift` at all (attempts still 0), while a LATER tick is mid-retry-loop — its first
+  // (hung) attempt already incremented the SAME shared `versionProbeAttempts` counter this scenario then
+  // reads. That reads an in-flight, not-yet-resolved count belonging to a tick that hasn't finished, never
+  // "the" completed tick's own final tally — exactly the class `waitForTickReachingAttempts` (line 79) was
+  // built for and scenario (14) already uses. See the POSITIVE CONTROL block below this scenario, which
+  // reproduces that exact race deterministically and shows the OLD wait selecting attempts<2 here.
+  const retried = await waitForTickReachingAttempts(sup, 2);
+  check("(13) waitForTickReachingAttempts located the completed tick whose own loop reached at least 2 version-probe attempts",
+    retried);
 
   // Card 15c4dad6: relaxed from an exact-2 count, which conflated two different claims — (a) a timed-out
   // attempt 1 gets retried [the real invariant this scenario tests] AND (b) that specific real-subprocess
@@ -973,6 +983,93 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 
   warnings.restore();
   sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+  delete process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS;
+}
+
+// ===================== POSITIVE CONTROL (card 3ce4e749): the OLD "any completed tick" wait CAN select a tick that never reached the version probe, while a LATER tick is mid-retry-loop — and waitForTickReachingAttempts is NOT fooled the same way ====
+// Deterministic reproduction of the exact race scenario (13) used to be exposed to. Tick 1's own
+// `/graph/health` fetch is forced to never answer (FAKE_CODESCAPE_HEALTH_WEDGE_FILE), so it bails at
+// `healthProbeTimeoutMs` WITHOUT ever calling checkBuildDrift — `getCompletedProbeTickCount()` reaches 1
+// while `getVersionProbeAttemptCount()` stays 0. The wedge is then released so tick 2's health fetch
+// succeeds and enters checkBuildDrift -> readInstalledBuild, whose first (fixture-forced-hang) attempt
+// increments the SAME shared `versionProbeAttempts` counter — synchronously, before that attempt's own
+// timeout/retry resolves. Caught at that exact mid-flight instant: the OLD condition
+// (`getCompletedProbeTickCount() >= 1`) is ALREADY satisfied by tick 1, so reading
+// `getVersionProbeAttemptCount()` right then observes tick 2's unresolved partial count (1, not yet the
+// >=2 tick 2 will eventually reach) — proving the old wait is genuinely unsound, not merely theoretically
+// suspect. `waitForTickReachingAttempts` is then shown NOT fooled the same way: it only returns once a
+// tick's OWN completion coincides with the attempt count, which here only happens once tick 2 itself
+// finishes (attempt 1 hangs out, attempt 2 succeeds).
+{
+  const homeDir = path.join(tmpHome, "any-tick-vs-reaching-attempts-control-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  fs.mkdirSync(homeDir, { recursive: true }); // needed up front — the wedge file below must exist before start()
+  const wedgeFile = path.join(homeDir, "control-health-wedge");
+  fs.writeFileSync(wedgeFile, "1"); // tick 1's /graph/health never answers — bails BEFORE reaching checkBuildDrift
+  process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-running";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-installed"; // resolvable once the version probe gets there
+  process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS = "1"; // tick 2's first version-probe attempt hangs, retries into success
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180, // tick 1 (wedged) bails here — well under healthProbeIntervalMs, so tick 2 fires on schedule
+    healthProbeFailureThreshold: 3, // one wedged tick is nowhere near enough to trigger a wedge-kill
+    versionProbeTimeoutMs: 2000,
+    versionProbeRetryDelayMs: 50,
+  });
+  await sup.start(["/fake/repo/control"]);
+  // TIMING-GUARD-SAFE: fully-awaited-completion — this bounded startup poll only waits for the spawn to be
+  // recorded; it does NOT guard the negative check 4 lines below. That check is guarded by the condition-
+  // driven `waitForCompletedCondition` call immediately after this line (not a fixed duration — it only
+  // resolves once tick 1 has genuinely completed), with zero fixed wait between that await and the check.
+  // The zero-attempts read is also structurally guaranteed, not merely timed to be likely: tick 2's version
+  // probe is fixture-forced to hang for its full versionProbeTimeoutMs(2000ms) budget before it could ever
+  // complete, while this poll observes tick 1's completion within one pollMs(25ms) tick — nowhere near
+  // enough time for a second tick to exist, let alone touch versionProbeAttempts.
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+
+  const tick1Ok = await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
+  check("(control) tick 1 (wedged health) completed", tick1Ok);
+  check("(control) tick 1 never reached the version probe — attempts still 0",
+    sup.getVersionProbeAttemptCount() === 0);
+  fs.rmSync(wedgeFile); // release the health wedge so tick 2's health fetch succeeds and its version probe begins
+
+  // Catch tick 2 strictly mid-flight: its first (hung) attempt has incremented the shared counter, but no
+  // SECOND completed tick has landed yet (probeInFlight makes tick 2's own completion — and thus a
+  // resolved final attempt count — impossible until its retry loop finishes). Reuses the existing
+  // waitForCompletedCondition helper (progress-keyed off the very counter this condition watches, so a
+  // genuine stall — never reaching the mid-flight state at all — times out loudly instead of hanging)
+  // rather than a bespoke poll loop.
+  const ticksBeforeMidFlight = sup.getCompletedProbeTickCount();
+  const caughtMidFlight = await waitForCompletedCondition(
+    () => sup.getVersionProbeAttemptCount() >= 1 && sup.getCompletedProbeTickCount() === ticksBeforeMidFlight,
+    () => sup.getVersionProbeAttemptCount(),
+  );
+  check("(control) caught tick 2's version probe mid-flight (first attempt made, tick not yet completed)",
+    caughtMidFlight);
+
+  // THE OLD, UNSOUND WAIT: "any completed tick" is ALREADY satisfied (by tick 1, from before) — reading
+  // getVersionProbeAttemptCount() right now observes tick 2's unresolved partial state, never a completed
+  // tick's own final tally. This is scenario (13)'s real, reproduced failure mode, not a hypothetical.
+  const staleAttemptsUnderOldWait = sup.getVersionProbeAttemptCount();
+  check("(control) POSITIVE CONTROL: the OLD 'any completed tick' condition is satisfied here even though the observed attempts count (< 2) belongs to a DIFFERENT, still-in-flight tick",
+    sup.getCompletedProbeTickCount() >= 1 && staleAttemptsUnderOldWait < 2);
+
+  // THE NEW WAIT: must NOT be fooled the same way — it only returns once a tick's OWN completion coincides
+  // with the attempt count reaching the target (tick 2 itself finishing: attempt 1 hangs out, attempt 2
+  // succeeds).
+  const newWaitOk = await waitForTickReachingAttempts(sup, 2);
+  check("(control) waitForTickReachingAttempts is NOT fooled by tick 1's early completion — it waited for tick 2's own completion",
+    newWaitOk && sup.getVersionProbeAttemptCount() >= 2);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
   delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
   delete process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS;
