@@ -40,16 +40,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //   NOT force a full gate. Read directly against `computeEmitCompareGate` and `isInertMergeDiff`
 //   (git/worktrees.ts), that's backwards: `INERT_MERGE_PATH_PREFIXES` is `["docs/"]` only (an assets/**
 //   path is never inert-skip-eligible), and `computeEmitCompareGate` classifies ONLY
-//   `packages/daemon/src/*.ts` and `packages/daemon/test/*.mjs` paths as eligible for the reduced path —
-//   any other changed path (assets/** included) hits its `notEligible("path outside emit-compare scope")`
-//   branch, which `sessions/service.ts` maps straight to `effectiveGate = gate` (the FULL gate, unreduced).
+//   `packages/daemon/src/*.ts` and `packages/daemon/test/*.mjs` paths as eligible for the reduced path,
+//   plus (card b97f643d, added AFTER this note was first written — re-verified still true for `assets/**`,
+//   not silently inherited) a third class of path already certified inert by `INERT_MERGE_PATH_PREFIXES`,
+//   which is SKIPPED from consideration rather than blocking eligibility — any changed path outside all
+//   three (assets/** included, since it's on none of them) still hits `notEligible("path outside
+//   emit-compare scope")` or the function's empty-set guard, either of which `sessions/service.ts` maps
+//   straight to `effectiveGate = gate` (the FULL gate, unreduced).
 //   So an edit to either serve-static.mjs copy ALWAYS takes the full gate, exactly like a behavioural .ts
 //   edit does — it is never reachable-but-unrun on a reduced path, by the criterion's own terms. Adding this
 //   guard to STATIC_GUARD_REPO_PATHS would cost a second hand-maintained list entry (plus the
 //   GUARD_BASENAMES mirror in emit-compare-gate.mjs — see that file's own doc for why the omission direction
 //   fails silently) to protect against a code path that can't happen. Re-derive this if
 //   `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`/`INERT_MERGE_PATH_PREFIXES` ever widen to cover
-//   `assets/**` — that would reopen the question this note just closed.
+//   `assets/**`, OR if a new exempt-path class is ever added to `computeEmitCompareGate`'s classification
+//   loop (the card b97f643d shape: a new SKIPPED-not-blocking category, distinct from widening an existing
+//   allowlist) — either would reopen the question this note just closed, and neither is guaranteed to be
+//   caught by re-reading only the three named constants above.
 //
 // ✅ POSITIVE CONTROL (run manually, not part of this file's own execution — pasted in the task report,
 // same convention as clock-path-regression-guard.mjs):

@@ -1984,6 +1984,15 @@ const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
  * whitespace, e.g. `" docs"` — reasoned, not observed, but zero-cost to close): git's own `--name-only`
  * output uses `\n` line endings even on Windows, so this only ever strips a stray CR, never real path
  * content.
+ *
+ * A THIRD caller depends on the same two flags for the same reasons, without being built on this shared
+ * helper: {@link computeEmitCompareGate} issues its own `git diff --name-status` invocation (it needs
+ * per-path STATUS, which `--name-only` doesn't carry) with `--no-renames` and `-c core.quotePath=false` set
+ * identically, and inline-only — a non-ASCII `docs/café-findings.md` must still match {@link
+ * isInertMergePath}'s `startsWith("docs/")` check there too (card b97f643d added the second real
+ * `startsWith` allowlist consumer of a diff this file produces). Not duplicated here as a THIRD copy of the
+ * flag list to keep in sync — see that call site's own comment for why `--name-status` couldn't reuse this
+ * function directly.
  */
 async function changedPathsBetween(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
@@ -2053,6 +2062,18 @@ async function changedPathSetDigest(
 const INERT_MERGE_PATH_PREFIXES = ["docs/"];
 
 /**
+ * Whether a single path falls under an {@link INERT_MERGE_PATH_PREFIXES} prefix — the ONE predicate both
+ * {@link isInertMergeDiff} (below) and {@link computeEmitCompareGate}'s classification loop (further down
+ * this file) test against, so the boundary semantics `merge-gate-inert-diff.mjs` scenario (G) pins
+ * (`docs-internal/`, `docsfoo.md` must NOT match) can never drift between the two call sites — card
+ * b97f643d, Code Review: reusing the LIST alone still left the `startsWith` PREDICATE written twice, which
+ * is the identical divergence risk one level down from a second hand-copied list.
+ */
+function isInertMergePath(p: string): boolean {
+  return INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix));
+}
+
+/**
  * Whether every path changed between `baseSha` and `ref` falls under an {@link
  * INERT_MERGE_PATH_PREFIXES} prefix — a provable property of the changed file SET, not a prediction about
  * test coverage (card db9b0130; this is a strict, safe subset of the deferred "scope the gate to the
@@ -2084,7 +2105,7 @@ export async function isInertMergeDiff(
     return false;
   }
   if (paths.length === 0) return false;
-  return paths.every((p) => INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)));
+  return paths.every(isInertMergePath);
 }
 
 /** Prefix under which a Loom-bundled skill asset lives. Only Loom's OWN self-hosted repo ever has a path
@@ -2237,10 +2258,15 @@ export interface EmitCompareGateResult {
  * {@link isInertMergeDiff} above, which proves a diff can skip the gate ENTIRELY: this proves only that the
  * diff's COMPILED BEHAVIOR is unchanged, so `pnpm build` (real typecheck) and the static source-text guards
  * below still run UNCONDITIONALLY — only the runtime test suite itself is ever skipped, and only for
- * `packages/daemon/src/**\/*.ts`; every other path (including `test/*.mjs`, handled separately below) fails
- * this diff closed to the full gate.
+ * `packages/daemon/src/**\/*.ts` and a changed `test/*.mjs` file (handled separately below); a path already
+ * certified inert by {@link INERT_MERGE_PATH_PREFIXES} is SKIPPED from classification entirely rather than
+ * gating (card b97f643d — see that skip's own doc, just above the classification loop below, for why this
+ * is sound: {@link isInertMergeDiff} must prove nothing anywhere in the gate reads the path at all, while
+ * this function needs only the weaker "no still-running check reads it" — build, every static guard, and
+ * any changed test file all still run — so the stronger certification implies the weaker one); every OTHER
+ * path fails this diff closed to the full gate.
  *
- * WHY NOT "skip when the diff is comments-only" (Code Review, card 2154b6ad §2): three of the four static
+ * WHY NOT "skip when the diff is comments-only" (Code Review, card 2154b6ad §2): five of the six static
  * guards under `packages/daemon/test/` grep raw FILE CONTENT — e.g. `clock-path-regression-guard.mjs`'s
  * `/Date\.now\(\)/` scan. A comment-only edit CAN flip one of them: a real owner branch (`6d53b02b`)
  * introduced the literal string `Date.now()` inside an explanatory comment in a `test/*.mjs` file. So
@@ -2332,6 +2358,12 @@ export async function computeEmitCompareGate(
 
   let entries: string[];
   try {
+    // `--no-renames` and `-c core.quotePath=false` carry the SAME load-bearing reasons {@link
+    // changedPathsBetween}'s own doc gives (this call needs `--name-status`, which that shared helper
+    // doesn't produce, so it's a separate invocation rather than a third copy of that helper's flag list) —
+    // most concretely now that a changed path is tested against {@link isInertMergePath}'s `startsWith`
+    // allowlist here too (card b97f643d): a renamed-into-`docs/` source file or an unquoted non-ASCII
+    // `docs/` filename would otherwise misclassify exactly as `isInertMergeDiff` warns against.
     const raw = (await withTimeout(
       git.raw(["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames", `${baseSha}..${ref}`]),
       timeoutMs, "git diff --name-status (emit-compare classify)",
@@ -2359,6 +2391,30 @@ export async function computeEmitCompareGate(
     if (tab < 0) return notEligible(`unparseable diff line: ${line}`);
     const status = line[0];
     const p = line.slice(tab + 1);
+    // Card b97f643d: a path already certified inert by {@link isInertMergePath} (e.g. `docs/**`) is
+    // SKIPPED here, before it can hit the `notEligible` catch-all below — REUSING that exact predicate
+    // (list AND matching logic), never a second hand-copied one (this file's own recurring shared-unit-
+    // divergence warning). Without this, a diff that is otherwise reducible (comment-only .ts, or a
+    // changed test file) but ALSO touches one provably-inert docs/ path fell to the FULL gate — strictly
+    // MORE expensive than either the docs/ path alone (which already skips the gate entirely via
+    // `isInertMergeDiff`, itself built on this same predicate) or the reducible part alone. This is purely
+    // NARROWING: it can only ever remove a path from consideration that would otherwise have forced
+    // `eligible:false`, never admit a path that isn't ALSO already provably inert by the same predicate the
+    // full-skip path trusts.
+    //
+    // DOES NOT, BY ITSELF, GUARANTEE AN ALL-INERT DIFF NEVER REACHES THIS FUNCTION — this function has TWO
+    // callers in sessions/service.ts, and they are NOT guarded the same way. The PRIMARY classification
+    // site (`~:12856`) is gated `!inertSkip`, with `inertSkip` freshly re-derived from `isInertMergeDiff`
+    // immediately above — so an all-inert diff structurally cannot reach this function through that site.
+    // The ADMISSION-TIME RECLASSIFICATION site (`~:13064`) is gated only on a PRIOR classification having
+    // been eligible and never re-consults `isInertMergeDiff` — so a diff that shrinks to all-inert paths
+    // between pre-wait classification and admission CAN reach this function that way. For THAT path, it is
+    // the pre-existing empty-set guard below (`no eligible changed path left to prove inert`) — not this
+    // skip — that fails the result closed; this skip only ensures the reason is that guard rather than the
+    // `path outside emit-compare scope` catch-all further down. Traced at card b97f643d; judged acceptable
+    // as-is (narrow window, fails toward the safe full-gate outcome either way) rather than widened to
+    // re-consult `isInertMergeDiff` a second time.
+    if (isInertMergePath(p)) continue;
     if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
       if (status !== "M") return notEligible(`non-modify status "${status}" on compiled file ${p}`);
       changedTsFiles.push(p);
@@ -2436,10 +2492,17 @@ export async function computeEmitCompareGate(
   }
 
   if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0) {
-    // Every changed path was a DELETED test/*.mjs file — an excluded-dir (fixtures/, census/) path already
-    // returned notEligible above (card 44968963), so it can never reach here. Nothing left needing
-    // behavioral proof, but nothing PROVEN inert either — fail closed rather than report a green run that
-    // proved nothing.
+    // Every remaining changed path was a DELETED test/*.mjs file, or one already certified inert by
+    // INERT_MERGE_PATH_PREFIXES and skipped above (card b97f643d) — an excluded-dir (fixtures/, census/)
+    // path already returned notEligible above (card 44968963), so it can never reach here. Nothing left
+    // needing behavioral proof, but nothing PROVEN inert either — fail closed rather than report a green
+    // run that proved nothing.
+    //
+    // THIS is the actual backstop for the admission-time reclassification call site (service.ts ~:13064,
+    // gated only on a PRIOR eligible classification, never re-consulting isInertMergeDiff) — the one path
+    // by which a diff that has become entirely inert CAN still reach this function (see the skip's own doc
+    // above the classification loop). The skip does not itself guarantee anything survives to classify;
+    // this guard is what fails such a diff closed, not the skip.
     return notEligible("no eligible changed path left to prove inert");
   }
   // Card 17cd1f30 DoD-3: a diff whose ONLY changed test-shaped path(s) are NOT_HERMETIC (empty

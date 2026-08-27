@@ -31,6 +31,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (G) SOUNDNESS — Code Review (manager #128): emitDecoratorMetadata:true in the PACKAGE tsconfig
 //       (packages/daemon/tsconfig.json), NOT the base one, must ALSO force FULL gate on an otherwise
 //       comment-only .ts edit.
+//   (N) card b97f643d — a provably-inert `docs/**` path (already certified by `INERT_MERGE_PATH_PREFIXES`,
+//       the SAME allowlist `isInertMergeDiff` trusts to skip the gate ENTIRELY for an all-docs diff) must
+//       be SKIPPED during classification, not treated as "outside emit-compare scope" — a comment-only .ts
+//       edit plus one docs/ line must still REDUCE. This exercises the ONE path order real git actually
+//       produces here: `git diff --name-status` is lexically ordered and "docs/" always sorts before
+//       "packages/" for this repo's two scoped prefixes, so no real invocation on this repo can construct
+//       the reverse order — order-independence is NOT proven by this test. It instead rests on a structural
+//       argument: the skip is an unconditional per-line `continue` that reads no state accumulated from
+//       prior iterations (`changedTsFiles`/`changedTestFiles` are never consulted before the skip decision),
+//       so its outcome for a given path cannot depend on where that path sits in the diff.
 // See `emit-compare-gate-scope.mjs` for (H)-(L): the shell-metacharacter defence-in-depth case, the two
 // fixtures/-scope cases, and the branch-blind-at-cap-queue-admission case.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
@@ -50,7 +60,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, buildReducedGateCommand } = await import("../dist/git/worktrees.js");
+const { createWorktree, buildReducedGateCommand, computeEmitCompareGate } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -262,6 +272,80 @@ try {
     check("(G) gateRan:true", confirm.gateRan === true);
     check("(G) captured command IS the full gate — emitDecoratorMetadata in packages/daemon/tsconfig.json fails closed, not just in the base config", capturedGate === FULL_GATE);
   }
+
+  // ── (N) card b97f643d — a provably-inert docs/** path alongside an otherwise-reducible comment-only .ts
+  //        edit must REDUCE, not fail closed as "outside emit-compare scope". RED-first: this is expected
+  //        to FAIL on pre-fix code (the specimen the card was filed from) ────────────────────────────────
+  {
+    const N = mk("n");
+    makeRepoWithBaseSrcFile(N, BASE_SRC);
+    mkdirp(path.join(N.repo, "docs", "investigations"));
+    fs.writeFileSync(path.join(N.repo, "docs", "investigations", "findings.md"), "# findings\n\nline one\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: seed findings"`, { cwd: N.repo });
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId);
+    N.worktreePath = worktreePath; N.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
+    fs.appendFileSync(path.join(worktreePath, "docs", "investigations", "findings.md"), "line two\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + one findings.md line"`, { cwd: worktreePath });
+    seed(db, N);
+
+    const confirm = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
+    check("(N) merged:true", confirm.merged === true);
+    check("(N) gateRan:true — a real (smaller) gate still spawns", confirm.gateRan === true);
+    check("(N) the gate command WAS called exactly once", calls === 1);
+    check("(N) captured command is NOT the full gate — the docs/ line does not defeat the reduction", capturedGate !== FULL_GATE);
+    check("(N) captured command does NOT run the full test:daemon suite", !capturedGate.includes("test:daemon"));
+    check("(N) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
+    check("(N) a distinguishing reduced-gate warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
+  }
+
+  // ── (N2) card b97f643d — NARROWING GUARD: a docs/ line riding alongside a REAL behavioral .ts edit must
+  //        NOT turn what would have been a full gate into a reduced one — the skip only ever removes an
+  //        already-inert path from consideration, it never widens what counts as eligible ──────────────
+  {
+    const N2 = mk("n2");
+    makeRepoWithBaseSrcFile(N2, BASE_SRC);
+    mkdirp(path.join(N2.repo, "docs"));
+    fs.writeFileSync(path.join(N2.repo, "docs", "notes.md"), "# notes\n\nline one\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: seed notes"`, { cwd: N2.repo });
+    const baseSha = execSync("git rev-parse HEAD", { cwd: N2.repo }).toString().trim();
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(N2.repo, N2.projId, N2.taskId);
+    N2.worktreePath = worktreePath; N2.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
+    fs.appendFileSync(path.join(worktreePath, "docs", "notes.md"), "line two\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold + a docs note"`, { cwd: worktreePath });
+
+    // Code Review, card b97f643d: `capturedGate === FULL_GATE` alone is BLIND to whether the skip is even
+    // present — a `.ts` edit that isn't transpile-identical fails closed to the full gate for that reason
+    // alone, with or without the docs/ line, so that assertion by itself passes identically pre-fix and
+    // post-fix and never actually witnesses the skip. Call `computeEmitCompareGate` directly and assert
+    // WHICH reason fired: it must be the real behavioral-edit reason, never the pre-fix "docs/ path is
+    // outside emit-compare scope" reason the skip exists to eliminate. MUST run BEFORE confirmWorkerMerge:
+    // the merge below deletes/advances the branch this reads, so calling it after would read post-merge
+    // repo state instead of the diff being classified (measured: doing this after the merge silently
+    // changes the failure to "git error reading the diff" — a different, unrelated reason that happens to
+    // also not match either regex, which would have made this assertion pass for the wrong cause).
+    const direct = await computeEmitCompareGate(N2.repo, worktreePath, baseSha, branch);
+    check("(N2) direct call: still not eligible", direct.eligible === false);
+    check("(N2) direct call: reason IS the real behavioral-edit reason", /not transpile-identical/.test(direct.reason ?? ""));
+    check("(N2) direct call: reason is NOT the pre-fix docs/-out-of-scope reason", !/path outside emit-compare scope/.test(direct.reason ?? ""));
+
+    seed(db, N2);
+    const confirm = await sessions.confirmWorkerMerge(N2.mgrId, N2.workerId);
+    check("(N2) gateRan:true", confirm.gateRan === true);
+    check("(N2) captured command IS the full gate — a real behavioral edit alongside a docs/ line still fails closed", capturedGate === FULL_GATE);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -269,6 +353,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; and emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed. See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d). See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
