@@ -1322,7 +1322,20 @@ export type OrchestrationEventKind =
   // session itself; `detail` carries { gen, writtenHash, reportedHash, intendedLen }. The durable audit
   // trail for a mismatch whose own notice promised a follow-up either way but, until this card, only ever
   // delivered on the SUCCESS half of that promise.
-  | "prompt_mismatch_unresolved";
+  | "prompt_mismatch_unresolved"
+  // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
+  // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
+  // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
+  // session that always exists) exactly ONE aggregate event per restart, never one per failed session (a
+  // restart is inherently a batch; N separate events would flood attention-push's IMMEDIATE_BURST_CAP for
+  // no benefit — see its doc). `detail` carries { count, failed: [{ sessionId, role, projectId, taskId,
+  // wasBusy }] } — full cross-project identity is DELIBERATE here (unlike the count-only text this same
+  // call site sends the requester/Lead — see 5a9a963b's isolation invariant, preserved untouched): this
+  // event's ONLY consumer is the human-facing `attention-push` surface (classify() maps it to
+  // "worker-crashed", the `session_recovery_abandoned` precedent), which exists precisely so a fleet-
+  // resume failure has a real owner even in the shipped (non-LOOM_DEV) product where no platform-role
+  // session can ever exist to receive the identified nudge (see `paths.ts` › `isLoomDev`).
+  | "fleet_resume_failed";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1356,7 +1369,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
-  paste_tripwire_give_up: true, prompt_mismatch_unresolved: true,
+  paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 
@@ -2543,6 +2556,7 @@ export interface PollJob {
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
+  "fleet_resume_failed",
   "question_asked",
   "idle_escalated", "idle_report",
   "context_escalated",

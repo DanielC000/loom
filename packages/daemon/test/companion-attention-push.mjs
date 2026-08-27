@@ -545,7 +545,60 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 21. FIX (card 9e4205f5): a fleet-resume failure has a real owner in the shipped (non-LOOM_DEV)
+//     product, where no `role === "platform"` session can ever exist to receive the identified
+//     `[loom:fleet-resume-failure]` nudge sessions/service.ts sends when a Lead IS live. classify()/
+//     alertLine() sanity for the new "fleet_resume_failed" kind — mirrors section 17's shape. ---
+{
+  check("classify: fleet_resume_failed → worker-crashed (same family as session_recovery_abandoned)",
+    classify("fleet_resume_failed", { count: 1, failed: [] }) === "worker-crashed");
+  const detail = {
+    count: 2,
+    failed: [
+      { sessionId: "dead-session-aaaaaaaa", role: "worker", projectId: "proj-other-bbbbbbbb", taskId: "task-cccccccc", wasBusy: true },
+      { sessionId: "dead-session-dddddddd", role: "manager", projectId: "proj-other-eeeeeeee", taskId: null, wasBusy: false },
+    ],
+  };
+  const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "fleet_resume_failed", detail }, "worker-crashed", "Proj Z");
+  check("fleet_resume_failed alert line: names the project + accurate count", line.includes("Proj Z") && line.includes("2 session(s) elsewhere in the fleet failed to resume"));
+  // DoD-4: assert the alert is ACTUALLY RAISED WITH THE IDENTITY IN IT — a test asserting only "no crash"
+  // or "a warning exists" would pass identically against the broken (count-only, unowned) behaviour.
+  check("fleet_resume_failed alert line: carries the failed sessions' cross-project identity (role@project/session)",
+    line.includes("worker@proj-oth/dead-ses") && line.includes("manager@proj-oth/dead-ses"));
+  // A malformed/missing detail degrades to the count alone, never throws.
+  const lineNoIdentity = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "fleet_resume_failed", detail: { count: 3 } }, "worker-crashed", "Proj Z");
+  check("fleet_resume_failed alert line: a missing `failed` array degrades to count-only, never throws", lineNoIdentity.includes("3 session(s)") && !lineNoIdentity.includes("undefined"));
+}
+
+// --- 22. END-TO-END (card 9e4205f5, DoD-4 — the LOOM_DEV=0, no-live-Lead path): a real fleet_resume_failed
+//     event — for a failed session in a DIFFERENT project than the companion's own grant — ticks through
+//     the watcher and pushes a turn naming that cross-project identity. This is the exact configuration a
+//     real (non-dev) end user runs: no platform-role session ever exists, so this attention-push surface
+//     is the ONLY owner a fleet-resume failure has at all. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  // Filed under mgrA (Proj A, the restart requester) but naming a failed session that lived in Proj B —
+  // mirrors sessions/service.ts's real emission (managerSessionId: reqId, detail.failed carries whatever
+  // OTHER project's session actually failed to resume).
+  fire(e, "fleet_resume_failed", e.mgrA, {
+    count: 1,
+    failed: [{ sessionId: e.mgrB, role: "manager", projectId: e.projB, taskId: null, wasBusy: true }],
+  });
+  e.watcher.tick(new Date());
+  check("e2e: a fleet_resume_failed event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn names the accurate count", e.enqueued.length === 1 && e.enqueued[0].text.includes("1 session(s) elsewhere in the fleet failed to resume"));
+  // DoD-4, concretely: the identity (the OTHER project's failed session) actually reaches the human —
+  // proving this path OWNS the failure, not just that a generic alert fired.
+  check("e2e: the pushed turn identifies the failed session's role and (8-char) id — this IS the ownership fix",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("manager@") && e.enqueued[0].text.includes(e.mgrB.slice(0, 8)));
+  const pushed = events(e, "companion_alert_pushed");
+  check("e2e: emits one companion_alert_pushed audit row", pushed.length === 1 && pushed[0].detail.sourceKind === "fleet_resume_failed");
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, and renders a platform_escalate alert with a readable title instead of an opaque line."
+  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, and gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

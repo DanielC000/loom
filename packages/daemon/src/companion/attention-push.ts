@@ -124,6 +124,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
       return detail?.status === "blocked" ? "worker-blocked" : null;
     case "worker_exited_without_report":
     case "session_recovery_abandoned":
+    // Card 9e4205f5: same family as `session_recovery_abandoned` — sessions that did not come back. This
+    // is the ONLY owner a fleet-resume failure has in the shipped (non-LOOM_DEV) product, where no
+    // `role === "platform"` session can ever exist to receive the identified nudge `resumeFleetOnBoot`
+    // sends when a Lead IS live (see sessions/service.ts's `liveLead` branch — unchanged by this card).
+    case "fleet_resume_failed":
       return "worker-crashed";
     case "question_asked":
       return "decision-pending";
@@ -171,6 +176,28 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "session_recovery_abandoned":
       line = `${projectName}: crash-loop, auto-resume gave up — ${who}`;
       break;
+    case "fleet_resume_failed": {
+      // Card 9e4205f5: full cross-project identity is DELIBERATE here — this event's only consumer is
+      // this human-facing surface (see the doc on the "fleet_resume_failed" kind in shared/src/types.ts),
+      // unlike the count-only text the same restart sends a requesting manager (5a9a963b's invariant,
+      // untouched). `detail.failed` entries are read defensively (a stale/foreign row is never trusted).
+      const rawFailed = Array.isArray(detail.failed) ? detail.failed : [];
+      const count = typeof detail.count === "number" ? detail.count : rawFailed.length;
+      const idPreview = rawFailed
+        .slice(0, 3)
+        .map((f) => {
+          const d = (f ?? {}) as Record<string, unknown>;
+          const proj = typeof d.projectId === "string" ? d.projectId.slice(0, 8) : "?";
+          const sess = typeof d.sessionId === "string" ? d.sessionId.slice(0, 8) : "?";
+          const role = typeof d.role === "string" ? d.role : "plain";
+          return `${role}@${proj}/${sess}`;
+        })
+        .join(", ");
+      const more = rawFailed.length > 3 ? `, +${rawFailed.length - 3} more` : "";
+      line = `${projectName}: ${count} session(s) elsewhere in the fleet failed to resume after a restart` +
+        (idPreview ? ` — ${idPreview}${more}` : "");
+      break;
+    }
     case "question_asked": {
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
       const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;

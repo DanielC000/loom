@@ -4883,6 +4883,16 @@ export class SessionService {
         let leadNotified = false;
         let leadOwnFailureDetail: string | null = null;
         if (!fleetOk) {
+          // Card 9e4205f5: a durable, ONE-per-restart aggregate event — the human-facing owner of a
+          // fleet-resume failure in EVERY configuration, not just when a (LOOM_DEV-only) platform Lead
+          // happens to be live. Filed under `reqId` (a manager/platform session that always exists)
+          // regardless of the `liveLead` branch below, which is unchanged: this is an ADDITIVE backstop,
+          // never a replacement for the identified Lead nudge when one IS live. Full cross-project
+          // identity in `detail` is deliberate — see the kind's own doc in shared/src/types.ts.
+          this.db.appendEvent({
+            id: randomUUID(), ts: now.toISOString(), managerSessionId: reqId, kind: "fleet_resume_failed",
+            detail: { count: failed.length, failed: failedDetail },
+          });
           const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
           if (liveLead) {
             const detailLines = failedDetail.map((d) =>

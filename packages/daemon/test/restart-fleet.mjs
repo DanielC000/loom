@@ -586,6 +586,17 @@ try {
     msg8i.length === 1 && /1 session\(s\) elsewhere in the fleet failed to resume/i.test(msg8i[0]));
   check("(8i) no live Lead: it never fabricates a false 'Lead has been notified' claim",
     msg8i.length === 1 && !/the Lead has been notified/i.test(msg8i[0]));
+  // Card 9e4205f5 (DoD-4): the configuration real (non-LOOM_DEV) users run — no platform-role session
+  // exists at all, so the old code's ONLY owner (the liveLead branch) never fires. Assert a durable
+  // `fleet_resume_failed` event is STILL filed (naming the failure's real identity), so this human-facing
+  // ownership backstop is proven to work in EXACTLY the unowned configuration this card is about — not
+  // merely that "no crash" happened, which would pass identically against the old, unowned behaviour.
+  const events8i = db.listEvents(d1.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(8i) no live Lead: a durable fleet_resume_failed event is STILL filed under the requester", events8i.length === 1);
+  check("(8i) the durable event carries the accurate count", events8i.length === 1 && events8i[0].detail?.count === 1);
+  check("(8i) the durable event carries the failed session's full identity (this IS the ownership fix)",
+    events8i.length === 1 && Array.isArray(events8i[0].detail?.failed) &&
+    events8i[0].detail.failed.some((f) => f.sessionId === d1.dead && f.projectId === B.proj && f.role === "worker" && f.wasBusy === true));
 
   // (8ii) A LIVE Platform Lead exists, and the REQUESTER IS NOT the Lead. The requester's own notice
   // gets an accurate count + "the Lead has been notified" — never the failed session's identity (the
