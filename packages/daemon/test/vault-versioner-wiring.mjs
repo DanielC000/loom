@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { simpleGit } from "simple-git";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
@@ -24,7 +25,10 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-vv-home-${Date.now()}-${pro
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
-const { startVaultVersioners, VaultVersioner } = await import("../dist/vault/versioner.js");
+const {
+  startVaultVersioners, VaultVersioner,
+  gitignoredTopLevelNames, safeToExcludeNames, buildIgnoredMatcher,
+} = await import("../dist/vault/versioner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -205,6 +209,287 @@ try {
   check("flushSync skips an Obsidian-Git-managed own-root vault", vor.flushSync() === false);
   check("Obsidian-Git-managed own-root vault got no loom commit", commitCount(obsOwnRoot) === beforeObsOwn);
   await vor.stop();
+
+  // FIX VERIFICATION (card 39ceb732, Lever 5 concretized): a repo's own root .gitignore excludes a
+  // top-level scratch folder from the WATCHER too — the exact shape of the "OSS Contributions" project's
+  // real _external/ (~19k entries, ~14% of the ~134k measured on card a0c62330): a directory git already
+  // NEVER commits (git add . respects .gitignore), so watching it cost OS handles for zero benefit. Two
+  // things must both hold: (1) the parser recognizes the right subset of gitignore syntax; (2) the LIVE
+  // chokidar watcher actually stops tracking entries under the excluded folder, while STILL tracking a
+  // sibling non-ignored file — a positive control so an "everything's excluded" bug can't hide as a pass.
+  {
+    const gi = [
+      "scratch/",             // bare top-level dir — SHOULD be excluded (the oss-contrib _external/ shape)
+      "# a comment",          // comment — ignored
+      "",                     // blank line — ignored
+      "!kept-anyway",         // negation — out of scope, left watched
+      "*.log",                // glob — out of scope, left watched
+      "nested/deep",          // multi-segment path — out of scope, left watched
+      "/leading-slash-dir/",  // ROOT-ANCHORED — out of scope, left watched (see the MAJOR fix test below)
+      " leading-space-dir/",  // LEADING WHITESPACE is significant to git (NOT ignored) — out of scope, left watched
+    ].join("\n");
+    const vaultF = path.join(root, "vaultF");
+    initVault(vaultF);
+    fs.writeFileSync(path.join(vaultF, ".gitignore"), gi);
+    fs.mkdirSync(path.join(vaultF, "scratch"));
+    fs.writeFileSync(path.join(vaultF, "scratch", "ignored.txt"), "should never be watched\n");
+    fs.writeFileSync(path.join(vaultF, "keep.md"), "# should still be watched + committed\n");
+
+    const names = gitignoredTopLevelNames(vaultF);
+    check("gitignoredTopLevelNames picks up a bare top-level dir entry", names.includes("scratch"));
+    check("gitignoredTopLevelNames excludes a ROOT-ANCHORED (leading-/) entry — CRITICAL/MAJOR fix", !names.includes("leading-slash-dir"));
+    check("gitignoredTopLevelNames excludes a LEADING-WHITESPACE line (significant to git, not ignored) — round-3 fix", !names.includes("leading-space-dir"));
+    check("gitignoredTopLevelNames excludes a negated pattern", !names.includes("kept-anyway"));
+    check("gitignoredTopLevelNames excludes a glob pattern", !names.some((n) => n.includes("*")));
+    check("gitignoredTopLevelNames excludes a nested multi-segment path", !names.includes("nested/deep") && !names.includes("deep"));
+
+    const gitF = simpleGit(vaultF);
+    const safeF = await safeToExcludeNames(vaultF, gitF);
+    check("safeToExcludeNames keeps the untracked scratch/ candidate", safeF.includes("scratch"));
+
+    // Driven through buildIgnoredMatcher (the ONLY exported form) rather than the un-exported
+    // buildIgnoredPattern — Critical-2's fix lives in the RELATIVE-path matcher, so a check that fed an
+    // absolute path straight to the bare pattern would be testing exactly the form that fix retired.
+    const matcherF = buildIgnoredMatcher(vaultF, safeF);
+    check(
+      "buildIgnoredMatcher still matches all FOUR load-bearing hardcoded exclusions",
+      matcherF(path.join(vaultF, ".git", "x"))
+        && matcherF(path.join(vaultF, "node_modules", "x"))
+        && matcherF(path.join(vaultF, "worktrees", "x"))
+        && matcherF(path.join(vaultF, ".obsidian", "x")),
+    );
+    check("buildIgnoredMatcher also matches the newly-gitignored dir", matcherF(path.join(vaultF, "scratch", "ignored.txt")));
+
+    const vf = new VaultVersioner(vaultF, 150);
+    await vf.start();
+    try {
+      await vf.whenReady();
+      const allTrackedNames = Object.values(vf.watchedSnapshot ?? {}).flat();
+      check("gitignored scratch/ file is NOT tracked by the live watcher", !allTrackedNames.includes("ignored.txt"));
+      check("gitignored scratch/ dir itself is NOT tracked by the live watcher", !allTrackedNames.includes("scratch"));
+      check("a sibling non-ignored file IS still tracked (scan actually ran, not silently empty)", allTrackedNames.includes("keep.md"));
+
+      // The exclusion has ZERO effect on what gets committed: `git add .` was NEVER going to stage a
+      // gitignored, UNTRACKED path regardless of watcher state, so this doesn't need (and shouldn't try)
+      // its own commit-behavior assertion — a fixed-wait "no commit happened" check can't distinguish
+      // "correctly never fires" from "hasn't fired YET" in one trial. The `getWatched()` snapshot above is
+      // the stronger, directly-observable proof: no chokidar "all" event can ever fire for an untracked
+      // path, so `schedule()`/`commit()` mechanically can't be reached from an edit under scratch/ at all.
+      const beforeF = commitCount(vaultF);
+      fs.writeFileSync(path.join(vaultF, "keep.md"), "# edited — must still auto-commit\n");
+      check("a real (non-excluded) edit still auto-commits", await waitFor(() => commitCount(vaultF) > beforeF));
+    } finally {
+      await vf.stop();
+    }
+  }
+
+  // CRITICAL-1 REGRESSION TEST (review finding): `.gitignore` has NO effect on an already-TRACKED path.
+  // A repo in the ordinary "committed first, ignored later" shape (commit a file, THEN add its directory
+  // to .gitignore) must keep auto-committing edits to that tracked file — excluding it from the watcher
+  // would silently stop version history for real content, which is the whole point of this feature.
+  {
+    const vaultI = path.join(root, "vaultI");
+    initVault(vaultI);
+    fs.mkdirSync(path.join(vaultI, "notes"));
+    fs.writeFileSync(path.join(vaultI, "notes", "a.md"), "hello\n");
+    git(vaultI, "add notes/a.md");
+    git(vaultI, "commit -m init");
+    // notes/ is added to .gitignore AFTER a.md is already tracked — the "committed first, ignored later"
+    // shape. scratch/ is a genuinely-untracked sibling, included as a positive control (proves this vault's
+    // exclusion mechanism still works normally, so a "nothing gets excluded" bug can't hide as a pass).
+    fs.writeFileSync(path.join(vaultI, ".gitignore"), "notes/\nscratch/\n");
+    fs.mkdirSync(path.join(vaultI, "scratch"));
+    fs.writeFileSync(path.join(vaultI, "scratch", "untracked.md"), "never committed\n");
+
+    const gitI = simpleGit(vaultI);
+    const safeI = await safeToExcludeNames(vaultI, gitI);
+    check("safeToExcludeNames does NOT offer a gitignored-but-TRACKED name for exclusion", !safeI.includes("notes"));
+    check("safeToExcludeNames still offers the genuinely-untracked sibling", safeI.includes("scratch"));
+
+    const vi = new VaultVersioner(vaultI, 150);
+    await vi.start();
+    try {
+      await vi.whenReady();
+      const allTrackedNames = Object.values(vi.watchedSnapshot ?? {}).flat();
+      check("the gitignored-but-TRACKED notes/ dir IS still tracked by the live watcher", allTrackedNames.includes("notes"));
+      check("the genuinely-untracked scratch/ dir is NOT tracked by the live watcher", !allTrackedNames.includes("scratch"));
+
+      const beforeI = commitCount(vaultI);
+      fs.appendFileSync(path.join(vaultI, "notes", "a.md"), "edited after notes/ was gitignored\n");
+      check("editing a gitignored-but-TRACKED file still auto-commits (the actual regression)", await waitFor(() => commitCount(vaultI) > beforeI));
+    } finally {
+      await vi.stop();
+    }
+  }
+
+  // CRITICAL-1b REGRESSION TEST (review Round 3): `core.quotePath` defaults TRUE, so a plain
+  // `git ls-files` QUOTES a non-ASCII tracked path as backslash-escaped octal (e.g. `Café/note.md` prints
+  // as `"Caf\303\251/note.md"`), which a naive newline+`/`-split shreds — wrongly reporting a REAL tracked
+  // directory as untracked, exactly recreating Critical-1 with an ordinary personal-vault folder name
+  // (`Café`, `文档`, `Notas`), not an exotic input. Identical shape to vaultI above, just with a non-ASCII
+  // tracked name — this is the ASCII-only blind spot the reviewer flagged in that block.
+  {
+    const vaultL = path.join(root, "vaultL");
+    initVault(vaultL);
+    fs.mkdirSync(path.join(vaultL, "Café"));
+    fs.writeFileSync(path.join(vaultL, "Café", "note.md"), "bonjour\n");
+    git(vaultL, 'add "Café/note.md"');
+    git(vaultL, "commit -m init");
+    fs.writeFileSync(path.join(vaultL, ".gitignore"), "Café/\nscratch/\n");
+    fs.mkdirSync(path.join(vaultL, "scratch"));
+    fs.writeFileSync(path.join(vaultL, "scratch", "untracked.md"), "never committed\n");
+
+    const gitL = simpleGit(vaultL);
+    const safeL = await safeToExcludeNames(vaultL, gitL);
+    check("safeToExcludeNames does NOT offer a gitignored-but-TRACKED non-ASCII name for exclusion", !safeL.includes("Café"));
+    check("safeToExcludeNames still offers the genuinely-untracked ASCII sibling", safeL.includes("scratch"));
+
+    const vl = new VaultVersioner(vaultL, 150);
+    await vl.start();
+    try {
+      await vl.whenReady();
+      const allTrackedNames = Object.values(vl.watchedSnapshot ?? {}).flat();
+      check("the gitignored-but-TRACKED Café/ dir IS still tracked by the live watcher", allTrackedNames.includes("Café"));
+      check("the genuinely-untracked scratch/ dir is NOT tracked by the live watcher", !allTrackedNames.includes("scratch"));
+
+      const beforeL = commitCount(vaultL);
+      fs.appendFileSync(path.join(vaultL, "Café", "note.md"), "edited after Café/ was gitignored\n");
+      check("editing a gitignored-but-TRACKED non-ASCII-named file still auto-commits", await waitFor(() => commitCount(vaultL) > beforeL));
+    } finally {
+      await vl.stop();
+    }
+  }
+
+  // CRITICAL-2 REGRESSION TEST (review finding): a repo whose OWN path contains a segment matching one of
+  // its own gitignored top-level names must NOT go dark — an absolute-path pattern previously matched the
+  // watch ROOT ITSELF (chokidar refuses to descend into an ignored root at all → getWatched() = {}, the
+  // WHOLE repo silently unwatched, for the daemon's whole lifetime).
+  {
+    const vaultJOuter = path.join(root, "scratch"); // deliberately reuses the name the vault's own .gitignore excludes
+    const vaultJ = path.join(vaultJOuter, "myvault");
+    fs.mkdirSync(vaultJ, { recursive: true });
+    initVault(vaultJ);
+    fs.writeFileSync(path.join(vaultJ, ".gitignore"), "scratch/\n"); // matches a segment of vaultJ's OWN path
+    fs.writeFileSync(path.join(vaultJ, "keep.md"), "# must still be watched\n");
+
+    const vj = new VaultVersioner(vaultJ, 150);
+    await vj.start();
+    try {
+      await vj.whenReady();
+      check("a repo whose own path collides with its gitignored name is NOT a dead watcher", (vj.watchedEntryCount ?? 0) > 0);
+      const allTrackedNames = Object.values(vj.watchedSnapshot ?? {}).flat();
+      check("...and its real content is actually tracked", allTrackedNames.includes("keep.md"));
+
+      const beforeJ = commitCount(vaultJ);
+      fs.writeFileSync(path.join(vaultJ, "keep.md"), "# edited\n");
+      check("...and still auto-commits", await waitFor(() => commitCount(vaultJ) > beforeJ));
+    } finally {
+      await vj.stop();
+    }
+  }
+
+  // MAJOR REGRESSION TEST (review finding): a ROOT-ANCHORED gitignore entry (`/dist`, top-level-only in
+  // real git semantics) must NOT broaden into excluding a NESTED same-named directory — the pre-fix parser
+  // stripped the leading `/` and treated `/dist` exactly like a bare `dist`, matching at ANY depth.
+  {
+    const vaultK = path.join(root, "vaultK");
+    initVault(vaultK);
+    fs.writeFileSync(path.join(vaultK, ".gitignore"), "/dist\n");
+    fs.mkdirSync(path.join(vaultK, "packages", "web", "dist"), { recursive: true });
+    fs.writeFileSync(path.join(vaultK, "packages", "web", "dist", "keep.md"), "# nested dist — must stay watched\n");
+
+    const namesK = gitignoredTopLevelNames(vaultK);
+    check("a root-anchored entry contributes NO candidate (left watched at every depth)", namesK.length === 0);
+
+    const vk = new VaultVersioner(vaultK, 150);
+    await vk.start();
+    try {
+      await vk.whenReady();
+      const allTrackedNames = Object.values(vk.watchedSnapshot ?? {}).flat();
+      check("a NESTED dir sharing the root-anchored entry's name is still tracked", allTrackedNames.includes("dist") && allTrackedNames.includes("keep.md"));
+
+      const beforeK = commitCount(vaultK);
+      fs.writeFileSync(path.join(vaultK, "packages", "web", "dist", "keep.md"), "# edited\n");
+      check("editing inside the nested same-named dir still auto-commits", await waitFor(() => commitCount(vaultK) > beforeK));
+    } finally {
+      await vk.stop();
+    }
+  }
+
+  // ABSENT-.gitignore regression (review finding): the four hardcoded exclusions must survive even when
+  // there is no .gitignore at all — previously only ever asserted WITH one present.
+  {
+    check("gitignoredTopLevelNames returns [] when there is no .gitignore", gitignoredTopLevelNames(vaultA).length === 0);
+    const matcherNoGitignore = buildIgnoredMatcher(vaultA, []);
+    check(
+      "buildIgnoredMatcher still matches all FOUR hardcoded exclusions with NO .gitignore present",
+      matcherNoGitignore(path.join(vaultA, ".git", "x"))
+        && matcherNoGitignore(path.join(vaultA, "node_modules", "x"))
+        && matcherNoGitignore(path.join(vaultA, "worktrees", "x"))
+        && matcherNoGitignore(path.join(vaultA, ".obsidian", "x")),
+    );
+  }
+
+  // LEVER 4 (visibility warning): `start()` logs a one-time warning when the watched entry count exceeds
+  // the threshold. Real threshold (20,000) would need a slow real fixture to exercise — override it (same
+  // testability shape as commitVault's opts.maxFileBytes) so a handful of files can cross a tiny threshold.
+  {
+    const vaultG = path.join(root, "vaultG");
+    initVault(vaultG);
+    for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(vaultG, `f${i}.md`), `# file ${i}\n`);
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    const vg = new VaultVersioner(vaultG, 150, 3); // threshold=3 — 5 files crosses it
+    try {
+      await vg.start();
+      await vg.whenReady();
+    } finally {
+      console.warn = origWarn;
+      await vg.stop();
+    }
+    check("crossing the watch-warn threshold logs a [vault-versioner] warning", warnings.some((w) => w.includes("[vault-versioner]") && w.includes("is watching") && w.includes("entries")));
+  }
+  {
+    const vaultH = path.join(root, "vaultH");
+    initVault(vaultH);
+    fs.writeFileSync(path.join(vaultH, "f0.md"), "# file 0\n");
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    const vh = new VaultVersioner(vaultH, 150, 3); // threshold=3 — 1 file (+.gitignore-less) stays under it
+    try {
+      await vh.start();
+      await vh.whenReady();
+    } finally {
+      console.warn = origWarn;
+      await vh.stop();
+    }
+    check("staying under the watch-warn threshold logs nothing", !warnings.some((w) => w.includes("[vault-versioner]") && w.includes("is watching")));
+  }
+
+  // ZERO-ENTRIES TRIPWIRE, false-positive direction (review Round 3): a legitimately brand-new, EMPTY vault
+  // (no notes yet — nothing on disk but the repo's own .git) must NOT trigger the "dead watcher" warning.
+  // The genuine-warning direction (a real dead watcher despite un-excluded content) is NOT independently
+  // reproduced here: the discriminator deliberately reuses the SAME matcher as the exclusion decision (see
+  // hasUnexcludedTopLevelEntry's doc), so triggering it would require a genuine chokidar-internal scan
+  // failure unrelated to anything this fix controls — not something a hermetic test should fabricate.
+  {
+    const vaultM = path.join(root, "vaultM");
+    initVault(vaultM); // no files beyond .git — genuinely empty, not a dead watcher
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    const vm = new VaultVersioner(vaultM, 150);
+    try {
+      await vm.start();
+      await vm.whenReady();
+    } finally {
+      console.warn = origWarn;
+      await vm.stop();
+    }
+    check("a genuinely empty (brand-new) vault does NOT trigger the zero-entries dead-watcher warning", !warnings.some((w) => w.includes("[vault-versioner]") && w.includes("ZERO entries")));
+  }
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }
   // root's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup

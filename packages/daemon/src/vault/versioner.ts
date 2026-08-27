@@ -30,6 +30,147 @@ export function humanBytes(n: number): string {
   return `${n}B`;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Card 39ceb732 (chokidar opens one OS handle per watched entry, no cap): CANDIDATE top-level entries a
+ * repo's own root `.gitignore` lists — a bare, non-root-anchored name or `name/`, no wildcards, no
+ * negation, no nested path (e.g. `_external/`). **These are CANDIDATES ONLY, not yet safe to exclude from
+ * the watcher** — see {@link safeToExcludeNames}, which is the function that actually decides what to
+ * exclude. `.gitignore` has NO effect on an already-TRACKED path (confirmed live: committing a file, then
+ * adding its directory to `.gitignore`, then editing it — `git add .` still stages the edit, and
+ * `git check-ignore` reports the tracked file as NOT ignored), so a name straight out of this function is
+ * NOT provably safe to stop watching on its own; excluding one that turns out to have tracked content
+ * under it would silently stop auto-committing edits to real, history-bearing files.
+ *
+ * Deliberately narrow, NOT full gitignore semantics: no negation (`!`), no glob syntax, no nested paths,
+ * no ROOT-ANCHORED entries (a leading `/`, e.g. `/dist` — anchoring means "top-level only", which is
+ * narrower than the any-depth match this module's `ignored` pattern makes, so honoring it correctly would
+ * need a second, differently-anchored regex; simpler and safer to just leave it watched, matching the
+ * "unknown pattern → leave alone" fail-safe below), no LEADING whitespace (git treats it as SIGNIFICANT —
+ * a line like ` scratch/` does NOT ignore `scratch/`; `.trim()`ing it away used to generate a candidate git
+ * never actually excludes — the one place this parser broke its own fail-safe doctrine, in the UNSAFE
+ * direction, live-verified), no TRAILING whitespace after removing a directory-marker slash (git strips
+ * unescaped trailing spaces but honors an escaped one — rather than replicate that, any leftover trailing
+ * whitespace is treated as "not understood"), and no BACKSLASH (an escape sequence we don't interpret —
+ * e.g. an escaped leading `#`/`!`, or an escaped trailing space — so we cannot know what the real pattern
+ * means; leave it watched rather than guess). A pattern we don't understand is simply left alone — we keep
+ * watching it (today's status quo) — so a false negative here only costs us the handles we already had; it
+ * can never mis-translate into excluding something that WOULD have been committed. Best-effort: a
+ * missing/unreadable `.gitignore` returns `[]`.
+ */
+export function gitignoredTopLevelNames(repoRoot: string): string[] {
+  let raw: string;
+  try { raw = fs.readFileSync(path.join(repoRoot, ".gitignore"), "utf8"); }
+  catch { return []; }
+  const names: string[] = [];
+  for (const lineRaw of raw.split(/\r?\n/)) {
+    if (lineRaw === "" || /^\s/.test(lineRaw)) continue; // blank, or leading whitespace (significant to git) — leave watched
+    if (lineRaw.startsWith("#") || lineRaw.startsWith("!")) continue;
+    if (/[*?[\]\\]/.test(lineRaw)) continue; // glob syntax or a backslash escape we don't interpret — leave watched
+    if (lineRaw.startsWith("/")) continue; // root-anchored — narrower semantics than we implement; leave watched
+    const stripped = lineRaw.replace(/\/$/, ""); // strip only a trailing directory-marker slash
+    if (!stripped || stripped.includes("/") || /\s$/.test(stripped)) continue; // nested path or unhandled trailing whitespace — leave watched
+    names.push(stripped);
+  }
+  return names;
+}
+
+/**
+ * Which of `candidates` (from {@link gitignoredTopLevelNames}) git ALREADY TRACKS — either an exact
+ * tracked FILE of that name, or a tracked file somewhere under a same-named directory. ONE batched
+ * `git ls-files` call covers every candidate (a single git invocation, not one per name).
+ *
+ * **No trailing slash on the pathspec — verified live this matters:** `git ls-files -- foo/` (trailing
+ * slash) returns EMPTY for a tracked FILE literally named `foo` — a trailing slash restricts the pathspec
+ * to matching WITHIN a directory, silently missing the exact-file case. `git ls-files -- foo` (bare)
+ * correctly matches both the exact file AND anything under a `foo/` directory.
+ *
+ * **`-z` (NUL-separated), not newline-split — verified live this matters too:** `core.quotePath` defaults
+ * TRUE, so plain `git ls-files` QUOTES any path containing non-ASCII (or `"`/`\`) as a backslash-escaped
+ * octal string, e.g. a tracked `Café/note.md` prints as `"Caf\303\251/note.md"` — literal backslashes in
+ * the output, which a naive newline+`/`-split shreds into garbage that doesn't match the real candidate
+ * name at all (so the real, tracked `Café` directory was wrongly reported as UNTRACKED, and offered as
+ * safe to exclude — a narrower-triggering recurrence of the exact same "tracked content silently loses
+ * history" defect, and an ordinary personal-vault folder name, not an exotic input). `-z` sidesteps
+ * quoting entirely (raw bytes, NUL-terminated) rather than merely disabling it — verified live to emit the
+ * literal `Café/note.md` — so it's used INSTEAD OF `-c core.quotePath=false`, not just in addition to it:
+ * no config override is applied to the shared `git` client, and there is nothing left to parse quoting out
+ * of at all.
+ *
+ * Fails SAFE: any git error (a corrupt repo, git not on PATH, whatever) treats every candidate as tracked
+ * — i.e. excludes NOTHING — rather than risk silently dropping history for a name we couldn't verify.
+ */
+async function gitTrackedTopLevelNames(git: SimpleGit, candidates: string[]): Promise<Set<string>> {
+  if (candidates.length === 0) return new Set();
+  try {
+    const out = await git.raw(["ls-files", "-z", "--", ...candidates]);
+    const tracked = new Set<string>();
+    for (const rel of out.split("\0")) {
+      if (!rel) continue;
+      tracked.add(rel.split(/[\\/]/)[0] ?? rel);
+    }
+    return tracked;
+  } catch {
+    return new Set(candidates);
+  }
+}
+
+/**
+ * The names actually SAFE to exclude from the watcher for `commitPath`: its gitignored top-level
+ * candidates ({@link gitignoredTopLevelNames}) MINUS any git already tracks ({@link gitTrackedTopLevelNames}
+ * — a gitignored-but-tracked name must stay watched, since `commitVault`'s `git add .` would still stage
+ * an edit to it and the watcher must still be able to see that edit happen). Read/computed ONCE, at
+ * `start()` — like `commitPath`/`externallyManaged` elsewhere in this class, this does not react to a
+ * LATER `.gitignore` edit or a file being un-tracked without a versioner restart (a daemon restart or vault
+ * re-provision); accepted, consistent with the rest of this class's resolve-once-at-start design.
+ */
+export async function safeToExcludeNames(commitPath: string, git: SimpleGit): Promise<string[]> {
+  const candidates = gitignoredTopLevelNames(commitPath);
+  if (candidates.length === 0) return [];
+  const tracked = await gitTrackedTopLevelNames(git, candidates);
+  return candidates.filter((n) => !tracked.has(n));
+}
+
+/**
+ * The four hardcoded, LOAD-BEARING exclusions (`.git`/`.obsidian`/`node_modules`/`worktrees` — these are
+ * what keep worker worktrees and tool state out of the watcher today; see the module doc above) UNION
+ * `extraSafeNames` (see {@link safeToExcludeNames} — the caller's job to have already proven these safe;
+ * this function does no safety filtering of its own). Always additive, never a replacement, so the
+ * hardcoded four are unconditionally present regardless of `extraSafeNames`.
+ *
+ * **NOT exported.** This regex is only ever safe to test against a path RELATIVE to `commitPath` — see
+ * {@link buildIgnoredMatcher}'s doc for why an ABSOLUTE-path test can match a segment in `commitPath`'s own
+ * ancestor chain and kill the whole watcher. Keeping this un-exported means that invariant lives in the
+ * one place that constructs a matcher from it, instead of being a convention a second future caller could
+ * silently violate by testing the bare pattern against an absolute path (exactly the form Critical-2 named
+ * unsafe). `buildIgnoredMatcher` is the only public surface.
+ */
+function buildIgnoredPattern(commitPath: string, extraSafeNames: string[] = []): RegExp {
+  const names = ["\\.git", "\\.obsidian", "node_modules", "worktrees", ...extraSafeNames.map(escapeRegExp)];
+  return new RegExp(`(^|[/\\\\])(${names.join("|")})([/\\\\]|$)`);
+}
+
+/**
+ * The chokidar `ignored` MATCHER (a function, not a bare pattern) for a governing repo root: tests each
+ * candidate path RELATIVE TO `commitPath`, never the absolute path. Card 39ceb732's Critical-2 finding:
+ * an absolute-path regex can match a segment in `commitPath`'s OWN ANCESTOR chain — including the repo
+ * root's own directory name — and chokidar tests the ROOT itself, so a repo at (say)
+ * `.../scratch/myvault` with `scratch/` in ITS OWN `.gitignore` got a pattern that matched the root path
+ * itself, and chokidar refuses to descend into an ignored root at all: `getWatched()` came back `{}` — a
+ * SILENT, TOTAL watcher death, live-verified. Testing the RELATIVE path instead makes this structurally
+ * impossible, not just less likely: `path.relative(commitPath, commitPath)` is always `""`, which cannot
+ * match `(^|[/\\])(name)([/\\]|$)` for any non-empty name — nothing outside the repo is ever in the string
+ * being tested at all. This is the ONLY exported way to get an ignore matcher — {@link buildIgnoredPattern}
+ * itself is deliberately un-exported so nothing outside this module can reintroduce the absolute-path form.
+ */
+export function buildIgnoredMatcher(commitPath: string, extraSafeNames: string[] = []): (p: string) => boolean {
+  const pattern = buildIgnoredPattern(commitPath, extraSafeNames);
+  return (p: string) => pattern.test(path.relative(commitPath, p));
+}
+
 /**
  * Paths we've already warned about for a given repo root — suppresses re-warning on every debounced
  * commit tick while a stuck oversized file just sits there untouched (chokidar re-triggers `commit()` on
@@ -318,6 +459,10 @@ function isVaultAutoCommitPaused(commitPath: string): boolean {
  * {@link checkVaultPushStatus} / {@link VaultPushStatusWatcher} below (read-only `rev-list --count`, no
  * writes) — push stays a manual action the human takes through the existing git-write surface.
  */
+/** Above this many watched entries, `start()` logs a one-time visibility warning (card 39ceb732 Lever 4) —
+ *  see {@link VaultVersioner.warnIfLarge}. Not a cap: nothing is skipped or throttled at this size. */
+const LARGE_VAULT_WATCH_WARN_THRESHOLD = 20_000;
+
 export class VaultVersioner {
   private git: SimpleGit;
   private watcher?: FSWatcher;
@@ -325,8 +470,20 @@ export class VaultVersioner {
   private externallyManaged = false;
   /** The folder we actually watch + commit — the governing repo ROOT, resolved in `start()`. */
   private commitPath: string;
+  /** Resolves once chokidar's initial scan completes ("ready") — see {@link whenReady}. */
+  private readyPromise?: Promise<void>;
+  /** The matcher passed to chokidar as `ignored` — retained so {@link hasUnexcludedTopLevelEntry} can
+   *  reuse it (never a second, possibly-divergent copy of the exclusion logic). */
+  private matcher?: (p: string) => boolean;
 
-  constructor(private vaultPath: string, private debounceMs = 5000) {
+  constructor(
+    private vaultPath: string,
+    private debounceMs = 5000,
+    /** Test-only override for {@link LARGE_VAULT_WATCH_WARN_THRESHOLD} — real callers never pass this
+     *  (same override-for-testability shape as `commitVault`'s `opts.maxFileBytes`; a real threshold this
+     *  large would need a slow, wasteful real fixture to exercise the warning path at all). */
+    private watchWarnThreshold = LARGE_VAULT_WATCH_WARN_THRESHOLD,
+  ) {
     this.commitPath = vaultPath;
     this.git = simpleGit(vaultPath);
   }
@@ -347,11 +504,115 @@ export class VaultVersioner {
       const isRepo = await this.git.checkIsRepo().catch(() => false);
       if (!isRepo) await this.git.init();
     }
+    const safeNames = await safeToExcludeNames(this.commitPath, this.git);
+    this.matcher = buildIgnoredMatcher(this.commitPath, safeNames);
     this.watcher = chokidar.watch(this.commitPath, {
       ignoreInitial: true,
-      ignored: /(^|[/\\])(\.git|\.obsidian|node_modules|worktrees)([/\\]|$)/,
+      ignored: this.matcher,
+      // sessions/liveness.ts:36-43 records a chokidar EPERM taking the whole daemon down on 2026-06-16 —
+      // its fix was "never rethrow, swallow and continue"; ignorePermissionErrors:true goes one step
+      // earlier and stops chokidar from even EMITTING "error" for the common EPERM/EACCES transient-race
+      // class in the first place (e.g. a short-lived temp dir vanishing mid-stat), rather than relying
+      // solely on the "error" listener below to catch it after the fact.
+      ignorePermissionErrors: true,
     });
+    // Resolves ONLY on "ready" — deliberately does NOT reject on "error". Matching liveness.ts's
+    // established doctrine: a chokidar error is swallow-and-log, never rethrown. An earlier version of
+    // this rejected readyPromise on ANY pre-ready error, which is unsafe in exactly the way that doctrine
+    // exists to prevent — a single transient, often-recoverable error (chokidar frequently still reaches
+    // "ready" afterward) would otherwise turn into an unhandled-rejection risk for any caller (a test, or
+    // a future consumer) that awaits whenReady() without its own try/catch.
+    this.readyPromise = new Promise((resolve) => { this.watcher!.once("ready", resolve); });
     this.watcher.on("all", () => this.schedule());
+    this.watcher.on("ready", () => this.warnIfLarge());
+    this.watcher.on("error", (err) => {
+      console.warn(`[vault-versioner] ${this.commitPath} watcher error (ignored, watcher continues): ${(err as Error)?.message ?? err}`);
+    });
+  }
+
+  /**
+   * Resolves once the watcher's initial filesystem scan completes (chokidar's own "ready" event). Never
+   * REJECTS — a pre-ready chokidar error is logged (see `start()`) but does not settle this promise, so a
+   * transient error chokidar itself recovers from (the common case) doesn't spuriously fail an awaiter. If
+   * the watcher truly never reaches "ready", this will not resolve; a caller that needs a bound should use
+   * its own timeout (e.g. this test suite's `waitFor`) rather than have this method guess at what counts as
+   * "fatal enough" to give up on. A no-op (resolves immediately) if `start()` hasn't been called. Exposed
+   * for callers/tests that need to anchor on this OBSERVABLE event rather than a fixed wait.
+   */
+  async whenReady(): Promise<void> {
+    await this.readyPromise;
+  }
+
+  /**
+   * Total tracked entries (files + dirs) the live watcher holds an OS handle for — the SAME method card
+   * a0c62330 used to measure this (`watcher.getWatched()`, summed): confirmed there to be ~1:1 with both
+   * `process.getActiveResourcesInfo()`'s `FSEventWrap` count and the OS handle count. `undefined` before
+   * `start()` resolves (or once `stop()` has closed the watcher) — never a stale/wrong number.
+   */
+  get watchedEntryCount(): number | undefined {
+    if (!this.watcher) return undefined;
+    return Object.values(this.watcher.getWatched()).reduce((sum, names) => sum + names.length, 0);
+  }
+
+  /** Test/diagnostic-only: the raw chokidar `getWatched()` snapshot (dir path → tracked child basenames),
+   *  for a caller that needs to assert precisely WHICH entries are (or are not) tracked, not just the
+   *  aggregate count. `undefined` before `start()`/after `stop()`. */
+  get watchedSnapshot(): Record<string, string[]> | undefined {
+    return this.watcher?.getWatched();
+  }
+
+  /**
+   * Card 39ceb732's Lever 4 ("do nothing to the mechanism; add a startup size warning"): logs ONCE, when
+   * the initial scan completes, if this watcher ended up tracking an unusually large number of entries.
+   * Chokidar opens one native OS handle PER entry with no cap, so a vault this large is a real, uncapped
+   * resource cost on a local-first desktop product — this makes that cost VISIBLE instead of silent until
+   * someone reads a crashlog, without changing what gets watched or committed.
+   *
+   * Also warns (the DISCRIMINATING form, not a naive one) when the watcher tracks exactly ZERO entries —
+   * the signature of the Critical-2 dead-watcher class (now structurally prevented, see
+   * {@link buildIgnoredMatcher}, but this is a cheap tripwire for any FUTURE cause of the same failure
+   * shape). A naive "count===0 ⇒ warn" false-positives on a legitimately brand-new, empty vault (no notes
+   * yet) — so this only warns when the count is zero AND `commitPath` actually has top-level content the
+   * matcher does NOT exclude (i.e. content that SHOULD have produced at least one watched entry).
+   *
+   * Best-effort: swallows any error from `getWatched()`/`watchedEntryCount`/the zero-entry directory read
+   * rather than risking the ready handler itself.
+   */
+  private warnIfLarge(): void {
+    try {
+      const count = this.watchedEntryCount;
+      if (count === 0) {
+        if (this.hasUnexcludedTopLevelEntry()) {
+          console.warn(
+            `[vault-versioner] ${this.commitPath} is watching ZERO entries despite having real, ` +
+            `non-excluded top-level content — this is almost certainly a dead watcher, not an empty vault. ` +
+            `Auto-commit for this vault is effectively disabled until this is investigated.`,
+          );
+        }
+      } else if (count !== undefined && count > this.watchWarnThreshold) {
+        console.warn(
+          `[vault-versioner] ${this.commitPath} is watching ${count} entries (> ${this.watchWarnThreshold}) — ` +
+          `chokidar opens one OS file handle per entry with no cap, so this is a real, uncapped memory/handle ` +
+          `cost that scales with vault size. A subfolder this repo's own .gitignore already excludes is also ` +
+          `excluded from being watched automatically — see this file's gitignoredTopLevelNames/` +
+          `safeToExcludeNames for exactly what qualifies (git-TRACKED content under a gitignored name is ` +
+          `deliberately still watched, so this never silently stops version history for real content).`,
+        );
+      }
+    } catch { /* best-effort — never let a diagnostic log break watcher startup */ }
+  }
+
+  /** Whether `commitPath`'s own top-level directory listing has at least one entry `this.matcher` does NOT
+   *  exclude — used only to discriminate "legitimately empty vault" from "dead watcher" in {@link
+   *  warnIfLarge}'s zero-entry branch. An unreadable directory (edge case, shouldn't happen once `start()`
+   *  has already succeeded) reads as "nothing to warn about" — fail toward silence, not a spurious alarm. */
+  private hasUnexcludedTopLevelEntry(): boolean {
+    if (!this.matcher) return false;
+    try {
+      return fs.readdirSync(this.commitPath).some((name) => !this.matcher!(path.join(this.commitPath, name)));
+    } catch {
+      return false;
+    }
   }
 
   private schedule(): void {
@@ -373,6 +634,11 @@ export class VaultVersioner {
 
   async stop(): Promise<void> {
     await this.watcher?.close();
+    // Clear the reference (not just close()) so watchedEntryCount/watchedSnapshot's documented
+    // "undefined after stop()" is actually true — chokidar's close() doesn't null out getWatched()'s
+    // result, it empties it, so leaving `this.watcher` set would make those getters silently return
+    // 0/{} instead, indistinguishable from "watching zero entries" rather than "not watching at all".
+    this.watcher = undefined;
     if (this.timer) clearTimeout(this.timer);
   }
 
