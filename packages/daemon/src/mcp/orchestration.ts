@@ -3566,7 +3566,27 @@ export class OrchestrationMcpRouter {
           "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"), " +
           "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
-          "sessionId, projectId, projectName, retriedFile, retryPassed}. " +
+          "sessionId, projectId, projectName, retriedFile, retryPassed, emitCompareReduced, " +
+          "emitCompareIdenticalCount, emitCompareTestFiles}. " +
+          "⚠️ CARD 6ca4b1a0 — `emitCompareReduced`: a duration series built from this table MUST bucket on " +
+          "this field before comparing durations — a `\"merge\"` row's gate can run REDUCED (build + static " +
+          "guards, ± the changed test files — seconds, not minutes) instead of the full daemon test suite, " +
+          "and the two populations differ by an order of magnitude or more. TRI-STATE: `true` = this gate " +
+          "genuinely ran reduced; `false` = a real gate spawned and was PROVEN not reduced (a genuine full " +
+          "run — the positive control, never read as \"nothing to report\"); `null` = no gate spawned for " +
+          "this op, this row predates card 6ca4b1a0, or this is a `\"worker\"`/`\"deploy\"` row (the " +
+          "reduction feature is MERGE-ONLY). NEVER pool a `null` row with a `false` row as if both were " +
+          "known full runs — `null` means \"not determinable\", not \"known full run\". " +
+          "`emitCompareIdenticalCount`/`emitCompareTestFiles` are present (non-null) ONLY alongside " +
+          "`emitCompareReduced:true`, and are ALWAYS read TOGETHER, never one without the other — " +
+          "`emitCompareIdenticalCount:0` is VACUOUS on one of two arms: paired with a NON-EMPTY " +
+          "`emitCompareTestFiles` it means the changed-test-files arm (a test-only diff has no compiled " +
+          "files to compare — `0` means \"nothing to check\", not \"the check found nothing\"); paired with " +
+          "an EMPTY `emitCompareTestFiles` it means the emit-identity arm, fully informative (zero test " +
+          "files ran — build + static guards only). The cheapest way to tell the two arms apart WITHOUT " +
+          "reading either field is the `[loom:merge-done]` nudge text this mirrors: \"…+ N changed test " +
+          "file(s)\" names the changed-test-files arm; \"…static guards only, skipped the full daemon test " +
+          "suite\" (no test-file clause) names the emit-identity arm. " +
           "Card 344ce950 — `retriedFile`/`retryPassed`: a `gateType:\"merge\"` row whose test step named " +
           "one identifiable, re-runnable file retried JUST that file, once, before this row's verdict — " +
           "`retriedFile` is `null` on the overwhelming majority of rows (nothing retried). A `\"pass\"` row " +

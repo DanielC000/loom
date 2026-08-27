@@ -1680,6 +1680,43 @@ export interface GateHistoryRow {
    *  /`"reject"`) — see {@link GateOutcome}'s own doc. Every OTHER non-null `retriedFile` row still pairs it
    *  with a real `true`/`false`. */
   retryPassed: boolean | null;
+  /** Card 6ca4b1a0 — the RETROSPECTIVE, `gate_history`-native read of the SAME emit-compare-reduction fact
+   *  `gate_status(opId)` already exposes for a settled merge op (see the daemon's `PendingGateOpVerdict
+   *  .emitCompareReduced` doc for the full tri-state discipline this mirrors exactly): `true` = this merge
+   *  gate genuinely ran REDUCED (build + static guards, ± the changed test files — NOT the full daemon test
+   *  suite); `false` = a real gate spawned for this op and was PROVEN not reduced (a genuine full run — the
+   *  positive control, never conflate with "nothing to report"); `null` = no gate spawned for this op, this
+   *  row predates card 6ca4b1a0, or this is a `"worker"`/`"deploy"` row (the reduction feature is
+   *  MERGE-ONLY). ⛔ NEVER `false` for an unmeasured row — that would assert "this was a full run" about a
+   *  row nobody measured.
+   *  ⚠️ Sourced from `pending_gate_ops.verdict_payload_json` (via this row's own `opId`), NOT from this
+   *  event's own raw detail — the merge-gate event only ever stamps this key when `true` (a conditional
+   *  spread, never an explicit `false`), so the raw event alone cannot distinguish "genuinely not reduced"
+   *  from "reduction never computed"; the pending-ops tombstone is the one place the real tri-state
+   *  survives. A caller building a duration series MUST bucket on this field — pooling a `true` row's
+   *  reduced run with a `false`/`null` row's full run silently averages two different populations into one
+   *  meaningless number (card 6ca4b1a0's own measured evidence: a 12.9× duration gap with zero observations
+   *  inside it). Never pool a `null` row with a `false` row either — `null` means "not determinable", not
+   *  "known full run". */
+  emitCompareReduced: boolean | null;
+  /** Card 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; `null` whenever
+   *  `emitCompareReduced` is `false` or `null` (nothing reduced to report).
+   *  ⚠️ VACUOUS ON ONE OF TWO ARMS — never read this alone, always alongside `emitCompareTestFiles`
+   *  (below): `identicalCount: 0` paired with a NON-EMPTY `emitCompareTestFiles` means the
+   *  changed-test-files arm — a test-only diff has no compiled files to compare, so `0` means "nothing to
+   *  check", NOT "the check found nothing". `identicalCount` non-zero paired with an EMPTY
+   *  `emitCompareTestFiles` means the emit-identity arm, fully informative — zero test files ran, build +
+   *  static guards only. */
+  emitCompareIdenticalCount: number | null;
+  /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.
+   *  Present (as an array — possibly EMPTY on the emit-identity arm) whenever `emitCompareReduced: true`;
+   *  `null` otherwise. Paired 1:1 with `emitCompareIdenticalCount` (both present together or both `null`,
+   *  never one without the other) so that field's `0` is never misread in isolation — see its own doc for
+   *  the two-arm discipline this pairing exists to disambiguate. The cheapest way to tell the two arms
+   *  apart WITHOUT reading either field is the `[loom:merge-done]` nudge text this mirrors: "…+ N changed
+   *  test file(s)" names the changed-test-files arm; "…static guards only, skipped the full daemon test
+   *  suite" (no test-file clause) names the emit-identity arm. */
+  emitCompareTestFiles: string[] | null;
 }
 
 /** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so

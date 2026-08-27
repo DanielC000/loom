@@ -34,6 +34,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           ACTUAL `gate_cancel` on a genuinely QUEUED `runWorkerGate` op, and a REAL rejection on a
 //           sibling op, through the production code paths — proving the two rows are now distinguishable at
 //           the source, not just at the mapper.
+//   (card 6ca4b1a0) `gate_history` rows now also carry `emitCompareReduced`/`emitCompareIdenticalCount`/
+//           `emitCompareTestFiles` — the SAME emit-compare-reduction facts `gate_status(opId)` already
+//           exposes, so a duration series built from THIS table can finally separate a ~30s reduced merge
+//           gate from a ~14min full one (a measured 12.9x bimodal gap with zero observations inside it).
+//           Sourced from `pending_gate_ops.verdict_payload_json`, NOT the raw `build_gate` event's own
+//           detail — that event only ever stamps `emitCompareReduced` when `true` (a conditional spread),
+//           never an explicit `false`, so it alone cannot distinguish "genuinely full run" from "reduction
+//           never computed". The "(unit, card 6ca4b1a0)" block below proves the mapper against synthetic
+//           `pending_gate_ops` fixtures for all FOUR shapes: the changed-test-files arm (`identicalCount:0`
+//           is VACUOUS there — nothing to compare, not "nothing found"), the emit-identity arm
+//           (`identicalCount` informative, `testFiles:[]`), an explicit `false` (a real gate proven NOT
+//           reduced — the positive control, never conflated with "nothing to report"), and a row with no
+//           matching `pending_gate_ops` tombstone at all (reads back `null`, never a fabricated `false`).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-history.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -597,7 +610,92 @@ function seed(db) {
   }
 }
 
+// ── (unit, card 6ca4b1a0) emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles — the mapper,
+// against synthetic `pending_gate_ops` fixtures covering all FOUR shapes: the two arms of a genuine
+// reduction (vacuous-vs-informative `identicalCount`), an explicit `false` (a real gate proven NOT
+// reduced), and a row with no matching tombstone at all (must read `null`, never a fabricated `false`).
+// Proves the mapper reads `pending_gate_ops.verdict_payload_json`, not the raw event's own `detail` — the
+// producer side (service.ts actually stamping this into `verdict_payload_json` on a real merge) is already
+// covered by this card's own DoD-1 note that the value is ALREADY persisted there, and by gate_status's
+// own pre-existing tests; this block is scoped to gate_history's own new projection. ────────────────────
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P = `gh-emitcompare-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    db.insertProject({ id: P, name: "EmitCompare Fixtures", repoPath: `/tmp/${P}`, vaultPath: `/tmp/${P}`, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    const a = `${P}-a`;
+    db.insertAgent({ id: a, projectId: P, name: "dev", startupPrompt: "", position: 0 });
+    const t = `${P}-task`;
+    db.insertTask({ id: t, projectId: P, title: "EmitCompare fixtures task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const mgr = `${P}-mgr`, w = `${P}-wkr`;
+    db.insertSession({ id: mgr, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: w, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t, worktreePath: `/tmp/${P}-wt`, branch: "loom/emitcompare-branch" });
+
+    const seedOp = (suffix, offsetMs, payload) => {
+      const opId = randomUUID();
+      db.appendEvent({
+        id: randomUUID(), ts: new Date(Date.now() - offsetMs).toISOString(), managerSessionId: mgr, workerSessionId: w,
+        taskId: t, kind: "build_gate",
+        detail: { opId, passed: true, durationMs: 100 + offsetMs, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0 },
+      });
+      if (payload !== null) {
+        db.insertPendingGateOp({ opId, kind: "merge", key: `merge:${w}-${suffix}`, ownerSessionId: mgr, projectId: P, taskId: t, branch: "loom/emitcompare-branch", startedAt: new Date(Date.now() - offsetMs - 500).toISOString(), state: "pending", surfacedPending: false });
+        db.settlePendingGateOp(opId, { kind: "pass", payload });
+      }
+      return opId;
+    };
+
+    // (1) Changed-test-files arm: `identicalCount:0` is VACUOUS here — a test-only diff has no compiled
+    // files to compare — but a NON-EMPTY `emitCompareTestFiles` alongside it proves this arm fired.
+    const testFilesArmOp = seedOp("testfiles", 5000, { emitCompareReduced: true, emitCompareIdenticalCount: 0, emitCompareTestFiles: ["gate-history.mjs"] });
+    // (2) Emit-identity arm: `identicalCount` is fully INFORMATIVE here (a real count of compiled files
+    // proven byte-identical) — paired with an EMPTY `emitCompareTestFiles` (zero test files ran).
+    const identityArmOp = seedOp("identity", 4000, { emitCompareReduced: true, emitCompareIdenticalCount: 1, emitCompareTestFiles: [] });
+    // (3) Explicit false — a real gate spawned and was PROVEN not reduced (the positive control): must
+    // read back `false`, never `null` (which would falsely claim "not determinable").
+    const falseOp = seedOp("full", 3000, { emitCompareReduced: false });
+    // (4) No matching `pending_gate_ops` tombstone at all (payload:null skips seeding one) — must read back
+    // `null` for all three fields, never a fabricated `false`.
+    const noPayloadOp = seedOp("nopayload", 2000, null);
+
+    const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
+    check("(unit, card 6ca4b1a0) all 4 fixture rows returned", page.items.length === 4);
+    const testFilesArmRow = page.items.find((r) => r.opId === testFilesArmOp);
+    const identityArmRow = page.items.find((r) => r.opId === identityArmOp);
+    const falseRow = page.items.find((r) => r.opId === falseOp);
+    const noPayloadRow = page.items.find((r) => r.opId === noPayloadOp);
+    check("(unit, card 6ca4b1a0) precondition: all 4 fixtures resolved to 4 distinct rows", new Set([testFilesArmRow, identityArmRow, falseRow, noPayloadRow]).size === 4 && [testFilesArmRow, identityArmRow, falseRow, noPayloadRow].every(Boolean));
+
+    check("(unit, card 6ca4b1a0) (1) changed-test-files arm: emitCompareReduced:true", testFilesArmRow?.emitCompareReduced === true);
+    check("(unit, card 6ca4b1a0) (1) changed-test-files arm: emitCompareIdenticalCount:0 (VACUOUS — nothing to compare, not \"nothing found\")", testFilesArmRow?.emitCompareIdenticalCount === 0);
+    check("(unit, card 6ca4b1a0) (1) changed-test-files arm: emitCompareTestFiles is the NON-EMPTY list — the field that disambiguates the vacuous 0 above", Array.isArray(testFilesArmRow?.emitCompareTestFiles) && testFilesArmRow.emitCompareTestFiles.length === 1 && testFilesArmRow.emitCompareTestFiles[0] === "gate-history.mjs");
+
+    check("(unit, card 6ca4b1a0) (2) emit-identity arm: emitCompareReduced:true", identityArmRow?.emitCompareReduced === true);
+    check("(unit, card 6ca4b1a0) (2) emit-identity arm: emitCompareIdenticalCount:1 (fully INFORMATIVE here)", identityArmRow?.emitCompareIdenticalCount === 1);
+    check("(unit, card 6ca4b1a0) (2) emit-identity arm: emitCompareTestFiles is EMPTY (zero test files ran)", Array.isArray(identityArmRow?.emitCompareTestFiles) && identityArmRow.emitCompareTestFiles.length === 0);
+
+    check("(unit, card 6ca4b1a0 — THE POSITIVE CONTROL) (3) a genuine full run reads emitCompareReduced:false, NEVER null — a real gate spawned and was proven NOT reduced", falseRow?.emitCompareReduced === false);
+    check("(unit, card 6ca4b1a0) (3) a false emitCompareReduced carries no identicalCount/testFiles (both null — nothing reduced to report)", falseRow?.emitCompareIdenticalCount === null && falseRow?.emitCompareTestFiles === null);
+
+    check("(unit, card 6ca4b1a0 — NEVER FABRICATE false) (4) a row with no matching pending_gate_ops tombstone reads emitCompareReduced:null, NOT false", noPayloadRow?.emitCompareReduced === null);
+    check("(unit, card 6ca4b1a0) (4) no-payload row's identicalCount/testFiles are also null", noPayloadRow?.emitCompareIdenticalCount === null && noPayloadRow?.emitCompareTestFiles === null);
+
+    // Cross-check against the FIRST block's own pre-existing fixtures (seed()) — a row from BEFORE this
+    // card shipped (no pending_gate_ops row at all, same shape as fixture (4) above) must ALSO read null,
+    // proving the historical/legacy case is not special-cased differently from the synthetic "no tombstone"
+    // fixture just proven above.
+    const { P1 } = seed(db);
+    const legacyPage = db.listGateEvents({ projectId: P1, limit: 100, offset: 0 });
+    const legacyPassed = legacyPage.items.find((r) => r.durationMs === 61234);
+    check("(unit, card 6ca4b1a0) a PRE-EXISTING (seed()) row with no opId/tombstone also reads emitCompareReduced:null", legacyPassed?.emitCompareReduced === null && legacyPassed?.emitCompareIdenticalCount === null && legacyPassed?.emitCompareTestFiles === null);
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code."
+  ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code. Since card 6ca4b1a0, a row also carries emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles sourced from pending_gate_ops (never the raw event alone), correctly distinguishing both reduction arms, an explicit proven-not-reduced false, and a never-fabricated null."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

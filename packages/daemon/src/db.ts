@@ -5434,6 +5434,11 @@ export class Db {
    * `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] and returned as the EFFECTIVE page size so a
    * "load more" client can detect a server cap (mirrors the archived-sessions pagination contract).
    * Ordered by `seq DESC` (the never-reused monotonic sequence) so recency is stable across same-ts ties.
+   *
+   * Card 6ca4b1a0: ALSO left-joins `pending_gate_ops` by this row's own `opId` (extracted from
+   * `detail_json`) to project `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` — see
+   * `GateEventJoinRow.verdictPayloadJson`'s own doc for why that table, not `detail_json` directly, is the
+   * one place the real true/false tri-state survives.
    */
   listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
     const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
@@ -5446,6 +5451,9 @@ export class Db {
        LEFT JOIN projects p ON p.id = s.project_id
        LEFT JOIN agents a ON a.id = s.agent_id
        LEFT JOIN tasks t ON t.id = oe.task_id
+       -- Card 6ca4b1a0: op_id is this table's PRIMARY KEY, so this LEFT JOIN can never fan out a row —
+       -- safe to share with the COUNT query below unchanged. See GateEventJoinRow.verdictPayloadJson's doc.
+       LEFT JOIN pending_gate_ops pgo ON pgo.op_id = json_extract(oe.detail_json, '$.opId')
        WHERE oe.kind IN (${kindPlaceholders})${projFilter}`;
     const filterParams: unknown[] = opts.projectId ? [...GATE_HISTORY_KINDS, opts.projectId] : [...GATE_HISTORY_KINDS];
     const total = (this.db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...filterParams) as { c: number }).c;
@@ -5453,7 +5461,7 @@ export class Db {
       `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
               COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
               s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
-              s.branch AS branch, t.title AS taskTitle
+              s.branch AS branch, t.title AS taskTitle, pgo.verdict_payload_json AS verdictPayloadJson
        ${from}
        ORDER BY oe.seq DESC
        LIMIT ? OFFSET ?`,
@@ -7444,6 +7452,12 @@ interface GateEventJoinRow {
   agentName: string | null;
   branch: string | null;
   taskTitle: string | null;
+  /** Card 6ca4b1a0: the SAME `pending_gate_ops.verdict_payload_json` blob `gate_status(opId)` reads,
+   *  joined in by this row's own `opId` (extracted from `detailJson`, never a second column) — the ONLY
+   *  place `emitCompareReduced`'s real tri-state (true/false, not just true/absent) survives; see
+   *  `toGateHistoryRow`'s own doc for why the raw event's `detailJson` alone cannot supply this. `null`
+   *  when no `pending_gate_ops` row matches (no opId on this event, or the op was never tombstoned). */
+  verdictPayloadJson: string | null;
 }
 
 /** Map a gate-run event kind to the page's three gate types (`build_gate`/`build_gate_retry` → merge). */
@@ -7558,6 +7572,24 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // never-backfilled discipline as `concurrentGatesMax` above.
   const retriedFile = typeof detail.retriedFile === "string" ? detail.retriedFile : null;
   const retryPassed = typeof detail.retryPassed === "boolean" ? detail.retryPassed : null;
+  // Card 6ca4b1a0: deliberately NOT read from `detail` above — the raw `build_gate` event only ever stamps
+  // `emitCompareReduced` when `true` (a conditional spread at the producer, see service.ts's `evt("build_gate",
+  // ...)` call site), never an explicit `false`, so `detail` alone can't tell "genuinely full run" from
+  // "reduction never computed". `pending_gate_ops.verdict_payload_json` (joined in as `verdictPayloadJson`)
+  // is the one place `deriveMergeGateVerdict` persists the real tri-state — see GateHistoryRow.emitCompareReduced's
+  // own doc (shared/types.ts) for the full discipline this projects.
+  let verdictPayload: Record<string, unknown> = {};
+  if (r.verdictPayloadJson) {
+    try { verdictPayload = JSON.parse(r.verdictPayloadJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
+  }
+  const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean" ? verdictPayload.emitCompareReduced : null;
+  // Both gated on `emitCompareReduced === true` (never merely "present in the payload") — the producer
+  // only ever stamps these two alongside a `true` reduced flag, so this mirrors that pairing defensively
+  // rather than trusting an already-redundant payload shape.
+  const emitCompareIdenticalCount = emitCompareReduced === true && typeof verdictPayload.emitCompareIdenticalCount === "number"
+    ? verdictPayload.emitCompareIdenticalCount : null;
+  const emitCompareTestFiles = emitCompareReduced === true && Array.isArray(verdictPayload.emitCompareTestFiles)
+    ? verdictPayload.emitCompareTestFiles as string[] : null;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
@@ -7579,6 +7611,9 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     concurrentGatesMax,
     retriedFile,
     retryPassed,
+    emitCompareReduced,
+    emitCompareIdenticalCount,
+    emitCompareTestFiles,
   };
 }
 
