@@ -2391,9 +2391,13 @@ export const STATIC_GUARD_REPO_PATHS = [
   // see the guard's own header for the comment/code classification and why it exists (the seam this card just
   // extracted has no structural way to stop a FUTURE file from reintroducing the same scattered coupling).
   "packages/daemon/test/harness-adapter-claude-literal-guard.mjs",
-  // Card 4f2c493a: reads working-tree BYTES ON DISK (never git status/diff/numstat/show — see the guard's
-  // own header for why those are structurally blind to a whole-file CRLF-to-LF flip) to catch a Write-tool
-  // (or equivalent) wholesale rewrite silently flipping a tracked text file's line endings. Belongs here on
+  // Card 4f2c493a (comment corrected by card a9728787): reads working-tree BYTES ON DISK to catch a
+  // Write-tool (or equivalent) wholesale rewrite silently flipping a tracked text file's line endings.
+  // `git diff HEAD`, `git diff --numstat`, and `git show HEAD:<file>` are blind to that flip in every
+  // state, but `git status --porcelain` DOES see it while unstaged — it only goes blind once staged
+  // (`git add`). This guard skips status because of THAT staging step, not because status is blind
+  // outright, and skips the other three because they're blind regardless (see the guard's own header for
+  // the full mechanism). Belongs here on
   // the same ground as fixed-wait-witness-guard.mjs above: a CRLF flip of a packages/daemon/src/**/*.ts or
   // packages/daemon/test/**/*.mjs file changes zero compiled/runtime behaviour, so it can pass through
   // computeEmitCompareGate's reduced path (which reasons about compiled-output/test-pass equivalence, not

@@ -1,17 +1,36 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no daemon/Db used below, pure fs+git
-// STANDING GUARD (card 4f2c493a) — guards against a WHOLE-FILE CRLF-to-LF flip that every git-side
-// signal is structurally blind to.
+// STANDING GUARD (card 4f2c493a) — guards against a WHOLE-FILE CRLF-to-LF flip. ⚠️ CORRECTED BY CARD
+// a9728787 (2026-08-27): this header used to claim EVERY git-side signal is blind to the flip. That
+// overclaimed — see THE STAGING WINDOW below for the accurate version, which makes the guard MORE
+// clearly necessary, not less.
 //
 // THE MECHANISM: this repo runs `core.autocrlf=true` with `.gitattributes` `* text=auto` — git stores
 // LF in the blob and the checkout smudge filter writes CRLF into the working tree. A wholesale file
 // rewrite that reads through a normalising layer and writes bytes back (measured on this card: the
 // `Write` tool; also any `open(p).read()` + `open(p,'wb')` Python/Bash rewrite) flips the ENTIRE file to
-// LF — not just the edited region. Staging then re-normalises the flip away BEFORE any git-side check
-// can observe it: `git status --porcelain`, `git diff HEAD`, `git diff --numstat`, and `git show
-// HEAD:<file>` all read clean, because the flipped-to-LF working copy now matches the LF-normalised blob
-// byte-for-byte. A guard built on any of those commands shares this exact blind spot no matter how many
-// of them you combine — six checks routed through the same normalising layer are one instrument wearing
-// six hats. ⛔ THIS GUARD DOES NOT USE git status/diff/numstat/show FOR THAT REASON — it reads the
+// LF — not just the edited region.
+//
+// THE STAGING WINDOW (card a9728787): `git status --porcelain` DOES see an UNSTAGED flip (` M <path>`)
+// — it is NOT blind at that point. It goes blind the moment the flip is staged (`git add`), because the
+// clean filter re-normalises the index entry to match HEAD's LF-normalised blob while the working-tree
+// bytes stay flipped. `git diff HEAD`, `git diff --numstat`, and `git show HEAD:<file>` are blind in
+// BOTH states — none of them ever look at raw working-tree bytes, staged or not. Git DOES warn when the
+// flip happens ("LF will be replaced by CRLF the next time Git touches it") but only to STDERR, where it
+// is trivially missed inside a normal `git add` + `git commit` flow.
+// ⭐ THE WINDOW BEING REAL IS WHY THIS GUARD STILL MATTERS: an ordinary worker workflow stages before
+// committing, closing the one window that would have told you — silently, on stderr nobody reads. The
+// signal exists, is real, and is routinely destroyed before anyone sees it.
+// ⚠️ EVIDENCE SCOPE: the staging-window mechanism above was demonstrated in an ISOLATED SYNTHETIC repo
+// (fresh `git init`, three tiny files, no `.gitattributes`) — a MECHANISM demonstration, NOT a
+// re-derivation of the original incident that motivated this guard. It carries two real-repo anchors:
+// the pre-staging `git status` reading was independently observed on a real tracked file; the
+// post-staging reading matches the original recorded incident. The original incident's own root cause
+// remains UNESTABLISHED — this correction does not claim to have found it.
+//
+// A guard built on git status/diff/numstat/show still shares a real blind spot no matter how many of
+// them you combine — six checks routed through the same normalising layer (and, for status, the same
+// staging step every worker actually performs before committing) are one instrument wearing six hats.
+// ⛔ THIS GUARD DOES NOT USE git status/diff/numstat/show FOR THAT REASON — it reads the
 // WORKING-TREE FILE'S RAW BYTES directly off disk (`fs.readFileSync`) and compares them against what
 // `.gitattributes` + `core.autocrlf` imply for that path, which is derived from `git check-attr`
 // (pure path-pattern matching against .gitattributes — it never reads file content, so it carries none
