@@ -11,6 +11,11 @@ export interface CapQueuedSpawn {
   taskId: string | null;
   kickoffLabel: string;
   queuedAt: string;
+  /** Present only for a REVIEW spawn (see `record()`'s `reviewSpec` param) — mutually exclusive, mirrors
+   *  worker_spawn's own `reviewOfWorkerSessionId`/`reviewOfTaskId`. Surfaced so worker_list's cap-queued
+   *  placeholder (and the initial cap-reject error) make a queued review's target visible. */
+  reviewOfWorkerSessionId?: string;
+  reviewOfTaskId?: string;
 }
 
 /** 30 min — a stale intent is reaped lazily (checked on every read/write, no separate timer), never surfaced forever. Exported for tests. */
@@ -31,8 +36,12 @@ interface CapQueueEntry extends CapQueuedSpawn {
 }
 
 function toPublic(e: CapQueueEntry): CapQueuedSpawn {
-  const { opId, managerSessionId, agentId, taskId, kickoffLabel, queuedAt } = e;
-  return { opId, managerSessionId, agentId, taskId, kickoffLabel, queuedAt };
+  const { opId, managerSessionId, agentId, taskId, kickoffLabel, queuedAt, reviewOfWorkerSessionId, reviewOfTaskId } = e;
+  return {
+    opId, managerSessionId, agentId, taskId, kickoffLabel, queuedAt,
+    ...(reviewOfWorkerSessionId ? { reviewOfWorkerSessionId } : {}),
+    ...(reviewOfTaskId ? { reviewOfTaskId } : {}),
+  };
 }
 
 /**
@@ -81,9 +90,21 @@ export class CapQueueRegistry {
     return reaped;
   }
 
-  /** Record a cap-rejected spawn intent. Returns the PUBLIC projection (opId + kickoffLabel + queuedAt —
-   *  never the full kickoffPrompt) so the caller can echo it back on the enriched cap-reject error. */
-  record(managerSessionId: string, agentId: string, taskId: string | null, kickoffPrompt: string): CapQueuedSpawn {
+  /**
+   * Record a cap-rejected spawn intent. Returns the PUBLIC projection (opId + kickoffLabel + queuedAt —
+   * never the full kickoffPrompt) so the caller can echo it back on the enriched cap-reject error.
+   *
+   * `reviewSpec` (optional, mutually exclusive `reviewOfWorkerSessionId`/`reviewOfTaskId`) carries a REVIEW
+   * spawn's target forward into the entry so {@link SessionService.maybeDrainCapQueue}'s later replay can
+   * pass it back to `spawnWorker` — WITHOUT this, the replay silently degraded into a plain HEAD-forked
+   * spawn (no reviewed branch, no `reviewOf` on the result), the exact silent-contract-violation worker_spawn's
+   * own tool description promises never happens ("A bad/unresolvable reviewOf* id is a hard {error} — it
+   * never silently falls back to a HEAD-forked spawn") — card daf7dfa1.
+   */
+  record(
+    managerSessionId: string, agentId: string, taskId: string | null, kickoffPrompt: string,
+    reviewSpec?: { reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
+  ): CapQueuedSpawn {
     const nowMs = this.now();
     this.prune(nowMs);
     if (this.entries.size >= CAP_QUEUE_MAX) {
@@ -100,6 +121,8 @@ export class CapQueueRegistry {
       kickoffLabel: kickoffPrompt.length > KICKOFF_LABEL_MAX ? `${kickoffPrompt.slice(0, KICKOFF_LABEL_MAX)}…` : kickoffPrompt,
       kickoffPrompt,
       queuedAt,
+      ...(reviewSpec?.reviewOfWorkerSessionId ? { reviewOfWorkerSessionId: reviewSpec.reviewOfWorkerSessionId } : {}),
+      ...(reviewSpec?.reviewOfTaskId ? { reviewOfTaskId: reviewSpec.reviewOfTaskId } : {}),
     };
     this.entries.set(key, entry);
     return toPublic(entry);
@@ -177,6 +200,26 @@ export class CapQueueRegistry {
     this.entries.clear();
     this.entries.set(key, entry);
     for (const [k, e] of rest) this.entries.set(k, e);
+  }
+
+  /**
+   * Re-key every entry belonging to `oldManagerId` onto `newManagerId`, IN PLACE (mutates `managerSessionId`
+   * on each qualifying entry; the Map's own key is never `managerSessionId`-derived for a tasked entry and
+   * carries no FIFO-position meaning worth touching for a taskless one either, so insertion order/FIFO is
+   * untouched). Card daf7dfa1: a manager recycle (`recycleManager`) reparents live workers/wakes/questions
+   * onto its successor but — before this — NEVER reparented this registry, so a cap-queued entry recorded
+   * under the predecessor was silently ORPHANED: no future retirement is ever attributed to the (now-dead)
+   * predecessor id again (every live worker was just reparented to the successor, so ITS future onExit calls
+   * `maybeDrainCapQueue(successorId)`), so the entry can never drain — it just sits until its 30-min TTL
+   * reaps it, and even that reap's notification is sent to a session that no longer exists. Returns the
+   * count reparented, for the caller's own event/audit trail.
+   */
+  reparent(oldManagerId: string, newManagerId: string): number {
+    let count = 0;
+    for (const e of this.entries.values()) {
+      if (e.managerSessionId === oldManagerId) { e.managerSessionId = newManagerId; count++; }
+    }
+    return count;
   }
 
   /** Cancel one queued entry by opId, scoped to the calling manager (never lets a manager cancel another

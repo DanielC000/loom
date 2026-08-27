@@ -6446,7 +6446,9 @@ export class SessionService {
       // Record the rejected intent so it stays VISIBLE via worker_list instead of silently
       // disappearing — see CapQueueRegistry's class doc. Purely additive: the thrown error's
       // `.message` is byte-identical to before; only CapQueueRejectedError.capQueued is new.
-      const capQueued = this.capQueue.record(managerSessionId, workerAgent.id, taskId, opts.kickoffPrompt);
+      const capQueued = this.capQueue.record(managerSessionId, workerAgent.id, taskId, opts.kickoffPrompt, {
+        reviewOfWorkerSessionId: opts.reviewOfWorkerSessionId, reviewOfTaskId: opts.reviewOfTaskId,
+      });
       throw new CapQueueRejectedError(cap, capQueued);
     }
     this.inFlightSpawnTaskIds.add(claimKey);
@@ -7048,6 +7050,14 @@ export class SessionService {
           taskId: entry.taskId ?? undefined,
           agentId: entry.agentId,
           kickoffPrompt: entry.kickoffPrompt, // the FULL prompt — never the truncated kickoffLabel
+          // Card daf7dfa1: WITHOUT this, a queued REVIEW spawn silently degraded on auto-fire into a plain
+          // HEAD-forked spawn — no reviewed branch, no `reviewOf` on the result — violating worker_spawn's
+          // own documented contract that a bad/unresolvable reviewOf* id is a hard error, never a silent
+          // fallback. Re-validated exactly as a manual worker_spawn would be (the reviewed session/branch
+          // may have moved or vanished since queuing) — a genuine failure here correctly reaches the
+          // [loom:cap-queue-autofire-failed] notify branch below instead of masquerading as a success.
+          reviewOfWorkerSessionId: entry.reviewOfWorkerSessionId,
+          reviewOfTaskId: entry.reviewOfTaskId,
         }, { skipCapQueueRecord: true }); // WE re-queue on a cap-race ourselves — see the catch branch below
         // Success: loop again in case more than one slot is free (e.g. two workers retired back-to-back).
       } catch (e) {
@@ -10986,6 +10996,14 @@ export class SessionService {
     // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
     // predecessor asked, unreachable from the successor's own session id.
     this.db.reparentQuestions(oldManagerId, fresh.id);
+    // Card daf7dfa1: move any of the predecessor's still-queued cap-queue entries onto the successor too —
+    // otherwise a spawn queued behind the cap gets permanently orphaned under a manager id that no future
+    // retirement will ever drain again (see CapQueueRegistry.reparent's own doc). Fire-and-forget catch-up
+    // drain right after, mirroring recycleWorker's own finally-drain: the successor may already have free
+    // capacity (workers were just reparented onto it too), so a migrated entry shouldn't have to wait for
+    // an unrelated future retirement if it could fire right now.
+    this.capQueue.reparent(oldManagerId, fresh.id);
+    void this.maybeDrainCapQueue(fresh.id);
     const carried = this.pty.flushPending(oldManagerId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
     this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);

@@ -2529,7 +2529,14 @@ export class OrchestrationMcpRouter {
         rateLimitedUntil: null,
         rateLimitDeadline: null,
         worktreePathAliases: null, // no worktree exists yet — not determinable, never a silent 0
-        capQueued: { opId: e.opId, agentId: e.agentId, taskId: e.taskId, kickoffLabel: e.kickoffLabel, queuedAt: e.queuedAt },
+        capQueued: {
+          opId: e.opId, agentId: e.agentId, taskId: e.taskId, kickoffLabel: e.kickoffLabel, queuedAt: e.queuedAt,
+          // Card daf7dfa1: additive-only — omitted entirely for a non-review entry, so a normal cap-queued
+          // placeholder's shape is byte-identical to before these fields existed. Makes a queued review's
+          // target visible BEFORE it ever fires, not just discoverable after the fact.
+          ...(e.reviewOfWorkerSessionId ? { reviewOfWorkerSessionId: e.reviewOfWorkerSessionId } : {}),
+          ...(e.reviewOfTaskId ? { reviewOfTaskId: e.reviewOfTaskId } : {}),
+        },
         reportedState: null,
         awaitingReview: false,
         staleReport: null,

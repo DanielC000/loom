@@ -69,6 +69,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //  (26) both-directions control: a normally-queued entry (no TTL lapse) still auto-fires into a real
 //       worker exactly as before, AND emits NO [loom:cap-queue-ttl-reaped] notice.
 //
+// Proves (Section E — card daf7dfa1: a REVIEW spawn's target survives the cap-queue round trip):
+// THE GAP THIS CLOSES: worker_spawn's own tool description promises "A bad/unresolvable reviewOf* id is
+// a hard {error} — it never silently falls back to a HEAD-forked spawn." Before this fix, CapQueueEntry
+// never carried `reviewOfWorkerSessionId`/`reviewOfTaskId`, so maybeDrainCapQueue's auto-fire replay
+// dropped them silently — a queued Code Review spawn auto-fired as an ordinary fresh-HEAD worker with NO
+// `reviewOf`, exactly the silent fallback the tool description says never happens. A manager scanning for
+// "the reviewer of X" would see nothing recognizable — this is what card daf7dfa1 actually observed.
+//  (30) a cap-rejected REVIEW spawn's `capQueued` carries `reviewOfWorkerSessionId`, and worker_list's
+//       placeholder row surfaces it too (visible BEFORE it ever fires, not just after).
+//  (31) once the slot frees and the entry auto-fires, the live worker's result carries `reviewOf` matching
+//       the reviewed branch/headSha — NOT a plain HEAD-forked spawn. THIS is the assertion that must go
+//       RED on unfixed code (CapQueueEntry drops the review target on replay).
+//  (32) if the reviewed session has since vanished (deleted) by the time the entry fires, the auto-fire
+//       correctly FAILS (re-validated exactly like a manual worker_spawn would) and the manager IS
+//       notified via [loom:cap-queue-autofire-failed] — parity with worker_message's deliveryState:
+//       "dropped", never a silent wrong-target success.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/worker-spawn-cap-queue.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -575,6 +592,93 @@ try {
       for (const wt of [...new Set(worktreesD.filter(Boolean))]) { try { await removeWorktree(repoD, wt); } catch { /* best-effort */ } }
     } catch { /* best-effort */ }
     try { fs.rmSync(repoD, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+}
+
+// ===================== Section E (card daf7dfa1): a REVIEW spawn's target survives the cap-queue =====================
+// ===================== round trip — own project/manager/repo ("pE"/"mgr4") =====================
+{
+  const repoE = path.join(os.tmpdir(), `loom-wscq-repoE-${Date.now()}-${process.pid}-${randomUUID()}`);
+  initRepo(repoE);
+  const worktreesE = [];
+  try {
+    db.insertProject({ id: "pE", name: "E", repoPath: repoE, vaultPath: repoE, config: { orchestration: { maxConcurrentWorkers: 1 } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "agentMgrE", projectId: "pE", name: "MgrE", startupPrompt: "MGR", position: 0, profileId: null });
+    db.insertAgent({ id: "agentDevE", projectId: "pE", name: "DevE", startupPrompt: "DEV", position: 1, profileId: null });
+    db.insertAgent({ id: "agentCRE", projectId: "pE", name: "CRE", startupPrompt: "CR", position: 2, profileId: null });
+    db.insertSession({ id: "mgr4", projectId: "pE", agentId: "agentMgrE", engineSessionId: null, title: null,
+      cwd: repoE, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const taskE1 = randomUUID();
+    db.insertTask({ id: taskE1, projectId: "pE", title: "task E1", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+
+    const routerE = new OrchestrationMcpRouter(db, svc);
+    const serverE = routerE.buildServer("mgr4", "manager");
+    const [clientTE, serverTE] = InMemoryTransport.createLinkedPair();
+    await serverE.connect(serverTE);
+    const clientE = new Client({ name: "worker-spawn-cap-queue-test-E", version: "0" });
+    await clientE.connect(clientTE);
+    const callE = async (nameArgs, args) => parse(await clientE.callTool({ name: nameArgs, arguments: args ?? {} }));
+    const retireAndDrainE = async (workerSessionId) => { events.onExit(workerSessionId, 0, { intended: true }); await lastDrainPromise; };
+
+    // Worker E1 fills the cap; give its branch a REAL commit so the reviewed tip sha is checkable.
+    const spawnE1 = await callE("worker_spawn", { taskId: taskE1, agentId: "agentDevE", kickoffPrompt: "GO E1" });
+    check("(30 setup) taskE1 fills the cap (cap=1)", !!spawnE1.workerSessionId);
+    worktreesE.push(spawnE1.worktreePath);
+    execSync(`git -C "${spawnE1.worktreePath}" ${GIT_ID} commit -q --allow-empty -m "feat: e1 marker commit"`);
+    const reviewedHeadSha = execSync(`git -C "${spawnE1.worktreePath}" rev-parse HEAD`).toString().trim();
+
+    // ===================== (30) a cap-rejected REVIEW spawn's capQueued + worker_list placeholder carry reviewOfWorkerSessionId =====================
+    const rejCR = await callE("worker_spawn", { agentId: "agentCRE", kickoffPrompt: "Review E1's branch", reviewOfWorkerSessionId: spawnE1.workerSessionId });
+    check("(30) cap-rejected REVIEW spawn's capQueued carries reviewOfWorkerSessionId",
+      !!rejCR.capQueued && rejCR.capQueued.reviewOfWorkerSessionId === spawnE1.workerSessionId);
+    const listE = await callE("worker_list");
+    const placeholderE = listE.find((w) => w.processState === "cap-queued");
+    check("(30) worker_list's cap-queued placeholder ALSO surfaces reviewOfWorkerSessionId (visible before it ever fires)",
+      !!placeholderE && placeholderE.capQueued.reviewOfWorkerSessionId === spawnE1.workerSessionId);
+
+    // ===================== (31) THE FIX: once the slot frees, the auto-fired worker's result carries reviewOf — =====================
+    // ===================== NOT a plain HEAD-forked spawn. Must go RED on unfixed code (CapQueueEntry drops it). =====================
+    await retireAndDrainE(spawnE1.workerSessionId);
+    const listE2 = await callE("worker_list");
+    const liveCR = listE2.find((w) => w.processState === "live" && w.taskId === null);
+    check("(31) the queued review auto-fires into a real live worker", !!liveCR);
+    // worker_list's own row shape doesn't project `reviewOf` (that's only on the DIRECT worker_spawn
+    // response, which nobody receives for an auto-fired replay) — read the raw DB row instead (white-box,
+    // same pattern as this file's other `svc.capQueue.entries.get(...)` access) to check what the auto-fire
+    // ACTUALLY cut the worktree from.
+    const liveCRRow = liveCR && db.getSession(liveCR.workerSessionId);
+    check("(31) the auto-fired worker's reviewBaseSha matches E1's REAL commit tip (recorded a review fork, not a plain spawn)",
+      !!liveCRRow && liveCRRow.reviewBaseSha === reviewedHeadSha);
+    // Content-level proof, not just the recorded field: the auto-fired worktree's OWN checked-out HEAD is
+    // E1's marker commit (a plain HEAD-forked spawn would instead sit on repoE's initial commit).
+    const firedHeadSha = liveCRRow?.worktreePath && execSync(`git -C "${liveCRRow.worktreePath}" rev-parse HEAD`).toString().trim();
+    check("(31) the auto-fired worktree's checked-out HEAD is E1's marker commit (NOT a fresh HEAD-forked spawn)",
+      firedHeadSha === reviewedHeadSha);
+    if (liveCR) worktreesE.push(liveCRRow?.worktreePath);
+
+    // ===================== (32) if the reviewed session vanishes before the entry fires, the auto-fire FAILS loud =====================
+    // ===================== (parity with worker_message's "dropped" deliveryState), never a silent wrong-target success =====================
+    // liveCR is STILL live (cap=1, full) — queue a SECOND review, of liveCR's own session, behind the cap.
+    const rejCR2 = await callE("worker_spawn", { agentId: "agentCRE", kickoffPrompt: "Review a soon-to-vanish session", reviewOfWorkerSessionId: liveCR.workerSessionId });
+    check("(32 setup) a second review spawn (of the FIRST reviewer's own session) is cap-queued", !!rejCR2.capQueued);
+    const vanishedId = liveCR.workerSessionId;
+    db.deleteSession(vanishedId); // the reviewed session vanishes — this ALSO frees the cap slot it held (db.listWorkers no longer sees it)
+
+    host.enqueueLog.length = 0;
+    await svc.maybeDrainCapQueue("mgr4"); // deterministic — no onExit needed, deletion already freed the slot
+    const listE3 = await callE("worker_list");
+    // The ONLY worker rows left for mgr4 are E1 (exited) and the deleted liveCR (gone) — so ANY live row
+    // here can only be a wrongly-fired fallback spawn for the vanished-target review.
+    check("(32) the vanished-target review never becomes a live worker (no silent wrong-target fallback)",
+      !listE3.some((w) => w.processState === "live"));
+    check("(32) the manager IS notified via [loom:cap-queue-autofire-failed], naming the vanished reviewOfWorkerSessionId",
+      host.enqueueLog.some((e) => e.sessionId === "mgr4" && e.text.includes("[loom:cap-queue-autofire-failed]") && e.text.includes(vanishedId)));
+  } finally {
+    try {
+      const { removeWorktree } = await import("../dist/git/worktrees.js");
+      for (const wt of [...new Set(worktreesE.filter(Boolean))]) { try { await removeWorktree(repoE, wt); } catch { /* best-effort */ } }
+    } catch { /* best-effort */ }
+    try { fs.rmSync(repoE, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 }
 
