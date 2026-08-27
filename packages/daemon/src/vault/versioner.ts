@@ -103,13 +103,22 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 /**
+ * The git method surface {@link boundedVaultGit} exposes: the plumbing methods this module's
+ * OTHER bounded call sites use (`checkIsRepo`/`revparse`/`init`/`raw`) UNION the three working-tree
+ * methods `commitVault` needs (`add`/`status`/`commit` — card 54b839c5). One shared Pick so
+ * `commitVault` reuses the SAME bounding seam as every other call site in this file instead of a
+ * second bounding mechanism.
+ */
+export type BoundedVaultGit = Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw" | "add" | "status" | "commit">;
+
+/**
  * Injectable seam mirroring git/worktrees.ts's `BoundedGitDeps` — lets a test simulate a hanging git
  * child with a tiny budget and assert a call returns within the window instead of hanging forever.
  * `gitFactory` defaults to a simpleGit whose `block` timeout kills a no-output (hung) child; `timeoutMs`
  * bounds both that block timeout and the {@link withTimeout} race. Real callers never pass this.
  */
 export interface VaultGitDeps {
-  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">;
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => BoundedVaultGit;
   timeoutMs?: number;
   /**
    * Test-only, `flushSync`-specific override for its `git add -A` call, INDEPENDENT of `timeoutMs` /
@@ -126,11 +135,47 @@ export interface VaultGitDeps {
   flushCommitTimeoutMs?: number;
 }
 
-/** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's defaults. */
+/**
+ * **`GIT_TERMINAL_PROMPT=0` is DELIBERATELY NOT SET here — a finding, not an oversight (card 54b839c5).**
+ * The obvious shape, `simpleGit(p, {...}).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })` (the SAME
+ * shape `restart.ts`'s `defaultGitLogSince` uses), was tried and REVERTED after it broke two real things,
+ * verified live rather than assumed:
+ *  1. It throws outright the instant an ambient editor/pager var is set (`GitPluginError: Use of
+ *     "GIT_EDITOR" is not permitted without enabling allowUnsafeEditor` — reproduced in the very shell
+ *     this fix was developed in; this repo's own worker/session spawn recipe additionally sets
+ *     `GIT_PAGER`/`PAGER` — see root CLAUDE.md). This alone is fixable by stripping that family, same as
+ *     `git/writer.ts`'s `nonInteractiveEnv()` does — but:
+ *  2. `simpleGit(...).env(obj)` REPLACES the instance's whole env with `obj` (verified against the
+ *     installed package: `Git2.prototype.env` sets `this._executor.env = obj` outright, not a merge)
+ *     — so `obj` must ALSO carry `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` whenever the CALLER has them set,
+ *     to preserve a caller's legitimate config redirection. But simply having those two keys PRESENT in
+ *     an explicitly-supplied `.env()` object trips simple-git's `blockUnsafeOperationsPlugin` too (a
+ *     DIFFERENT category, `allowUnsafeConfigPaths` — the exact one `commitVault`'s own identity fallback,
+ *     two sections below, already avoids reopening, via `-c` args instead of env, for the same reason).
+ *     STRIPPING those two keys instead of passing them through is not a safe alternative either — verified
+ *     live: `test/vault-write-tool.mjs`'s hermetic identity-fallback case (f1) sets
+ *     `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to nonexistent paths SPECIFICALLY so `commitVault` sees NO
+ *     resolvable identity and exercises its Loom-fallback path; stripping those keys from the child's env
+ *     instead lets git fall back to this HOST's real `~/.gitconfig` — this dev host has one configured
+ *     (`git config --global user.name` → a real identity), which would make that test silently commit
+ *     under the WRONG (real, non-fallback) identity instead of throwing — a worse failure than a loud
+ *     crash, since it passes or fails depending on the runner's own host config rather than the code.
+ *
+ * Given neither path is safe, and `commitVault` performs NO network operation (no fetch/push/clone —
+ * `checkIsRepo`/`revparse`/`init`/`add`/`status`/`commit` are all local), `GIT_TERMINAL_PROMPT` has no
+ * live effect here regardless: it only governs git's OWN credential-prompt logic during HTTP(S) auth,
+ * which this function can never trigger. The timeout bounding below (the actual, functionally load-bearing
+ * fix for the hang this card is about) does not depend on `.env()` at all. `CLAUDE.md`'s "every git write
+ * is bounded + non-interactive" invariant is satisfied here by the bound; the terminal-prompt half is
+ * moot for a call sequence that never touches the network.
+ */
+
+/** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's
+ *  defaults. No `.env()` override (see the doc immediately above for why — card 54b839c5). */
 function boundedVaultGit(
   repoPath: string,
   deps: VaultGitDeps,
-): { git: Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">; timeoutMs: number } {
+): { git: BoundedVaultGit; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
@@ -390,12 +435,18 @@ const warnedOversizedFiles = new Set<string>();
  * there). Swallows a reset failure per-file (leaves that one file staged) rather than aborting the whole
  * commit — refusing to commit ANYTHING because one file couldn't be unstaged would be a worse outcome
  * than the rare case of a stray oversized commit slipping through, and the failure itself is still logged.
+ *
+ * Narrowed to `Pick<SimpleGit, "raw">` and `timeoutMs`-bounded (card 54b839c5) — a `git reset` here is
+ * cheap plumbing (local index manipulation, no hooks), so it shares {@link VAULT_GIT_OP_TIMEOUT_MS} with
+ * this module's other plumbing-tier calls rather than the working-tree-scale ceiling `commitVault`'s
+ * `add`/`commit` use.
  */
 async function unstageOversizedFiles(
-  git: SimpleGit,
+  git: Pick<SimpleGit, "raw">,
   root: string,
   files: Array<{ path: string; working_dir: string; index: string }>,
   maxFileBytes: number,
+  timeoutMs: number = VAULT_GIT_OP_TIMEOUT_MS,
 ): Promise<string[]> {
   const skipped: string[] = [];
   for (const f of files) {
@@ -404,7 +455,7 @@ async function unstageOversizedFiles(
     try { size = fs.statSync(path.join(root, f.path)).size; } catch { continue; } // gone/unreadable — let the normal flow handle it
     if (size <= maxFileBytes) continue;
     try {
-      await git.raw(["reset", "--", f.path]);
+      await withTimeout(git.raw(["reset", "--", f.path]), timeoutMs, `git reset (vault unstage oversized: ${f.path})`);
       skipped.push(f.path);
       const key = `${root}::${f.path}`;
       if (!warnedOversizedFiles.has(key)) {
@@ -426,11 +477,20 @@ async function unstageOversizedFiles(
  * Whether the repo at `git`'s cwd has BOTH `user.name` and `user.email` resolvable (global/system/local
  * config, in git's own precedence order). `git config user.<key>` exits non-zero when unset, which
  * simple-git surfaces as a rejection — caught here and treated as "unresolved", never thrown.
+ *
+ * Narrowed to `Pick<SimpleGit, "raw">` (card 54b839c5) — the only method this calls — mirroring
+ * `git/worktrees.ts`'s own copy of this same check, so callers passing a `BoundedVaultGit` (which does
+ * not carry every `SimpleGit` method) can use it directly. `timeoutMs` bounds each `raw` call the same
+ * way every other plumbing-tier call in this module is bounded; defaults to {@link VAULT_GIT_OP_TIMEOUT_MS}
+ * since a `git config` read is cheap plumbing, not working-tree-scale.
  */
-async function hasConfiguredGitIdentity(git: SimpleGit): Promise<boolean> {
+async function hasConfiguredGitIdentity(
+  git: Pick<SimpleGit, "raw">,
+  timeoutMs: number = VAULT_GIT_OP_TIMEOUT_MS,
+): Promise<boolean> {
   try {
-    const name = (await git.raw(["config", "user.name"])).trim();
-    const email = (await git.raw(["config", "user.email"])).trim();
+    const name = (await withTimeout(git.raw(["config", "user.name"]), timeoutMs, "git config user.name (vault identity check)")).trim();
+    const email = (await withTimeout(git.raw(["config", "user.email"]), timeoutMs, "git config user.email (vault identity check)")).trim();
     return !!name && !!email;
   } catch {
     return false;
@@ -490,40 +550,127 @@ function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeou
  * which is why it silently unstages rather than warning — contrast `git/writer.ts`'s `GitWriter.commit`,
  * a DELIBERATE human/agent act on the project's code repo, which instead WARNS on the same threshold
  * without unstaging or refusing (see that method's own doc for the reasoning).
+ *
+ * **Bounded, card 54b839c5 (the Code Reviewer's finding 4 on card 816f0056's branch).** This used to
+ * construct a plain `simpleGit(vaultPath)` — no block timeout, no `GIT_TERMINAL_PROMPT=0` — and run
+ * `add`/`status`/`commit` through the user's own `git commit` (and therefore any pre-commit hook) with
+ * nothing bounding any of it: the exact hang vector `816f0056` hardened on `flushSync`'s SHUTDOWN path,
+ * left open here on the path a human's HTTP request (`vault/writer.ts`) actually blocks on. Every call
+ * now goes through {@link boundedVaultGit} — the SAME seam this module's other bounded call sites use,
+ * never a second mechanism — via two instances at two ceilings (the load-bearing half of this fix —
+ * `GIT_TERMINAL_PROMPT=0` is deliberately NOT added here; see the doc immediately above `boundedVaultGit`
+ * for why, and for why its absence doesn't matter — this function never touches the network):
+ *  - **Cheap plumbing** (`checkIsRepo`/`revparse`/`init`/`status`/the identity `config` reads/
+ *    `unstageOversizedFiles`'s `reset` calls): {@link VAULT_GIT_OP_TIMEOUT_MS} (15s) — measured on this
+ *    host at 43-59ms steady-state, so 15s is generous headroom, not a tight fit.
+ *  - **Working-tree-scale** (`add`, and `commit` — the actual named hang vector, since `commit` runs the
+ *    hook): {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} (5 min) — the SAME constant `flushSync` uses for
+ *    its own `add`/`commit`, sized off the SAME measurement (a cold `git add -A` over a 20k-file vault
+ *    measured ~11.6s on local NVMe alone). ⛔ A single tight ceiling across both tiers would mean a
+ *    genuinely-still-working large-vault flush fails EVERY time — on this path, a failed commit attempt
+ *    means a DROPPED user edit stays uncommitted, so sizing the working-tree tier tight is not a safe
+ *    default. `status`/`checkIsRepo`/`revparse` stay on the cheap tier deliberately (matching `flushSync`'s
+ *    own `git status --porcelain`, not its `add`/`commit`) — none of them touch the working tree at scale.
+ *
+ * **Mechanism, verified rather than assumed (the card's own instruction):** simple-git's `block` timeout
+ * is a NO-OUTPUT timer (it resets on every stdout/stderr `data` event from the child; verified by reading
+ * the installed `simple-git@3.36.0` package's bundled `timeoutPlugin` — it re-arms via `spawned.stdout.on
+ * ("data", wait)`/`stderr` the same way) — the right shape for a silent hung hook (e.g. `sleep`), not a
+ * hard wall-clock cap on a verbose one. On expiry it calls `spawned.kill("SIGINT")` on the DIRECTLY
+ * spawned child — simple-git calls `child_process.spawn(command, args, spawnOptions)` with no `shell:
+ * true` anywhere in the package, so unlike `flushSync`'s shell-string `execSync` calls (where a timeout
+ * only kills the wrapping `cmd.exe`, not the real `git.exe` grandchild — see that method's own doc), a
+ * timeout HERE kills `git.exe` itself directly. On Windows, `child.kill()` ignores the signal argument
+ * and forcibly terminates that immediate process regardless. **This still does not guarantee the pre-commit
+ * hook's own child (a `sh`/`sleep` `git.exe` already spawned) dies with it** — no job object, no tree
+ * kill, same abandonment risk `flushSync` already documents — so, as there, a bound here means "how long
+ * THIS FUNCTION waits", not a guarantee about what the hook process does afterward, and whether a killed
+ * `git commit` still lands its commit object is the same kind of race `flushSync`'s own doc describes
+ * (not asserted either way by this function or its test).
+ *
+ * **No `maxBuffer` ceiling applies here (card 816f0056 review round 2, finding 1, re-checked for this
+ * path rather than assumed to carry over):** that finding was about the Node.js `execSync`/`execFileSync`
+ * family's `maxBuffer` option (a large `git add -A` under `core.autocrlf=true` can emit enough per-file
+ * stderr warnings to hit Node's default 1 MiB cap and throw ENOBUFS). simple-git does not use that family
+ * at all — it spawns via `child_process.spawn` and accumulates stdout/stderr itself with no size cap and
+ * no `maxBuffer`-shaped option anywhere in the package (verified: zero occurrences of `maxBuffer` in the
+ * installed `simple-git@3.36.0` source). So this path cannot ENOBUFS the way `flushSync`'s did; it has no
+ * matching ceiling to add.
+ *
+ * **What a bound expiring on the REST path (`vault/writer.ts`) means — the design decision this card asks
+ * for, made explicit rather than left implicit:** `writeVaultFile`/`createVaultFile`/`deleteVaultFile` all
+ * write the file to disk FIRST and call this function SECOND — so a timeout (or any other commit failure)
+ * here never drops the user's edit; the edit is already durable on disk, only the git commit of it is
+ * delayed. Every real caller (those three, and `VaultVersioner`'s own debounced `commit()` below) already
+ * treats a rejection from this function as "not committed this round" (`writer.ts`'s `.catch(() => false)`
+ * turns it into `{ ok: true, committed: false }`, never a hard REST error), and that stays correct: the
+ * still-uncommitted file remains on disk under the watched root, so the NEXT debounced auto-commit tick
+ * (or a later retry) picks it back up and commits it then — self-healing, not a permanent loss. This
+ * function therefore still REJECTS on a bound expiry (unchanged from today's behavior for any other git
+ * error on these calls, which already propagated uncaught) rather than swallowing it to `false` — what
+ * changes is that it no longer HANGS, and a timeout is no longer SILENT: see the `console.warn` below,
+ * closing the same observability gap `flushSync`'s own review already closed on its path.
  */
 export async function commitVault(
   vaultPath: string,
   message: string,
-  opts?: { maxFileBytes?: number },
+  opts?: { maxFileBytes?: number; deps?: VaultGitDeps },
 ): Promise<boolean> {
   const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
-  const git = simpleGit(vaultPath);
-  const isRepo = await git.checkIsRepo().catch(() => false);
+  const deps = opts?.deps ?? {};
+  // Two tiers, two bounded instances (same seam, different ceiling) — see this function's own doc for
+  // why one shared ceiling is wrong here. A test-injected `deps.timeoutMs` collapses both tiers onto the
+  // SAME small value (both `??` fallbacks below are skipped), which is exactly what a hang test wants —
+  // real callers never set `deps`, so production always gets the real 15s/5min split.
+  const cheapTimeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
+  const workTreeTimeoutMs = deps.timeoutMs ?? VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS;
+  const { git } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: cheapTimeoutMs });
+  const { git: workGit } = boundedVaultGit(vaultPath, { ...deps, timeoutMs: workTreeTimeoutMs });
+
+  const isRepo = await withTimeout(git.checkIsRepo(), cheapTimeoutMs, "git check-is-repo (vault commit)").catch(() => false);
   if (isRepo) {
-    const root = (await git.revparse(["--show-toplevel"]).catch(() => "")).trim();
+    const root = (await withTimeout(git.revparse(["--show-toplevel"]), cheapTimeoutMs, "git rev-parse --show-toplevel (vault commit)").catch(() => "")).trim();
     const externallyManaged = !!root && root.replace(/\\/g, "/") !== vaultPath.replace(/\\/g, "/");
     if (externallyManaged) return false;
   } else {
-    await git.init();
+    await withTimeout(git.init(), cheapTimeoutMs, "git init (vault commit)");
   }
-  await git.add(".");
-  const status = await git.status();
-  if (status.files.length === 0) return false;
-  const skipped = await unstageOversizedFiles(git, vaultPath, status.files, maxFileBytes);
-  // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
-  // so re-querying status here would still see it and wrongly think there's something left to commit.
-  // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
-  if (skipped.length >= status.files.length) return false; // everything staged was oversized — nothing left to commit
-  if (await hasConfiguredGitIdentity(git)) {
-    await git.commit(message);
-  } else {
-    await git.raw([
-      "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
-      "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
-      "commit", "-m", message,
-    ]);
+
+  // Tracks the call in flight so the warn below names WHICH op hit its bound (mirrors flushSync's own
+  // `currentOp` tracking) — this is the section covering the actual named hang vector (add/status/commit).
+  let currentOp: { label: string; timeoutMs: number } | undefined;
+  try {
+    currentOp = { label: "git add .", timeoutMs: workTreeTimeoutMs };
+    await withTimeout(workGit.add("."), workTreeTimeoutMs, currentOp.label);
+    currentOp = { label: "git status", timeoutMs: cheapTimeoutMs };
+    const status = await withTimeout(git.status(), cheapTimeoutMs, currentOp.label);
+    if (status.files.length === 0) return false;
+    const skipped = await unstageOversizedFiles(git, vaultPath, status.files, maxFileBytes, cheapTimeoutMs);
+    // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
+    // so re-querying status here would still see it and wrongly think there's something left to commit.
+    // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
+    if (skipped.length >= status.files.length) return false; // everything staged was oversized — nothing left to commit
+    currentOp = { label: "git commit", timeoutMs: workTreeTimeoutMs };
+    if (await hasConfiguredGitIdentity(git, cheapTimeoutMs)) {
+      await withTimeout(workGit.commit(message), workTreeTimeoutMs, currentOp.label);
+    } else {
+      await withTimeout(workGit.raw([
+        "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
+        "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
+        "commit", "-m", message,
+      ]), workTreeTimeoutMs, currentOp.label);
+    }
+    return true;
+  } catch (err) {
+    // Closing the observability gap named above: before this fix a hung commit wedged the caller
+    // forever with nothing in the logs; now it's bounded AND visible. Still rethrows — see this
+    // function's own doc for why a bound expiry here stays a rejection rather than a swallowed `false`.
+    console.warn(
+      `[vault-versioner] ${vaultPath} commitVault's "${currentOp?.label}" call FAILED (bound ${currentOp?.timeoutMs}ms) — ` +
+      `a real user edit may sit uncommitted until the next auto-commit tick: ${(err as Error)?.message ?? err}`,
+    );
+    throw err;
   }
-  return true;
 }
 
 /**
@@ -691,7 +838,7 @@ function isVaultAutoCommitPaused(commitPath: string): boolean {
 const LARGE_VAULT_WATCH_WARN_THRESHOLD = 20_000;
 
 export class VaultVersioner {
-  private git: Pick<SimpleGit, "checkIsRepo" | "revparse" | "init" | "raw">;
+  private git: BoundedVaultGit;
   private watcher?: FSWatcher;
   private timer?: NodeJS.Timeout;
   private externallyManaged = false;
