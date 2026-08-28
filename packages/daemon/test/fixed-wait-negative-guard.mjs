@@ -108,6 +108,23 @@ const FALSE_MATCH_RE = /TIMING-GUARD-FALSE-MATCH:\s*([a-z-]+)/;
 // two candidates existed). Matches check()/assert() in the order they appear in the window.
 const CHECK_OR_ASSERT_RE = /(?:check|assert)\(\s*(["'`])((?:(?!\1).)*)\1/g;
 
+// Card 743be0c9: IDIOM_A/IDIOM_B must NOT fire on the raw line text, because a `//`-comment can legitimately
+// CONTAIN the literal idiom text — e.g. an explanatory TIMING-GUARD-* annotation quoting the call it's
+// talking about ("...this is not competing against a moving deadline the way run_C's old internal sleep(30)
+// was" — the real specimen that surfaced this, pending-ops-registry.mjs:269). Without stripping, that
+// comment line is itself treated as a second wait site, producing a duplicate/phantom hit next to the real
+// wait it's describing. Strip a TRAILING `//` comment before the idiom test only — this makes a
+// WHOLE-LINE comment vanish entirely (nothing left for IDIOM_A/B to match) while leaving real code before
+// the `//` on a mixed line (`await sleep(5); // ...`) intact. `(?<!:)` avoids truncating at a URL's `://`;
+// same idiom as harness-adapter-claude-literal-guard.mjs's own `codeOnly` strip (that file's header has the
+// CRLF gotcha this shares: no trailing `$` anchor, because this repo's source is CRLF and `.*$` would never
+// reach a `\r`-terminated end-of-string — bare `.*` already consumes everything up to it). This is scoped
+// STRICTLY to the idiom test below — markerReasonFor() (TIMING-GUARD-SAFE/-FALSE-MATCH lookback) still reads
+// the ORIGINAL `lines` array unstripped, so a marker comment stays fully readable. Comments must become
+// invisible for IDIOMS and stay readable for MARKERS — two opposite treatments of the same text, kept
+// explicitly separate rather than collapsed into one pass.
+const stripTrailingComment = (line) => line.replace(/(?<!:)\/\/.*/, "");
+
 // file -> Set(assertion label text). EXCLUDING the 4 retrofitted files (no longer match the raw idiom at
 // all — a regression there is a NEW flag, not a baseline hit) and the 2 files exempted via inline comment
 // (companion-voice-enable-gate.mjs, companion-voice-tts-provision.mjs's line-37 site). Regenerate with the
@@ -518,8 +535,8 @@ function scanFile(file) {
   const lines = text.split("\n");
   const hits = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!IDIOM_A.test(line) && !IDIOM_B.test(line)) continue;
+    const codeOnly = stripTrailingComment(lines[i]);
+    if (!IDIOM_A.test(codeOnly) && !IDIOM_B.test(codeOnly)) continue;
     const window = lines.slice(i, i + 5).join("\n");
     // Scan EVERY check()/assert() in the window (matchAll, not the first match only) — a single wait can
     // guard more than one assertion, and dropping anything past the first is a silent under-report.
@@ -540,6 +557,42 @@ const files = walkTestFiles();
 // of silently certifying an empty scan as a clean corpus. `files.length > 0` (not a hardcoded count) —
 // any legitimate future test file only grows this population, never shrinks it toward the floor.
 check(`the corpus scan opened at least one test/*.mjs file (found ${files.length})`, files.length > 0);
+
+// Card 743be0c9, DoD-2 — BOTH DIRECTIONS, synthetic: a `//`-comment merely MENTIONING the idiom must NOT
+// produce a hit, and a REAL idiom on a code line must STILL produce one. A fix that suppresses both would
+// silently blind this guard to every genuine fixed wait in the corpus — worse than the phantom it replaces.
+// ⚠️ Built via string concatenation, and the check() labels below deliberately avoid spelling the idiom text
+// verbatim — this guard scans its OWN source too (TEST_DIR includes this file), so a literal contiguous
+// "sleep(40)" written directly into this file's code would make THIS specimen block a genuine hit against
+// itself: the exact self-referential trap the card's own irony describes, hit for real while drafting this.
+const SLEEP_IDIOM_SAMPLE = "sleep" + "(40)";
+const COMMENT_MENTIONING_IDIOM = "  // this wait matches " + SLEEP_IDIOM_SAMPLE + " — a TIMING-GUARD-SAFE annotation";
+const CODE_WITH_TRAILING_COMMENT_MENTIONING_IDIOM = "  await " + SLEEP_IDIOM_SAMPLE + "; // trailing comment, also names " + SLEEP_IDIOM_SAMPLE;
+check("sanity: a `//`-comment mentioning the wait idiom is invisible to the idiom test (no phantom site)",
+  !IDIOM_A.test(stripTrailingComment(COMMENT_MENTIONING_IDIOM)));
+check("sanity: a real wait call on a code line still matches after comment-stripping (fix does not blind real waits)",
+  IDIOM_A.test(stripTrailingComment(CODE_WITH_TRAILING_COMMENT_MENTIONING_IDIOM)));
+
+// Card 743be0c9, DoD-2 — BOTH DIRECTIONS, REAL CORPUS specimen (positive-controlled against the actual
+// defect, not just a synthetic string): pending-ops-registry.mjs:269 is a `//` comment explaining a timing
+// argument by naming the exact call it's contrasting against — a real TIMING-GUARD-style explanation that
+// quotes the literal idiom text in prose. Line 270, immediately below it, is the REAL wait it's describing.
+// Read directly (not embedded as a literal here, for the same self-scan reason as above) so this fails
+// loudly if that file is ever edited out from under this check.
+{
+  const pendingOpsLines = fs.readFileSync(path.join(TEST_DIR, "pending-ops-registry.mjs"), "utf8").split("\n");
+  const commentLine = pendingOpsLines[268]; // 1-indexed 269
+  const realWaitLine = pendingOpsLines[269]; // 1-indexed 270
+  check("sanity: pending-ops-registry.mjs:269 is still the comment specimen this check depends on (mentions the idiom in prose)",
+    IDIOM_A.test(commentLine) && /^\s*\/\//.test(commentLine));
+  check("sanity: pending-ops-registry.mjs:270 is still the real-wait specimen this check depends on (a real wait call)",
+    IDIOM_A.test(realWaitLine));
+  check("REAL CORPUS: the comment at pending-ops-registry.mjs:269 mentioning the idiom in prose is invisible to the idiom test",
+    !IDIOM_A.test(stripTrailingComment(commentLine)));
+  check("REAL CORPUS: the real wait at pending-ops-registry.mjs:270 still matches after comment-stripping (fix does not blind it)",
+    IDIOM_A.test(stripTrailingComment(realWaitLine)));
+}
+
 const newViolations = [];
 const badExemptions = [];
 const regressions = [];
