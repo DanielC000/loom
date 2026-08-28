@@ -105,6 +105,22 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // bound work, with no disk metric available to check). Same additive-field posture as `diskProbeMs` moving
 // forward: an older row simply lacks the key. See `diskProbeWriteMs`'s own doc for what it measures, why
 // this metric (not a subprocess-based OS counter, not raw I/O-operation counts), and its measured cost.
+//
+// Card 237aa3a9: a FAILING "file" row now also carries `failureDetail` — before this card, a red recorded
+// only `ok:false`/`status:1` and nothing about WHY, so diagnosing a past gate rejection needed the merge
+// nudge's own bounded `outputTail` (a DIFFERENT surface, truncated exactly when a run has many failures —
+// see card e1183875, the incident this card was filed from) or was simply impossible once that tail was
+// gone. `failureDetail` is computed by `classifyFailureDetail` (below) from the SAME captured stdout/stderr
+// `runOne` already holds, and is attached on the SAME per-file flush `runLane` already performs THE MOMENT
+// EACH FILE COMPLETES (card 05056168) — not a close-time/summary pass, so it inherits that card's own
+// SIGKILL-survival property rather than reopening the hole it closed. A run killed mid-FILE still loses
+// that file's detail (nothing to attach — the file never completed) — that residue is the SAME accepted gap
+// `neverCompletedFiles` already names for the row's other fields, not a new one. ADDITIVE ONLY: `failureDetail`
+// is a NEW key; no existing key on this row is renamed or re-meant (`f8b176f7` DoD-4's concatenability
+// requirement, `1ec2e353`'s frozen-key convention). Present ONLY on a failing row — `JSON.stringify` drops
+// an `undefined`-valued property entirely, so a passing row has NO `failureDetail` key at all, never a
+// present-but-empty one; presence of the key IS the failure signal, unambiguous under a key-shape census
+// (the peer's own volunteered gap — see this card's design-input log).
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 // Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
@@ -1134,6 +1150,110 @@ export function spawnWithTimeout(execPath, argv, { timeoutMs, env } = {}) {
   });
 }
 
+// Card 237aa3a9: per-row bounds for `failureDetail.messages` — a STORAGE bound (this file is appended to
+// on every file of every gate run, ~777 rows/run today), not a threshold statistic, so unlike a fixed-ms
+// timeout constant it does not rot against the suite's own growth (per the peer's design-input (a): only
+// take that shape when a value is compared against a fixed threshold to make a judgement — a storage cap
+// makes no judgement, it just bounds bytes). Two independent caps — message COUNT (so many small failures
+// don't crowd out the earliest ones) and total CHARS (so one very long message can't blow the budget alone)
+// — either tripping sets `truncated: true`, explicit and never silent (DoD-3's own requirement: a silent
+// truncation would re-create the exact defect this card fixes).
+const FAILURE_DETAIL_MAX_MESSAGES = 20;
+const FAILURE_DETAIL_MAX_CHARS = 4000;
+// CR follow-up (manager review of cad5d5d6, mixed-case question): a much smaller secondary bound for the
+// `stderrExcerpt` a mixed assertionFailed+testThrew failure carries alongside its FAIL messages (see
+// `classifyFailureDetail` below) — a supplementary excerpt, not the primary diagnostic, so it does not
+// need anywhere near the same budget as `messages` itself.
+const FAILURE_DETAIL_STDERR_EXCERPT_MAX_MESSAGES = 5;
+const FAILURE_DETAIL_STDERR_EXCERPT_MAX_CHARS = 800;
+
+// Applies the two bounds above to an ordered list of candidate message lines, reporting whether either
+// bound actually cut anything. Pure so DoD-3's truncation behavior is directly testable against synthetic
+// input, independent of any real subprocess.
+//
+// CR follow-up (manager review of cad5d5d6): a FIRST line alone longer than FAILURE_DETAIL_MAX_CHARS used
+// to trip the char bound on iteration one and return `messages: []` — `truncated: true` satisfied DoD-3's
+// LETTER (the bound really was marked) but broke the card's own stated property ("a reader can name the
+// failing assertion(s) from one read") — a reader got a bucket and nothing else, on exactly the failure
+// mode (one huge stack trace) where the message matters most. Now: when the FIRST message alone would
+// overflow the remaining budget, push a budget-sized PREFIX of it rather than leaving `messages` empty —
+// a clipped stack head beats nothing. This only applies while `messages` is still empty; a line that
+// overflows the budget after at least one full message has already been captured still just stops there
+// (that first message is real, useful content — no reason to also clip a second, partial one onto it).
+function boundMessageList(lines, maxMessages, maxChars) {
+  let truncated = lines.length > maxMessages;
+  const capped = lines.slice(0, maxMessages);
+  const messages = [];
+  let chars = 0;
+  for (const line of capped) {
+    const remaining = maxChars - chars;
+    if (remaining <= 0) { truncated = true; break; }
+    if (line.length > remaining) {
+      truncated = true;
+      if (messages.length === 0) messages.push(line.slice(0, remaining));
+      break;
+    }
+    messages.push(line);
+    chars += line.length;
+  }
+  return { messages, truncated };
+}
+
+function boundFailureMessages(failureType, lines) {
+  const { messages, truncated } = boundMessageList(lines, FAILURE_DETAIL_MAX_MESSAGES, FAILURE_DETAIL_MAX_CHARS);
+  return { failureType, messages, truncated };
+}
+
+// Card 237aa3a9: classify one failing (non-skipped) run's OWN captured stdout/stderr into one of four
+// honest buckets — the peer's own design input, and the half of their `failureRecords` design that
+// "demonstrably worked" (it routed them to a race instead of a regression before they even read a stack).
+// Four buckets beat twelve; an explicit "unclassified" beats a wrong label (this card's own instruction).
+// Pure + exported so a test can drive every bucket directly against synthetic OR real-captured
+// stdout/stderr, without spawning a child for the classification logic itself.
+//   "timeout"        — already fully named by `timeoutDetail` elsewhere on the row; this just labels it.
+//   "assertionFailed" — this project's own `check(label, cond)` helper (used across the whole test/ dir —
+//                       see e.g. merge-gate-reuse.mjs) prints "FAIL  <label>" to stdout for every false
+//                       assertion, independent of how many a single file makes. Pulling every such line
+//                       names EVERY distinct failing assertion in one read of this row — the exact property
+//                       card 237aa3a9's DoD-5 requires for a multi-failure run. CR follow-up (manager
+//                       review of cad5d5d6): a file can ALSO throw uncaught after one or more `check()`
+//                       calls already failed — a real, plausible shape (code that assumes a check passed
+//                       and dereferences something that isn't there once it didn't), and precisely the
+//                       kind of stray-stderr signal the peer's own `testThrew` insight was about. The
+//                       named assertions stay the PRIMARY signal (`failureType` stays "assertionFailed" —
+//                       a concrete, already-known-false check is more actionable than an incidental
+//                       downstream throw, and this card explicitly forbids a fifth bucket for it), but
+//                       the stderr is no longer silently dropped: a small bounded `stderrExcerpt` is
+//                       attached alongside `messages` whenever BOTH FAIL lines and stderr are present —
+//                       present only in that mixed case, absent (not an empty array) otherwise.
+//   "testThrew"       — no FAIL line at all, but the process still exited nonzero and produced stderr: the
+//                       file's own code threw/rejected (an uncaught exception, a rejected promise, a syntax
+//                       error) rather than a false assertion. Node prints the thrown error's message + top
+//                       stack frames to stderr, which is what actually named the peer's root cause.
+//   "unclassified"    — nonzero exit, no FAIL line, no stderr at all: genuinely nothing to classify from.
+export function classifyFailureDetail({ status, stdout, stderr }) {
+  if (status === "timeout") return { failureType: "timeout", messages: [], truncated: false };
+
+  const failLines = (stdout ?? "").split("\n")
+    .filter((l) => /^FAIL\s\s/.test(l))
+    .map((l) => l.replace(/^FAIL\s\s/, "").trim());
+  const stderrLines = (stderr ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+
+  if (failLines.length) {
+    const result = boundFailureMessages("assertionFailed", failLines);
+    if (stderrLines.length) {
+      const excerpt = boundMessageList(stderrLines, FAILURE_DETAIL_STDERR_EXCERPT_MAX_MESSAGES, FAILURE_DETAIL_STDERR_EXCERPT_MAX_CHARS);
+      result.stderrExcerpt = excerpt.messages;
+      if (excerpt.truncated) result.truncated = true;
+    }
+    return result;
+  }
+
+  if (stderrLines.length) return boundFailureMessages("testThrew", stderrLines);
+
+  return { failureType: "unclassified", messages: [], truncated: false };
+}
+
 // Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
 // collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
 async function runOne(name, lane) {
@@ -1170,7 +1290,13 @@ async function runOne(name, lane) {
   if (r.errored) {
     // Byte-identical shape to before this card: a spawn error never carried a `tail` or the
     // exit/close instrumentation fields (they're meaningless when the child never even started).
-    return { name, ok: false, status: r.status, stdout: r.stdout, stderr: r.stderr, lane, startTs, endTs, durationMs: endTs - startTs };
+    // Card 237aa3a9: `failureDetail` IS added here, unlike those — the spawn-error message (captured onto
+    // `r.stderr` by `spawnWithTimeout`'s own error handler) is the single most useful diagnostic available
+    // for exactly this case, not a meaningless one.
+    return {
+      name, ok: false, status: r.status, stdout: r.stdout, stderr: r.stderr, lane, startTs, endTs, durationMs: endTs - startTs,
+      failureDetail: classifyFailureDetail({ status: r.status, stdout: r.stdout, stderr: r.stderr }),
+    };
   }
   return {
     name,
@@ -1178,6 +1304,10 @@ async function runOne(name, lane) {
     status: r.status,
     stdout: r.stdout, stderr: r.stderr,
     tail: r.ok ? undefined : (r.stdout.split("\n").filter(Boolean).slice(-1)[0] || r.stderr.split("\n").filter(Boolean).slice(-1)[0]),
+    // Card 237aa3a9: `undefined` (never computed) on a pass — JSON.stringify drops the key entirely, so a
+    // passing row carries no `failureDetail` key at all (see the module-header doc above for why that
+    // matters — key PRESENCE, not a valued-but-false field, is the failure signal).
+    failureDetail: r.ok ? undefined : classifyFailureDetail({ status: r.status, stdout: r.stdout, stderr: r.stderr }),
     lane, startTs, endTs, durationMs: endTs - startTs,
     // Card e26f3199 DoD-2: exitAt/closeAt/exitToCloseGapMs are recorded for EVERY completed (non-errored)
     // run — real numbers on a normal pass too, not just a timeout. That's deliberate, not incidental: a
@@ -1243,6 +1373,11 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps, ga
       closeAt: result.closeAt ?? null,
       exitToCloseGapMs: result.exitToCloseGapMs ?? null,
       timeoutDetail: result.timeoutDetail ?? null,
+      // Card 237aa3a9: `result.failureDetail` is `undefined` on every passing/skipped row (both `runOne`
+      // return paths only compute it when `!ok`) — passed straight through, NEVER defaulted to `null`,
+      // so `JSON.stringify` drops the key entirely on a pass and it is only ever PRESENT on a failing row.
+      // See the module-header doc above for why that key-presence contract matters.
+      failureDetail: result.failureDetail,
     });
   }
 }

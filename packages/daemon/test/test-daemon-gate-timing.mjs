@@ -22,6 +22,7 @@ import {
   formatGateTimingSummaryLines,
   neverCompletedFiles,
   gateTimingOpId,
+  classifyFailureDetail,
 } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
@@ -209,6 +210,92 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-test
     "a completed name not present in `selected` at all is simply ignored (no crash, no spurious entry)",
     neverCompletedFiles(["a"], ["a", "z"]).length === 0,
   );
+}
+
+// ── classifyFailureDetail (card 237aa3a9) — synthetic bucket/bound coverage; the REAL multi-failure
+// positive control (DoD-5) lives in test-daemon-gate-timing-failure-detail.mjs, against a genuine spawn.
+{
+  // [positive control] the "timeout" bucket ignores stdout/stderr entirely — already fully named by the
+  // row's own `timeoutDetail` field, this just labels the bucket.
+  check(
+    "[positive control] status:'timeout' classifies as failureType:'timeout' regardless of captured output",
+    classifyFailureDetail({ status: "timeout", stdout: "FAIL  should be ignored", stderr: "" }).failureType === "timeout",
+  );
+  check("the timeout bucket carries no messages (nothing to name beyond the bucket itself)",
+    classifyFailureDetail({ status: "timeout", stdout: "x", stderr: "" }).messages.length === 0);
+
+  // [positive control] multiple distinct "FAIL  <label>" lines are ALL named, a PASS line is excluded —
+  // this is the exact reader-facing property card 237aa3a9 exists for.
+  const multiFail = classifyFailureDetail({
+    status: 1,
+    stdout: "PASS  (A) an unrelated passing check\nFAIL  (B) first assertion\nFAIL  (C) second assertion\n",
+    stderr: "",
+  });
+  check("[positive control] multiple distinct assertion failures classify as 'assertionFailed'", multiFail.failureType === "assertionFailed");
+  check("[positive control] BOTH distinct failing labels are named, in order", multiFail.messages.join("|") === "(B) first assertion|(C) second assertion");
+  check("a PASS line never leaks into the failure messages", !multiFail.messages.some((m) => m.includes("passing check")));
+  check("well under the bound, nothing is truncated", multiFail.truncated === false);
+
+  // [positive control] no FAIL line but real stderr content: the file's own code threw, not a false
+  // assertion — classified "testThrew", the message carries the thrown error.
+  const threw = classifyFailureDetail({ status: 1, stdout: "", stderr: "/x/fixture.mjs:3\nthrow new Error(\"boom\");\n\nError: boom\n    at Object.<anonymous>\n" });
+  check("[positive control] stderr with no FAIL line classifies as 'testThrew'", threw.failureType === "testThrew");
+  check("the thrown error's own message line is present in the captured messages", threw.messages.some((m) => m.includes("Error: boom")));
+
+  // [negative control] nonzero exit, no FAIL line, no stderr at all — genuinely nothing to classify from;
+  // an honest 'unclassified' beats guessing a wrong bucket.
+  const nothing = classifyFailureDetail({ status: 1, stdout: "", stderr: "" });
+  check("[negative control] no stdout FAIL line and no stderr classifies as 'unclassified'", nothing.failureType === "unclassified");
+  check("[negative control] the unclassified bucket carries no fabricated messages", nothing.messages.length === 0);
+
+  // [positive control — DoD-3, the actual bound] a run with far more than FAILURE_DETAIL_MAX_MESSAGES (20)
+  // distinct FAIL lines is capped, not silently accepted whole, and the cap sets `truncated: true` rather
+  // than leaving a reader to infer truncation from a suspiciously round count.
+  const manyFailLines = Array.from({ length: 25 }, (_, i) => `FAIL  synthetic failure #${i}`).join("\n");
+  const many = classifyFailureDetail({ status: 1, stdout: manyFailLines, stderr: "" });
+  check("[positive control] a 25-failure run is capped at the 20-message bound", many.messages.length === 20);
+  check("[positive control] the cap sets truncated:true — never a silent truncation", many.truncated === true);
+  check("the FIRST 20 failures survive the cap, in original order (not an arbitrary subset)", many.messages[0] === "synthetic failure #0" && many.messages[19] === "synthetic failure #19");
+
+  // [positive control — DoD-3, the char bound] one message alone can exceed the total-chars bound even
+  // while well under the message-count bound.
+  const oneHugeLine = `FAIL  ${"x".repeat(5000)}`;
+  const huge = classifyFailureDetail({ status: 1, stdout: oneHugeLine, stderr: "" });
+  // CR follow-up (manager review of cad5d5d6): an EMPTY `messages` array on a marked failure defeats the
+  // card's own stated property ("a reader can name the failing assertion(s) from one read") — the bound
+  // being marked (`truncated:true`) is not enough on its own if there's nothing left to read. A single
+  // over-long message must still leave a non-empty, budget-sized PREFIX behind.
+  check("[positive control — CR fix] a single message exceeding the char bound leaves a non-empty, budget-sized PREFIX, never an empty array", huge.messages.length === 1 && huge.messages[0].length === 4000);
+  check("the prefix is a real, in-order slice of the actual message content (not a placeholder)", "x".repeat(5000).startsWith(huge.messages[0]));
+  check("[positive control] exceeding the char bound alone still sets truncated:true", huge.truncated === true);
+
+  // ── mixed case: FAIL line(s) AND stderr both present (CR follow-up — manager review of cad5d5d6) ──────
+  // A file can throw uncaught AFTER one or more check() calls already failed. `failureType` stays
+  // "assertionFailed" (the named assertions are the primary signal), but the stderr must not be silently
+  // dropped — a bounded `stderrExcerpt` is attached alongside `messages`.
+  const mixed = classifyFailureDetail({
+    status: 1,
+    stdout: "FAIL  (D) a real assertion failure before the throw\n",
+    stderr: "/x/fixture.mjs:9\nthrow new Error(\"secondary throw after the check already failed\");\n\nError: secondary throw after the check already failed\n",
+  });
+  check("[positive control] the mixed case (FAIL line + stderr) still classifies 'assertionFailed', not a fifth bucket", mixed.failureType === "assertionFailed");
+  check("the real FAIL line is still named in messages", mixed.messages.some((m) => m.includes("a real assertion failure before the throw")));
+  check("[positive control] the stderr is NOT silently dropped — a stderrExcerpt is attached alongside the FAIL messages", Array.isArray(mixed.stderrExcerpt) && mixed.stderrExcerpt.some((m) => m.includes("secondary throw after the check already failed")));
+
+  // [negative control] the ORDINARY assertionFailed case (no stderr at all) carries NO stderrExcerpt key —
+  // presence of the key itself signals the mixed case, same unambiguous-presence discipline as
+  // `failureDetail` itself on the row.
+  check("[negative control] the ordinary (non-mixed) assertionFailed case carries no stderrExcerpt key at all", !("stderrExcerpt" in multiFail));
+
+  // ── failureDetail key-presence contract (peer design input (b)) ──────────────────────────────────────
+  // A reader censusing rows by KEY PRESENCE must never miscount a pass as a failure or vice versa —
+  // `failureDetail` must be genuinely ABSENT (not present-with-a-falsy-value) on a passing row.
+  const presenceTarget = path.join(scratchRoot, "failure-detail-presence.ndjson");
+  appendGateTimingRow(presenceTarget, { kind: "file", name: "passing", ok: true, failureDetail: undefined });
+  appendGateTimingRow(presenceTarget, { kind: "file", name: "failing", ok: false, failureDetail: classifyFailureDetail({ status: 1, stdout: "FAIL  (Z) example", stderr: "" }) });
+  const presenceRows = fs.readFileSync(presenceTarget, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  check("[positive control] a passing row carries NO failureDetail key at all (JSON.stringify drops undefined)", !("failureDetail" in presenceRows[0]));
+  check("[positive control] a failing row's failureDetail key IS present, with real content", "failureDetail" in presenceRows[1] && presenceRows[1].failureDetail.messages[0] === "(Z) example");
 }
 
 fs.rmSync(scratchRoot, { recursive: true, force: true });
