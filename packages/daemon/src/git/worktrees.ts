@@ -2491,24 +2491,32 @@ export interface EmitCompareGateResult {
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
   reason?: string;
-  /** Card 2db8a3dd: `false` on `eligible:true` (trivially — a proven-eligible diff was, by definition,
-   *  evaluated against a repo this predicate applies to) and on every `eligible:false` reason that this
-   *  Loom-shaped repo's own diff genuinely tripped (a non-modify status on a compiled file, an
-   *  excluded-dir/underscore/shell-unsafe test path, a transpile mismatch, or an operational failure
-   *  reading the diff/base/branch content) — those are real, informative "ran, not reduced" verdicts.
-   *  `true` ONLY on the specific `notEligible` reasons that mean the predicate could not have been
-   *  eligible for THIS REPO AT ALL, independent of diff content: the catch-all "path outside emit-compare
-   *  scope" (every changed path fails `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`, exactly what
-   *  a repo whose sources don't live under `packages/daemon/src|test/` hits on its FIRST changed path,
-   *  always), a failed load of `scripts/test-daemon.mjs`'s `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this
-   *  diff's own worktree (that script doesn't exist outside Loom's own layout), and an unresolvable
-   *  `typescript` module (this whole mechanism's own dev-dependency, absent on a shipped end-user
-   *  install). ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT RE-DERIVED BY A CALLER: a caller must never
-   *  re-sniff repo layout itself to guess this — `computeEmitCompareGate` already knows exactly which
-   *  `notEligible` reason it returned, and this field is that knowledge surfaced, once, at the source.
-   *  The caller's job is only to treat `notApplicable:true` the same way it already treats "the predicate
-   *  never ran at all" (never report a fabricated `false` for it) — see
-   *  {@link EMIT_COMPARE_SRC_PREFIX}'s own doc / `sessions/service.ts`'s `emitCompareNotApplicable`. */
+  /** Card 2db8a3dd (introduced this field), CORRECTED by card 4def0708 (the operational-failure sites
+   *  below were originally documented — wrongly — as informative `false`; that was the exact bug 4def0708
+   *  fixed). Produced by one of two explicitly-named constructors in {@link computeEmitCompareGate}, never
+   *  a defaulted boolean param — see that function's own `notReducible`/`notApplicableHere` doc.
+   *  `false` (via `notReducible`) on `eligible:true` (trivially — a proven-eligible diff was, by
+   *  definition, evaluated against a repo this predicate applies to) and on every `eligible:false` reason
+   *  that is a REAL, REPRODUCIBLE verdict about THIS diff's own content on a repo the predicate DOES cover
+   *  (a non-modify status on a compiled file, an excluded-dir/underscore/shell-unsafe test path, "no
+   *  eligible changed path left to prove inert", an unverified soundness precondition, or a transpile
+   *  mismatch) — those are real, informative "ran, not reduced" verdicts.
+   *  `true` (via `notApplicableHere`) on every reason that is NOT a verdict about reducibility: the
+   *  catch-all "path outside emit-compare scope" (every changed path fails
+   *  `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`, exactly what a repo whose sources don't live
+   *  under `packages/daemon/src|test/` hits on its FIRST changed path, always), a failed load of
+   *  `scripts/test-daemon.mjs`'s `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this diff's own worktree (that
+   *  script doesn't exist outside Loom's own layout), an unresolvable `typescript` module (this whole
+   *  mechanism's own dev-dependency, absent on a shipped end-user install), AND — corrected by card
+   *  4def0708 — any OPERATIONAL/mechanism failure (a git error reading the diff/base/branch content, an
+   *  empty diff, an unparseable diff line): a git error proves nothing about reducibility either way, so
+   *  it must never be stamped as a decided "not reduced". ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT
+   *  RE-DERIVED BY A CALLER: a caller must never re-sniff repo layout itself to guess this —
+   *  `computeEmitCompareGate` already knows exactly which reason it returned, and this field is that
+   *  knowledge surfaced, once, at the source. The caller's job is only to treat `notApplicable:true` the
+   *  same way it already treats "the predicate never ran at all" (never report a fabricated `false` for
+   *  it) — see {@link EMIT_COMPARE_SRC_PREFIX}'s own doc / `sessions/service.ts`'s
+   *  `emitCompareNotApplicable`. */
   notApplicable: boolean;
 }
 
@@ -2613,10 +2621,14 @@ export interface EmitCompareGateResult {
 export async function computeEmitCompareGate(
   repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
-  // Card 2db8a3dd: `notApplicable` defaults `false` (an ordinary, informative not-reduced verdict) — pass
-  // `true` ONLY from the specific call sites below that mean this repo's layout, not this diff's content,
-  // is why the predicate returned here. See {@link EmitCompareGateResult.notApplicable}'s own doc.
-  const notEligible = (reason: string, notApplicable = false): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable });
+  // Card 4def0708: replaces the old single `notEligible(reason, notApplicable = false)` — a DEFAULTED
+  // boolean param let a forgotten call site silently stamp the INFORMATIVE value (12 of 16 original call
+  // sites never opted in to `notApplicable:true`, three of them plainly wrong: a git error, an empty diff,
+  // and an unparseable line, none of which are verdicts about reducibility). Two explicitly-named
+  // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
+  // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
+  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable: false });
+  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable: true });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2633,9 +2645,11 @@ export async function computeEmitCompareGate(
     )).trim();
     entries = raw ? raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean) : [];
   } catch {
-    return notEligible("git error reading the diff");
+    // Card 4def0708: a git error is a MECHANISM failure, not a verdict about reducibility — it proves
+    // nothing either way, so it must OMIT (notApplicableHere), never stamp an informative "not reduced".
+    return notApplicableHere("git error reading the diff");
   }
-  if (entries.length === 0) return notEligible("empty diff — nothing to prove inert from");
+  if (entries.length === 0) return notApplicableHere("empty diff — nothing to prove inert from");
 
   const changedTsFiles: string[] = [];
   const changedTestFiles: string[] = [];
@@ -2651,7 +2665,8 @@ export async function computeEmitCompareGate(
   let notHermeticNames: Set<string> | null | undefined;
   for (const line of entries) {
     const tab = line.indexOf("\t");
-    if (tab < 0) return notEligible(`unparseable diff line: ${line}`);
+    // Card 4def0708: an unparseable line is the same mechanism-failure shape as the git error above — omit.
+    if (tab < 0) return notApplicableHere(`unparseable diff line: ${line}`);
     const status = line[0];
     const p = line.slice(tab + 1);
     // Card b97f643d: a path already certified inert by {@link isInertMergePath} (e.g. `docs/**`) is
@@ -2679,7 +2694,7 @@ export async function computeEmitCompareGate(
     // re-consult `isInertMergeDiff` a second time.
     if (isInertMergePath(p)) continue;
     if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
-      if (status !== "M") return notEligible(`non-modify status "${status}" on compiled file ${p}`);
+      if (status !== "M") return notReducible(`non-modify status "${status}" on compiled file ${p}`);
       changedTsFiles.push(p);
       continue;
     }
@@ -2711,16 +2726,16 @@ export async function computeEmitCompareGate(
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
         if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
-        if (excludedDirNames === null) return notEligible(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`, true);
+        if (excludedDirNames === null) return notApplicableHere(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`);
         if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
-          return notEligible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
+          return notReducible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
         }
       }
       // Mirrors scripts/test-daemon.mjs's own discovery rule: an underscore-prefixed segment anywhere in
       // the path (the file's own name, or a containing directory like `_scratch/`) marks a non-test helper
       // whose standalone-run behavior isn't guaranteed — fail closed rather than assume it's safe to run
       // in isolation or silently drop it.
-      if (p.split("/").some((seg) => seg.startsWith("_"))) return notEligible(`underscore-prefixed test helper path: ${p}`);
+      if (p.split("/").some((seg) => seg.startsWith("_"))) return notReducible(`underscore-prefixed test helper path: ${p}`);
       // Code Review (card 2154b6ad): `buildReducedGateCommand` interpolates this path directly into a
       // shell-executed `&&` chain (`node ${p}`) — the prefix/suffix checks above constrain WHERE the path
       // sits, not WHICH CHARACTERS it contains. A committed filename carrying shell metacharacters (a
@@ -2729,7 +2744,7 @@ export async function computeEmitCompareGate(
       // reach the shell string at all. Mirrors sibling card 344ce950's `identifyRetriableTestFile`, which
       // guards the analogous interpolation with an explicit allowlist before building its own command
       // string — same subsystem, same posture.
-      if (!/^[A-Za-z0-9_.\-/]+$/.test(p)) return notEligible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
+      if (!/^[A-Za-z0-9_.\-/]+$/.test(p)) return notReducible(`test file path contains a character outside the shell-safe allowlist: ${p}`);
       if (status === "A" || status === "M") {
         // Card 17cd1f30: classify against the harness's own NOT_HERMETIC set BEFORE pushing into
         // changedTestFiles — a NOT_HERMETIC file is a real, maintained test (not a fixture/helper, both of
@@ -2740,7 +2755,7 @@ export async function computeEmitCompareGate(
         // keys on; a nested file's name (containing a `/`) can never match a NOT_HERMETIC entry, which is
         // correct — NOT_HERMETIC only ever names test/'s top-level files.
         if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath);
-        if (notHermeticNames === null) return notEligible(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`, true);
+        if (notHermeticNames === null) return notApplicableHere(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`);
         const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
         if (notHermeticNames.has(harnessName)) {
           notHermeticExcluded.push(p);
@@ -2757,7 +2772,7 @@ export async function computeEmitCompareGate(
     // reachable on a Loom-shaped diff that touches a path this predicate simply doesn't cover (e.g.
     // `packages/web/**`) — equally `notApplicable`, for the identical reason: the predicate never had this
     // path in its domain, so "not reduced" would overclaim there too.
-    return notEligible(`path outside emit-compare scope: ${p}`, true);
+    return notApplicableHere(`path outside emit-compare scope: ${p}`);
   }
 
   if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0) {
@@ -2772,7 +2787,7 @@ export async function computeEmitCompareGate(
     // by which a diff that has become entirely inert CAN still reach this function (see the skip's own doc
     // above the classification loop). The skip does not itself guarantee anything survives to classify;
     // this guard is what fails such a diff closed, not the skip.
-    return notEligible("no eligible changed path left to prove inert");
+    return notReducible("no eligible changed path left to prove inert");
   }
   // Card 17cd1f30 DoD-3: a diff whose ONLY changed test-shaped path(s) are NOT_HERMETIC (empty
   // changedTestFiles, non-empty notHermeticExcluded) stays eligible rather than failing closed here — the
@@ -2784,14 +2799,14 @@ export async function computeEmitCompareGate(
 
   if (changedTsFiles.length > 0) {
     if (!(await emitCompareSoundnessOk(worktreePath))) {
-      return notEligible("soundness precondition (emitDecoratorMetadata / const enum) not verified");
+      return notReducible("soundness precondition (emitDecoratorMetadata / const enum) not verified");
     }
     let tsModule: TypeScriptModule;
     try {
       const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
       tsModule = imported.default ?? imported;
     } catch {
-      return notEligible("typescript module not resolvable (expected on a shipped end-user install)", true);
+      return notApplicableHere("typescript module not resolvable (expected on a shipped end-user install)");
     }
     for (const p of changedTsFiles) {
       let before: string;
@@ -2799,16 +2814,17 @@ export async function computeEmitCompareGate(
       try {
         before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
       } catch {
-        return notEligible(`could not read base content for ${p}`);
+        // Card 4def0708: a failed git read is the same mechanism-failure shape as the diff-read error above.
+        return notApplicableHere(`could not read base content for ${p}`);
       }
       try {
         after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
       } catch {
-        return notEligible(`could not read branch content for ${p}`);
+        return notApplicableHere(`could not read branch content for ${p}`);
       }
       const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule).outputText;
       const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule).outputText;
-      if (outBefore !== outAfter) return notEligible(`${p} is not transpile-identical — a real code change`);
+      if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
     }
   }
 

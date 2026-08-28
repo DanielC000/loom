@@ -12579,7 +12579,13 @@ export class SessionService {
     // writes below (mirroring the existing `gateRan`-gated "nothing to report" discipline exactly): a
     // `false` written under this condition would be the same fabricated "genuinely not reduced" claim for
     // a repo the predicate never applied to, one cause over from the one `gateRan` already guards.
-    let emitCompareNotApplicable = false;
+    // DEFAULT CORRECTED, card 4def0708: was `false` (the INFORMATIVE value) — any of the three routes that
+    // skip the predicate block entirely below (`inertSkip`, `reuseResult`, or an unresolved
+    // `!gateBaseMainHead`) left this at its initialiser, which the two stamping sites below then read as a
+    // genuine "a real gate spawned and was PROVEN not reduced" verdict, even though the predicate was never
+    // consulted. The default is now the UNINFORMATIVE value (`true` ⇒ omit): only the guarded assignments
+    // below — reached exclusively when the predicate actually ran — ever set this to `false`.
+    let emitCompareNotApplicable = true;
     // Card 7183540f: the branch/main tips THIS classification actually ran against — captured strictly
     // BEFORE the `computeEmitCompareGate` call below (see that call site's own doc for the ordering-trap
     // reasoning, mirroring db413510's identical discipline for the inert-skip path). Read again at
@@ -13246,6 +13252,11 @@ export class SessionService {
           emitCompareTestFiles = emitCompare.changedTestFiles;
           emitCompareNotHermeticExcluded = emitCompare.notHermeticExcluded;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
+          // Card 4def0708: the predicate DID run and decided this diff IS applicable (it's eligible for
+          // the reduced gate) — an explicit `false` here, not left to fall through on the new
+          // uninformative-`true` default above, which would otherwise wrongly OMIT the field on the one
+          // outcome (`eligible:true`) where a real decision was unambiguously made.
+          emitCompareNotApplicable = false;
         } else {
           emitCompareNotApplicable = emitCompare.notApplicable;
         }
@@ -13457,6 +13468,10 @@ export class SessionService {
               emitCompareNotHermeticExcluded = reclassified.notHermeticExcluded;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
               effectiveGate = buildReducedGateCommand(emitCompareTestFiles);
+              // Card 4def0708: mirrors the pre-wait classification's own explicit `false` on its
+              // `eligible:true` branch, above — the re-derivation DID run and decided this diff is
+              // applicable.
+              emitCompareNotApplicable = false;
             } else {
               // No longer provably reducible (or the re-derivation itself was ambiguous — an unresolvable
               // branch ref, or `gateBaseMainHead` itself unset) — this MUST take the full gate, never a
@@ -13464,10 +13479,14 @@ export class SessionService {
               // wrong full run is minutes). `emitCompareSkip:false` here also keeps the eventual
               // `emitCompareWarning`/`build_gate` event from claiming a reduction that no longer happened.
               emitCompareSkip = false;
-              // Card 2db8a3dd: carry the re-derivation's own applicability verdict too (an unresolvable ref
-              // — `reclassified` itself `undefined` — carries no verdict, so this stays `false`, same as
-              // the pre-wait classification's own default for that shape).
-              emitCompareNotApplicable = reclassified?.notApplicable ?? false;
+              // Card 2db8a3dd (DEFAULT CORRECTED, card 4def0708): carry the re-derivation's own
+              // applicability verdict when it ran one (`reclassified` defined but not eligible). An
+              // unresolvable ref — `reclassified` itself `undefined` — means the re-derivation carries NO
+              // verdict at all, so this now falls to `true` (the uninformative "omit" default), not `false`
+              // — the old `?? false` fallback was itself an instance of this same card's defect: it
+              // fabricated a decided "not reduced" for an ambiguous re-derivation the predicate never
+              // actually completed.
+              emitCompareNotApplicable = reclassified?.notApplicable ?? true;
               effectiveGate = gate;
             }
           }
@@ -14078,7 +14097,13 @@ export class SessionService {
           // real gate spawning and genuinely running full, on a repo whose layout this predicate can never
           // evaluate. Reporting `false` there would be the identical fabricated "genuinely not reduced"
           // claim the green-return guard below already exists to prevent, just reached via a different
-          // outcome.
+          // outcome. FIXED, card 4def0708: this guard existed already, but `emitCompareNotApplicable`
+          // DEFAULTED to the informative `false` (see its declaration above), so a real gate that spawned
+          // and failed via a route that skips the predicate entirely (`!gateBaseMainHead` — an unresolved
+          // git HEAD, reachable via the `preLanded` capture above) still fabricated `emitCompareReduced:
+          // false` here despite this guard's own intent. The declaration's default is now `true`
+          // (uninformative), so this same `emitCompareNotApplicable ? {} : {...}` correctly omits on that
+          // route without any change to the guard expression itself.
           ...(emitCompareNotApplicable ? {} : {
             emitCompareReduced: emitCompareSkip,
             ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
@@ -14391,7 +14416,11 @@ export class SessionService {
     // isn't this one — see `EmitCompareGateResult.notApplicable`'s own doc, git/worktrees.ts). `false`
     // there would be the identical fabricated claim this guard already exists to prevent for the
     // never-spawned case; `emitCompareNotApplicable` (set only from the predicate's own verdict, never
-    // re-derived here) closes it.
+    // re-derived here) closes it. FIXED, card 4def0708: closing it depended on `emitCompareNotApplicable`
+    // actually being `true` whenever the predicate never ran — its declaration DEFAULTED to `false`
+    // instead, so a real gate that spawned via the `!gateBaseMainHead` route (predicate skipped) and then
+    // PASSED still fabricated `emitCompareReduced:false` here, this guard's own intent notwithstanding.
+    // The default is now the uninformative `true`, so this same expression is correct without change.
     const emitCompareStructuredFields = (gateRan && !emitCompareNotApplicable)
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       : {};
