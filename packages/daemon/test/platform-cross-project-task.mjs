@@ -408,22 +408,43 @@ try {
   // tasks_list returns NEWLINE-DELIMITED JSON (one task per line, card dc647ae2 part A) — not a JSON
   // array — so it stays Read/grep-pageable even if a wide window spills to a file (okLinesSpillable,
   // mirrors tasks-list-ndjson-spill.mjs's own read convention): below SPILL_INLINE_BUDGET_CHARS the text
-  // IS the bare NDJSON; above it, the text is a single `{rowsFile,...}` pointer object instead, and the
-  // real rows live at `rowsFile`. Follow the pointer when present so this section's row-count assertions
-  // hold regardless of how close a given row count sits to that budget (row size grows over time as the
-  // Task schema grows — card 0d4bc3f0 added `deferredItems` and pushed the 100-105-row responses here
-  // from comfortably inline to just over budget).
-  const ndjson = (res) => {
+  // IS the bare NDJSON (only when the result is UNTRUNCATED — see card 84f6ac42 below); above it, the
+  // text is a single `{rowsFile,...}` pointer object instead, and the real rows live at `rowsFile`.
+  // Follow the pointer when present so this section's row-count assertions hold regardless of how close a
+  // given row count sits to that budget (row size grows over time as the Task schema grows — card
+  // 0d4bc3f0 added `deferredItems` and pushed the 100-105-row responses here from comfortably inline to
+  // just over budget).
+  //
+  // Card 84f6ac42: tasks_list now ALSO carries the SAME {total,returned,offset,nextOffset} completeness
+  // signal list_all_tasks already has (checked in section (5) above) — a capped/paged in-project read is
+  // no longer indistinguishable from a complete one. `ndjsonPage` returns {rows, ...meta}; `ndjson` is the
+  // pre-existing rows-only convenience the two checks below already use.
+  const ndjsonPage = (res) => {
     const text = res.content[0].text;
-    let parsedPointer;
-    try { parsedPointer = JSON.parse(text); } catch { parsedPointer = null; }
-    const spilledText = parsedPointer && typeof parsedPointer.rowsFile === "string" ? fs.readFileSync(parsedPointer.rowsFile, "utf8") : text;
-    return spilledText.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { parsed = null; }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.rowsFile === "string") {
+      const rows = fs.readFileSync(parsed.rowsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      const { rowsFile, rowsChars, rowCount, note, ...meta } = parsed;
+      return { rows, ...meta };
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.rows)) {
+      const { rows, ...meta } = parsed;
+      return { rows, ...meta };
+    }
+    return { rows: text.split("\n").filter(Boolean).map((l) => JSON.parse(l)) };
   };
-  const ipList = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true } }));
+  const ndjson = (res) => ndjsonPage(res).rows;
+  const ipListPage = ndjsonPage(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true } }));
+  const ipList = ipListPage.rows;
   check(`(5) in-project tasks_list default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${ipList.length})`, ipList.length === DEFAULT_TASK_SUMMARY_CAP);
-  const ipPaged = ndjson(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 } }));
+  check("(5) in-project tasks_list default (capped, no explicit args) signals the TRUE total + a non-null nextOffset",
+    ipListPage.total === BULK && ipListPage.returned === DEFAULT_TASK_SUMMARY_CAP && ipListPage.offset === 0 && ipListPage.nextOffset === DEFAULT_TASK_SUMMARY_CAP);
+  const ipPagedPage = ndjsonPage(await ipClient.callTool({ name: "tasks_list", arguments: { includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 } }));
+  const ipPaged = ipPagedPage.rows;
   check("(5) in-project tasks_list pages past the cap with an explicit limit", ipPaged.length === BULK);
+  check("(5) in-project tasks_list explicit-limit page signals the TRUE total + nextOffset:null (nothing left, the n==limit-with-nothing-after boundary)",
+    ipPagedPage.total === BULK && ipPagedPage.returned === BULK && ipPagedPage.offset === 0 && ipPagedPage.nextOffset === null);
   await ipClient.close();
 
   // ===================== (6) enumeration gaps — profiles + schedules =====================

@@ -94,8 +94,14 @@ try {
   await client.connect(clientT);
 
   // Default summary shape, well under the spill budget for this N — measures the REAL per-row cost.
-  const text = (await client.callTool({ name: "tasks_list", arguments: { limit: N_TASKS } })).content[0].text;
-  check("response is bare NDJSON, not a spill pointer (this call is sized to stay under budget)", !text.includes("rowsFile"));
+  // NO explicit limit/offset (card 84f6ac42): N_TASKS(50) already sits comfortably under
+  // DEFAULT_TASK_SUMMARY_CAP(100), so an implicit read stays bare NDJSON — the shape this guard's
+  // byte-per-row measurement depends on. An EXPLICIT limit (even one that fits the whole set) now always
+  // returns the {rows,total,returned,offset,nextOffset} completeness-signal envelope instead, which would
+  // measure envelope overhead, not per-row cost — deliberately avoided here, not an oversight.
+  const text = (await client.callTool({ name: "tasks_list", arguments: {} })).content[0].text;
+  check("response is bare NDJSON, not a spill pointer or completeness envelope (this call is sized to stay under budget, with no explicit paging)",
+    !text.includes("rowsFile") && !text.startsWith("{\"rows\":"));
 
   const lines = text.split("\n").filter(Boolean);
   check(`all ${N_TASKS} seeded rows are present`, lines.length === N_TASKS);

@@ -40,21 +40,43 @@ const okLines = (rows: unknown[]) => ({ content: [{ type: "text" as const, text:
  * this renders NDJSON text first (always Read/grep-pageable one row at a time) and only THEN checks it
  * against the budget.
  *
- * BELOW the cap: byte-identical to before — the bare NDJSON text, no envelope.
+ * BELOW the cap: byte-identical to before — the bare NDJSON text, no envelope — UNLESS `page` is passed
+ * AND signals a possibly-partial result (see below), in which case a `{rows,total,returned,offset,
+ * nextOffset}` envelope is returned instead (`rows` as the real parsed array, not NDJSON text — safe to
+ * inline since this only happens below the spill cap).
  * ABOVE the cap: the text is written verbatim to `sessionId`'s own scratch dir (real per-row line
  * breaks, explicit UTF-8 — same NDJSON shape the inline text already promised) and the response becomes
- * a small `{rowsFile,rowsChars,rowCount,note}` pointer instead. `key` should be deterministic per
- * (session, list) so repeated pulls overwrite rather than accumulate scratch-dir garbage.
+ * a small `{rowsFile,rowsChars,rowCount,note}` pointer instead — plus the same `total,returned,offset,
+ * nextOffset` fields when `page` is passed. `key` should be deterministic per (session, list) so
+ * repeated pulls overwrite rather than accumulate scratch-dir garbage.
+ *
+ * `page` (card 84f6ac42) is the completeness signal: pass `{total, offset, nextOffset, explicit}` (total
+ * = the TRUE matching-row count before this page's slice; nextOffset = offset+returned while more
+ * remains, else null; explicit = true iff the caller passed offset/limit itself) to opt a caller into the
+ * envelope. Mirrors `list_all_tasks`' own page envelope (card 57cb355d) field-for-field, and the SAME
+ * "bare when it fits and wasn't explicitly paged, else envelope" contract `spillableTurnsResponse` (the
+ * transcript-reading sibling) already uses — so a capped/partial read is NEVER indistinguishable from a
+ * complete one. Omitting `page` (as `task_requests_list` still does below) preserves today's behavior
+ * byte-for-byte — this is an ADDITIVE opt-in, not a behavior change for every caller of this helper.
  */
-const okLinesSpillable = (sessionId: string, subdir: string, key: string, rows: unknown[]) => {
+const okLinesSpillable = (
+  sessionId: string, subdir: string, key: string, rows: unknown[],
+  page?: { total: number; offset: number; nextOffset: number | null; explicit: boolean },
+) => {
   const text = rows.map((r) => JSON.stringify(r)).join("\n");
   const spill = spillTextIfLarge(sessionId, subdir, key, text, SPILL_INLINE_BUDGET_CHARS);
-  if (spill.inline) return { content: [{ type: "text" as const, text }] };
+  if (spill.inline) {
+    if (!page || (!page.explicit && page.nextOffset === null)) return { content: [{ type: "text" as const, text }] };
+    return ok({ rows, total: page.total, returned: rows.length, offset: page.offset, nextOffset: page.nextOffset });
+  }
   const note =
     `${rows.length} rows are ${spill.chars} chars — too large to inline safely, so they were written to ` +
     `${spill.file} as NDJSON (one JSON object per line, real line breaks, UTF-8) — page it with Read ` +
     "(offset/limit are LINE-based) or grep it for a field/id. Re-call with a narrower filter/limit to inline fewer rows instead.";
-  return ok({ rowsFile: spill.file, rowsChars: spill.chars, rowCount: rows.length, note });
+  return ok({
+    rowsFile: spill.file, rowsChars: spill.chars, rowCount: rows.length, note,
+    ...(page ? { total: page.total, returned: rows.length, offset: page.offset, nextOffset: page.nextOffset } : {}),
+  });
 };
 
 /**
@@ -123,7 +145,7 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows are written to a scratch file instead of inlining, and the response becomes a `{rowsFile,rowsChars,rowCount,note}` pointer at that same NDJSON text (one task per line) — page it with Read or grep it; re-call with a narrower filter/limit to inline instead. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged,repoKey,deferred,deferredUntilTaskId,deferredStuck,deferredAt,deferredReason}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. deferredUntilTaskId (when set) names the task this card is auto-cleared behind — deferred flips to false here the moment that task's merged state resolves non-null, no separate check needed. `deferredReason` is the reason required on a manual deferral (deferred:true with no deferredUntilTaskId) — null on an auto-deferral or when not deferred. `deferredAt` is the server-stamped instant the current deferral started — null when not deferred. `deferredStuck` (only meaningful while deferred:true) is `true` when that release condition can no longer be shown to resolve — the named blocker is deleted, or it's already sitting in the terminal (done) column with no proven merge (e.g. it closed with zero commits, a legitimate outcome that never produces a squash commit) — a fail-toward-VISIBLE signal, not proof the blocker will never ship (a real merge outside the scan window reads the same way); a stuck card is worth a manual look rather than trusting it'll resolve on its own. `merged` is this card's git-derived ship state — {sha,date,verification?} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset. Pass countsOnly:true to answer \"how many cards, by column/priority\" WITHOUT fetching any row bodies — returns {total, byColumn, byPriority} (a few hundred bytes) instead of the filtered row set; the same column/priority/id/title filters above still apply, limit/offset/includeBody are ignored in this mode.",
+          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows are written to a scratch file instead of inlining, and the response becomes a `{rowsFile,rowsChars,rowCount,note}` pointer at that same NDJSON text (one task per line) — page it with Read or grep it; re-call with a narrower filter/limit to inline instead. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged,repoKey,deferred,deferredUntilTaskId,deferredStuck,deferredAt,deferredReason}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. deferredUntilTaskId (when set) names the task this card is auto-cleared behind — deferred flips to false here the moment that task's merged state resolves non-null, no separate check needed. `deferredReason` is the reason required on a manual deferral (deferred:true with no deferredUntilTaskId) — null on an auto-deferral or when not deferred. `deferredAt` is the server-stamped instant the current deferral started — null when not deferred. `deferredStuck` (only meaningful while deferred:true) is `true` when that release condition can no longer be shown to resolve — the named blocker is deleted, or it's already sitting in the terminal (done) column with no proven merge (e.g. it closed with zero commits, a legitimate outcome that never produces a squash commit) — a fail-toward-VISIBLE signal, not proof the blocker will never ship (a real merge outside the scan window reads the same way); a stuck card is worth a manual look rather than trusting it'll resolve on its own. `merged` is this card's git-derived ship state — {sha,date,verification?} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default (the DEFAULT limit when you pass none) — page with limit/offset. COMPLETENESS SIGNAL (card 84f6ac42): with NO offset/limit passed and the whole matching set fits in one page, returns the bare NDJSON rows exactly as before (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope alongside the rows instead: {rows,total,returned,offset,nextOffset} inline, or {rowsFile,rowsChars,rowCount,note,total,returned,offset,nextOffset} when the rows themselves spilled to a file. `total` is the TRUE matching-row count before this call's offset/limit slice; `nextOffset` is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null (mirrors list_all_tasks' own page envelope) — a capped read is thus self-evidently partial; a `rowCount`/`returned` equal to your `limit` never by itself means \"that's everything\" unless `nextOffset` is null. Pass countsOnly:true to answer \"how many cards, by column/priority\" WITHOUT fetching any row bodies — returns {total, byColumn, byPriority} (a few hundred bytes) instead of the filtered row set; the same column/priority/id/title filters above still apply, limit/offset/includeBody are ignored in this mode.",
         inputSchema: strictShape({
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
@@ -145,7 +167,16 @@ export class TaskMcpRouter {
         // never pays for row bodies or the merged-state git enrichment (card 9798200c).
         if (args.countsOnly) return ok(countProjectTasks(db, projectId, args));
         const effective = { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP };
-        const result = okLinesSpillable(sessionId, "tasks-list-spills", taskListSpillKey(effective), await listProjectTasks(db, projectId, effective));
+        const rows = await listProjectTasks(db, projectId, effective);
+        // Card 84f6ac42: the completeness signal. `total` is the TRUE filtered-row count BEFORE this
+        // call's offset/limit slice — computed via the cheap countProjectTasks (same filters, no
+        // merged-state git enrichment, no body) rather than re-deriving it from `rows.length` (which is
+        // already post-slice and can never tell "exactly at the cap" apart from "more remains").
+        const total = countProjectTasks(db, projectId, effective).total;
+        const off = effective.offset ?? 0;
+        const nextOffset = off + rows.length < total ? off + rows.length : null;
+        const explicit = args.offset !== undefined || args.limit !== undefined;
+        const result = okLinesSpillable(sessionId, "tasks-list-spills", taskListSpillKey(effective), rows, { total, offset: off, nextOffset, explicit });
         // Card 9c8e256e: this is the genuine "recipient read the board" signal the idle-watcher's delta
         // digest anchors to (board-read.ts) — recorded for manager/platform sessions only, the only roles
         // the idle nudge ever reaches. Snapshots the FULL non-terminal board regardless of this call's own

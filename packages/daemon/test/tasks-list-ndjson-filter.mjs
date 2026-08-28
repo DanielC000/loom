@@ -19,6 +19,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) titleContains narrows to only tasks whose title contains the substring (case-insensitive);
 //   (5) idPrefix/titleContains compose with the existing columns/excludeDone/minPriority filters and
 //       with offset/limit pagination.
+//   (6) card 84f6ac42 — the completeness signal: an explicit offset/limit always returns a
+//       {rows,total,returned,offset,nextOffset} envelope (not bare NDJSON), and BOTH boundary polarities
+//       are proven — a result exceeding the limit reports a non-null nextOffset (more remains), a result
+//       fitting EXACTLY at the boundary (n==limit, nothing after) reports nextOffset:null (complete), and
+//       a genuinely complete, non-explicit-paged result stays bare NDJSON exactly as before.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/tasks-list-ndjson-filter.mjs
 import fs from "node:fs";
@@ -108,9 +113,36 @@ try {
   const titleFiltered = ndjson(await rawText({ titleContains: "logout" })).map((t) => t.id);
   check("(4) tasks_list titleContains over MCP narrows to the matching title", titleFiltered.join(",") === T_GAMMA);
 
-  // (5) idPrefix composes with limit/offset pagination.
-  const pagedFiltered = ndjson(await rawText({ idPrefix: "aaaa", limit: 1 }));
-  check("(5) idPrefix composes with limit", pagedFiltered.length === 1);
+  // (5) idPrefix composes with limit/offset pagination. An EXPLICIT limit/offset now always returns the
+  // {rows,total,returned,offset,nextOffset} completeness-signal envelope instead of bare NDJSON (card
+  // 84f6ac42) — even though the two aaaa-matches would otherwise fit comfortably inline — so parse it as
+  // JSON rather than splitting on newlines.
+  const pagedFilteredRaw = await rawText({ idPrefix: "aaaa", limit: 1 });
+  let pagedFilteredEnvelope = null;
+  try { pagedFilteredEnvelope = JSON.parse(pagedFilteredRaw); } catch { /* left null — checked below */ }
+  check("(5) idPrefix + an explicit limit returns the envelope (parses as ONE JSON object, not bare NDJSON)",
+    pagedFilteredEnvelope !== null && typeof pagedFilteredEnvelope === "object" && Array.isArray(pagedFilteredEnvelope.rows));
+  check("(5) idPrefix composes with limit — exactly 1 row returned", pagedFilteredEnvelope.rows.length === 1);
+
+  // (6) card 84f6ac42 — the completeness signal itself, BOTH polarities of the boundary:
+  //   (a) EXCEEDS the limit (2 aaaa-matches, limit:1) ⇒ must report MORE REMAINS (nextOffset non-null).
+  check("(6a) result EXCEEDING the limit reports total=2, returned=1, nextOffset=1 (more remains) — not just '1 row, no signal'",
+    pagedFilteredEnvelope.total === 2 && pagedFilteredEnvelope.returned === 1 &&
+    pagedFilteredEnvelope.offset === 0 && pagedFilteredEnvelope.nextOffset === 1);
+  //   (b) FITS EXACTLY at the boundary (2 aaaa-matches, limit:2 — n==limit with NOTHING after) ⇒ must
+  //   report COMPLETE (nextOffset:null), never mistaken for "more might remain" just because it hit the cap.
+  const exactBoundaryRaw = await rawText({ idPrefix: "aaaa", limit: 2 });
+  const exactBoundaryEnvelope = JSON.parse(exactBoundaryRaw);
+  check("(6b) result fitting EXACTLY at the boundary (n==limit, nothing after) reports nextOffset:null (complete)",
+    exactBoundaryEnvelope.rows.length === 2 && exactBoundaryEnvelope.total === 2 &&
+    exactBoundaryEnvelope.returned === 2 && exactBoundaryEnvelope.nextOffset === null);
+  //   (c) a call with NO explicit offset/limit whose result is genuinely complete (well under the default
+  //   cap) stays BARE NDJSON — unchanged, no false envelope for the common case (already exercised by (3)
+  //   above; reasserted here for locality with the rest of this boundary group).
+  const implicitCompleteText = await rawText({ idPrefix: "aaaa" });
+  let implicitCompleteParses = true;
+  try { JSON.parse(implicitCompleteText); } catch { implicitCompleteParses = false; }
+  check("(6c) a genuinely complete, non-explicit-paged result stays bare NDJSON (no envelope)", !implicitCompleteParses);
 
   await client.close();
 } finally {
@@ -119,6 +151,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — tasks_list emits NEWLINE-DELIMITED JSON (one task per line, never a single JSON-array blob) so a wide read stays Read/grep-pageable, and the new idPrefix/titleContains filters narrow a read without paging a huge window."
+  ? "\n✅ ALL PASS — tasks_list emits NEWLINE-DELIMITED JSON (one task per line, never a single JSON-array blob) so a wide read stays Read/grep-pageable, the idPrefix/titleContains filters narrow a read without paging a huge window, and (card 84f6ac42) an explicit or truncated read now carries a {total,returned,offset,nextOffset} completeness signal — proven at both boundary polarities — instead of being indistinguishable from a complete answer."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
