@@ -54,7 +54,7 @@ process.env.LOOM_HOME = tmpHome;
 const WINDOW_MS = 200;
 process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS = String(WINDOW_MS);
 
-const { PtyHost, framePossibleDuplicate } = await import("../dist/pty/host.js");
+const { PtyHost, framePossibleDuplicate, PROMPT_MISMATCH_EXCERPT_MAX_LEN } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const waitUntil = async (predicate, timeoutMs = 3000, stepMs = 10) => {
@@ -154,6 +154,11 @@ try {
       evs[0]?.info.recognizedGen === 1 && evs[0]?.info.matchedLen === gen1Text.length);
     check("6c: a whole-string replay leaves no remainder — both lengths are 0",
       evs[0]?.info.leadingRemainderLen === 0 && evs[0]?.info.trailingRemainderLen === 0);
+    // Card a419a7e6: PtyHost always passes messageExcerpt RAW/unconditionally through this event (the
+    // LOOM_LOG_MESSAGE_CONTENT gate lives downstream, in SessionService — see that method's own doc) —
+    // a bounded HEAD slice of THIS generation's own intended text (gen2Text), never the replayed gen1Text.
+    check("6d: carries a bounded head-slice of the ORIGINAL intended text (gen2Text), not the replayed gen1Text",
+      evs[0]?.info.messageExcerpt === gen2Text.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN));
   }
 
   // ===== PART 2 — THE MANDATORY OTHER DIRECTION (DoD-3): a recognized-replay mismatch that DOES resolve —

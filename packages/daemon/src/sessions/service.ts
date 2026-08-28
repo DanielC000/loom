@@ -20,7 +20,7 @@ import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranc
 import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
@@ -8201,16 +8201,28 @@ export class SessionService {
    * generation this mismatch replayed and how much of it matched — lengths and a generation number, never
    * the matched/remainder TEXT itself, consistent with `intendedLen`/`writtenHash` already stored here.
    *
-   * Card 16c93a50 — the STILL-DEFERRED content half (c23e2869's own "bounded remainder excerpts" clause,
-   * deferred item `ea4793d9`) does NOT ship here, and deliberately isn't gated behind this card's own
-   * `LOOM_LOG_MESSAGE_CONTENT` flag either: request `0eb43216`'s ruling and this card's DoD are both scoped
-   * in terms to "the rotated daemon log" (the console.* stream `daemon-output.log` tees) — a bounded,
-   * 60MB-capped file. A durable `orchestration_events` row is a STRUCTURALLY DIFFERENT artifact: it never
-   * rotates away, and is queryable indefinitely (`events_search` and friends) by any session with access —
-   * a materially different, arguably HIGHER-stakes exposure than a line in a capped log file. Extending
-   * this card's ruling to cover it would be inferring an owner decision on an artifact nobody actually
-   * asked them about. If a durable record of the unmatched remainder text is wanted, that's a fresh policy
-   * question for its own request, not a corollary of `0eb43216`.
+   * Card 16c93a50 left this durable row's own content question OPEN on purpose (see the paragraph this one
+   * replaces, preserved in that card's own history): request `0eb43216`'s ruling and card 16c93a50's DoD are
+   * both scoped in terms to "the rotated daemon log" (the console.* stream `daemon-output.log` tees), a
+   * bounded, 60MB-capped file — a durable `orchestration_events` row is a STRUCTURALLY DIFFERENT artifact
+   * (never rotates away, queryable indefinitely via `events_search` and friends), so extending that ruling
+   * to cover it here would have been INFERRING an owner decision nobody actually made.
+   *
+   * Card a419a7e6 DECIDED that open question, owning it explicitly rather than leaving it to rot as an
+   * orphaned doc comment (see that card's own "why this is a card and not a comment"): `detail.messageExcerpt`
+   * below is gated behind the SAME `isLogMessageContentEnabled()` flag as every other raw-text diagnostic in
+   * this file (see that function's own doc) — OMITTED from `detail` entirely when the flag is OFF (the
+   * shipped default), so an unopted-in host's durable row is BYTE-IDENTICAL to before this card, and no new
+   * decision was needed for that population. With the flag ON, the operator has already accepted raw message
+   * content in a host-wide, cross-tenant ROTATING log; a project-scoped durable row is a NARROWER surface
+   * than the one already permitted, not a wider one — see this card's own board body for the full reasoning.
+   * `info.messageExcerpt` (pty/host.ts) is always a bounded HEAD slice of the ORIGINAL `intended` text for
+   * the generation that never resolved — genuinely the best available evidence of what was lost, not a
+   * "remainder": the deferred item's own "bounded remainder excerpts" phrasing does not match what this
+   * branch can ever actually produce (`leadingRemainderLen`/`trailingRemainderLen` are always 0 here — see
+   * `PtyHostEvents.onPromptMismatchUnresolved`'s own doc — because the reachable branch is always a WHOLE-
+   * string replay match, never a partial one), so there is no remainder to excerpt, only the intended text
+   * itself.
    *
    * DoD-3's OWN ask ("decide the durability boundary deliberately … not a request to durably log all
    * 685[+ console notices] — a request to say which shapes are worth surviving rotation, and why") IS
@@ -8224,7 +8236,7 @@ export class SessionService {
    * a loss nobody can any longer verify by re-reading the log — not for every classification this file
    * makes along the way.
    */
-  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number }): void {
+  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string }): void {
     const s = this.db.getSession(sessionId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
@@ -8232,6 +8244,9 @@ export class SessionService {
       kind: "prompt_mismatch_unresolved", detail: {
         gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen,
         recognizedGen: info.recognizedGen, matchedLen: info.matchedLen, leadingRemainderLen: info.leadingRemainderLen, trailingRemainderLen: info.trailingRemainderLen,
+        // Card a419a7e6: OMITTED entirely (not an empty string) when the flag is off — see this method's
+        // own doc for why omission, not a redacted placeholder, is the byte-identical-to-before shape.
+        ...(isLogMessageContentEnabled() ? { messageExcerpt: info.messageExcerpt } : {}),
       },
     });
     const recipientMsg = `[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mismatch] notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No confirming later generation ever arrived — that content is now the best available evidence of a genuine loss, not merely a possible one. If you are a Loom-driven session, say so in your next report up.`;

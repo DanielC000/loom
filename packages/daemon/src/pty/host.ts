@@ -736,6 +736,22 @@ export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
     ? rawPromptMismatchResolveWindowMs : 600_000;
 
 /**
+ * Card a419a7e6: how much of the ORIGINAL `intended` text (the payload Loom wrote for the generation that
+ * never resolved) `checkPromptMismatchUnresolved` carries forward as `messageExcerpt` on
+ * `PtyHostEvents.onPromptMismatchUnresolved`'s info object — always a bounded HEAD slice, same shape as
+ * this file's other bounded excerpts (`[submit-write]`'s `text.slice(0, 60)`, `[stdin-write]`'s same). This
+ * value is passed RAW through the internal event chain (PtyHost -> index.ts -> SessionService, one in-
+ * process call each, never logged or serialized on its own) — the actual `LOOM_LOG_MESSAGE_CONTENT` gate
+ * lives at the one place this content can become durable/queryable: `SessionService.
+ * handlePromptMismatchUnresolved`'s own `detail` construction (see that method's doc). Bounding it here
+ * regardless of the flag keeps the raw value cheap to carry through a 10-minute-old closure without ever
+ * holding more than this many characters — the reachable branch that schedules this check is always a
+ * WHOLE-string replay match (see `checkPromptMismatchUnresolved`'s own doc), so this is genuinely the best
+ * available evidence of what the recipient never confirmed receiving, not a remainder or a guess.
+ */
+export const PROMPT_MISMATCH_EXCERPT_MAX_LEN = 200;
+
+/**
  * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
  * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
  * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
@@ -3325,8 +3341,14 @@ export interface PtyHostEvents {
    * future widening of WHICH mismatches reach this event (a durability-boundary policy call this card
    * explicitly defers — see its own DoD-3) can populate non-zero remainders under the same field names
    * without a schema change.
+   *
+   * Card a419a7e6: `messageExcerpt` is a bounded HEAD slice (`PROMPT_MISMATCH_EXCERPT_MAX_LEN` chars — see
+   * that constant's own doc) of the ORIGINAL `intended` text, passed RAW and UNCONDITIONALLY here — this is
+   * an in-process call chain with exactly one implementer (SessionService.handlePromptMismatchUnresolved,
+   * via index.ts), never logged or serialized on its own. The `LOOM_LOG_MESSAGE_CONTENT` gate this content
+   * is subject to lives at THAT method, the one place it can become a durable, queryable row — not here.
    */
-  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number }): void;
+  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string }): void;
   /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
@@ -6160,6 +6182,11 @@ export class PtyHost {
                   // replay happened (see `PtyHostEvents.onPromptMismatchUnresolved`'s own doc).
                   const pendingRecognizedGen = replayedEntry.gen;
                   const pendingMatchedLen = replayedEntry.text.length;
+                  // Card a419a7e6: bounded HEAD slice of THIS generation's own intended text — see
+                  // PROMPT_MISMATCH_EXCERPT_MAX_LEN's own doc for why this is captured raw, unconditionally,
+                  // and why it's genuinely the best available evidence for this branch (always a whole-
+                  // string replay, never a remainder).
+                  const pendingMessageExcerpt = intended.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN);
                   // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
                   // pendingMismatchUnresolvedTimers` (see that field's own doc) so `spawn()`/`onExit` can
                   // clear it before a resume/recycle/restart/exit invalidates this session's own tracking —
@@ -6172,7 +6199,7 @@ export class PtyHost {
                   // resolution.
                   const timer: NodeJS.Timeout = setTimeout(() => {
                     live.pendingMismatchUnresolvedTimers.delete(timer);
-                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen, pendingRecognizedGen, pendingMatchedLen);
+                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen, pendingRecognizedGen, pendingMatchedLen, pendingMessageExcerpt);
                   }, PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
                   live.pendingMismatchUnresolvedTimers.add(timer);
                 }
@@ -9996,7 +10023,7 @@ export class PtyHost {
    * as the real defect). PtyHost itself has no DB/manager lookup (same layering boundary as
    * `onPasteLengthLoss`/`onKickoffGiveUpExhausted`), so it only ever hands off the raw facts.
    */
-  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number, recognizedGen: number, matchedLen: number): void {
+  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number, recognizedGen: number, matchedLen: number, messageExcerpt: string): void {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.mismatchResolvedGens.has(gen)) return;
@@ -10005,7 +10032,10 @@ export class PtyHost {
     // Card c23e2869 DoD-2: `recognizedGen`/`matchedLen` are `replayedEntry`'s own gen/length, captured at
     // the ORIGINAL detection's own call site (see this method's own doc) — this branch is reachable only
     // when `replayedEntry !== undefined`, a WHOLE-string match, so there is never a remainder to name here.
-    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0 });
+    // Card a419a7e6: `messageExcerpt` is passed through RAW and UNCONDITIONALLY (see
+    // PtyHostEvents.onPromptMismatchUnresolved's own doc) — the content gate lives downstream, in
+    // SessionService.handlePromptMismatchUnresolved, not here.
+    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0, messageExcerpt });
   }
 
   /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s

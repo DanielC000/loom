@@ -1365,9 +1365,12 @@ export type OrchestrationEventKind =
   // and the follow-up window to prove it recovered has now elapsed). Filed under the AFFECTED session
   // (managerSessionId = its parent session's id if one exists, else its own id — same "notify whoever can
   // act" convention as `paste_length_loss`/`paste_tripwire_give_up`), workerSessionId = the affected
-  // session itself; `detail` carries { gen, writtenHash, reportedHash, intendedLen }. The durable audit
-  // trail for a mismatch whose own notice promised a follow-up either way but, until this card, only ever
-  // delivered on the SUCCESS half of that promise.
+  // session itself; `detail` carries { gen, writtenHash, reportedHash, intendedLen, recognizedGen,
+  // matchedLen, leadingRemainderLen, trailingRemainderLen }, plus an OPTIONAL `messageExcerpt` (card
+  // a419a7e6) — present only when the host has set LOOM_LOG_MESSAGE_CONTENT=1 (default OFF; see
+  // isLogMessageContentEnabled's own doc), OMITTED entirely otherwise, never an empty placeholder. The
+  // durable audit trail for a mismatch whose own notice promised a follow-up either way but, until this
+  // card, only ever delivered on the SUCCESS half of that promise.
   | "prompt_mismatch_unresolved"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
