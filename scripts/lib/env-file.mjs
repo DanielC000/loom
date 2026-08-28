@@ -47,9 +47,18 @@ export function loadDotEnvFile(filePath) {
  * Fill any key `fileEnv` sets that `target` does NOT already have, mutating `target` in place and
  * returning it. A key `target` already sets always wins — so a real shell var is never clobbered by
  * the file; the file only fills in vars the shell doesn't set.
+ *
+ * `excludeKeys` (optional) names keys to skip entirely, even if `fileEnv` sets them and `target`
+ * doesn't. Card ac3efca3: the caller resolves `LOOM_HOME` itself, from `target`, to find the very
+ * file `fileEnv` was loaded from — a `LOOM_HOME=` line inside that file can never relocate the file
+ * that set it (circular), so honouring it here would only let it silently diverge a value some OTHER
+ * consumer of `target` (e.g. a spawned child inheriting the whole env) sees from the one the caller
+ * itself already resolved.
  */
-export function fillEnvDefaults(target, fileEnv) {
+export function fillEnvDefaults(target, fileEnv, excludeKeys) {
+  const excluded = excludeKeys ? new Set(excludeKeys) : null;
   for (const [key, value] of Object.entries(fileEnv)) {
+    if (excluded && excluded.has(key)) continue;
     if (!(key in target)) target[key] = value;
   }
   return target;

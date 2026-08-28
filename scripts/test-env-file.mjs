@@ -57,6 +57,20 @@ check("a var already in the target is NOT overridden by the file", merged.EXISTI
 check("a var missing from the target IS filled in from the file", merged.NEW_FLAG === "from-file");
 check("fillEnvDefaults mutates and returns the same target object", merged === shellEnv);
 
+// --- fillEnvDefaults: excludeKeys (card ac3efca3 — LOOM_HOME must never propagate from the .env file
+// that was itself located using the pre-existing LOOM_HOME, or a spawned child could silently diverge
+// from the resolving process's own paths) ---
+const targetWithoutHome = { OTHER: "from-shell" };
+const fileEnvWithHome = { LOOM_HOME: "/some/other/home", OTHER_FLAG: "from-file" };
+const excludedResult = fillEnvDefaults(targetWithoutHome, fileEnvWithHome, ["LOOM_HOME"]);
+check("an excluded key is never filled in, even when absent from the target", !("LOOM_HOME" in excludedResult));
+check("a non-excluded key is still filled in as usual", excludedResult.OTHER_FLAG === "from-file");
+
+// Negative control: without excludeKeys, the same file WOULD have filled LOOM_HOME in — proves the
+// exclusion above is actually doing something, not just vacuously passing.
+const unexcludedResult = fillEnvDefaults({ OTHER: "from-shell" }, fileEnvWithHome);
+check("negative control: with no excludeKeys, the same key IS filled in", unexcludedResult.LOOM_HOME === "/some/other/home");
+
 fs.rmSync(dir, { recursive: true, force: true });
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} env-file: ${failures === 0 ? "all checks passed" : `${failures} check(s) failed`}`);

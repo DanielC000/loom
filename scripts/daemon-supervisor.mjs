@@ -37,7 +37,14 @@ const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 // THIS process's env, so a flag only ever set via a fresh shell is invisible to it — a full Ctrl-C +
 // relaunch was the only way to pick one up. Load <LOOM_HOME>/.env once, before the daemon child's env
 // is ever constructed, and fill in any var the real shell env doesn't already set (shell always wins).
-fillEnvDefaults(process.env, loadDotEnvFile(path.join(LOOM_HOME, ".env")));
+// LOOM_HOME itself is excluded (card ac3efca3, traced): the LOOM_HOME constant just above is already
+// bound by the time this file is even located, so a `LOOM_HOME=` line inside it is inert for THIS
+// process's own path resolution (pid file, logs, crash.log all stay put) — but was still landing in
+// process.env and propagating into the daemon CHILD's env below (runDaemon's spawn), letting the
+// child's own LOOM_HOME (packages/daemon/src/paths.ts, and therefore its DB/worktrees/runs/skills/
+// secret.key) silently diverge from the supervisor's. Excluding it here makes that divergence
+// impossible rather than merely documenting it.
+fillEnvDefaults(process.env, loadDotEnvFile(path.join(LOOM_HOME, ".env")), ["LOOM_HOME"]);
 
 // ---- --detach (card 2f146782) ------------------------------------------------------------------------
 // Genuinely decouples the self-host daemon from whatever terminal launched it — no console window is a
