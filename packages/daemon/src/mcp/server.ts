@@ -385,9 +385,13 @@ export class TaskMcpRouter {
           "current size against the project's read-side digest budget (`memory.budgetTokens`) — purely " +
           "informational, it never blocks this write; use it to judge whether the tier is getting too big " +
           "to keep guaranteeing delivery. Optional `title` " +
-          "(short label, max 200 chars) and `tags` (string[]). Write " +
+          "(short label, max 200 chars) and `tags` (string[]). `title` (or, if omitted, `key`) is rendered " +
+          "into every delivered note's digest header as `### {title} ({key})` — both `title` and `key` are " +
+          "on-budget, consuming `memory.budgetTokens` on every kickoff exactly like `text` does, so a long " +
+          "descriptive title is NOT a free way to say more; keep it short. Write " +
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
-          "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +
+          "`text` ALONE is capped at 4000 bytes (a short, curated note, not a dumping ground; the header's " +
+          "own bytes are separate and uncapped here); a too-long write " +
           "is rejected with `bytesOver` + the current note (if any) so you can trim without re-fetching. " +
           "A note that is (effectively, after this write) `pinned:true` AND tagged `\"never-drop\"` — i.e. " +
           "actually IN the floor tier — is held to a LOWER, SEPARATE cap of 2000 bytes instead, and this " +
