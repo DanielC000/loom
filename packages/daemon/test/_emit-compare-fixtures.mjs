@@ -59,16 +59,33 @@ const REAL_TMP_FIXTURE_SCRIPT = fs.readFileSync(
 const REAL_TEMP_REAPER_SCRIPT = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "temp-reaper.mjs"), "utf8",
 );
+// Card f8b176f7 CR follow-up: test-daemon.mjs's own import of this module is LAZY (a call-site
+// `await import(...)`, not a top-level static import — see that file's own comment for why), so
+// `loadExcludedTestDirNames`/`loadNotHermeticNames` never actually need this file to resolve
+// REAL_TEST_DAEMON_SCRIPT's exports today. It's copied into the fixture repo below anyway, on the same
+// "REAL content, not a hand-typed stub" principle as every other file here — see the
+// self-resolving-mirror doc on `writeRealTestDaemonScript` for why that principle doesn't get to lapse
+// just because the current import happens to be lazy.
+const REAL_GATE_TIMING_RETENTION_SCRIPT = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "lib", "gate-timing-retention.mjs"), "utf8",
+);
 
-// Writes a REAL, fully self-resolving copy of scripts/test-daemon.mjs (plus its two real sibling imports)
-// into `repoDir` — unlike writing `REAL_TEST_DAEMON_SCRIPT` alone (see (I)/(J)/(K) above), a dynamic
-// import of the result actually SUCCEEDS, so a caller needing `loadExcludedTestDirNames`/
-// `loadNotHermeticNames` to genuinely resolve (not merely fail closed) should use this instead.
+// Writes a REAL, fully self-resolving copy of scripts/test-daemon.mjs into `repoDir` — "self-resolving"
+// meaning every file it imports, transitively, static or dynamic, is ALSO written here as REAL content,
+// never a hand-typed stub — so a dynamic `import()` of the written test-daemon.mjs actually SUCCEEDS,
+// unlike writing `REAL_TEST_DAEMON_SCRIPT` alone (see (I)/(J)/(K) above). A caller needing
+// `loadExcludedTestDirNames`/`loadNotHermeticNames` to genuinely resolve (not merely fail closed) should
+// use this instead. ⚠️ Card 89ab1e01's own defect class: this function's file list must track
+// test-daemon.mjs's REAL import graph by inspection each time that graph changes, not by trusting a
+// count anywhere (this comment included) — an import added there with no matching write here reproduces
+// op a450e3dd's failure (a real module load silently falling back to fail-closed in the loaders above).
 export function writeRealTestDaemonScript(repoDir) {
   mkdirp(path.join(repoDir, "packages", "daemon", "scripts"));
+  mkdirp(path.join(repoDir, "packages", "daemon", "scripts", "lib"));
   mkdirp(path.join(repoDir, "packages", "daemon", "test"));
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "temp-reaper.mjs"), REAL_TEMP_REAPER_SCRIPT);
+  fs.writeFileSync(path.join(repoDir, "packages", "daemon", "scripts", "lib", "gate-timing-retention.mjs"), REAL_GATE_TIMING_RETENTION_SCRIPT);
   fs.writeFileSync(path.join(repoDir, "packages", "daemon", "test", "_tmp-fixture.mjs"), REAL_TMP_FIXTURE_SCRIPT);
 }
 

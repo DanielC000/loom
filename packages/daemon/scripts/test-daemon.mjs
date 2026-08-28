@@ -47,6 +47,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "../test/_tmp-fixture.mjs";
 import { reapStaleLoomTempDirs } from "./temp-reaper.mjs";
+// Card f8b176f7 CR follow-up: deliberately NOT a top-level import. `git/worktrees.ts`'s
+// `loadNotHermeticNames`/`loadExcludedTestDirNames` load THIS FILE as a real module (dynamic
+// `import()`, not a parse) purely to read its NOT_HERMETIC/excluded-dir exports, from an
+// arbitrary worktree — including test fixtures that mirror only this file's OWN direct siblings
+// (see test/_emit-compare-fixtures.mjs's writeRealTestDaemonScript). A top-level import here would
+// make loading this file for those two unrelated exports also require every transitive import to
+// resolve, coupling this module's dependency graph to those loaders' fixture completeness for no
+// reason — the exact defect a real gate run caught (op a450e3dd). Importing lazily, at the one call
+// site that actually needs it, means loading this file for its exports alone never touches this
+// module at all.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
@@ -1523,6 +1533,26 @@ if (isMain) {
     }
   } catch (err) {
     console.warn(`⚠ gate-timing observability block failed (non-fatal): ${err.message}`);
+  }
+
+  // Card f8b176f7: best-effort compaction of the gate-timing NDJSON — see gate-timing-retention.mjs's own
+  // doc for the full policy and why it's shaped the way it is. Runs AFTER the run-summary write above (so
+  // this run's own rows are eligible to be treated as "the most recent run" immediately) and is wrapped
+  // exactly like every other observability step in this block: compactGateTimingLogIfNeeded itself never
+  // throws (see its own doc), this outer try/catch is belt-and-suspenders only, and a compaction miss must
+  // never affect this gate's own pass/fail or exit code.
+  try {
+    // Lazy import (see the header comment above this file's other imports for why) — loaded here, at the
+    // one real call site, rather than at module top-level.
+    const { compactGateTimingLogIfNeeded } = await import("./lib/gate-timing-retention.mjs");
+    const compactionResult = compactGateTimingLogIfNeeded(GATE_TIMING_NDJSON);
+    if (compactionResult.compacted) {
+      console.log(`ℹ gate-timing: compacted ${GATE_TIMING_NDJSON} (${compactionResult.beforeBytes} bytes, ${compactionResult.beforeRows} rows → ${compactionResult.afterRows} rows${compactionResult.droppedOldSummaries ? `, dropped ${compactionResult.droppedOldSummaries} old run-summary row(s) past the retention ceiling` : ""})`);
+    } else if (compactionResult.reason === "error" || compactionResult.reason === "write-failed") {
+      console.warn(`⚠ gate-timing: compaction attempt failed (non-fatal): ${compactionResult.error}`);
+    }
+  } catch (err) {
+    console.warn(`⚠ gate-timing compaction block failed (non-fatal): ${err.message}`);
   }
 
   if (failed.length) {
