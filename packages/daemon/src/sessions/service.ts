@@ -52,7 +52,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -718,6 +718,16 @@ function deriveMergeGateVerdict(
       // a new commit, so `v.commitSubject` is never set there); see `PendingGateOpVerdict.commitSubject`'s
       // own doc for the ALREADY_MERGED-path caveat (that path bypasses this function's onSettle entirely).
       ...(v.merged && v.commitSubject !== undefined ? { commitSubject: v.commitSubject } : {}),
+      // Card 6dcb9cd3: MEASURED NEGATIVE, deliberately NOT the `!== undefined ? {...} : {}` spread every
+      // other field on this payload uses — `retriedFile`/`retryPassed` are set UNCONDITIONALLY here (as a
+      // real value or `null`), on both a "pass" and a "fail" verdict, so `gate_status(opId)`'s settled read
+      // can tell "no retry fired" (`null`) apart from "this row predates the field" (`undefined`, only ever
+      // possible on a row `deriveMergeGateVerdict` never touched). `v.retryPassed` is already `undefined`
+      // exactly on card 318ac7b2's cancel-while-queued exception (see `ConfirmMergeResult.retryPassed`'s own
+      // doc) — `?? null` there is precisely the "identified but no verdict" reading `PendingGateOpVerdict
+      // .retryPassed`'s doc documents, not a loss of information.
+      retriedFile: v.retriedFile ?? null,
+      retryPassed: v.retryPassed ?? null,
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -3979,6 +3989,31 @@ export class SessionService {
      *  path, or a "gate" self-check row) or the row predates this card — never fabricated. Populated for
      *  "merge" rows only, on a `passed:true` (merged) outcome only — a rejection/error never lands a commit. */
     commitSubject?: string;
+    /** Card 6dcb9cd3: plumbs card 344ce950's single-file-retry fact onto this second reader — see
+     *  {@link PendingGateOpVerdict.retriedFile}'s own doc for the full discipline. ⭐ A MEASURED NEGATIVE,
+     *  not this method's usual "omitted means nothing to report": `null` is a POSITIVE assertion that no
+     *  such retry fired for this row, present on every "pass"/"fail" "merge" row `deriveMergeGateVerdict`
+     *  writes going forward — `undefined` only for a settled row that predates this card, or a "cancelled"/
+     *  "error"/"gate" (worker self-check) row, where this pairing was never computed at all. Same
+     *  present-with-null-vs-absent-key contract as `composerDirtyLen`/`recentTimeoutStreak` elsewhere on
+     *  this daemon. A settled `outcome:"pass"` with a non-null `retriedFile` is WEAKER evidence than an
+     *  ordinary clean pass (`retriedFile:null`) — see `retryWarning` below, which explains why in the same
+     *  words the `[loom:merge-done]` nudge already uses for a live read of the identical fact. */
+    retriedFile?: string | null;
+    /** Card 6dcb9cd3, sibling of `retriedFile` immediately above: whether that retry itself passed. `null`
+     *  whenever `retriedFile` is `null` (no retry, nothing to report). When `retriedFile` names a real file,
+     *  usually `true`/`false` — EXCEPT card 318ac7b2's exception, where it stays `null` even alongside a
+     *  real `retriedFile` (the retry was identified and queued but cancelled before it ran to completion,
+     *  so there is no verdict for it yet). Never assume a non-null `retriedFile` implies `retryPassed:true`. */
+    retryPassed?: boolean | null;
+    /** Card 6dcb9cd3: present ONLY when `retriedFile` is non-null — the SAME "⚠ WEAKER PASS" wording the
+     *  `[loom:merge-done]` nudge already renders inline for a live read of this exact op (one shared
+     *  formatter feeds both, so the two can never tell two different stories about the identical settle).
+     *  Explains, in plain language, why a retry-assisted pass is weaker evidence than an ordinary clean
+     *  pass (an order-dependent/cross-test-pollution bug can pass alone and fail in the full suite) — read
+     *  this before treating any settled "merge" pass as trustworthy on its own. Absent (never an empty
+     *  string) whenever `retriedFile` is `null` or `undefined`. */
+    retryWarning?: string;
   } {
     const scoped = scopeSessionId != null || scopeProjectId != null;
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
@@ -4032,6 +4067,16 @@ export class SessionService {
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
+          // Card 6dcb9cd3: `!== undefined` (not truthy) — a `null` here IS the measured negative
+          // (`payload.retriedFile` is written unconditionally, as a real name or `null`, by
+          // deriveMergeGateVerdict) and must pass through, exactly like the `undefined`-means-"row predates
+          // this card" case must stay omitted rather than fabricated as `null`. `retryWarning` is the one
+          // exception to this whole block's "spread payload.X verbatim" shape — it's DERIVED (via the same
+          // formatter the live nudge uses), not stored, and gated on a TRUTHY retriedFile specifically (a
+          // `null`/`undefined` retriedFile has no warning to render).
+          ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
+          ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
+          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile) } : {}),
           // Card e2b6f900: without this, the triple is written to verdict_payload_json and NEVER read back
           // out — a manager calling gate_status(opId) after missing the nudge (precisely the post-hoc
           // recovery path this card exists to serve) would see undefined and reasonably conclude "no gate
@@ -14630,7 +14675,7 @@ export class SessionService {
         // "measured n=30" finding) — this states only that a retry happened and passed, nothing about why
         // the first attempt failed.
         const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
-          ? ` ⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${outcome.value.retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`
+          ? ` ${formatWeakerPassWarning(outcome.value.retriedFile)}`
           : "";
         // Card e2b6f900: the SAME concurrency triple the `[loom:merge-rejected]` rejection text already
         // bakes into its `detailBits` (see confirmWorkerMerge's identical `cap=… concurrentGates=…

@@ -104,7 +104,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GateSemaphore } = await import("../dist/orchestration/gate-semaphore.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
-const { describeGateProximity, GATE_PROXIMITY_THRESHOLD } = await import("../dist/orchestration/gate-runner.js");
+const { describeGateProximity, GATE_PROXIMITY_THRESHOLD, formatWeakerPassWarning } = await import("../dist/orchestration/gate-runner.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -630,6 +630,82 @@ try {
     // previously could not answer this at all (gate_status carried no subject field whatsoever).
     check("(e2e merge verdict pass — 7a1a76e9 DoD-2 FIX) commitSubject round-trips through the tombstone, past registry eviction, no nudge read anywhere in this test",
       status.commitSubject === "chore: GST-MVERDICT-PASS-TASK");
+    // Card 6dcb9cd3, NEGATIVE POLARITY — an ORDINARY clean pass (no single-file retry ever fired) must
+    // expose `retriedFile`/`retryPassed` as a MEASURED NEGATIVE (`null`, present), never as an absent key —
+    // the SAME present-with-null-vs-absent-key contract this daemon already applies to `composerDirtyLen`/
+    // `recentTimeoutStreak`. Read alongside the RETRY-ASSISTED PASS block below (same file), this is the
+    // "test both polarities" half of the card's DoD-5 — the two blocks together prove `null` really means
+    // "no retry, measured" and not just "nothing was ever set here".
+    check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retriedFile is a present `null`, not an absent key", "retriedFile" in status && status.retriedFile === null);
+    check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retryPassed is a present `null`, not an absent key", "retryPassed" in status && status.retryPassed === null);
+    check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retryWarning is absent — nothing to warn about on a clean pass", !("retryWarning" in status));
+  }
+
+  // ── (e2e merge, card 6dcb9cd3 — RETRY-ASSISTED PASS, POSITIVE CONTROL) card 344ce950's single-file retry
+  // (fails once, retries the ONE identifiable file in isolation, passes) landed the fields on
+  // `gate_history`/the `[loom:merge-done]` nudge long ago, but `gate_status(opId)` carried NEITHER field NOR
+  // a warning for the identical settled op — the exact asymmetry card 6dcb9cd3 measured on real op `3954a69f`
+  // (outcome:"pass" sitting beside a `steps[]` entry with a real failure and nothing explaining it). Mirrors
+  // merge-gate-single-file-retry.mjs's own scenario (A) (fails once naming a real bare-identifier test file,
+  // retries in isolation, passes) but driven through `confirmWorkerMergeTracked` — the tracked/tombstone
+  // wrapper `gate_status` actually reads from — rather than the raw `confirmWorkerMerge` that test calls
+  // directly. Asserted only AFTER the op leaves PendingOpRegistry's retained view, same discipline as every
+  // other block in this file. ─────────────────────────────────────────────────────────────────────────────
+  {
+    const P = `gst-mretry-pass-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-MRETRY-PASS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`, mgrId = `${P}-mgr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-MRETRY-PASS-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    // Plants the two files `identifyRetriableTestFile`'s real `fs.existsSync` checks look for — mirrors
+    // merge-gate-single-file-retry.mjs's own `plantTestFile` exactly, so the retry actually identifies
+    // "flaky-gst" instead of refusing (fail-closed) for want of a real file on disk.
+    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs"), "// stub\n");
+    fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "test"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "flaky-gst.mjs"), "// stub\n");
+    fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const retryThenPassGate = async () => {
+      calls++;
+      // `steps` on attempt 1 deliberately carries a NONZERO status — the single-file retry's own
+      // pass-after-retry absorption (`gateResult = { ...gateResult, passed: true }`, sessions/service.ts)
+      // overwrites only `passed`, so this EXACT attempt-1 steps array (real failure, `status:1`) is what
+      // survives onto the final settled "pass" row below — the real shape the DoD-3 check further down
+      // needs to mean anything (a synthetic gate that never returns `steps` at all would make that check
+      // vacuous, since `status.steps` would just be `undefined`).
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-gst", failingTestCount: 1, failTierTest: "FAIL  flaky-gst", failTierTestCount: 1, steps: [{ step: "pnpm gate", durationMs: 500, status: 1 }] };
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: retryThenPassGate });
+
+    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const { opId, value, viaAsync } = await settleMergeEitherPath(sessions, r, "e2e merge retry-assisted pass");
+    if (!viaAsync) {
+      check("(e2e merge retry-assisted pass) settled INLINE this run, merged:true (retry passed)", r.ok === true && value.merged === true);
+      check("(e2e merge retry-assisted pass) sync result ALREADY carries retriedFile/retryPassed:true — precondition for this block, not the fix itself", value.retriedFile === "flaky-gst" && value.retryPassed === true);
+    }
+    check("(e2e merge retry-assisted pass) exactly 2 gate calls — one genuine failure, one single-file retry", calls === 2);
+
+    await waitUntil(() => (sessions.peekPendingMerge(workerId) === undefined ? true : undefined), { timeoutMs: 10_000, label: "merge op to leave PendingOpRegistry's retained view" });
+
+    const status = sessions.gateStatus(opId);
+    check("(e2e merge retry-assisted pass — THE FIX) gate_status alone reports outcome:\"pass\" for the settled retry-assisted merge, past eviction, no nudge read anywhere in this test", status.state === "settled" && status.outcome === "pass");
+    check("(e2e merge retry-assisted pass — THE FIX) retriedFile round-trips through the tombstone — previously absent for EVERY settled merge row, retried or not", status.retriedFile === "flaky-gst");
+    check("(e2e merge retry-assisted pass — THE FIX) retryPassed:true round-trips through the tombstone", status.retryPassed === true);
+    check("(e2e merge retry-assisted pass — DoD-2, SHARED FORMATTER) retryWarning is present and matches the SAME formatWeakerPassWarning text the live [loom:merge-done] nudge renders for this exact op — never a second, independently-worded copy", status.retryWarning === formatWeakerPassWarning("flaky-gst"));
+    check("(e2e merge retry-assisted pass — DoD-3, steps[] not the verdict) steps[0].status is nonzero (attempt 1's real failure) even though outcome is \"pass\" — proves a reader CANNOT take steps[N].status for the verdict; outcome/retriedFile/retryWarning are what discriminate", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].status !== 0 && status.outcome === "pass");
   }
 
   // ── (e2e merge, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) the merge-gate analogue of the worker

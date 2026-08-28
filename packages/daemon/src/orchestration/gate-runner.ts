@@ -1115,3 +1115,22 @@ export function identifyRetriableTestFile(failTierTest: string | undefined, cwd:
   if (!fs.existsSync(scriptFile) || !fs.existsSync(testFile)) return undefined;
   return { name, command: `node packages/daemon/scripts/test-daemon.mjs --only=${name}` };
 }
+
+/**
+ * Card 6dcb9cd3: the ONE place the "⚠ WEAKER PASS" wording is authored — reused by BOTH the live
+ * `[loom:merge-done]` nudge (`confirmWorkerMergeTracked`'s onSettle, sessions/service.ts) and the pull-based
+ * `gate_status(opId)` settled-record read (`retryWarning`, same file). Before this card the nudge had its
+ * own inline template literal and `gate_status` had no warning at all — a manager who missed the nudge and
+ * polled `gate_status` instead saw `outcome:"pass"` next to a `steps[]` entry with a real failure and
+ * nothing explaining it (the card's own measured finding, op `3954a69f`). A single formatter means the two
+ * surfaces can never drift into two different tellings of the identical fact — exactly the two-hand-
+ * maintained-copies drift card `6dcb9cd3`'s own DoD-2 calls out by name.
+ *
+ * Takes the bare `retriedFile` name (never call this when no retry fired — both call sites gate on a
+ * truthy `retriedFile` first, so this never has to branch on "was there a retry"). Returns the warning text
+ * WITHOUT a leading space or the `⚠` glyph's own leading space — callers that inline this into a larger
+ * nudge string prepend their own separator, mirroring {@link formatGateStepsDiagnostic}'s own convention.
+ */
+export function formatWeakerPassWarning(retriedFile: string): string {
+  return `⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`;
+}

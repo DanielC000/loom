@@ -2055,6 +2055,30 @@ export interface PendingGateOpVerdict {
    *  `commitSubject` on — broader than `gateCap`/`outputTail`'s two-dominant-paths scope, since the subject
    *  is set unconditionally on every landed squash regardless of which return branch is taken. */
   commitSubject?: string;
+  /** Card 6dcb9cd3: plumbs card 344ce950's single-file-retry fact onto this durable payload — before this
+   *  card, `gate_history` (the `build_gate` audit event) already carried `retriedFile`/`retryPassed` on
+   *  BOTH outcomes, but a `gate_status(opId)` read of a settled "merge" row carried neither, so a caller
+   *  who polled `gate_status` instead of `gate_history` saw `outcome:"pass"` sitting beside a `steps[]`
+   *  entry with a real failure and no way to tell "a failing gate merged code" from "the retry worked".
+   *  ⭐ DELIBERATE MEASURED-NEGATIVE DISCIPLINE, NOT the `undefined`-means-omit pattern every other field on
+   *  this interface uses: `deriveMergeGateVerdict` sets this to a real filename OR `null` — NEVER leaves it
+   *  `undefined` — on every "pass"/"fail" row it writes going forward, so `null` here is a POSITIVE
+   *  assertion ("no such retry fired for this row"), not silence. `undefined` still means what it means
+   *  everywhere else on this interface: a settled row that predates this card, or a "cancelled"/"error" row
+   *  (this pairing was never computed on those branches — see `ConfirmMergeResult.retriedFile`'s own doc for
+   *  why attempt 1's own retry facts don't carry onto a cancel-while-queued return). Same
+   *  present-with-null-vs-absent-key contract this codebase already applies to `composerDirtyLen`/
+   *  `recentTimeoutStreak` (mcp/orchestration.ts) — an absent key must never be read as "no retry", only a
+   *  literal `null` may be. */
+  retriedFile?: string | null;
+  /** Card 6dcb9cd3, sibling of `retriedFile` immediately above — same measured-negative discipline: `null`
+   *  whenever `retriedFile` is `null` (no retry at all). When `retriedFile` IS a real filename, this is
+   *  `true`/`false` UNLESS card 318ac7b2's exception applies (the retry was identified and queued but
+   *  cancelled before it ran to completion) — in that one case it stays `null` even though `retriedFile` is
+   *  non-null, mirroring `gate_history`'s own documented pairing exactly (see mcp/orchestration.ts's
+   *  `gate_history` tool description). A reader must never assume a non-null `retriedFile` implies
+   *  `retryPassed:true`. */
+  retryPassed?: boolean | null;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

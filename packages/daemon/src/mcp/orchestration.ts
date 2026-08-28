@@ -320,7 +320,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
       "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
-      "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?}. `queued`/`running` " +
+      "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
+      "retriedFile?, retryPassed?, retryWarning?}. `queued`/`running` " +
       "mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge as your PRIMARY, unprompted way to learn the outcome, but a settled op " +
@@ -328,7 +329,12 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "(`\"pass\"`|`\"fail\"`|`\"error\"`|`\"cancelled\"` — `\"pass\"` means merged, `\"fail\"` means a " +
       "resolved rejection, `\"error\"` means a thrown exception mid-confirm), `steps` (card 720bb7ad — " +
       "per-step `{step,durationMs,status}` at sub-ms precision, present on BOTH a pass and a fail, the same " +
-      "shape the completion nudge's own steps line renders from) and a bounded `outputTail`, and — on a " +
+      "shape the completion nudge's own steps line renders from — DIAGNOSTIC ONLY: a step's `status` is NOT " +
+      "the verdict for this op and must never be read as one (see `outcome`/`passed` for the real verdict) " +
+      "— a `\"pass\"` op can carry a `steps[]` entry with a nonzero `status` from a FIRST gate attempt that " +
+      "genuinely failed before a single-file retry (see `retriedFile` below) passed and the merge landed; " +
+      "reading that entry's `status` as THE answer, instead of `outcome`, is exactly how a retry-assisted " +
+      "pass gets misread as a failing gate that merged code) and a bounded `outputTail`, and — on a " +
       "`\"fail\"` only — `gateDetail` (phase/failedStep/failingTest/exitCode/signal/timedOut, the SAME " +
       "diagnosis the `[loom:merge-rejected]` nudge embeds). " +
       "`gateCap`/`concurrentGates`/`concurrentGatesMax` (card e2b6f900) are the gate CONCURRENCY this op " +
@@ -394,6 +400,32 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`undefined` for every other outcome, the ALREADY_MERGED case (no new commit lands there either), or " +
       "a settled row that predates this card — never fabricated. These settled- " +
       "record fields are OMITTED, never fabricated, for a settled op that predates this capability. " +
+      "⚠️ `retriedFile`/`retryPassed`/`retryWarning` (card 6dcb9cd3) — A SETTLED `outcome:\"pass\"` CAN BE A " +
+      "RETRY-ASSISTED PASS, WEAKER EVIDENCE THAN AN ORDINARY CLEAN PASS, and these are the fields that " +
+      "discriminate. Card 344ce950's merge gate can retry ONE identifiable failing test file in isolation " +
+      "before rejecting; if that retry passes, the merge lands as an ordinary `outcome:\"pass\"` — the SAME " +
+      "shape a clean first-attempt pass has, unless you read these three fields. `retriedFile` is the bare " +
+      "name of that retried file, or a literal `null` — DELIBERATELY a MEASURED NEGATIVE here, NOT this " +
+      "tool's usual undefined-means-nothing-to-report discipline: `null` positively asserts \"no such retry " +
+      "fired for this row\", present on every settled \"merge\" pass/fail going forward (same present-with-" +
+      "null-vs-absent-key contract `composerDirtyLen`/`recentTimeoutStreak` use elsewhere on this daemon) — " +
+      "`undefined` means only \"this row predates card 6dcb9cd3\" or \"this op never reached a pass/fail " +
+      "verdict at all (cancelled/errored)\", never \"no retry\". `retryPassed` mirrors `retriedFile`'s own " +
+      "null-vs-undefined discipline: `null` whenever `retriedFile` is `null`; when `retriedFile` names a " +
+      "real file, USUALLY `true`/`false`, but STAYS `null` for the one exception the retry itself was " +
+      "cancelled while still queued before it ever ran — never assume a non-null `retriedFile` implies " +
+      "`retryPassed:true`. `retryWarning` is present ONLY when `retriedFile` is non-null: the SAME " +
+      "\"⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '<file>' in isolation " +
+      "once...\" wording the `[loom:merge-done]` nudge already renders live for this exact op — one shared " +
+      "formatter feeds both, so a caller who only ever reads `gate_status` (never the nudge) gets the " +
+      "identical warning, not a paraphrase. An order-dependent/cross-test-pollution bug can pass alone in " +
+      "isolation and fail in the full suite — exactly the class this single-file retry can otherwise mask — " +
+      "so treat a non-null `retriedFile` pass differently from an ordinary clean one before reporting it up " +
+      "as a plain green. Populated for \"merge\" rows only (a \"gate\"/worker-self-check row has no " +
+      "single-file-retry mechanism at all) and, structurally, ONLY EVER non-null on a project whose gate " +
+      "runs THIS daemon's own `packages/daemon/scripts/test-daemon.mjs` hermetic suite — `identifyRetriableTestFile` " +
+      "hardcodes that layout, so on every other project `retriedFile` reads `null` by construction, not by " +
+      "coincidence. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +
       "ever delivered for it, treat it like `settled` for planning purposes and just re-run " +
