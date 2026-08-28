@@ -2967,6 +2967,24 @@ interface Live {
   // `UserPromptSubmit`'s mismatch detector) so this never grows past the session's own count of currently
   // still-unresolved mismatches.
   pendingMismatchUnresolvedTimers: Set<NodeJS.Timeout>;
+  // Card 340b9dbe — PER-GEN DEDUP for `checkPromptMismatchUnresolved`'s own fired event, orthogonal to
+  // `pendingMismatchUnresolvedTimers` just above (that Set tracks live TIMER HANDLES so they can be
+  // cancelled on exit/resume; this one tracks which GENS have already produced a durable
+  // `onPromptMismatchUnresolved` event, so a second one for the SAME gen is a silent no-op instead of a
+  // duplicate alarm). THE GAP THIS CLOSES: the `UserPromptSubmit` detector's own arming site (this file,
+  // `isRecognizedReplayAwaitingResolution`) sits BEFORE the exact-repeat suppression guard
+  // (`isExactRepeatNotice`, same case, further down) and arms independently of it — so a detector
+  // re-entry for an already-notified `(gen, writtenHash, reportedHash)` triple gets its NOTICE correctly
+  // suppressed but still arms a SECOND `setTimeout` for the same gen. `checkPromptMismatchUnresolved`
+  // used to consult only `mismatchResolvedGens` (a real fusion resolving the gen), which has no way to
+  // stop a second timer that fires for a gen that was never resolved, only already reported — this field
+  // is that missing per-gen "already fired" memory, checked/set at the single call site inside
+  // `checkPromptMismatchUnresolved` itself, so it protects against ANY arming path that can produce two
+  // timers for one gen, not just the one currently reachable. Same never-shrinks posture as
+  // `mismatchResolvedGens` (reset only at spawn/resume/fork, alongside it — see those init sites) — no
+  // `onExit` clear needed the way `pendingMismatchUnresolvedTimers` gets one, since a stale entry here can
+  // only ever suppress a duplicate, never fire a false one.
+  firedMismatchUnresolvedGens: Set<number>;
   // Card 59757189 DoD-1/3 — the UNMATCHABLE counterpart to `lastMismatchReplay`/`lastMismatchFusion` above:
   // set the instant a mismatch matches NONE of the recognized/confirmed shapes above (not a single-entry
   // replay, not a confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip
@@ -4681,7 +4699,7 @@ export class PtyHost {
       lastPromptSenderId: null,
       activeTurnProactive: false,
       lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
@@ -4877,7 +4895,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -4962,7 +4980,7 @@ export class PtyHost {
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
-      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
+      lastMismatchReplay: null, lastMismatchFusion: null, mismatchResolvedGens: new Set(), pendingMismatchUnresolvedTimers: new Set(), firedMismatchUnresolvedGens: new Set(), lastMismatchUnmatched: null, lastMismatchNoticeSignature: null, lastMismatchNoticeSuppressed: null,
       lastPasteTripwireGiveUp: null,
       startupModeCycles: 0, startupCyclesDone: true,
       modeCycleChain: Promise.resolve(),
@@ -10015,9 +10033,16 @@ export class PtyHost {
    * time (if ever) this method's body runs, `live` is either a still-alive claude session or one of the
    * genuinely-deletable other kinds.
    *
-   * UNRESOLVED: fires `PtyHostEvents.onPromptMismatchUnresolved` exactly once (this method is only ever
-   * scheduled once per detection — see the `setTimeout` call site) so the implementer (sessions/service.ts,
-   * via index.ts) can fail loud to both the recipient and, where one exists, the sender — mirroring
+   * UNRESOLVED: fires `PtyHostEvents.onPromptMismatchUnresolved` AT MOST ONCE PER GEN — enforced here via
+   * `live.firedMismatchUnresolvedGens` (card 340b9dbe), not merely assumed from the caller's own scheduling.
+   * ⚠️ CORRECTED (card 340b9dbe): this doc used to say the event "fires exactly once (this method is only
+   * ever scheduled once per detection)". That parenthetical was true but the guarantee it implied was not:
+   * "once per detection" is not "once per gen" — the `UserPromptSubmit` detector's own arming site can, on a
+   * re-entry for an already-notified `(gen, writtenHash, reportedHash)` triple, schedule a SECOND timer for
+   * the SAME gen even though its own notice gets correctly suppressed as an exact repeat (see that call
+   * site's own doc). Without a per-gen guard here, both timers would fire this event, producing two durable
+   * "established loss" alarms for one underlying event. So the implementer (sessions/service.ts, via
+   * index.ts) can fail loud to both the recipient and, where one exists, the sender — mirroring
    * `handlePasteLengthLoss`'s established two-recipient, durable-event shape (see that method's own doc;
    * the independent worker confirmation on this card's own board body names this exact sibling asymmetry
    * as the real defect). PtyHost itself has no DB/manager lookup (same layering boundary as
@@ -10027,6 +10052,13 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.mismatchResolvedGens.has(gen)) return;
+    // Card 340b9dbe — PER-GEN DEDUP: a detector re-entry for an already-notified `(gen, writtenHash,
+    // reportedHash)` triple can arm a second timer for this SAME gen even though its own notice was
+    // correctly suppressed as an exact repeat (see `live.firedMismatchUnresolvedGens`' own doc) — without
+    // this guard, both timers would reach the `events.onPromptMismatchUnresolved?.(...)` call below and
+    // fire two durable "established loss" alarms for one underlying event.
+    if (live.firedMismatchUnresolvedGens.has(gen)) return;
+    live.firedMismatchUnresolvedGens.add(gen);
     // eslint-disable-next-line no-console
     console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} recognizedGen=${recognizedGen} matchedLen=${matchedLen} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
     // Card c23e2869 DoD-2: `recognizedGen`/`matchedLen` are `replayedEntry`'s own gen/length, captured at

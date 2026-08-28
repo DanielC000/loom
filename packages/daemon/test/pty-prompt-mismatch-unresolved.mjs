@@ -423,6 +423,66 @@ try {
     check("27: outward confirmation — no follow-up event (a 'please resend' nudge to a session that no longer exists) ever arrives",
       unresolvedEvents.filter((e) => e.sessionId === sid).length === 0);
   }
+  // ===== PART 6 — card 340b9dbe: a detector RE-ENTRY for the SAME (gen, writtenHash, reportedHash) must
+  // produce AT MOST ONE `onPromptMismatchUnresolved` event, even if it manages to arm a SECOND follow-up
+  // timer for that gen (`checkPromptMismatchUnresolved` had no per-gen fired-once dedup of its own — only
+  // `mismatchResolvedGens`, which a re-entry's gen can never join unless a real fusion resolves it).
+  //
+  // ⚠️ DoD-2's own REACHABILITY QUESTION, ANSWERED (not merely declined): CAN a real detector re-entry for
+  // an unchanged gen be DRIVEN through the public deliverHook/submit surface (not by calling the private
+  // arming/check methods by hand)? Traced structurally, not guessed:
+  //   - The whole mismatch-detection block (including the arming site) runs ONLY inside
+  //     `if (submitWasOutstanding) { ... if (typeof hook.prompt === "string") { ... } }` (this file,
+  //     UserPromptSubmit case), where `submitWasOutstanding = !live.enterConfirmed`, READ then
+  //     UNCONDITIONALLY set `live.enterConfirmed = true` in the very next line, every single
+  //     UserPromptSubmit hook delivery, regardless of source (internal or a genuine duplicate hook call
+  //     from the real CLI) — so a SECOND hook delivery for a generation already confirmed by a FIRST one
+  //     always finds `submitWasOutstanding === false` and skips the entire block, never reaching arming.
+  //   - The ONLY code in this whole file that ever writes `live.enterConfirmed = false` again (this file,
+  //     `submit()`) does so in the SAME synchronous call as `const gen = ++live.submitGeneration` — the two
+  //     are written atomically together, with no `await` between them. So the ONLY way
+  //     `submitWasOutstanding` can ever read `true` a second time is via a NEW, higher `submitGeneration` —
+  //     never the SAME `gen` the first arm already captured.
+  //   ⇒ Through `deliverHook`/`submit` alone (the real state machine this session's harness drives, and the
+  //   only surface a genuine engine-originated re-entry could ever reach this code through), two arms for
+  //   the IDENTICAL gen are NOT merely unobserved (as card c0323f8a's own comment states) — they are
+  //   CODE-UNREACHABLE given the current coupling of `enterConfirmed` and `submitGeneration`. This is
+  //   STRONGER than "no observed instance": it is a structural proof, not an absence of a specimen.
+  //   OUTCOME (ii) FOLLOWS, per the card's own DoD-2: below is a HAND-ARMED test of the DEDUP itself —
+  //   calling the PRIVATE `checkPromptMismatchUnresolved` (TypeScript `private` is compile-time-only; this
+  //   is plain JS at runtime, same as `host.live` being read directly elsewhere in this suite) twice with
+  //   an IDENTICAL synthetic gen, exactly as two independently-armed timers for the same gen would each do
+  //   when they fire — this proves the DEDUP guard works, NOT that a real re-entry is reachable. Do not
+  //   read it as reachability evidence; the reachability analysis above is what answers that question, and
+  //   it answers NO for the current code (the arming site's own asymmetry vs. `isExactRepeatNotice` — the
+  //   Direction (a) this card also offered — remains real and is worth closing per DoD-1's own reasoning
+  //   even though it cannot currently be reached: the (b) fix shipped here also protects any FUTURE second
+  //   arming path this file might grow, which Direction (a) alone would not). =====
+  {
+    const sid = newSession("HandArmedDedup340b9dbe"); SIDS.push(sid);
+    const live = host.live.get(sid);
+    check("28: sanity — no onPromptMismatchUnresolved has fired yet for this fresh session", unresolvedEvents.filter((e) => e.sessionId === sid).length === 0);
+    check("28b: sanity — this gen has not been marked resolved (a real fusion never ran on this session)", !live.mismatchResolvedGens.has(99));
+
+    // Simulate what TWO independently-armed follow-up timers for the SAME (gen, writtenHash, reportedHash)
+    // would each do when they fire: call the method they'd each call, with IDENTICAL args, back to back —
+    // exactly the shape the card's own asymmetry (arming before isExactRepeatNotice) can produce if it
+    // arms twice for one gen.
+    const args = [sid, /* gen */ 99, "deadbeef", "cafef00d", 123, /* recognizedGen */ 1, 45, "hand-armed dedup specimen"];
+    host.checkPromptMismatchUnresolved(...args);
+    host.checkPromptMismatchUnresolved(...args);
+
+    const evs28 = unresolvedEvents.filter((e) => e.sessionId === sid);
+    check("29: RED-PROOF (card 340b9dbe) — two independently-armed follow-ups for the SAME gen fire the durable event AT MOST ONCE, not twice",
+      evs28.length === 1);
+    check("30: the ONE event that did fire carries the original gen/hashes, unaffected by the dedup", evs28[0]?.info.gen === 99 && evs28[0]?.info.writtenHash === "deadbeef" && evs28[0]?.info.reportedHash === "cafef00d");
+    check("31: sanity — a genuinely DIFFERENT gen is NOT swallowed by this gen's own dedup entry (the guard is per-gen, not global)",
+      (() => {
+        const before = unresolvedEvents.filter((e) => e.sessionId === sid).length;
+        host.checkPromptMismatchUnresolved(sid, 100, "aaaa", "bbbb", 1, 1, 1, "different gen");
+        return unresolvedEvents.filter((e) => e.sessionId === sid).length === before + 1;
+      })());
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
