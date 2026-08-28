@@ -1300,6 +1300,18 @@ const COMPANION_HOME_KEY_PREFIX = "companion_home:";
 const COMPANION_HOME_KEY_LEGACY = "companion_home";
 
 /**
+ * app_meta key PREFIX for a session's board-read snapshot (card 15bdb031 / 9c8e256e) — MUST mirror
+ * orchestration/board-read.ts's own private `BOARD_READ_META_PREFIX` byte-for-byte; that module owns the
+ * snapshot content/shape (this file deliberately stays generic re: what's stored, per its own doc
+ * comment), but session-removal cleanup lives here alongside every other per-session cascade
+ * (deleteSession/deleteProject/deleteAgent already clean up wakes/reminders/grants/questions the same
+ * way). The real key is `board_read:<sessionId>:<projectId>` (one row per project a session ever read,
+ * card e9750bc2) — a session can hold several, so cleanup is a PREFIX delete on `board_read:<sessionId>:`,
+ * never a single exact-key delete like COMPANION_HOME_KEY_PREFIX's.
+ */
+const BOARD_READ_META_PREFIX = "board_read:";
+
+/**
  * app_meta key for the wedged-worktree tracking set (task dea6728e — the threadpool-safe redo of
  * bd9fc808). A single JSON array of {@link WedgedWorktreeEntry}, daemon-GLOBAL, mirroring
  * getCompanionHome's single-JSON-key pattern (NO new table for what is expected to stay a handful of
@@ -2812,6 +2824,7 @@ export class Db {
         this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         // orchestration_events is session-keyed (manager OR worker) with no project_id — drop per session id.
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
+        this.purgeBoardReadSnapshots(sid); // card 15bdb031
       }
       for (const aid of agentIds) this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(aid);
       this.db.prepare("DELETE FROM run_events WHERE project_id = ?").run(id);
@@ -2942,6 +2955,31 @@ export class Db {
    *  backfill after wiping the inflated samples — see UsageSampler.correctiveResetOnce). */
   deleteMeta(key: string): void {
     this.db.prepare("DELETE FROM app_meta WHERE key = ?").run(key);
+  }
+  /** Delete every app_meta row whose key starts with `prefix` (a LIKE prefix scan — SQLite can use the
+   *  key PK's index for a trailing-wildcard-only pattern). `prefix` is escaped so a literal `%`/`_`/`\\`
+   *  in it can never widen the match. Returns the number of rows removed (0 when none match). */
+  private deleteMetaPrefix(prefix: string): number {
+    const escaped = prefix.replace(/[\\%_]/g, "\\$&");
+    return this.db.prepare("DELETE FROM app_meta WHERE key LIKE ? ESCAPE '\\'").run(`${escaped}%`).changes;
+  }
+  /** Purge every board-read snapshot a session left behind (card 15bdb031) — see {@link
+   *  BOARD_READ_META_PREFIX}'s doc for why this is a prefix delete rather than one exact key. Called from
+   *  every real per-session removal point (archiveSession/deleteSession/deleteProject/deleteAgent) so a
+   *  retired session's snapshot never outlives it, regardless of which of those a caller used. Idempotent
+   *  (a session with no recorded read matches nothing). Returns the count removed, for tests.
+   *
+   *  Deliberately called from `archiveSession` too, even though that's a SOFT archive (row retained,
+   *  `restoreSession` can bring it back) — not an oversight. Purging only on the hard-delete paths
+   *  (deleteSession/deleteProject/deleteAgent) would leave the leak in place for nearly every session,
+   *  since most sessions are archived on exit and never hard-deleted; that would largely defeat the
+   *  point of this card. An archived-then-restored session simply comes back with NO board-read
+   *  baseline — its next computeBoardDelta reads `computed:false` exactly like a brand-new session, and
+   *  the one after that just has a WIDER delta (more cards read as "created" than actually were) until it
+   *  re-records on its own next genuine board read. Never wrong, only momentarily less precise — the
+   *  same bounded, benign cost this whole card accepts in exchange for not leaking forever. */
+  private purgeBoardReadSnapshots(sessionId: string): number {
+    return this.deleteMetaPrefix(`${BOARD_READ_META_PREFIX}${sessionId}:`);
   }
 
   // --- preset prompts (GLOBAL "terminal action-buttons" store; human/UI REST only, no MCP path) ---
@@ -3840,6 +3878,7 @@ export class Db {
         // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167), keyed by owner_session_id
         // with no direct agent_id — cascade per session, mirroring deleteProject's own project_id cascade.
         this.db.prepare("DELETE FROM pending_gate_ops WHERE owner_session_id = ?").run(sid);
+        this.purgeBoardReadSnapshots(sid); // card 15bdb031
       }
       // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
       for (const rid of runIds) this.db.prepare("DELETE FROM run_events WHERE run_id = ?").run(rid);
@@ -4742,6 +4781,7 @@ export class Db {
   /** Soft-archive a session (stamp archived_at) — hidden from the rail/god-eye lists; row retained. */
   archiveSession(id: string): void {
     this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+    this.purgeBoardReadSnapshots(id); // card 15bdb031 — a retired session's board-read snapshot(s) never outlive it
     this.notifySessionChanged(id);
   }
   /** Restore an archived session back to the rail (clear archived_at). */
@@ -4831,6 +4871,7 @@ export class Db {
     this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(id);
+    this.purgeBoardReadSnapshots(id); // card 15bdb031
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
     this.notifySessionChanged(id);
   }
