@@ -342,7 +342,13 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    reportable from memory or a couple of hopeful reads: run the repo-wide grep that FAILS to find it and
    cite that negative search (the pattern you searched + zero hits) in your report. A confident absence
    claim that turns out false — the thing existed all along — can send your manager to the owner with a
-   wrong premise; the cited grep is what makes "it isn't there" trustworthy.
+   wrong premise; the cited grep is what makes "it isn't there" trustworthy. **The same discipline applies
+   to a COUNT you derive from logs or files, not just a bare existence claim: state which files you
+   searched and which pattern you matched, and report your filtered count alongside the raw/broad-marker
+   count it was filtered from** — a filter that silently drops most of its population produces a result
+   that looks identical to a clean one, and the ratio is the only thing that makes the drop visible.
+   Sanity-check the raw side too; an inflated broad count can just swap a silent under-count for a silent
+   over-count.
 
 **Verify a claim before you adopt it — including one that only asks you to stop.** Scrutiny follows
 attention, not importance: disputing part of a report doesn't test the rest of it — an untested

@@ -827,6 +827,30 @@ what you checked. Found none? Treat it as live.
    the target gone.** Use a definition/use-form pattern only when you've READ the real declaration, never
    one you inferred; keep bare-token enumeration (list, don't count, the matching lines) as the fail-safe.
 
+   **A claim derived by grepping logs or files must state which files it searched and which pattern it
+   matched, then compare its filtered count against the raw count.** Report both the broad marker's count
+   (the population you searched, e.g. `grep -c '<broad marker>'`) and your actual filter's count (what you
+   kept) — not the filtered number alone. A filter that silently discards most of what it's counting
+   produces a result that looks byte-identical, on the page, to a clean one; the ratio between the two
+   numbers is the only thing that makes a silent discard visible. **Sanity-check the raw side too, not
+   only the filtered one** — an unexamined broad-marker count can itself be inflated by matches that share
+   the marker but aren't real instances of what you're counting, so fixing a silent under-count with an
+   unchecked raw count can just swap it for a silent over-count. Both sides of the ratio need to measure
+   the population you actually mean.
+   - **A right-answer instrument is more dangerous than a wrong one, because only the wrong one gets
+     caught by its consequences.** If a broken filter happens to still land on the correct conclusion —
+     every case that mattered happened to survive it — nothing downstream will ever contradict it; the
+     only way to catch the break is re-reading the pattern against its own label, not waiting for a bad
+     outcome to surface it. A conclusion holding up is not evidence the method behind it was sound — the
+     two are independent, and a right answer this time buys no trust for the same instrument next time.
+   - **Cross-review agreement is only evidence when the two checks actually covered different ground.**
+     Two people, or two passes, checking the same claim normally multiplies *coverage*, which is why
+     agreement is normally reassuring. But when both inherit the SAME narrow slice — the same one file,
+     the same one filtered query — agreement between them multiplies *confidence* while coverage stays
+     flat, and it's the confidence that ends up written down. Before treating a second confirmation as
+     real corroboration, check what ground it actually covered, not just whether it reached the same
+     answer.
+
    To eyeball a **static on-disk HTML artifact**, to launch a **live dev server** against a worker's
    worktree, to print served HTML to **PDF**, or to keep a screenshot **as a file** — read
    `references/serving-and-capture.md` (under this skill's own directory) FIRST and follow its recipes;
@@ -910,6 +934,27 @@ fault against the real instance, and check your fix's shape against live state. 
 is configured, else hand the owner the EXACT redeploy step — the precise command/action, not "please
 redeploy") → re-verify post-redeploy against the live target.** A read-only window onto the real thing
 beats inference every time; don't degrade to repo-only reasoning when one is right there.
+
+**A "merged but not yet live" claim is true only until the next restart — and nothing expires it for
+you.** Writing "commit X is merged but not deployed" in a card, a note, or your resume doc is a claim
+about a running *process's* state, not about the repo — it goes false the moment that process next
+restarts, and unless something re-checks it, every later reader inherits it as still-current, long after
+it stopped being true. Two disciplines, and you need both:
+- **Stamp it.** Write the claim as "as of `<ISO timestamp>` / build or boot `<id>`", not as a bare
+  assertion — a stamped claim shows its own age instead of reading as permanently true. This costs
+  nothing and needs no tooling; it's a convention you apply when you write the sentence.
+- **Re-verify it specifically when you REWRITE the document carrying it forward.** Stamping protects the
+  note nobody ever revisits again; it does nothing for the note that gets *revisited but not re-inspected*
+  — carried forward unchanged into a new draft because it read as settled fact the last time you looked.
+  The trigger here is narrow and mechanical: whenever you rewrite a document or card body that carries a
+  deploy-state claim forward, re-check that specific claim against the live target before you re-save it,
+  rather than copying the old sentence across unexamined.
+
+**Deploy state is a build artifact's timestamp AND a subsequent boot/restart event — never the build
+timestamp alone.** A rebuilt-but-not-yet-restarted build has a fresh file mtime, so an mtime-only check
+reads it as "live" — but the running process never picked the rebuild up, so nothing is actually serving
+that code yet. Confirm both facts before calling something live: the artifact was rebuilt, AND the
+serving process has restarted since that rebuild.
 
 ## A restart/redeploy note other sessions will read
 
