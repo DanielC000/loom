@@ -253,7 +253,7 @@ function fetchVersion(port) {
 // rejected the connection because no process is bound to this port at all), or "timeout"/"other-error"
 // (a connection went through — or errored some other way — but no response arrived; consistent with a
 // still-listening process that just isn't responding, e.g. a genuinely wedged daemon).
-function probePort(port, timeoutMs = 1500) {
+function classifyPortResponse(port, timeoutMs = 1500) {
   return new Promise((resolve) => {
     const req = http.get({ host: "127.0.0.1", port, path: "/api/version", timeout: timeoutMs }, (res) => {
       res.resume();
@@ -440,7 +440,7 @@ async function stop() {
   //     — refuse to guess (never a blind kill, never a silent no-op) and hand the human the exact pid and
   //     command so they can finish the job themselves if it really is stuck.
   if (!graceful && hook.status === undefined) {
-    const probe = await probePort(port);
+    const probe = await classifyPortResponse(port);
     if (probe === "refused") {
       console.error(`loom: PID ${rec.pid} is alive, but nothing is listening on ${urlFor(port)}. Treating the PID file as stale — a running Loom daemon always holds its port, so this PID is almost certainly a reused one belonging to another process.`);
       removePidFile();
