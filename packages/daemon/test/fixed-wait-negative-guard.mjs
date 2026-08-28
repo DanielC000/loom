@@ -51,14 +51,38 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // exactly the moment a human is already looking at the assertion and should re-audit it anyway, so
 // invalidation and the correct re-audit trigger coincide by construction.
 //
-// ⚠ COLLISION NOTE: when regenerating, 7 (file, label) pairs collapsed from 2 raw hits to 1 — NOT a bug.
-// Each is ONE check() fed by TWO nearby wait constructs (e.g. a bounded `for(...) await sleep(N)` poll
-// loop immediately followed by a longer settle sleep) — manually verified by grepping each label back to
-// source: every one resolves to exactly ONE check() call. One baseline entry correctly covers both feeding
-// wait lines, because the audit unit is the ASSERTION, not each individual timer call upstream of it. This
-// is why the entry count below (113, +2 hand-added — see next paragraph) is LOWER than the prior
-// line-keyed count (122): re-verify this delta before trusting a future regeneration — a genuine (not
-// artifact) merge or split is the one case DoD-5's "investigate before accepting" rule is for.
+// ⚠ COLLISION NOTE: at original baseline generation, 7 (file, label) pairs collapsed from 2 raw hits to 1
+// — NOT a bug, but this note used to claim, unqualified, that all 7 were "manually verified" as ONE check()
+// fed by TWO nearby wait constructs. Card f88c46df (2026-08-28) re-checked all 7 individually against the
+// current corpus and that blanket claim did NOT hold for one of them — "manually verified" is dropped as a
+// description of the set; each pair's real, individually-checked verdict is recorded below instead:
+//   • codescape-health-probe.mjs (6) `build` ABSENT…never triggers a restart — GENUINE: a bounded
+//     `for(...) await sleep(50)` poll loop immediately followed by a longer `sleep(500)` settle wait, both
+//     real code, both within 5 lines of the one check().
+//   • codescape-health-probe.mjs (7) `build: null` never triggers a restart — GENUINE, same shape as (6).
+//   • codescape-supervisor.mjs (c) no further serve call is recorded after stop() — GENUINE: two sequential
+//     real `await sleep(...)` waits (600ms then 300ms), both feeding the one check().
+//   • gate-cancel.mjs (guard) cap 2 but SAME worktree — GENUINE: two sequential real `await sleep(10)`
+//     waits, both feeding the one check().
+//   • codescape-health-probe.mjs (8c)/(9) (installed build:null / build-matching drift) — NO LONGER
+//     COLLIDE: both were genuine at note-writing time, but card 1aabf969 later replaced the settle-adjacent
+//     fixed `sleep(500)` with a `waitForCompletedCondition(...)` poll-until-condition call and inserted an
+//     explanatory comment block, pushing the still-present earlier `for(...) await sleep(50)` poll loop's
+//     5-line window past the check(). Only the one remaining settle sleep is in range now — a distance
+//     change, not a phantom.
+//   • pending-ops-registry.mjs (clobber guard) run_C's entry SURVIVES…NOT clobbered — FALSIFIED: this is
+//     the pair that broke the blanket claim. One of its two feeding "hits" was a `//`-comment (line 269)
+//     quoting the wait idiom in prose ("…the way run_C's old internal sleep(30) was"), not a second real
+//     wait — never manually verified as genuine, or the comment-vs-code distinction would have caught it.
+//     Card 743be0c9 (merged c51cac2b) stopped scanning comment text for the idiom, so this pair also no
+//     longer collides post-fix; see the DoD-2 REAL CORPUS checks below for the live specimen.
+// ⇒ Net: 4 of the 7 confirmed genuine double-wait sites, 3 no longer collide at all in the current corpus
+// (2 via the unrelated 1aabf969 refactor, 1 via the 743be0c9/c51cac2b comment-scan fix). Whichever the
+// cause, ONE baseline entry still correctly covers each (file, label) pair's real wait line(s) — no
+// baseline edit follows from this re-check. This is also why the entry count below (113, +2 hand-added —
+// see next paragraph) is LOWER than the original line-keyed count (122): re-verify any such delta before
+// trusting a future regeneration — a genuine (not artifact) merge or split is the one case DoD-5's
+// "investigate before accepting" rule is for.
 //
 // KNOWN_UNAUDITED_WAITS is a PERMANENT BASELINE, not a countdown to zero — same posture as
 // codescape-privacy-guard.mjs's KNOWN_LEAKING_FILES. Every one of its 115 entries (113 auto-derived +
