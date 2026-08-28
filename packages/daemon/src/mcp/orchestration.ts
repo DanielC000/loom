@@ -911,20 +911,25 @@ export function resolveDirectiveOutcome(
  * origin event + the msgId to walk from it, or `undefined` on no match — callers never touch
  * `resolveDirectiveOutcome` directly, so they cannot feed it anything but the stream this function already
  * built via the correct constructor.
+ *
+ * `sentAt` (card af995d1d DoD-4) is the ORIGIN event's own timestamp — when the ROOT msgId a caller is
+ * holding was actually sent — regardless of how far the chain has since walked (a remint changes `msgId`
+ * but never the original send instant). Lets a `peer_message_status`/`directive_status` caller compute
+ * its own elapsed-since-send for a still-`pending` read without holding a separate send-time stamp.
  */
 function resolveMsgIdOutcome(
   events: DirectiveEventStream, ref: string,
   findOrigin: (events: DirectiveEventStream, ref: string) => { event: OrchestrationEvent; msgId: string } | undefined,
-): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
   const origin = findOrigin(events, ref);
-  if (!origin) return { msgId: ref, found: false, state: null, at: null };
+  if (!origin) return { msgId: ref, found: false, state: null, at: null, sentAt: null };
   const outcome = resolveDirectiveOutcome(events, origin.event, origin.msgId);
   const at =
     outcome.state === "parked" ? outcome.parkedAt
     : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
     : outcome.state === "delivered" ? outcome.deliveredAt
     : null;
-  return { msgId: origin.msgId, found: true, state: outcome.state, at };
+  return { msgId: origin.msgId, found: true, state: outcome.state, at, sentAt: origin.event.ts };
 }
 
 /**
@@ -954,7 +959,7 @@ function resolveMsgIdOutcome(
  */
 function directiveByMsgId(
   db: Db, workerSessionId: string, msgId: string,
-): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
   return resolveMsgIdOutcome(workerDirectiveStream(db, workerSessionId), msgId, (events, ref) => {
     const directiveEvent = events.find((e) => {
       if (e.kind === "message_worker") return e.detail?.msgId === ref;
@@ -1012,7 +1017,7 @@ function directiveByMsgId(
  */
 function peerMessageStatusByMsgId(
   db: Db, managerSessionId: string, ref: string,
-): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
   return resolveMsgIdOutcome(managerLineageDirectiveStream(db, managerSessionId), ref, (events, r) => {
     const originCandidates = events
       .filter((e): e is OrchestrationEvent & { detail: { msgId: string } } =>
@@ -4576,24 +4581,38 @@ export class OrchestrationMcpRouter {
             "id-prefix — the SAME resolution as `tasks_get`/`agent_get`/`worker_relink`, and exactly what " +
             "the parked notice itself hands you, since it only ever slices a msgId to 8 chars; never a value " +
             "you invent — see below for what an unrecognized one returns). Returns `{msgId, found, state, " +
-            "at}` (`msgId` is always the FULL resolved id, even when you passed a prefix): `found:false` " +
-            "means this isn't one of YOUR OWN peer_message sends — a typo, an ambiguous prefix, or the send " +
-            "BOARDED (a boarded send has no redelivery chain to track, since it's already a durable task on " +
-            "the target's own board — check the target project's board instead). `found:true` gives `state` " +
-            "— `\"pending\"` (still queued or Loom is still retrying its redelivery internally, not resolved " +
-            "either way yet), `\"delivered\"` (handed off as a turn — NOT proof the recipient manager acted " +
-            "on it, only that Loom got it there), `\"parked\"` (Loom exhausted its own redelivery budget " +
-            "with no confirmed hand-off — NOT proof it was never received, the engine can confirm a write " +
-            "minutes late under load; treat as genuinely uncertain, not as failed), or " +
-            "`\"confirmed-after-park\"` (a late confirming hook proved the original DID land after all, " +
-            "correcting an earlier `parked` reading — do NOT resend once you see this, the original already " +
-            "arrived and a resend would create a real duplicate turn). `at` is the timestamp of whichever " +
-            "state produced this reading, or null while still `\"pending\"`. Resolvable across YOUR OWN " +
-            "recycle lineage too — if you recycled since sending, you can still check a msgId your " +
-            "predecessor's peer_message call returned. This returns ONLY a delivered/undelivered/consumed " +
-            "bit for YOUR OWN message — never the peer's transcript, internals, or any other user-visible " +
-            "surface into that project (the peer stays a PRIVATE product). Non-mutating; safe to re-call " +
-            "any time.",
+            "at, sentAt}` (`msgId` is always the FULL resolved id, even when you passed a prefix): " +
+            "`found:false` means this isn't one of YOUR OWN peer_message sends — a typo, an ambiguous " +
+            "prefix, or the send BOARDED (a boarded send has no redelivery chain to track, since it's " +
+            "already a durable task on the target's own board — check the target project's board instead). " +
+            "`found:true` gives `state` — `\"pending\"` (still queued, still being redelivered internally, " +
+            "or CARRIED across a recycle at the recipient and awaiting the successor's own resolution — " +
+            "not resolved either way yet), `\"delivered\"` (handed off as a turn — either your original " +
+            "send or, if the recipient manager recycled while it was still held, the carried copy that " +
+            "landed on its successor — NOT proof the recipient acted on it, only that Loom got it there), " +
+            "`\"parked\"` (Loom exhausted its own redelivery budget with no confirmed hand-off — NOT proof " +
+            "it was never received, the engine can confirm a write minutes late under load; treat as " +
+            "genuinely uncertain, not as failed), or `\"confirmed-after-park\"` (a late confirming hook " +
+            "proved the original DID land after all, correcting an earlier `parked` reading — do NOT " +
+            "resend once you see this, the original already arrived and a resend would create a real " +
+            "duplicate turn). `at` is the timestamp of whichever state produced this reading, or null " +
+            "while still `\"pending\"`. `sentAt` is when the ORIGINAL msgId you passed was actually sent " +
+            "(unaffected by any later recycle-carry hop) — diff it against now to tell \"pending for 3 " +
+            "seconds\" from \"pending for 16 minutes\" without holding your own send stamp. " +
+            "A STILL-`\"pending\"`/`\"parked\"` READ AFTER A WHILE: neither state is proof of non-delivery " +
+            "— do NOT resend (a real duplicate turn if it already landed) and prefer NOT to restate the " +
+            "owed content in your next message either, since a restatement delivers the SAME material " +
+            "twice if the read turns out wrong, which is exactly the duplicate you're trying to avoid. " +
+            "When you have a live channel back to the recipient and something is already owed, fold ONE " +
+            "line into that message asking directly — e.g. \"<msgId> still reads pending — did it reach " +
+            "you? If not, say so and I'll restate\" — the recipient is the only party who actually knows. " +
+            "Restate outright only when you won't be around to hear the answer (going silent, recycling, " +
+            "nothing else owed) — there, an unanswered question is worse than a duplicate paragraph. " +
+            "Resolvable across YOUR OWN recycle lineage too — if you recycled since sending, you can still " +
+            "check a msgId your predecessor's peer_message call returned. This returns ONLY a " +
+            "delivered/undelivered/consumed bit for YOUR OWN message — " +
+            "never the peer's transcript, internals, or any other user-visible surface into that project " +
+            "(the peer stays a PRIVATE product). Non-mutating; safe to re-call any time.",
           inputSchema: strictShape({ msgId: z.string() }),
         },
         async ({ msgId }) => ok(peerMessageStatusByMsgId(db, managerSessionId, msgId)),

@@ -8529,6 +8529,22 @@ export class SessionService {
    * Scoped to peer frames ONLY (never a worker/session/platform-directed carry) — additive-and-tolerant to
    * the receiving project's manager, since the underlying `[loom:from-manager · …]` frame this card's own
    * design constraint protects is left byte-identical; the label is a separate paragraph ahead of it.
+   *
+   * Card af995d1d: the durable-record re-mint loop below now appends a `session_message_gave_up`
+   * (`outcome:"reminted"`) event linking the OLD record's own msgId to the NEW one — the SAME vocabulary
+   * `handleGiveUpExhausted`'s in-session remint already writes, so `resolveDirectiveOutcome`'s chain walk
+   * (mcp/orchestration.ts, shared by `peer_message_status`/`directive_status`) can hop from a msgId a
+   * sender is still holding forward to whatever actually happens to the carried copy on the successor.
+   * BEFORE this fix, a re-mint here started a brand-new, DISCONNECTED msgId with no link back to the one
+   * the original caller (`messagePeerManager`/`messageWorker`) returned — so a sender polling the OLD
+   * msgId saw `state:"pending"` FOREVER, even once the successor genuinely delivered (and the recipient
+   * consumed) the carried copy: the measured incident (card af995d1d) was a peer letter the recipient
+   * confirmed arrived in full and acted on, whose sender-side `peer_message_status` read never converged
+   * past `pending` across two reads ~16 minutes apart. The `flushed` loop above ALSO resolves the old
+   * in-memory entry as `"superseded"` (no `turnSeqAtDelivery`) for the boot-scan/done-guard's sake — that
+   * resolution is harmless to this fix: `resolveDirectiveOutcome`'s walk checks `session_message_gave_up`
+   * BEFORE it ever falls through to a `session_message_delivered` check, so the new "reminted" link is
+   * always found first and the chain hops onward instead of dead-ending on the superseded stamp.
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
@@ -8565,7 +8581,23 @@ export class SessionService {
       const carriedText = PEER_MESSAGE_FRAME_RE.test(text)
         ? `[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${text}`
         : text;
-      this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null });
+      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null });
+      // Card af995d1d: LINK the old msgId to the new one (see this method's own doc above) so a sender
+      // still holding the OLD msgId can resolve it forward instead of reading "pending" forever.
+      const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;
+      if (oldMsgId) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: sender, workerSessionId: successorId, taskId: rec.taskId ?? null,
+          kind: "session_message_gave_up",
+          detail: {
+            msgId: oldMsgId,
+            rootMsgId: typeof rec.detail?.rootMsgId === "string" ? rec.detail.rootMsgId : oldMsgId,
+            chainDepth: typeof rec.detail?.chainDepth === "number" ? rec.detail.chainDepth : 0,
+            outcome: "reminted", remintedAs: reminted.msgId,
+          },
+        });
+      }
     }
   }
 
