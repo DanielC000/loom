@@ -96,9 +96,29 @@ export interface FreshMintInfo {
   currentIdentity?: string;
 }
 
+/**
+ * Card 4aedde84 — the mirror of {@link FreshMintInfo} for the branch that used to be silent: set on a
+ * settled `AttachResult` ONLY when it was served from either cache read at the top of `attach()` (the
+ * never-expiring `untilSupersededVerdicts` map, or the TTL'd `retained` map) rather than from a genuine
+ * `run()` invocation. `identity` is the identity the REPLAYED verdict was validated against, when the
+ * registry knows it — always present for an `untilSupersededVerdicts` hit (that map always records one,
+ * even `undefined` for an identity-agnostic caller); a plain TTL `retained` hit only carries one when the
+ * minting call passed `opts.verdictIdentity` (see `retain()`'s own doc — the field was added to
+ * `RetainedView` by this same card). SET IN A DISJOINT BRANCH FROM `freshMint`: both are decided by the
+ * SAME cache-read-vs-mint fork at the top of `attach()`, so a result can never carry both — never derive
+ * "cache hit" from `!freshMint` at a call site when this field exists to say so directly. NEVER set on a
+ * `{settled:false}` (pending) result — both cache-read branches this type comes from return SETTLED
+ * results unconditionally (see attach()'s own code); a still-running op is always either a genuinely fresh
+ * mint or an attach to one, never a cache replay, so `cacheHit` is structurally absent from the pending
+ * variant of {@link AttachResult} below, not merely usually undefined.
+ */
+export interface CacheHitInfo {
+  identity?: string;
+}
+
 export type AttachResult<T> =
-  | { settled: true; ok: true; value: T; freshMint?: FreshMintInfo }
-  | { settled: true; ok: false; error: unknown; freshMint?: FreshMintInfo }
+  | { settled: true; ok: true; value: T; freshMint?: FreshMintInfo; cacheHit?: CacheHitInfo }
+  | { settled: true; ok: false; error: unknown; freshMint?: FreshMintInfo; cacheHit?: CacheHitInfo }
   | { settled: false; op: PendingOpView; freshMint?: FreshMintInfo };
 
 function sleep(ms: number): Promise<void> {
@@ -130,6 +150,11 @@ interface RetainedView extends PendingOpView {
    *  this field (it's stripped in the same projection that already drops `expiresAt`), so it stays purely
    *  an internal dedupe channel, not a caller-facing one. */
   rawOutcome: { ok: true; value: unknown } | { ok: false; error: unknown };
+  /** Card 4aedde84 — the identity this view's minting call resolved (`opts.verdictIdentity`), carried so a
+   *  later TTL `retained`-cache hit can report it via `CacheHitInfo.identity` exactly as the durable
+   *  `untilSupersededVerdicts` map already does. `undefined` for a caller that never opts into identity
+   *  tracking, byte-identical to before this field existed. */
+  identity?: string;
 }
 
 /** A settle verdict remembered UNTIL SUPERSEDED — never on a clock — for `opts.retainVerdictUntilSuperseded`
@@ -355,8 +380,8 @@ export class PendingOpRegistry {
    *  real event-loop congestion (long synchronous handlers delaying this timer's callback) a fresh op COULD
    *  still start while the old entry is technically present; keep this guard even though no current test
    *  exercises that skew. */
-  private retain(key: string, fresh: PendingOpView, retainMs: number, rawOutcome: RetainedView["rawOutcome"]): void {
-    const entry: RetainedView = { ...fresh, expiresAt: Date.now() + retainMs, rawOutcome };
+  private retain(key: string, fresh: PendingOpView, retainMs: number, rawOutcome: RetainedView["rawOutcome"], identity?: string): void {
+    const entry: RetainedView = { ...fresh, expiresAt: Date.now() + retainMs, rawOutcome, identity };
     this.retained.set(key, entry);
     setTimeout(() => {
       if (this.retained.get(key) === entry) this.retained.delete(key);
@@ -642,9 +667,15 @@ export class PendingOpRegistry {
       const priorVerdict = opts?.retainVerdictUntilSuperseded ? this.untilSupersededVerdicts.get(key) : undefined;
       if (priorVerdict && !opts?.bypassRetained) {
         if (opts?.identityOptional || priorVerdict.identity === opts?.verdictIdentity) {
+          // CACHE-HIT ANNOUNCEMENT (card 4aedde84 — the mirror of the FRESH-MINT REASON below): this branch
+          // is a genuine cache hit — no run() invocation happens on this call at all — so the result is
+          // tagged `cacheHit` instead of leaving the caller to infer "nothing ran" from the ABSENCE of
+          // `freshMint` (the exact defect this card fixes). See CacheHitInfo's own doc for why this can
+          // never coexist with `freshMint` on the same result.
+          const cacheHit: CacheHitInfo = { identity: priorVerdict.identity };
           return priorVerdict.rawOutcome.ok
-            ? { settled: true, ok: true, value: priorVerdict.rawOutcome.value as T }
-            : { settled: true, ok: false, error: priorVerdict.rawOutcome.error };
+            ? { settled: true, ok: true, value: priorVerdict.rawOutcome.value as T, cacheHit }
+            : { settled: true, ok: false, error: priorVerdict.rawOutcome.error, cacheHit };
         }
         untilSupersededMiss = true;
       }
@@ -665,9 +696,12 @@ export class PendingOpRegistry {
         // cache miss.
         const usable = !retainedHit.rawOutcome.ok || !opts?.isRetainedResultUsable || opts.isRetainedResultUsable(retainedHit.rawOutcome.value as T);
         if (usable) {
+          // CACHE-HIT ANNOUNCEMENT (card 4aedde84) — same reasoning as the untilSupersededVerdicts hit
+          // above: this TTL'd retained-view hit is also a genuine cache hit, no run() invocation this call.
+          const cacheHit: CacheHitInfo = { identity: retainedHit.identity };
           return retainedHit.rawOutcome.ok
-            ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T }
-            : { settled: true, ok: false, error: retainedHit.rawOutcome.error };
+            ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T, cacheHit }
+            : { settled: true, ok: false, error: retainedHit.rawOutcome.error, cacheHit };
         }
       }
       // FRESH-MINT REASON (card 615967c5 — the cached-verdict-legibility fix): reaching this line means
@@ -710,7 +744,7 @@ export class PendingOpRegistry {
           fresh.outcome = opts?.classifyOutcome?.({ ok: true, value });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value });
+            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value }, opts.verdictIdentity);
             // UNTIL-SUPERSEDED WRITE (card 1555e361): same identity-guarded branch as the TTL'd retain()
             // above, same reason (an evicted dead-owner op's late settle must never resurrect/overwrite a
             // live successor's verdict) — see the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section
@@ -735,7 +769,7 @@ export class PendingOpRegistry {
           fresh.outcome = opts?.classifyOutcome?.({ ok: false, error: err });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err });
+            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err }, opts.verdictIdentity);
             // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc, same "cancelled" veto
             // (a thrown error has no analogous cancelled shape today, so this is unaffected in practice).
             if (opts?.retainVerdictUntilSuperseded && fresh.outcome !== "cancelled") this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });

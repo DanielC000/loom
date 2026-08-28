@@ -72,10 +72,16 @@ async function setupWorkerProject(sfx, reposDir) {
 //        on a branch that was NEVER behind main, re-called with no new commits, must still return the
 //        CACHED verdict — no second gate run, freshMint absent (the signal a cache hit is distinguishable
 //        by). This is `1555e361`'s central claim, verified here for the first time.
+//
+//        CARD 4aedde84 EXTENSION — this is ALSO the exact incident shape (DoD-3): a gate FAILS (tip
+//        unmoved) → re-confirm at the identical tip. Before card 4aedde84 the only signal op 2 carried was
+//        the ABSENCE of freshMint (checked above) — this block now also asserts the POSITIVE marker
+//        (`cacheHit`, the registry-level field `servedFromCache` is built from — see mcp/orchestration.ts)
+//        so a caller never has to infer "nothing ran" from a missing field.
 {
   const sfx = `same-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-mcvc-same-${sfx}`);
-  const { db, mgrId, workerId } = await setupWorkerProject(sfx, reposDir);
+  const { db, mgrId, workerId, workerSha } = await setupWorkerProject(sfx, reposDir);
   let gateCalls = 0;
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
     runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
@@ -95,6 +101,14 @@ async function setupWorkerProject(sfx, reposDir) {
   check("(same-identity) the gate did NOT run a second time — POSITIVE CONTROL for the cache hit", gateCalls === 1);
   check("(same-identity) op 2 returns the SAME cached opId, not a fresh one", r2.ok && r1.ok && r2.value.opId === r1.value.opId);
   check("(same-identity) op 2 carries NO freshMint — the cache-hit signal", r2.freshMint === undefined);
+  // POSITIVE MARKER (card 4aedde84, DoD-1/DoD-3/DoD-4i): op 2 must ALSO carry the POSITIVE `cacheHit`
+  // field — the incident's whole point is that a caller must never have to notice an absence.
+  check("(same-identity) op 2 carries a POSITIVE cacheHit marker — this is the DoD-4(i) polarity", r2.cacheHit !== undefined);
+  check("(same-identity) op 2's cacheHit names the identity the replayed verdict was validated against (the worker's own commit)", r2.cacheHit?.identity === workerSha);
+  check("(same-identity) op 2's cacheHit and freshMint are mutually exclusive by construction — never both set", !(r2.cacheHit && r2.freshMint));
+  // op 1 (the genuinely fresh run) must NOT carry the cache marker — DoD-4(ii), the other polarity in the
+  // SAME run: a test that only exercised the cache-hit branch would leave a false positive undetected.
+  check("(same-identity) op 1 (a genuine fresh mint) carries NO cacheHit — DoD-4(ii)", r1.cacheHit === undefined);
 }
 
 // ── (b) BASE-ADVANCED: a branch that WAS behind main gets its tip advanced by THIS call's OWN pre-gate
@@ -137,8 +151,14 @@ async function setupWorkerProject(sfx, reposDir) {
   check("(base-advanced) op 2 announces base-advanced", r2.freshMint?.reason === "base-advanced");
   check("(base-advanced) op 2's priorIdentity is the CACHED verdict's identity (the worker's original commit, resolved BEFORE op 1's union-merge ran)", r2.freshMint?.priorIdentity === workerSha);
   check("(base-advanced) op 2's currentIdentity is the branch's tip AS OF op 2's own call (op 1's union-merge result)", r2.freshMint?.currentIdentity === shaAfterOp1);
+  // DoD-4(ii), card 4aedde84 — the OTHER polarity in this SAME run: a genuinely fresh re-gate (this is a
+  // REAL second gate run, asserted above via gateCalls === 2) must NEVER carry the cache marker either —
+  // proves cacheHit isn't just "always absent" by some unrelated bug, it's absent specifically because a
+  // gate genuinely ran, mirroring the freshMint assertion right above it.
+  check("(base-advanced) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
+  check("(base-advanced) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"base-advanced\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b."
+  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"base-advanced\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b. CARD 4aedde84: the cache-hit branch above now ALSO carries a POSITIVE `cacheHit` marker (never inferred from freshMint's absence), and BOTH polarities are proven in this one run — a cache hit is positively marked, and a genuinely fresh/re-gated run carries freshMint and NEVER the cache marker."
   : `\n❌ ${failures} FAILURE(S).`);

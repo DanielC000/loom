@@ -835,6 +835,61 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   await sleep(10);
 }
 
+// --- CACHE-HIT ANNOUNCEMENT (card 4aedde84 — the mirror of the freshMint block above, for the branch it
+// left silent): a settled result served from EITHER cache read at the top of attach() must carry a
+// POSITIVE `cacheHit` field, never leaving the caller to infer "nothing ran" from freshMint's absence. ---
+
+// (ch1) UNTIL-SUPERSEDED cache hit: carries `cacheHit.identity` naming what the replayed verdict was
+// validated against, and carries NO freshMint (mirrors fm2, from the other field's point of view).
+{
+  const reg = new PendingOpRegistry();
+  const r1 = await reg.attach("ch1", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(cacheHit until-superseded precondition) first call is a fresh mint, carries no cacheHit", r1.freshMint?.reason === "genuinely-new" && r1.cacheHit === undefined);
+  await waitUntil(() => reg.peek("ch1") === undefined, { label: "ch1 TTL'd display view expired" });
+  const r2 = await reg.attach("ch1", "merge", "mgr1", 200, async () => ({ merged: false, reason: "should not run", opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(cacheHit until-superseded) a same-identity re-call served from cache carries a POSITIVE cacheHit field", r2.cacheHit !== undefined);
+  check("(cacheHit until-superseded) cacheHit.identity names the identity the replayed verdict was validated against", r2.cacheHit?.identity === "sha-AAA");
+  check("(cacheHit until-superseded) freshMint and cacheHit are mutually exclusive by construction — a cache hit never also announces a fresh mint", r2.freshMint === undefined);
+}
+
+// (ch2) the plain TTL `retained`-map cache hit (reachable WITHOUT retainVerdictUntilSuperseded — e.g. a
+// re-call landing within the short display window) is ALSO a genuine cache hit and must carry the SAME
+// positive marker, with the identity threaded through from the minting call's own verdictIdentity.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("ch2", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1" }; }, undefined, { retainMs: 200, verdictIdentity: "sha-CCC", classifyOutcome: classify });
+  check("(cacheHit TTL-retained precondition) first op ran once, carries no cacheHit", calls === 1 && r1.cacheHit === undefined);
+  const r2 = await reg.attach("ch2", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run", opId: "op-2" }; }, undefined, { retainMs: 200, verdictIdentity: "sha-CCC", classifyOutcome: classify });
+  check("(cacheHit TTL-retained) re-call within the window dedupe-hits (no second run)", calls === 1 && r2.value.opId === "op-1");
+  check("(cacheHit TTL-retained) the TTL-retained-cache hit ALSO carries a positive cacheHit field", r2.cacheHit !== undefined);
+  check("(cacheHit TTL-retained) cacheHit.identity is threaded through from the minting call's verdictIdentity", r2.cacheHit?.identity === "sha-CCC");
+}
+
+// (ch3) a genuinely FRESH re-gate (base-advanced) must carry freshMint and NEVER the cache marker —
+// the other polarity, proving cacheHit isn't just permanently unset by some unrelated bug.
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("ch3", "merge", "mgr1", 200, async () => ({ merged: false, reason: "build gate failed", opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  const r2 = await reg.attach("ch3", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-BBB", classifyOutcome: classify });
+  check("(cacheHit fresh re-gate) a base-advanced re-gate announces freshMint, never cacheHit", r2.freshMint?.reason === "base-advanced" && r2.cacheHit === undefined);
+}
+
+// (ch4) DoD-5 — a cache hit can NEVER occur on the `{settled:false}` (pending) path: both cache-read
+// branches inside attach() return settled results unconditionally (see the class doc). Proven directly
+// against a genuinely slow op that degrades to pending — held open with a manually-resolved deferred
+// promise (no timer), same technique as the onSurfacedPending blocks above, so this needs no wait at all.
+{
+  const reg = new PendingOpRegistry();
+  let resolveOp;
+  const deferred = () => new Promise((resolve) => { resolveOp = resolve; });
+  const pending = await reg.attach("ch4", "merge", "mgr1", 10, deferred, undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
+  check("(cacheHit pending) a still-running op degrades to pending as usual", pending.settled === false);
+  check("(cacheHit pending) the pending shape carries no cacheHit field at all — structurally impossible on this branch", !("cacheHit" in pending));
+  resolveOp({ merged: true, opId: "op-1" });
+  await sleep(10); // let the settle .then() microtask actually run before this block's reg/vars go out of scope
+}
+
 // (fm6) OPT-OUT UNAFFECTED: a 'gate' op with no retainVerdictUntilSuperseded carries no freshMint at all,
 // on either a fresh mint or a re-mint after retainMs — byte-identical to before this card for every kind
 // that never opted in.
@@ -921,6 +976,6 @@ const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle. CARD 4aedde84: a settled result served from EITHER cache read (the never-expiring until-superseded map, or the TTL'd retained map) now carries a POSITIVE `cacheHit` field (with the identity it was validated against, when known) instead of leaving the caller to infer a cache hit from freshMint's absence — mutually exclusive with freshMint by construction, absent entirely from the pending shape (a cache hit can never occur on that branch)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
