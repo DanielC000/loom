@@ -221,7 +221,12 @@ check("(completeness) a name already in CODESCAPE_WRITE_TOOLS is never flagged",
     });
   });
   const port = await pickPort();
-  const child = spawn(process.execPath, [fixtureCli, "serve", "--port", String(port)], { stdio: "ignore" });
+  // Card 4a3c1f5a: pin cwd to the test's own temp home — the fixture appends its call log to
+  // `<cwd>/fake-codescape-calls.jsonl` (fake-codescape-cli.mjs:78-79), so an unset cwd here inherits
+  // the test RUNNER's cwd (packages/daemon when run the normal way) and leaks that file into the repo
+  // working tree. Every production spawn path (supervisor.ts) already pins cwd explicitly; this was
+  // the one direct spawn in the suite that didn't.
+  const child = spawn(process.execPath, [fixtureCli, "serve", "--port", String(port)], { cwd: tmpHome, stdio: "ignore" });
   try {
     let healthy = false;
     try {
