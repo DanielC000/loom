@@ -7,7 +7,8 @@ description: How Loom agents should use Codescape (the code-graph MCP) when a pr
 
 Codescape is a **code-graph MCP** — a per-project, ingested snapshot of the repo's structure. When your
 project exposes the Codescape MCP tools (`overview` / `list_flows` / `describe_symbol` / `what_touches` /
-`trace_flow` / `boundary_map` / `render_tree`), it is your PRIMARY orientation instrument, not a fallback.
+`trace_flow` / `boundary_map` / `render_tree` / `scenario_space`), it is your PRIMARY orientation
+instrument, not a fallback.
 
 **The one thing to internalize:** use the graph for **structure, coordinates, and reachability**, then
 open files ONLY to read the exact bytes you must verify or edit — at the coordinates the graph gave you.
@@ -23,8 +24,10 @@ speed / fewer-reads win collapses back into verify-by-reading.
 - **LOCATE — the coordinates.** Which `file:line` each piece lives at. `describe_symbol` / `overview` /
   `what_touches` / `trace_flow` return citation-grade `file:line` — take the exact coordinates FROM the
   graph; don't grep to find what it already pinpoints.
-- **REACHABILITY — what could happen.** "What could render" (components + conditional branches) and "what
-  scenarios are possible." Grep is actively BAD at these; the graph answers questions reading-by-hand can't.
+- **REACHABILITY — what could happen.** "What could render" (components + conditional branches) via
+  `render_tree`, and "what scenarios are possible" for one component — its loading/error/ready state space
+  across data and mutation states — via `scenario_space`, which replaces hand-tracing every conditional
+  yourself. Grep is actively BAD at these; the graph answers questions reading-by-hand can't.
 
 ## Then read — targeted, at the coordinates
 
