@@ -501,7 +501,12 @@ type ConfirmMergeResult = {
    *  upstream, before `deriveMergeGateVerdict` copies it into the durable payload). `true`/`false` set on
    *  the same two dominant return paths `gateCap`/`outputTail` already cover; `undefined` for a gateless
    *  project, a REUSED self-check, or a rarer post-gate-PASS rejection those two fields also leave
-   *  unwired. */
+   *  unwired. ⭐ WIDENED, card 2db8a3dd: `undefined` ALSO covers a repo `computeEmitCompareGate`'s
+   *  predicate structurally cannot apply to at all — its hardcoded `packages/daemon/src|test/` layout and
+   *  `scripts/test-daemon.mjs`/`typescript`-dev-dependency requirements make it, by construction, ONLY
+   *  EVER decidable (`true`/`false`) on Loom's own daemon package; on every other project this reads
+   *  `undefined` here too, not by coincidence — same discipline `retriedFile` already documents for its
+   *  own hardcoded-layout limit. */
   emitCompareReduced?: boolean;
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
@@ -12529,6 +12534,13 @@ export class SessionService {
     // emitCompareTestFiles/emitCompareIdenticalCount — surfaced below via emitCompareWarning so a reduced
     // gate never silently drops coverage reporting for these files.
     let emitCompareNotHermeticExcluded: string[] = [];
+    // Card 2db8a3dd: `true` only when `computeEmitCompareGate` itself said the predicate could not have
+    // been eligible for THIS repo's layout at all (see `EmitCompareGateResult.notApplicable`'s own doc,
+    // git/worktrees.ts) — NOT re-derived here, just carried. Gates the two `emitCompareReduced` record
+    // writes below (mirroring the existing `gateRan`-gated "nothing to report" discipline exactly): a
+    // `false` written under this condition would be the same fabricated "genuinely not reduced" claim for
+    // a repo the predicate never applied to, one cause over from the one `gateRan` already guards.
+    let emitCompareNotApplicable = false;
     // Card 7183540f: the branch/main tips THIS classification actually ran against — captured strictly
     // BEFORE the `computeEmitCompareGate` call below (see that call site's own doc for the ordering-trap
     // reasoning, mirroring db413510's identical discipline for the inert-skip path). Read again at
@@ -13195,6 +13207,8 @@ export class SessionService {
           emitCompareTestFiles = emitCompare.changedTestFiles;
           emitCompareNotHermeticExcluded = emitCompare.notHermeticExcluded;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
+        } else {
+          emitCompareNotApplicable = emitCompare.notApplicable;
         }
       }
       // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
@@ -13411,6 +13425,10 @@ export class SessionService {
               // wrong full run is minutes). `emitCompareSkip:false` here also keeps the eventual
               // `emitCompareWarning`/`build_gate` event from claiming a reduction that no longer happened.
               emitCompareSkip = false;
+              // Card 2db8a3dd: carry the re-derivation's own applicability verdict too (an unresolvable ref
+              // — `reclassified` itself `undefined` — carries no verdict, so this stays `false`, same as
+              // the pre-wait classification's own default for that shape).
+              emitCompareNotApplicable = reclassified?.notApplicable ?? false;
               effectiveGate = gate;
             }
           }
@@ -14012,11 +14030,20 @@ export class SessionService {
           ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
           ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
           // Card 725dc89a: mirrors the plain-GREEN return's own `emitCompareReduced` triple below — a real
-          // gate genuinely spawned to reach this rejection, so `emitCompareReduced` is always DECIDABLE here
+          // gate genuinely spawned to reach this rejection, so `emitCompareReduced` is DECIDABLE here
           // (true or false, never fabricated undefined) — see `PendingGateOpVerdict.emitCompareReduced`'s
-          // own doc for the tri-state discipline.
-          emitCompareReduced: emitCompareSkip,
-          ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
+          // own doc for the tri-state discipline. CORRECTED, card 2db8a3dd: "decidable" held only for a
+          // repo `computeEmitCompareGate`'s predicate actually applies to — `emitCompareNotApplicable`
+          // (set only from that predicate's own `notApplicable` verdict, never re-derived here) guards the
+          // other cause of "never had a chance to be eligible", the one `gateRan` alone doesn't cover: a
+          // real gate spawning and genuinely running full, on a repo whose layout this predicate can never
+          // evaluate. Reporting `false` there would be the identical fabricated "genuinely not reduced"
+          // claim the green-return guard below already exists to prevent, just reached via a different
+          // outcome.
+          ...(emitCompareNotApplicable ? {} : {
+            emitCompareReduced: emitCompareSkip,
+            ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
+          }),
           // Card 720bb7ad: mirrors the plain-GREEN return's own `gateSteps` — see this field's own doc for
           // why the rejection path used to leave it unset here (nested only in `gateDetail.steps` above).
           ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}),
@@ -14319,7 +14346,14 @@ export class SessionService {
     // set true at all (it stays its initial `false`); reporting `emitCompareReduced:false` there would be a
     // fabricated "genuinely not reduced" claim for a merge whose gate never spawned to be reduced OR not —
     // same "nothing to report" discipline `gateCapForRecord`/`gateExtended` already follow.
-    const emitCompareStructuredFields = gateRan
+    // WIDENED, card 2db8a3dd: `gateRan` alone covers only ONE of the two causes of "never had a chance to
+    // be eligible" — the other is a gate that genuinely spawned and ran (`gateRan:true`) on a repo whose
+    // layout `computeEmitCompareGate`'s predicate structurally can never evaluate (every project that
+    // isn't this one — see `EmitCompareGateResult.notApplicable`'s own doc, git/worktrees.ts). `false`
+    // there would be the identical fabricated claim this guard already exists to prevent for the
+    // never-spawned case; `emitCompareNotApplicable` (set only from the predicate's own verdict, never
+    // re-derived here) closes it.
+    const emitCompareStructuredFields = (gateRan && !emitCompareNotApplicable)
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       : {};
     return warning

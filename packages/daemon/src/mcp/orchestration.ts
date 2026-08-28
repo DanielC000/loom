@@ -382,9 +382,15 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "op and ran REDUCED (card 2154b6ad — `pnpm build` + the static guards + any changed test file, instead " +
       "of the full suite, because every changed compiled file was proven transpile-identical); `false` means " +
       "a real gate spawned and was PROVEN NOT reduced — never confuse this with `undefined`, which means " +
-      "EITHER no gate spawned for this op at all (gateless project, a REUSED self-check) OR this settled row " +
-      "predates card 725dc89a — a bare `undefined` conflating \"genuinely not reduced\" with \"nothing " +
-      "recorded\" is exactly the ambiguity this field exists to remove. `emitCompareIdenticalCount` (the " +
+      "no gate spawned for this op at all (gateless project, a REUSED self-check), this settled row " +
+      "predates card 725dc89a, OR (card 2db8a3dd) a real gate DID spawn and ran the FULL suite on a repo " +
+      "whose layout this predicate can never evaluate in the first place — its hardcoded " +
+      "`packages/daemon/src|test/` path scope and `scripts/test-daemon.mjs`/`typescript`-dev-dependency " +
+      "requirements make it, by construction, ONLY EVER decidable (`true`/`false`) on a project shaped " +
+      "like Loom's own daemon package; on every other project `emitCompareReduced` reads `undefined` here " +
+      "too, not by coincidence — same structural-layout-limit disclosure `retriedFile` gives below for its " +
+      "own hardcoded assumption. A bare `undefined` conflating \"genuinely not reduced\" with \"nothing " +
+      "recorded\" (of either cause) is exactly the ambiguity this field exists to remove. `emitCompareIdenticalCount` (the " +
       "count of compiled files proven transpile-identical) and `emitCompareTestFiles` (the changed test " +
       "file(s) actually run directly) are present ONLY alongside `emitCompareReduced:true`. " +
       "`emitCompareNotHermeticExcluded` (card 17cd1f30) names the SPECIFIC changed test file(s) excluded " +
@@ -3648,8 +3654,11 @@ export class OrchestrationMcpRouter {
           "and the two populations differ by an order of magnitude or more. TRI-STATE: `true` = this gate " +
           "genuinely ran reduced; `false` = a real gate spawned and was PROVEN not reduced (a genuine full " +
           "run — the positive control, never read as \"nothing to report\"); `null` = no gate spawned for " +
-          "this op, this row predates card 6ca4b1a0, or this is a `\"worker\"`/`\"deploy\"` row (the " +
-          "reduction feature is MERGE-ONLY). NEVER pool a `null` row with a `false` row as if both were " +
+          "this op, this row predates card 6ca4b1a0, this is a `\"worker\"`/`\"deploy\"` row (the " +
+          "reduction feature is MERGE-ONLY), OR (card 2db8a3dd) a real gate spawned and ran the FULL suite " +
+          "on a repo whose layout the reduction predicate can never evaluate at all — structurally, `false` " +
+          "is reachable ONLY on a project shaped like Loom's own daemon package; on every other project " +
+          "this reads `null`, not by coincidence. NEVER pool a `null` row with a `false` row as if both were " +
           "known full runs — `null` means \"not determinable\", not \"known full run\". " +
           "`emitCompareIdenticalCount`/`emitCompareTestFiles` are present (non-null) ONLY alongside " +
           "`emitCompareReduced:true`, and are ALWAYS read TOGETHER, never one without the other — " +

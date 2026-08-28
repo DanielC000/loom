@@ -17,7 +17,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // THIS FILE proves (DoD-3/DoD-2 of card 2154b6ad, the three committed controls plus the counterexample
 // regression, plus two scope-boundary + one soundness case):
 //   (A) COMMENT-ONLY .ts edit -> REDUCED gate (comments/whitespace stripped before compare -> identical).
-//   (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate, byte-identical to the configured gateCommand.
+//   (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate, byte-identical to the configured gateCommand — AND
+//       card 2db8a3dd: `emitCompareReduced:false` on the merge-confirm result, the POSITIVE-CONTROL
+//       polarity (a real, decidable "ran, proven not reduced" verdict for a Loom-layout diff).
 //   (C) WHITESPACE-ONLY .ts edit (blank lines only, no comment/token change) -> REDUCED gate.
 //   (D) THE §2 COUNTEREXAMPLE, ENCODED: a comment-only test/*.mjs edit that introduces the literal string
 //       `Date.now()` inside a comment -> the reduced command STILL contains every static guard (incl. the
@@ -27,7 +29,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       HARNESS (`test:daemon --only=<names>`), never as a bare `node <path>`.
 //   (E) SCOPE BOUNDARY — an ADDED .ts file (status A, not M) -> FULL gate (fails closed on non-modify).
 //   (F) SCOPE BOUNDARY — a changed path outside both scoped prefixes (packages/daemon/scripts/**) -> FULL
-//       gate, even though every OTHER changed path in the same diff is a comment-only .ts edit.
+//       gate, even though every OTHER changed path in the same diff is a comment-only .ts edit. Card
+//       2db8a3dd: this is also the NOT-APPLICABLE-TO-THIS-REPO polarity — the exact catch-all shape a
+//       genuinely non-Loom-layout repo hits on its first changed path, always. Asserts
+//       `computeEmitCompareGate`'s own `notApplicable:true` directly, AND that the merge-confirm result's
+//       `emitCompareReduced` is OMITTED (never a fabricated `false`) — distinct from (B)'s real `false`.
 //   (G) SOUNDNESS — Code Review (manager #128): emitDecoratorMetadata:true in the PACKAGE tsconfig
 //       (packages/daemon/tsconfig.json), NOT the base one, must ALSO force FULL gate on an otherwise
 //       comment-only .ts edit.
@@ -123,6 +129,11 @@ try {
     check("(B) the gate command WAS called exactly once", calls === 1);
     check("(B) captured command IS byte-identical to the configured full gate", capturedGate === FULL_GATE);
     check("(B) no reduced-gate warning present", !(typeof confirm.warning === "string" && /reduced/.test(confirm.warning)));
+    // Card 2db8a3dd: a genuinely Loom-layout diff that the predicate evaluated and proved NOT reducible —
+    // the POSITIVE-CONTROL polarity of `emitCompareReduced`. Must stay a real, decidable `false`, never
+    // swallowed by the `notApplicable` widening below (that widening is scoped to (F)'s shape, not this
+    // one).
+    check("(B) emitCompareReduced:false — genuinely proven not reduced, never omitted", confirm.emitCompareReduced === false);
   }
 
   // ── (C) WHITESPACE-ONLY .ts edit -> REDUCED gate ────────────────────────────────────────────────────
@@ -237,6 +248,7 @@ try {
   {
     const F = mk("f");
     makeRepoWithBaseSrcFile(F, BASE_SRC);
+    const baseSha = execSync("git rev-parse HEAD", { cwd: F.repo }).toString().trim();
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -249,11 +261,26 @@ try {
     mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "helper.mjs"), "console.log(1);\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + new script helper"`, { cwd: worktreePath });
-    seed(db, F);
 
+    // Card 2db8a3dd: THIS is the shape a genuinely non-Loom-layout repo hits on its FIRST changed path,
+    // always — the predicate could never have been eligible here, independent of the OTHER (reducible)
+    // path in the same diff. Direct call (mirrors (N2)'s pattern) so the assertion is against the
+    // predicate's own verdict, not re-derived from the merge-confirm result. MUST run BEFORE
+    // confirmWorkerMerge — see (N2)'s own comment for why (the merge advances/deletes the branch this reads).
+    const direct = await computeEmitCompareGate(F.repo, worktreePath, baseSha, branch);
+    check("(F) direct call: not eligible", direct.eligible === false);
+    check("(F) direct call: reason IS the out-of-scope catch-all", /path outside emit-compare scope/.test(direct.reason ?? ""));
+    check("(F) direct call: notApplicable:true — this is a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
+
+    seed(db, F);
     const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
     check("(F) gateRan:true", confirm.gateRan === true);
     check("(F) captured command IS the full gate — one out-of-scope path gates the WHOLE diff", capturedGate === FULL_GATE);
+    // The defect this card fixes: before the fix, `emitCompareReduced` would read `false` here too —
+    // indistinguishable from (B)'s genuine "ran, proven not reduced" case, even though this diff's failure
+    // has nothing to do with (B)'s reason. A cross-project reader (or a same-repo web-only diff) must see
+    // this OMITTED, never a fabricated `false`.
+    check("(F) emitCompareReduced OMITTED, not fabricated false — the predicate never had a chance to apply here", confirm.emitCompareReduced === undefined);
   }
 
   // ── (G) SOUNDNESS — Code Review (manager #128): emitDecoratorMetadata:true in the PACKAGE tsconfig
@@ -361,5 +388,6 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d). See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
+  + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

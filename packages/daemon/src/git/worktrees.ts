@@ -2491,6 +2491,25 @@ export interface EmitCompareGateResult {
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
   reason?: string;
+  /** Card 2db8a3dd: `false` on `eligible:true` (trivially — a proven-eligible diff was, by definition,
+   *  evaluated against a repo this predicate applies to) and on every `eligible:false` reason that this
+   *  Loom-shaped repo's own diff genuinely tripped (a non-modify status on a compiled file, an
+   *  excluded-dir/underscore/shell-unsafe test path, a transpile mismatch, or an operational failure
+   *  reading the diff/base/branch content) — those are real, informative "ran, not reduced" verdicts.
+   *  `true` ONLY on the specific `notEligible` reasons that mean the predicate could not have been
+   *  eligible for THIS REPO AT ALL, independent of diff content: the catch-all "path outside emit-compare
+   *  scope" (every changed path fails `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`, exactly what
+   *  a repo whose sources don't live under `packages/daemon/src|test/` hits on its FIRST changed path,
+   *  always), a failed load of `scripts/test-daemon.mjs`'s `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this
+   *  diff's own worktree (that script doesn't exist outside Loom's own layout), and an unresolvable
+   *  `typescript` module (this whole mechanism's own dev-dependency, absent on a shipped end-user
+   *  install). ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT RE-DERIVED BY A CALLER: a caller must never
+   *  re-sniff repo layout itself to guess this — `computeEmitCompareGate` already knows exactly which
+   *  `notEligible` reason it returned, and this field is that knowledge surfaced, once, at the source.
+   *  The caller's job is only to treat `notApplicable:true` the same way it already treats "the predicate
+   *  never ran at all" (never report a fabricated `false` for it) — see
+   *  {@link EMIT_COMPARE_SRC_PREFIX}'s own doc / `sessions/service.ts`'s `emitCompareNotApplicable`. */
+  notApplicable: boolean;
 }
 
 /**
@@ -2594,7 +2613,10 @@ export interface EmitCompareGateResult {
 export async function computeEmitCompareGate(
   repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
-  const notEligible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason });
+  // Card 2db8a3dd: `notApplicable` defaults `false` (an ordinary, informative not-reduced verdict) — pass
+  // `true` ONLY from the specific call sites below that mean this repo's layout, not this diff's content,
+  // is why the predicate returned here. See {@link EmitCompareGateResult.notApplicable}'s own doc.
+  const notEligible = (reason: string, notApplicable = false): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2689,7 +2711,7 @@ export async function computeEmitCompareGate(
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
         if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
-        if (excludedDirNames === null) return notEligible(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        if (excludedDirNames === null) return notEligible(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`, true);
         if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
           return notEligible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
         }
@@ -2718,7 +2740,7 @@ export async function computeEmitCompareGate(
         // keys on; a nested file's name (containing a `/`) can never match a NOT_HERMETIC entry, which is
         // correct — NOT_HERMETIC only ever names test/'s top-level files.
         if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath);
-        if (notHermeticNames === null) return notEligible(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        if (notHermeticNames === null) return notEligible(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`, true);
         const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
         if (notHermeticNames.has(harnessName)) {
           notHermeticExcluded.push(p);
@@ -2729,7 +2751,13 @@ export async function computeEmitCompareGate(
       // status "D" (deleted): nothing left to run directly; the guards below still cover its blast radius.
       continue;
     }
-    return notEligible(`path outside emit-compare scope: ${p}`);
+    // Card 2db8a3dd: THE primary structural case — a repo whose sources don't live under
+    // `packages/daemon/src|test/` (i.e. every project that isn't Loom's own daemon package) fails HERE, on
+    // the first changed path, every time, before any other classification below is even consulted. Also
+    // reachable on a Loom-shaped diff that touches a path this predicate simply doesn't cover (e.g.
+    // `packages/web/**`) — equally `notApplicable`, for the identical reason: the predicate never had this
+    // path in its domain, so "not reduced" would overclaim there too.
+    return notEligible(`path outside emit-compare scope: ${p}`, true);
   }
 
   if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0) {
@@ -2763,7 +2791,7 @@ export async function computeEmitCompareGate(
       const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
       tsModule = imported.default ?? imported;
     } catch {
-      return notEligible("typescript module not resolvable (expected on a shipped end-user install)");
+      return notEligible("typescript module not resolvable (expected on a shipped end-user install)", true);
     }
     for (const p of changedTsFiles) {
       let before: string;
@@ -2784,7 +2812,7 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, notHermeticExcluded, identicalFileCount: changedTsFiles.length };
+  return { eligible: true, changedTestFiles, notHermeticExcluded, identicalFileCount: changedTsFiles.length, notApplicable: false };
 }
 
 /**
