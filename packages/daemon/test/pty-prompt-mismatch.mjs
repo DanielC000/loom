@@ -1326,6 +1326,113 @@ try {
       captured?.gen === 1 && captured?.intendedText === genText && captured?.intendedLen === genText.length);
     host.deliverHook(sid, { hook_event_name: "Stop" });
   }
+  // ===== 22. Card 00b5066e DoD-1/DoD-7 — THE STRICT-PREFIX SPECIMEN (the card's own gen=1 15:19Z specimen
+  // shape, live-specimen fields: reportedLen=339 intendedLen=340 lenDelta=-1 divergesAtChar=339
+  // tailReportedLen=0 tailIntendedLen=1): `reported` is EXACTLY `intended` minus its own final char
+  // (`divergesAtChar == reportedLen`, `tailReportedLen == 0`) — almost certainly a trailing newline the
+  // engine did not echo back. Must be worded as NOT a loss (never "possible LOSS"), and the notice must
+  // carry the position fields (divergesAtChar/both tail lengths/lenDelta) so a recipient can see for itself
+  // that only 1 char is missing, from the notice text alone — no daemon-output.log lookup needed. =====
+  {
+    const sid = newSession("StrictPrefixOmission"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager] a real, correctly-submitted message ending in a newline\n";
+    const reported = intended.slice(0, -1); // exactly 1 trailing char (the newline) not echoed back
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    const enqueued22 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("22: the notice still fires for a strict-prefix omission (not suppressed, only reworded)", enqueued22);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("22: DoD-1 — a strict-prefix, tiny-tail mismatch is worded NOT a loss, never 'possible LOSS'",
+      /NOT a loss/.test(noticeWrite) && !/possible LOSS/.test(noticeWrite));
+    check("22: DoD-7 — the notice carries the exact position fields (divergesAtChar/both tails/lenDelta), letting the recipient self-triage without daemon-output.log",
+      new RegExp(`divergesAtChar=${reported.length}\\b`).test(noticeWrite)
+      && /tailReportedLen=0\b/.test(noticeWrite) && /tailIntendedLen=1\b/.test(noticeWrite) && /lenDelta=-1\b/.test(noticeWrite));
+    check("22: getLastMismatchReplay stays null — this is not a recognized replay of any prior write",
+      host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 23. Card 00b5066e DoD-6/DoD-7 — THE PREFIX-INSERTION SPECIMEN (the card's own gen=3 16:58Z
+  // specimen shape, live-specimen fields: reportedLen=543 intendedLen=524 lenDelta=+19 divergesAtChar=0
+  // tailReportedLen=543 tailIntendedLen=524, i.e. BOTH tails read FULL): `reported` is a PREPENDED run
+  // followed by `intended` unchanged in full — the exact never-re-syncs signature `cf2fef73` already
+  // documented for a mid-string benign re-render, relocated to char 0. THE CARD'S OWN TRAP: do NOT read
+  // `divergesAtChar=0` + full tails as automatic proof of a splice — but ALSO do not claim the extra
+  // prefix's own origin as confirmed benign (the card's own second specimen was left explicitly
+  // UNCONFIRMED — "nothing here settles which" of replay-vs-prefix-offset). =====
+  {
+    const sid = newSession("PrefixInsertion"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const prefix = "STALE-UNRECOGNIZED-PREFIX-RUN:"; // deliberately does NOT start with `intended`'s own leading `[` (unlike cf2fef73's stale-placeholder shape) — a clean divergesAtChar=0, not diverging-at-1 from a coincidentally shared first byte
+    const intended = "[loom:worker-report] worker MMMM — a real report, fully present in what arrived";
+    const reported = prefix + intended; // every byte of `intended` recovered whole at the tail
+    host.enqueueStdin(sid, intended); // gen=1 — no prior writes, so this can never also be a recognized replay
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    const enqueued23 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("23: the notice fires for a prefix insertion (mechanism unconfirmed, so not suppressed)", enqueued23);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("23: DoD-6 — worded NOT a loss (every byte of this turn's own content is present), never 'possible LOSS'",
+      /NOT a loss/.test(noticeWrite) && !/possible LOSS/.test(noticeWrite));
+    check("23: THE CARD'S OWN TRAP — the extra prefix's own MECHANISM is explicitly NOT claimed as established/confirmed",
+      /NOT established/.test(noticeWrite));
+    check("23: DoD-7 — divergesAtChar=0 and lenDelta's SIGN are both explicit in the notice text",
+      /divergesAtChar=0\b/.test(noticeWrite) && new RegExp(`lenDelta=\\+${prefix.length}\\b`).test(noticeWrite));
+    check("23: DoD-7 — both tails read FULL (the never-re-syncs signature), visible directly in the notice text",
+      new RegExp(`tailReportedLen=${reported.length}\\b`).test(noticeWrite) && new RegExp(`tailIntendedLen=${intended.length}\\b`).test(noticeWrite));
+    check("23: getLastMismatchReplay stays null — this content matches no recognized prior write of this session",
+      host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 24. Card 00b5066e HARD BOUND (1 of 2) — an OMISSION-shaped mismatch (`reported` a literal prefix
+  // of `intended`) but with a tail LARGER than OFFSET_OMISSION_MAX_TAIL_CHARS must NOT be softened — a large
+  // missing tail is a genuine truncation and must keep crying loud, exactly as before this card. Proves the
+  // bound is real, not merely documented: the SAME strict-prefix RELATIONSHIP as scenario 22, just past the
+  // size the card's own hard bound requires stay loud. =====
+  {
+    const sid = newSession("OmissionBoundExceeded"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager] a real message with a much larger tail that must not be softened";
+    const reported = intended.slice(0, intended.length - 10); // 10 chars omitted — well past the 2-char bound
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    const enqueued24 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("24: the notice fires", enqueued24);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("24: HARD BOUND — a 10-char omitted tail (past OFFSET_OMISSION_MAX_TAIL_CHARS=2) keeps the cautious 'possible LOSS' wording, is NOT softened to 'NOT a loss'",
+      /possible LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
+  }
+
+  // ===== 25. Card 00b5066e HARD BOUND (2 of 2) — THE REAL GEN=4 LOSS SHAPE this card's own hard-bounds
+  // section cites verbatim (`reportedLen=444` vs `intendedLen=42,082`, unrelated content beyond a short
+  // shared prefix, `divergesAtChar=7`): genuinely unrelated, much-shorter content must keep crying loud, AND
+  // the notice must still carry the position fields (DoD-7) so a recipient can tell — from a LARGE
+  // tailIntendedLen — that this is NOT the benign shape scenarios 22/23 cover. =====
+  {
+    const sid = newSession("GenuineLargeTailLoss"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = `${"x".repeat(7)}${"y".repeat(42075)}`; // divergesAtChar=7 (7 shared chars), then a large, genuinely-lost tail — reportedLen/intendedLen match the card's own gen=4 specimen exactly
+    const reported = `${"x".repeat(7)}${"z".repeat(437)}`; // shares only the first 7 chars; everything after is unrelated, much shorter
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    const enqueued25 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("25: the notice fires", enqueued25);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("25: HARD BOUND — a genuine, large-tail, unrelated-content loss keeps crying 'possible LOSS', is NOT softened",
+      /possible LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
+    check("25: DoD-7 — the notice STILL carries the position fields for a genuine loss too (divergesAtChar=7, a LARGE tailIntendedLen), letting a recipient tell this apart from scenarios 22/23 from the notice text alone",
+      /divergesAtChar=7\b/.test(noticeWrite) && /tailIntendedLen=42075\b/.test(noticeWrite) && /tailReportedLen=437\b/.test(noticeWrite));
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);

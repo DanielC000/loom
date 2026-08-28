@@ -147,6 +147,21 @@ export function redactedExcerpt(excerpt: string): string {
 const COMPOSER_ACCUM_WINDOW = 8;
 
 /**
+ * Card 00b5066e — the bound on the OMISSION direction of the offset-aware reconciliation check
+ * (`intended.startsWith(reported)`, i.e. `reported` is a literal, contiguous PREFIX of `intended` missing
+ * only its own trailing tail). Kept small and DELIBERATE: unbounded, a short `reported` could coincidentally
+ * appear as a leading-prefix match of a large `intended` purely by chance, softening the wording for what is
+ * actually a genuine large-tail truncation — the card's own explicit hard bound ("a large missing tail is a
+ * genuine truncation and must keep crying loud", citing the `-41638` gen=4 specimen: `divergesAtChar=7`, a
+ * 42,075-char missing tail). The card's own live specimen this bound is sized from had a tail of exactly 1
+ * char (a trailing newline, almost certainly not echoed back) — 2 leaves a little headroom without coming
+ * anywhere near a size where coincidence becomes plausible. The INSERTION direction
+ * (`reported.includes(intended)`, `reported` fully CONTAINS `intended`) carries no equivalent risk and is
+ * deliberately left unbounded — see that check's own comment below for why.
+ */
+const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
+
+/**
  * Card c2c750a9 — the CONSUMING half of card 736de9c0's hash-confirmed finding: the engine's
  * UserPromptSubmit hook can report back the composer's whole accumulated buffer (everything written
  * since the composer last genuinely cleared), not just the current turn's own text, when a clear is
@@ -6085,6 +6100,46 @@ export class PtyHost {
               // written) — not a chunk seam.
               const isChunkSeamFormFeed = i > 0 && i % PTY_WRITE_CHUNK_UNITS === 0 && reported[i] === "\u000c" &&
                 reported.slice(0, i) + reported.slice(i + 1) === intended;
+              // Card 00b5066e — THE OFFSET-AWARE RECONCILIATION CHECK. Two live specimens (one Platform Lead
+              // session, 100 minutes apart) both fell through every check above to the generic "possible
+              // LOSS" fallback below, with byte-identical wording despite being structurally opposite: a
+              // STRICT PREFIX missing one trailing char (`divergesAtChar` == `reportedLen`, `tailReportedLen`
+              // == 0 — almost certainly an unechoed trailing newline) and a PREFIX INSERTION where every byte
+              // of `intended` is present, just offset by a prepended run (`divergesAtChar` == 0, both tails
+              // read FULL — the exact never-re-syncs shape `cf2fef73` already documented for a mid-string
+              // benign re-render, relocated to char 0). An exact byte-wise scan (`i` above) cannot re-sync
+              // after content is inserted or removed at an offset, so BOTH specimens read as alarming as a
+              // genuine substitution to a bare divergence-point/tail-size read — that IS the bug this
+              // discriminator exists to fix. Check whether one string is a PREFIX/SUFFIX-offset copy of the
+              // other — NOT the same question `isBenignWhitespaceRerender`/`isStalePlaceholderPrefix`/
+              // `isChunkSeamFormFeed` above ask (those are PROVEN, specific mechanisms and SUPPRESS the notice
+              // entirely); this is a WEAKER, general structural fact ("nothing here shows a byte of `intended`
+              // is genuinely missing/replaced") that only changes the notice's WORDING below — the notice
+              // still fires, since the offset's own origin is not established.
+              //   - INSERTION (`reported.endsWith(intended)`, `reported` longer): `reported` is some PREFIX
+              //     run followed by `intended` unchanged in full — every byte of `intended` is provably
+              //     present, in order, at the very end. Deliberately `endsWith`, NOT the broader `includes`:
+              //     an earlier cut of this check used `includes` and false-matched card 68459420's own
+              //     UNCHARACTERIZED "reported longer, unmatched" population (test scenario 13's own shape,
+              //     `reported = intended + <unexplained SUFFIX>` — `intended` is a PREFIX of `reported`, the
+              //     mirror-image shape, not a prefix insertion) — that population is explicitly required to
+              //     keep its "possible LOSS" wording verbatim (card 68459420 DoD-3, re-affirmed by this
+              //     card's own DoD-3: "the LOSS wording is NOT weakened for any other population"). `endsWith`
+              //     matches ONLY the card's own specimen shape (extra content PREPENDED, `intended` recovered
+              //     whole at the tail) and correctly excludes the appended-suffix shape. An exact match over
+              //     the entire (typically hundreds of chars) `intended` string cannot happen by coincidence,
+              //     so this direction is left UNBOUNDED.
+              //   - OMISSION (`intended.startsWith(reported)`, `reported` a literal prefix, `reported`
+              //     shorter): BOUNDED to `OFFSET_OMISSION_MAX_TAIL_CHARS` (see that constant's own doc) — a
+              //     large omitted tail is a genuine truncation and must keep crying loud unchanged; this
+              //     direction only ever fires for the card's own tiny-trailing-artifact shape.
+              // MEASURED to answer NO for the real gen=4 loss specimen this card's own hard bound cites
+              // (`reportedLen=444` vs `intendedLen=42,082`, unrelated content, `divergesAtChar=7`): neither
+              // direction matches — `reported` does not end with the whole of `intended` (insertion), and the
+              // omission bound alone already excludes a 42,075-char missing tail regardless of content.
+              const isOffsetInsertion = reported.length > intended.length && reported.endsWith(intended);
+              const isOffsetOmission = !isOffsetInsertion && reported.length < intended.length &&
+                (intended.length - reported.length) <= OFFSET_OMISSION_MAX_TAIL_CHARS && intended.startsWith(reported);
               if (intendedIsOwnMismatchNotice) {
                 // Card 87d2dc95 DoD-1 — THE ACTUAL LOOP-BREAKER: this generation's own intended text IS one
                 // of Loom's own prompt-mismatch-family notices (either tag — see `PROMPT_MISMATCH_NOTICE_TAG`/
@@ -6274,13 +6329,44 @@ export class PtyHost {
                 // recovery would hand the recipient the same content twice. Tell them to wait one generation
                 // and re-check (a `[loom:prompt-mismatch]` fusion notice, or `lastMismatchFusion` naming this
                 // generation in its own `spanGens`, means it was recovered) before asking anyone to re-send.
-                // The unmatched-mismatch branch below is UNCHANGED — it already used the cautious "possible
-                // LOSS" framing pre-existing this card, which this reasoning does not contradict (an
-                // unmatched mismatch has no known prior entry to ever be fused back from, so there is no
-                // pending-recovery half to name for it the way there is for a recognized replay).
+                // The unmatched, NON-offset-reconcilable branch below is UNCHANGED — it already used the
+                // cautious "possible LOSS" framing pre-existing this card, which this reasoning does not
+                // contradict (an unmatched mismatch has no known prior entry to ever be fused back from, so
+                // there is no pending-recovery half to name for it the way there is for a recognized replay).
+                // Card 00b5066e adds the two OFFSET-reconcilable branches below it — see `isOffsetInsertion`/
+                // `isOffsetOmission`'s own doc above for why they only fire when `replayedEntry` did NOT
+                // already match (their `intended.startsWith(reported)`/`reported.endsWith(intended)` checks
+                // are against `intended` directly, unrelated to the ring-entry match `replayedEntry` is).
+                // Both are ALSO gated on `!unmatchedRecognized` (card d005f55b DoD-3's existing, MORE
+                // SPECIFIC substring-recognition wording — it names WHICH prior generation was recognized,
+                // where in `reported` it sits, and what the leading/trailing remainder is) — an offset
+                // check alone cannot tell "extra content Loom has no record of" apart from "extra content
+                // that IS a recognized prior write" the way `unmatchedRecognized` already can, so it must
+                // never win precedence over an already-more-informative recognition (regression caught by
+                // this file's own sibling suite, pty-composer-accumulation-diverged-prior.mjs scenario 4 —
+                // a SANDWICHED placeholder + an earlier generation's full write + this generation's own text
+                // satisfies `isOffsetInsertion`'s `endsWith` check too, but the substring recognizer's own
+                // naming of the earlier generation is strictly more useful and must not be discarded).
                 const lossClause = replayedEntry !== undefined
                   ? `The submitted content is a REPLAY of an earlier generation — the text Loom intended for THIS turn did not reach you as its own turn. This is NOT an established loss: the composer may still hold it, and a LATER generation's own submission may fuse it back in whole (if that happens you will see a SEPARATE, later notice saying plainly that nothing was lost) — whether that happens is unknowable until that later generation, if any, actually occurs. You cannot verify this yourself either way: you only ever see what arrived, never what was intended for you. Do not ask anyone to re-send yet — wait one generation and re-check before treating this as a confirmed loss. If you are a Loom-driven session, say so in your next report up.`
-                  : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
+                  // Card 00b5066e DoD-1/DoD-6: `reported` fully CONTAINS this turn's own `intended` text,
+                  // unchanged, with extra chars only preceding/following it — nothing of THIS turn's own
+                  // content is missing. Worded as NOT A LOSS (matching this file's own convention for the
+                  // other confirmed-benign branches), but deliberately NOT "ESTABLISHED"/ "confirmed benign"
+                  // the way `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit` are: this card's own second
+                  // specimen could NOT be attributed to any known mechanism (replay, wrapper tag, ANSI strip)
+                  // — see this card's own "UNCONFIRMED" framing — so the ORIGIN of the extra chars stays
+                  // explicitly unresolved even while their PRESENCE (not a loss) is stated plainly.
+                  : (isOffsetInsertion && !unmatchedRecognized)
+                    ? `This is NOT a loss — the engine's report CONTAINS this turn's own full intended text, unchanged and in order, with ${reported.length - intended.length} extra char(s) elsewhere in the report that Loom did not write for this turn. Every byte Loom intended for THIS turn did arrive. The MECHANISM for those extra chars is NOT established (it could be a stale prefix/tag Loom does not otherwise recognize, or a replay of other content prepended) — do not treat that part as confirmed benign the way a recognized wrapper/ANSI-strip shape above is, and if you are a Loom-driven session, note the extra content in your next report up in case it matters to whoever reads it.`
+                  // Card 00b5066e DoD-1: a STRICT PREFIX missing only a tiny (`OFFSET_OMISSION_MAX_TAIL_CHARS`
+                  // -bounded) trailing tail — every byte Loom intended for this turn UP TO that point matches
+                  // exactly, and the omitted amount is small enough that a genuine large-tail truncation
+                  // cannot produce this shape (see `isOffsetOmission`'s own bound). Worded as NOT A LOSS,
+                  // unlike the fully-unmatched fallback below.
+                  : (isOffsetOmission && !unmatchedRecognized)
+                    ? `This is NOT a loss in the usual sense — the engine's report is an exact, contiguous PREFIX of this turn's own full intended text: every byte up to that point matches exactly, and only the final ${intended.length - reported.length} char(s) are missing from the echo (most likely a trailing character, such as a newline, that the engine did not echo back). This is far too small an omission to be the kind of large-tail loss this notice otherwise exists to catch.`
+                    : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
                 // Card f5f6515a DoD-4 (manager review 5eef504d): a confirmed fusion gets its OWN complete
                 // notice text rather than a patched `lossClause`/`replayNote` — those two are built around a
                 // loss/replay dichotomy with no "possible LOSS" branch that's safe to reuse for a case where
@@ -6339,9 +6425,21 @@ export class PtyHost {
                 const writeWallClockAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : "an unrecorded time";
                 const writeMsgId = live.giveUpOrigin?.[0]?.logicalId ?? "none recorded";
                 const writeIdentity = `written at ${writeWallClockAt}, msgId=${writeMsgId}`;
+                // Card 00b5066e DoD-7 — the SESSION-FACING notice must carry the same position/shape fields
+                // the diagnostic `[prompt-mismatch]` log line above already computes (`i`/`divergesAtChar`,
+                // both tail lengths, `lenDelta`) so a recipient can self-triage a 1-char trailing omission
+                // apart from a whole-payload divergence FROM THE NOTICE TEXT ALONE — the exact gap this
+                // card was filed over (a Platform Lead burned six tool calls against `daemon-output.log` to
+                // recover fields the daemon already had at emit time). Added to the SAME shared hash clause
+                // every branch below already includes, so it appears "whenever the notice fires" per the
+                // card's own DoD-7, not only on the branch that happened to motivate it. `lenDelta`'s sign is
+                // made explicit with a `+` for a positive value — a bare positive number carries no visible
+                // sign of its own, unlike a negative one, so the two would otherwise read asymmetrically.
+                const lenDelta = reported.length - intended.length;
+                const positionInfo = `divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} lenDelta=${lenDelta > 0 ? `+${lenDelta}` : lenDelta}`;
                 const mismatchText = confirmedFusion
                   ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                    `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ESTABLISHED — nothing was lost: the engine's report is a CONFIRMED accumulation (spanGens=${JSON.stringify(confirmedFusion.spanGens)}) — the text Loom intended for THIS turn is in what arrived, fused together with generation(s) ${earlierFusedGens.join(", ")}'s own text because the composer had not fully cleared since ${earlierFusedGens.length > 1 ? "those earlier writes" : "that earlier write"}. If any of generation(s) ${earlierFusedGens.join(", ")}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that before treating everything in this turn as new. ` +
+                    `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ESTABLISHED — nothing was lost: the engine's report is a CONFIRMED accumulation (spanGens=${JSON.stringify(confirmedFusion.spanGens)}) — the text Loom intended for THIS turn is in what arrived, fused together with generation(s) ${earlierFusedGens.join(", ")}'s own text because the composer had not fully cleared since ${earlierFusedGens.length > 1 ? "those earlier writes" : "that earlier write"}. If any of generation(s) ${earlierFusedGens.join(", ")}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that before treating everything in this turn as new. ` +
                     `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on any of this content twice — that duplicate check is yours to make. There is no loss half to verify here: the full text intended for this turn did arrive.`
                   // Card d005f55b DoD-2: its OWN complete notice text, never patched onto `lossClause`/
                   // `replayNote` (same reasoning `confirmedFusion`'s own branch above was given, card
@@ -6351,7 +6449,7 @@ export class PtyHost {
                   // though nothing of THIS turn's own text was lost either.
                   : confirmedDivergedPrior
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ESTABLISHED, DISTINCT FROM A CLEAN FUSION — nothing of THIS turn's own content was lost: the engine's report is a CONFIRMED accumulation over generation ${confirmedDivergedPrior.priorGen}'s own REPORTED echo, NOT what Loom wrote for that generation — generation ${confirmedDivergedPrior.priorGen}'s own submission had ALREADY diverged from what Loom intended before this turn ever ran (see [composer-accumulation-diverged-prior] above; card d005f55b). If generation ${confirmedDivergedPrior.priorGen}'s own turn already ran, you may be about to act on UNVERIFIED content a second time — that generation's own reported content was never confirmed to be what Loom actually sent it, so treat it with more caution than an ordinary duplicate. ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ESTABLISHED, DISTINCT FROM A CLEAN FUSION — nothing of THIS turn's own content was lost: the engine's report is a CONFIRMED accumulation over generation ${confirmedDivergedPrior.priorGen}'s own REPORTED echo, NOT what Loom wrote for that generation — generation ${confirmedDivergedPrior.priorGen}'s own submission had ALREADY diverged from what Loom intended before this turn ever ran (see [composer-accumulation-diverged-prior] above; card d005f55b). If generation ${confirmedDivergedPrior.priorGen}'s own turn already ran, you may be about to act on UNVERIFIED content a second time — that generation's own reported content was never confirmed to be what Loom actually sent it, so treat it with more caution than an ordinary duplicate. ` +
                       `What YOU can check yourself: your own artifacts for whether you've now acted on any of generation ${confirmedDivergedPrior.priorGen}'s own content twice. There is no loss half to verify for THIS turn specifically — this turn's own intended text is in what arrived.`
                   // Card 854d1632 (manager measurement, 2026-08-06, SUPERSEDES an earlier "the tag itself
                   // did not reach you" / "TREAT THIS TURN'S CONTENT AS A POSSIBLE DUPLICATE ANYWAY" draft
@@ -6367,7 +6465,7 @@ export class PtyHost {
                   // and tracked separately, card 854d1632.
                   : confirmedWrapperDeficit
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like a STALE, out-of-order confirmation: the engine's report matches this turn's own intended text with a possible-duplicate tag ("${confirmedWrapperDeficit.strippedTag.trim()}") stripped, byte-for-byte — best explained as confirmation of an EARLIER, unwrapped write arriving after Loom had already moved on to this later, wrapped generation, not as anything failing to reach you. Every byte of that earlier content did arrive; this is an attribution/ordering artifact, not corruption. ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — this looks like a STALE, out-of-order confirmation: the engine's report matches this turn's own intended text with a possible-duplicate tag ("${confirmedWrapperDeficit.strippedTag.trim()}") stripped, byte-for-byte — best explained as confirmation of an EARLIER, unwrapped write arriving after Loom had already moved on to this later, wrapped generation, not as anything failing to reach you. Every byte of that earlier content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if that earlier write's own turn already ran, this stale confirmation may be describing IT, not this generation — check your own artifacts for whether you've now acted on the same underlying content twice.`
                   // Card a640c110 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
                   // own branch just above (never patched onto `lossClause`/`replayNote`, never worded as a
@@ -6377,7 +6475,7 @@ export class PtyHost {
                   // borrowed from that branch's "EARLIER write" framing.
                   : confirmedAnsiStripDeficit
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
                       `What YOU can check yourself: nothing — this shape has no duplicate-check or re-send action to take; the content for this turn is confirmed complete.`
                   // Card c23e2869 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
                   // own branch above (never patched onto `lossClause`/`replayNote`, never worded as a
@@ -6388,10 +6486,10 @@ export class PtyHost {
                   // (a single generation's own stale confirmation) since this fuses TWO generations' text.
                     : confirmedWrapperAwareFusion
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). NOT A LOSS — the engine's report is EXACTLY generation ${confirmedWrapperAwareFusion.recognizedGen}'s own recorded write (${confirmedWrapperAwareFusion.matchedLen} chars) plus THIS turn's own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte. Every byte of both generations' content did arrive; this is an attribution/ordering artifact, not corruption. ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — the engine's report is EXACTLY generation ${confirmedWrapperAwareFusion.recognizedGen}'s own recorded write (${confirmedWrapperAwareFusion.matchedLen} chars) plus THIS turn's own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte. Every byte of both generations' content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if generation ${confirmedWrapperAwareFusion.recognizedGen}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that.`
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
-                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}). ${lossClause} ${replayNote} ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
                 // Card f9b1ea00 — Code Review CRITICAL (confirmed, board card f9b1ea00): arm the follow-up
                 // timer iff `mismatchText` just above ACTUALLY made the "wait one generation and re-check"

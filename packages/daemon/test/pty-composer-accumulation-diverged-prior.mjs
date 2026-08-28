@@ -92,6 +92,15 @@ const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 5) => {
   }
 };
 const hasPendingMismatchNotice = (sid) => host.getPendingEntries(sid).some((e) => e.text.includes("[loom:prompt-mismatch]"));
+// Card b7158b99 / card 00b5066e (pty-prompt-mismatch.mjs's own established pattern, mirrored here): a long
+// notice is written in PACED CHUNKS (host.ts's writeChunked) with a real setTimeout between them — reading
+// `fake.writes` synchronously right after the Stop hook that drains it can capture only the FIRST chunk,
+// silently truncating mid-sentence. Card 00b5066e's added position fields (divergesAtChar/both tail
+// lengths/lenDelta) lengthened every notice branch's shared lead-in enough to expose this on scenario 4's
+// own notice, which previously fit inside one chunk. Wait for the closing bracketed-paste escape to land
+// before trusting the joined text is complete — a real, observed completion signal, not a guessed duration.
+const BRACKET_PASTE_END_MARKER = "\x1b[201~";
+const waitForChunkedWriteDone = (writesArr, fromIndex) => waitUntil(() => writesArr.slice(fromIndex).join("").includes(BRACKET_PASTE_END_MARKER));
 
 function newSession(name) {
   const sid = `sess-${name}`;
@@ -237,15 +246,33 @@ try {
     // recentReportedTurns entries for it, so this scenario also proves the diverged-prior candidate
     // correctly REFUSES even when the prior generation's own report was clean (sum still short by the
     // placeholder's own length either way).
+    const fake = fakesById.get(sid);
+    const writesBeforeGen1 = fake.writes.length;
     host.enqueueStdin(sid, earlierGenText);
+    // Card 00b5066e: `earlierGenText` (4819 chars) spans several PTY_WRITE_CHUNK_UNITS chunks, so its OWN
+    // write completes across real setTimeout pacing gaps, not synchronously — the very next lines
+    // (UserPromptSubmit/Stop) fire before it has actually finished unless this is awaited explicitly. Wait
+    // for gen=1's own bracket-end BEFORE gen=2 begins, so gen=2's own boundary (captured below) is never
+    // mistaken for gen=1's still-in-flight tail (caught empirically: without this wait, a LATER
+    // `waitForChunkedWriteDone` call downstream can resolve on THIS write's own lingering bracket-end
+    // instead of the one it actually meant to wait for).
+    await waitForChunkedWriteDone(fake.writes, writesBeforeGen1);
     host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
     host.deliverHook(sid, { hook_event_name: "Stop" });
 
     // Gen 2: Loom writes currentGenText, but the engine reports back the placeholder PREPENDED onto the
     // earlier generation's own full text, PREPENDED onto this generation's own text.
     const sandwichedReported = stalePlaceholder + earlierGenText + currentGenText;
+    const writesBeforeOriginal = fake.writes.length;
     host.enqueueStdin(sid, currentGenText);
-    const fake = fakesById.get(sid);
+    // Card 00b5066e: `currentGenText` (1123 chars) exceeds one PTY_WRITE_CHUNK_UNITS chunk too — same
+    // reasoning as gen=1's own wait just above. Wait for THIS write's own bracket-end BEFORE capturing
+    // `writesBefore`, so the notice write below starts from a genuinely clean boundary — otherwise
+    // `waitForChunkedWriteDone` below could resolve on THIS write's own (unrelated) bracket-end, read
+    // before the notice itself has even started, truncating it mid-sentence (caught empirically: an
+    // earlier cut of this scenario, without this wait, intermittently failed exactly this way once the
+    // notice grew past one chunk).
+    await waitForChunkedWriteDone(fake.writes, writesBeforeOriginal);
     const writesBefore = fake.writes.length;
     const capturedLines = [];
     const origLog = console.log;
@@ -267,6 +294,7 @@ try {
     const enqueued = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("4: the notice enqueues (not suppressed)", enqueued);
     host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBefore); // card 00b5066e: this notice now spans >1 chunk — wait for it to land in full before reading it
     const noticeText = fake.writes.slice(writesBefore).join("");
     check("4: the notice names what WAS recognized instead of the old blanket \"could not be matched... at all\" wording",
       /DOES contain generation 1's own recorded write as a substring/.test(noticeText));
