@@ -42,8 +42,11 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 // Minimal contract-faithful PtyStub — this test never exercises delivery, only the durable appendEvent
 // this method fires BEFORE any enqueueSystemNudge call, so "delivered" is enough to keep the recipient/
 // sender nudge dispatch below from touching a durable queued-message record we don't care about here.
+// Card 87d2dc95 DoD-4: ALSO records every enqueued text (by sessionId), so PART 4 below can assert on the
+// actual recipient/sender wording, not just the durable event's own structured fields (PARTs 1-3's scope).
 class PtyStub {
-  enqueueStdin() { return { delivered: true }; }
+  enqueued = [];
+  enqueueStdin(sessionId, text) { this.enqueued.push({ sessionId, text }); return { delivered: true }; }
 }
 
 const db = new Db();
@@ -63,7 +66,8 @@ const mgr = `pme-mgr-${sfx}`, wkr = `pme-wkr-${sfx}`;
 mkSession({ id: mgr, role: "manager" });
 mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
 
-const sessions = new SessionService(db, new PtyStub(), new OrchestrationControl());
+const ptyStub = new PtyStub();
+const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 const baseInfo = {
   gen: 7, writtenHash: "deadbeef", reportedHash: "cafef00d", intendedLen: 1234,
@@ -122,12 +126,36 @@ try {
     check("8: flag flipped back OFF, same process — messageExcerpt is OMITTED again (live read, not latched)",
       !Object.prototype.hasOwnProperty.call(detail, "messageExcerpt"));
   }
+  // ===== PART 4 — card 87d2dc95 DoD-4: the recipient/sender WORDING must state what is KNOWN, never a
+  // causal VERDICT. The overclaiming phrases "most likely never reached it" and an unconditional "please
+  // resend it" are gone — a wrong causal claim + an unconditional resend instruction is exactly what
+  // pointed a real reader at the sibling duplicate-delivery defect this project spends real machinery
+  // suppressing (see this card's own board body). =====
+  {
+    const wkr4 = `${wkr}-wording`;
+    mkSession({ id: wkr4, role: "worker", parentSessionId: mgr });
+    ptyStub.enqueued.length = 0;
+    sessions.handlePromptMismatchUnresolved(wkr4, baseInfo);
+    const recipientMsg = ptyStub.enqueued.find((e) => e.sessionId === wkr4)?.text ?? "";
+    const senderMsg = ptyStub.enqueued.find((e) => e.sessionId === mgr)?.text ?? "";
+    check("9: setup — both a recipient and a sender message were actually enqueued", recipientMsg.length > 0 && senderMsg.length > 0);
+    check("10: the SENDER message no longer asserts the causal verdict \"most likely never reached it\"",
+      !senderMsg.includes("most likely never reached it"));
+    check("11: the SENDER message no longer issues an UNCONDITIONAL \"please resend it\" (softened to a conditional, duplicate-aware ask)",
+      !senderMsg.includes("please resend it"));
+    check("12: the SENDER message instead states what is KNOWN — no later generation's own submission was recognized as containing it",
+      senderMsg.includes("no later generation's own submission was ever recognized as containing it"));
+    check("13: the RECIPIENT message states the same KNOWN fact (no later confirmation was recognized), not a verdict about cause",
+      recipientMsg.includes("No later generation's own confirmation was ever recognized as containing this content"));
+    check("14: sanity — neither message dropped the underlying gen/hash identity a reader needs to locate the event",
+      recipientMsg.includes(`gen=${baseInfo.gen}`) && senderMsg.includes(`gen=${baseInfo.gen}`));
+  }
 } finally {
   delete process.env.LOOM_LOG_MESSAGE_CONTENT;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a419a7e6's decided content-gate holds both directions: with LOOM_LOG_MESSAGE_CONTENT OFF (the shipped default) the durable prompt_mismatch_unresolved row's detail carries NO messageExcerpt key at all — byte-identical to before this card — and with it ON the row carries the bounded excerpt PtyHost supplied, verbatim; the length/hash backbone is untouched by the flag in either direction, and the gate is read live (not latched) within a single process."
+  ? "\n✅ ALL PASS — card a419a7e6's decided content-gate holds both directions: with LOOM_LOG_MESSAGE_CONTENT OFF (the shipped default) the durable prompt_mismatch_unresolved row's detail carries NO messageExcerpt key at all — byte-identical to before this card — and with it ON the row carries the bounded excerpt PtyHost supplied, verbatim; the length/hash backbone is untouched by the flag in either direction, and the gate is read live (not latched) within a single process. Card 87d2dc95 DoD-4: the recipient/sender notice wording no longer asserts the causal verdict \"most likely never reached it\" nor an unconditional \"please resend it\" — both messages instead state what is KNOWN (no later generation's own confirmation was ever recognized as containing the content) while keeping the gen/hash identity a reader needs."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

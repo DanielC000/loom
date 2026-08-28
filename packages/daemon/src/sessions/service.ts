@@ -12,7 +12,7 @@ import {
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
@@ -8249,10 +8249,25 @@ export class SessionService {
         ...(isLogMessageContentEnabled() ? { messageExcerpt: info.messageExcerpt } : {}),
       },
     });
-    const recipientMsg = `[loom:prompt-mismatch-unresolved] an earlier [loom:prompt-mismatch] notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No confirming later generation ever arrived — that content is now the best available evidence of a genuine loss, not merely a possible one. If you are a Loom-driven session, say so in your next report up.`;
+    // Card 87d2dc95 DoD-4: state what is KNOWN — no LATER generation's own confirmation was ever recognized
+    // as containing this content within the wait window — rather than a causal VERDICT ("most likely never
+    // reached it"). That phrasing overclaimed a mechanism Loom cannot see (the actual cause, if any, lives
+    // inside the engine, not here) and, combined with an unconditional "please resend it", actively
+    // instructed a reader toward the sibling duplicate-delivery defect this project spends real machinery
+    // suppressing (see this card's own board body). By the time this method runs, DoD-2's own fix (pty/
+    // host.ts, the lag-by-one chain resolution) has already retried every intermediate possibility — this
+    // fires only for a gen no later generation ever recognized, so it is a genuine, load-bearing alarm; the
+    // wording change here is about not overclaiming WHY, not about whether to alarm at all.
+    // Card 87d2dc95 (manager review): both messages are built FROM the shared tag constants (pty/host.ts),
+    // not a second hardcoded literal — pty/host.ts's own loop-breaker (`intendedIsOwnMismatchNotice`) must
+    // recognize a generation whose own intended text IS one of these two messages, and a literal duplicated
+    // here could silently drift from what that guard actually checks (exactly the gap a manager review
+    // caught: the guard originally checked only `PROMPT_MISMATCH_NOTICE_TAG`, missing this file's own tag
+    // entirely). One source of truth for both the mint site (here) and the recognition site (pty/host.ts).
+    const recipientMsg = `${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} an earlier ${PROMPT_MISMATCH_NOTICE_TAG} notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No later generation's own confirmation was ever recognized as containing this content within the wait window — that is the best available evidence of a genuine loss, though Loom cannot independently confirm what actually happened to it beyond that. If you are a Loom-driven session, say so in your next report up.`;
     this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
     if (s?.parentSessionId) {
-      const senderMsg = `[loom:prompt-mismatch-unresolved] your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a [loom:prompt-mismatch] replay detected (gen=${info.gen}, ${info.intendedLen} chars) that never resolved — the text Loom intended for that turn most likely never reached it, and Loom has no copy of it to resend automatically. If you (or the owner, relayed through you) sent that content, please resend it.`;
+      const senderMsg = `${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} replay detected (gen=${info.gen}, ${info.intendedLen} chars) that never resolved — no later generation's own submission was ever recognized as containing it within the wait window, and Loom has no copy of it to resend automatically. If you (or the owner, relayed through you) sent that content and it does not appear to have been acted on since, consider resending it — but check first, since a resend on top of content that actually did arrive creates a duplicate.`;
       this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
     }
   }

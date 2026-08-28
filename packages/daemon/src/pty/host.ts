@@ -752,6 +752,49 @@ export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
 export const PROMPT_MISMATCH_EXCERPT_MAX_LEN = 200;
 
 /**
+ * Card 87d2dc95 — the literal, stable prefix every `[loom:prompt-mismatch]` session-facing notice THIS
+ * FILE mints (`mismatchText`, below) begins with, regardless of which branch produced it (an ESTABLISHED
+ * fusion, a benign wrapper/ANSI-strip deficit, or the generic possible-loss fallback — see `mismatchText`'s
+ * own ternary). Used to recognize, at the START of the NEXT generation's own detection, that THIS
+ * generation's own intended text (`live.lastPrompt`) IS one of Loom's own notices rather than session
+ * content — see `intendedIsOwnMismatchNotice`'s own call site for the self-sustaining feedback loop this
+ * closes (card 87d2dc95, "the unresolved-loss alarm firing during a lag-by-one replay chain"): a persistent
+ * engine-confirmation lag can make a notice's OWN delivery mismatch too, and without this guard that
+ * mismatch would mint ANOTHER notice, forever.
+ *
+ * ⚠️ CORRECTED (manager review, card 87d2dc95): this is a `startsWith` PREFIX test, not a substring test —
+ * `"[loom:prompt-mismatch-unresolved] ...".startsWith(PROMPT_MISMATCH_NOTICE_TAG)` is FALSE (the two tags
+ * share a prefix, but this one has an extra `]` where the other has `-unresolved]`), so this constant ALONE
+ * does not recognize `SessionService.handlePromptMismatchUnresolved`'s own two notices (sessions/service.ts
+ * — a SEPARATE file, minted from the `checkPromptMismatchUnresolved` follow-up, not from this file's own
+ * `mismatchText`). Exported (was file-local) and paired with `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG` below
+ * for exactly that reason — see `intendedIsOwnMismatchNotice`'s own call site, which now checks BOTH.
+ */
+export const PROMPT_MISMATCH_NOTICE_TAG = "[loom:prompt-mismatch]";
+
+/**
+ * Card 87d2dc95 (added on manager review, after the original fix shipped checking only
+ * `PROMPT_MISMATCH_NOTICE_TAG` above) — the literal, stable prefix of the OTHER family of notice this whole
+ * mechanism can mint: `SessionService.handlePromptMismatchUnresolved`'s own recipient/sender messages
+ * (sessions/service.ts), fired when `checkPromptMismatchUnresolved`'s bounded-window follow-up finds a gen
+ * still unresolved. THE REACHABILITY QUESTION THIS ANSWERS: could a generation whose own intended text is
+ * one of THESE notices mismatch and mint a FRESH plain `[loom:prompt-mismatch]` notice (which the tag above
+ * alone would still correctly exempt from minting a THIRD notice), which then leaves ITS OWN newly-armed
+ * follow-up timer to fire ANOTHER `-unresolved` notice later if the recognizing generation happens to
+ * confirm cleanly instead of continuing the lag? Traced, not assumed: yes — nothing in this file or in what
+ * is known about the upstream engine-confirmation lag (its actual mechanism is explicitly unverified
+ * elsewhere in this file — outside this repo) proves the lag is a strict step function that, once broken
+ * for one generation's own resolve window, can never recur for a later, unrelated generation. A `gen`
+ * whose intended text is an `-unresolved` notice is therefore checked here too, closing the SAME class of
+ * loop for this second notice family rather than leaving an unproven "probably fine" residual. Exported so
+ * `SessionService` can mint its own two notices FROM this constant (see that method's own doc) instead of a
+ * second hardcoded literal — a single source of truth for both the mint site and the recognition site,
+ * so they cannot silently drift apart the way the reachability gap above was found (a hardcoded literal at
+ * each site, never cross-checked).
+ */
+export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unresolved]";
+
+/**
  * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
  * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
  * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
@@ -5635,6 +5678,16 @@ export class PtyHost {
               // happened for this in-flight turn — the `?? ""` below is defensive only, never expected to fire.
               const reported = hook.prompt;
               const intended = live.lastPrompt ?? "";
+              // Card 87d2dc95 DoD-1 — LOOP-BREAKER: is THIS generation's own intended text itself one of
+              // Loom's own prompt-mismatch-family notices — EITHER this file's own `[loom:prompt-mismatch]`
+              // notice OR SessionService's `[loom:prompt-mismatch-unresolved]` one (see both tag constants'
+              // own docs for why BOTH are checked, not just the first — a manager review found the original
+              // single-tag check left the second family's own mismatch able to mint a fresh plain notice and
+              // re-arm a follow-up timer that could still fire another `-unresolved` notice later). If so,
+              // this generation must never be allowed to mint ANOTHER notice about its own mismatch, no
+              // matter what the engine reports back for it — see the guard this feeds, just before
+              // `mismatchText` is actually composed/delivered, for the termination argument it establishes.
+              const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG);
               let i = 0;
               const max = Math.min(reported.length, intended.length);
               while (i < max && reported[i] === intended[i]) i++;
@@ -5776,6 +5829,26 @@ export class PtyHost {
               const replayedEntry = live.recentWrittenTurns.findLast((e) => e.text === reported);
               const priorEntry = live.recentWrittenTurns.length >= 2 ? live.recentWrittenTurns[live.recentWrittenTurns.length - 2] : undefined;
               const isImmediatePrior = replayedEntry !== undefined && priorEntry !== undefined && replayedEntry.gen === priorEntry.gen;
+              // Card 87d2dc95 DoD-2 — THE LAG-BY-ONE CHAIN: a plain single-entry replay (this generation's
+              // own `reported` equals EXACTLY an earlier generation's own recorded WRITE) is itself proof
+              // that `replayedEntry.gen`'s own content DID reach the engine — one generation late,
+              // attributed to THIS generation's turn instead of its own. `recognizedGen`/`matchedLen` (the
+              // fields this proof lives in) are already computed above (`replayedEntry.gen`/`.text.length`)
+              // — nothing new needs measuring, per the card's own DoD-2 note. Mark it resolved the INSTANT
+              // this generation's own detection recognizes it, rather than waiting on a stronger multi-entry
+              // fusion (`confirmedFusion`, below) that a lag chain structurally never produces — a lag chain
+              // replays exactly ONE prior entry per link, never a concatenation of several. A still-pending
+              // `checkPromptMismatchUnresolved` timer for `replayedEntry.gen` (armed when THAT generation's
+              // own turn was first detected — see `isRecognizedReplayAwaitingResolution`, below) checks
+              // `live.mismatchResolvedGens.has(gen)` and stays silent once this fires — closing the false
+              // "established loss" alarm the lag chain used to produce for every NON-TERMINAL link. Left
+              // unconditional on which branch below ultimately classifies THIS generation's own mismatch
+              // (`confirmedFusion`/`confirmedWrapperDeficit`/etc. all still run their own, separate
+              // resolution logic where they apply, and adding this membership ahead of them is harmless —
+              // `Set.add` is idempotent) — a bare `replayedEntry` match is sufficient proof on its own terms.
+              // A gen that NO later generation ever recognizes this way (a genuine terminal loss, DoD-3's
+              // own load-bearing polarity) never gets added here, so its own timer fires normally.
+              if (replayedEntry !== undefined) live.mismatchResolvedGens.add(replayedEntry.gen);
               // Card d005f55b DoD-3 (the card's own floor item): only reached once an exact replay AND
               // both confirmed-accumulation shapes above have already refused — see
               // findRecognizedSubstring's own doc for why this asserts no new confidence, only names what
@@ -5866,7 +5939,26 @@ export class PtyHost {
               // written) — not a chunk seam.
               const isChunkSeamFormFeed = i > 0 && i % PTY_WRITE_CHUNK_UNITS === 0 && reported[i] === "\u000c" &&
                 reported.slice(0, i) + reported.slice(i + 1) === intended;
-              if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed) {
+              if (intendedIsOwnMismatchNotice) {
+                // Card 87d2dc95 DoD-1 — THE ACTUAL LOOP-BREAKER: this generation's own intended text IS one
+                // of Loom's own prompt-mismatch-family notices (either tag — see `PROMPT_MISMATCH_NOTICE_TAG`/
+                // `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG`'s own docs), so skip mismatch classification/
+                // re-notification/follow-up-timer-arming for it ENTIRELY, regardless of what the engine
+                // reported. TERMINATION ARGUMENT: the block this `if` gates is the ONLY code that can ever
+                // mint a plain `[loom:prompt-mismatch]` notice OR arm the `checkPromptMismatchUnresolved`
+                // follow-up timer whose LATER firing is the only way an `[loom:prompt-mismatch-unresolved]`
+                // notice ever gets minted (sessions/service.ts) — and this guard makes that block structurally
+                // unreachable for a generation whose own content is already EITHER notice family. So a
+                // notice's own confirmation can never mint a further plain notice, and can never arm a timer
+                // that could later mint an `-unresolved` one either, however the engine happens to echo it
+                // (matched, mismatched, or itself a stale replay of an earlier generation) — BY CONSTRUCTION
+                // (the recursive case is unreachable for either family, not merely rare), not by the
+                // ~0.39%-base-rate probabilistic argument the SELF-REFERENCE comment above this block relied
+                // on before this card — that argument assumed an i.i.d. per-submission mismatch rate, which
+                // does not hold once a session has entered a persistent, sustained lag.
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own intended text IS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch] or [loom:prompt-mismatch-unresolved]); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
+              } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed) {
                 // Card 68459420 — DoD-3: a Platform sweep (2026-08-05) found a FOURTH population outside
                 // the three characterized above: reported LONGER than intended AND matching NO recent
                 // write of this session (first specimen: gen=12, wrote 2985 reported 3829 — the notice's

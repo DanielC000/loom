@@ -54,7 +54,7 @@ process.env.LOOM_HOME = tmpHome;
 const WINDOW_MS = 200;
 process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS = String(WINDOW_MS);
 
-const { PtyHost, framePossibleDuplicate, PROMPT_MISMATCH_EXCERPT_MAX_LEN } = await import("../dist/pty/host.js");
+const { PtyHost, framePossibleDuplicate, PROMPT_MISMATCH_EXCERPT_MAX_LEN, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const waitUntil = async (predicate, timeoutMs = 3000, stepMs = 10) => {
@@ -483,12 +483,193 @@ try {
         return unresolvedEvents.filter((e) => e.sessionId === sid).length === before + 1;
       })());
   }
+  // ===== PART 7 — card 87d2dc95: THE LAG-BY-ONE REPLAY CHAIN. Reproduces the real specimen (worker
+  // 67568eba, six-plus false "established loss" alarms in one session): a mismatch's own session-facing
+  // notice, once delivered as its own new turn, has its OWN confirmation ALSO caught by a persistent
+  // engine-confirmation lag — reporting back the PRECEDING generation's own write instead of the notice's
+  // own text. Proves, in one continuous sequence:
+  //   - DoD-2: a mid-chain gen is retroactively resolved the INSTANT a later generation's own detection
+  //     recognizes it — no false "established loss" alarm for it.
+  //   - DoD-1: the notice's own lagged confirmation mints NO further notice and arms NO further follow-up
+  //     timer — the self-sustaining loop cannot iterate a second time.
+  //   - DoD-3 (the load-bearing OTHER polarity): a genuinely terminal generation — one nothing ever
+  //     recognizes again — still alarms, exactly once. A fix that silenced the WHOLE chain (not just the
+  //     mid-chain false positives) would fail this half.
+  //   - DoD-5 (termination/bounded): the TOTAL alarm count for this whole chain (two real mismatches, one
+  //     lagged notice relapse, one genuine terminal loss) is bounded to exactly ONE — not one per link. =====
+  {
+    const sid = newSession("LagByOneChain"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const gen1Text = "[loom:worker-report] worker QQQQ — generation 1's own real report, the clean baseline";
+    const gen2Text = "[loom:worker-report] worker RRRR — generation 2's own real report, the one the lag first drops";
+    const gen4Text = "[loom:worker-report] worker SSSS — generation 4's own real report, a genuinely terminal loss";
+
+    // gen=1: clean baseline — establishes the entry generation 2's replay will match.
+    host.enqueueStdin(sid, gen1Text);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=2: mismatch — the engine reports gen=1's own write instead of gen=2's. Arms a follow-up timer
+    // for gen=2 (recognizedGen=1) and mints a hedge notice for it.
+    host.enqueueStdin(sid, gen2Text); // gen=2
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text });
+    check("32: sanity — gen=2's own mismatch is a recognized replay of gen=1",
+      host.getLastMismatchReplay(sid)?.gen === 2 && host.getLastMismatchReplay(sid)?.replayedGen === 1);
+    const live32 = host.live.get(sid);
+    check("33: sanity — gen=2's own follow-up timer is armed", live32.pendingMismatchUnresolvedTimers.size === 1);
+
+    // Drain gen=2's own hedge notice as its own new turn (gen=3) — mirrors PART 2's own mechanism.
+    const writesBeforeNotice = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeNotice);
+    const gen2NoticeJoined = fake.writes.slice(writesBeforeNotice).join("");
+    const gen2NoticeEndIdx = gen2NoticeJoined.indexOf(BRACKET_PASTE_END_MARKER);
+    const gen2NoticeText = gen2NoticeJoined.slice(6, gen2NoticeEndIdx);
+    check("34: setup — gen=2's own hedge notice text was actually recovered whole", gen2NoticeEndIdx > 6 && gen2NoticeText.length > 0);
+
+    // gen=3 (the notice's own turn): THE SELF-SUSTAINING STEP. The SAME persistent lag continues — the
+    // engine reports gen=2's own write (gen2Text) instead of the notice's own text (gen2NoticeText). Pre-fix,
+    // this would BOTH mint a THIRD notice about gen=3's own "loss" AND arm a THIRD follow-up timer — exactly
+    // the closed loop the card's own MAJOR CORRECTION describes ("I had to stop the worker manually").
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen2Text });
+
+    // DoD-2 RED-PROOF: gen=2 is retroactively resolved — this generation's own detection recognized gen=2's
+    // write, which is proof (already in the detection's own payload) that it reached the engine.
+    check("35: DoD-2 — gen=2 is retroactively marked resolved by gen=3's own recognition of its write",
+      live32.mismatchResolvedGens.has(2));
+
+    // DoD-1 RED-PROOF: no NEW follow-up timer was armed for gen=3, even though gen=3's own content (a
+    // Loom-authored notice) mismatched too — the loop-breaker recognizes gen=3's own INTENDED text is
+    // itself a [loom:prompt-mismatch] notice and skips detection/re-notification entirely for it. A
+    // pre-fix build would show size===2 here (gen=2's original timer PLUS a new one for gen=3).
+    check("36: DoD-1 — gen=3's own lagged confirmation arms NO new follow-up timer",
+      live32.pendingMismatchUnresolvedTimers.size === 1);
+    check("37: DoD-1 — gen=3's own mismatch never even reached the session-facing detection block (lastMismatchReplay still names gen=2, not gen=3)",
+      host.getLastMismatchReplay(sid)?.gen === 2);
+
+    // TIMING-GUARD-SAFE: fully-awaited-completion — the precondition this check rests on (gen=2 is marked
+    // resolved) was already OBSERVED, synchronously, by check 35 immediately above: `live.mismatchResolvedGens.
+    // add(replayedEntry.gen)` (host.ts) runs in the SAME synchronous block as gen=3's own detection, well
+    // before this sleep starts. Whenever gen=2's scheduled `checkPromptMismatchUnresolved` timer actually
+    // fires — already past, or still pending — it reads that already-true membership and returns silently by
+    // construction; nothing about the outcome depends on how long this sleep runs. This is margin on an
+    // already-settled state, not a race against a still-undetermined event (mirrors PART 2's own identical
+    // reasoning, check 10, above).
+    await new Promise((r) => setTimeout(r, WINDOW_MS + 300));
+    check("38: DoD-2 — the mid-chain gen=2 produces NO follow-up alarm at all once its own timer fires",
+      unresolvedEvents.filter((e) => e.sessionId === sid).length === 0);
+
+    // DoD-3, the load-bearing OTHER polarity: a genuinely terminal generation — nothing ever recognizes its
+    // content again — must STILL alarm. gen=3's own turn was never Stop'd above (UserPromptSubmit sets
+    // enterConfirmed=true unconditionally, so the session is ready for a fresh submission); end it now and
+    // drive one more, real, NEVER-recovered generation.
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    host.enqueueStdin(sid, gen4Text); // gen=4
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen2Text }); // never resolved from here on
+    const fired39 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("39: DoD-3 — a genuinely terminal, never-recognized-again generation still alarms", fired39);
+    const evs39 = unresolvedEvents.filter((e) => e.sessionId === sid);
+    check("40: DoD-5 — the alarm count for this WHOLE chain (2 mismatches + 1 lagged relapse + 1 terminal loss) is BOUNDED to exactly ONE, not one per link",
+      evs39.length === 1);
+    check("41: the one alarm that did fire names the actual terminal generation (4), not the earlier, correctly-suppressed gen=2",
+      evs39[0]?.info.gen === 4);
+  }
+
+  // ===== PART 8 — MANAGER REVIEW (card 87d2dc95): the loop-breaker must ALSO exempt a generation whose own
+  // intended text is a `[loom:prompt-mismatch-unresolved]` notice (sessions/service.ts), not only the plain
+  // `[loom:prompt-mismatch]` tag PART 7 covers. The manager's own review of commit c2e6b916 found
+  // `intendedIsOwnMismatchNotice` checked ONLY `PROMPT_MISMATCH_NOTICE_TAG` — a `startsWith` PREFIX test, not
+  // a substring test, so `"[loom:prompt-mismatch-unresolved] ...".startsWith("[loom:prompt-mismatch]")` is
+  // FALSE (the tags share a prefix, but diverge at the `]` vs `-unresolved]` byte). A generation whose own
+  // content is an `-unresolved` notice could therefore still mismatch, mint a fresh plain notice, and arm a
+  // fresh follow-up timer that could later fire ANOTHER `-unresolved` notice if the recognizing generation
+  // happened to confirm cleanly instead of continuing the lag — traced as code-reachable (not provably
+  // excludable — nothing shows the upstream engine-confirmation lag is a strict step function that cannot
+  // recur), so the fix is to widen the guard, not merely document the gap. Also proves this is a `startsWith`
+  // PREFIX test, not `.includes()` — a message that merely QUOTES a notice tag mid-string must NOT be
+  // exempted (an `.includes()` widening would silently swallow a genuine mismatch on real content that
+  // happens to quote a notice, a worse failure than the one being fixed). =====
+  {
+    const sid = newSession("UnresolvedNoticeAlsoSelfExempt"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const gen1Text = "[loom:worker-report] worker UUUU — generation 1's own real report, the clean baseline";
+    const gen2Text = "[loom:worker-report] worker VVVV — generation 2's own real report, the one this scenario reports as unresolved";
+
+    // gen=1: clean baseline.
+    host.enqueueStdin(sid, gen1Text);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // gen=2: mismatch, arms a follow-up timer for gen=2 (recognizedGen=1).
+    host.enqueueStdin(sid, gen2Text); // gen=2
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text });
+    check("42: sanity — gen=2's own mismatch is a recognized replay of gen=1", host.getLastMismatchReplay(sid)?.gen === 2);
+
+    // Drain gen=2's own PLAIN notice as its own turn (gen=3) and confirm it cleanly — no lag this time, so
+    // gen=2's own timer is left genuinely, permanently unresolved (nothing else ever recognizes it).
+    const writesBeforeNotice = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeNotice);
+    const gen2NoticeJoined = fake.writes.slice(writesBeforeNotice).join("");
+    const gen2NoticeEndIdx = gen2NoticeJoined.indexOf(BRACKET_PASTE_END_MARKER);
+    const gen2NoticeText = gen2NoticeJoined.slice(6, gen2NoticeEndIdx);
+    check("43: setup — gen=2's own plain notice text was actually recovered whole", gen2NoticeEndIdx > 6 && gen2NoticeText.length > 0);
+    check("44: sanity — the recovered notice text actually starts with the plain tag (setup for gen=4's realistic content below)",
+      gen2NoticeText.startsWith(PROMPT_MISMATCH_NOTICE_TAG));
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen2NoticeText }); // byteIdentical=true, gen=3
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    // Let gen=2's own follow-up timer actually fire — a genuine `-unresolved` alarm, since nothing ever
+    // recognized gen=2's content again.
+    const fired42 = await waitUntil(() => unresolvedEvents.some((e) => e.sessionId === sid));
+    check("45: setup — gen=2's own follow-up timer genuinely fires an unresolved alarm (nothing recognized it)", fired42);
+    const evsBefore46 = unresolvedEvents.filter((e) => e.sessionId === sid).length;
+
+    // gen=4: simulate delivering the resulting `[loom:prompt-mismatch-unresolved]` notice as the session's
+    // own next generation — the SAME shape SessionService.handlePromptMismatchUnresolved actually builds
+    // (built here from the real, imported tag constants, not a hand-typed guess).
+    const unresolvedNoticeText = `${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} an earlier ${PROMPT_MISMATCH_NOTICE_TAG} notice on this session (gen=2, ${gen2Text.length} chars) told you to wait one generation and re-check before treating it as a confirmed loss. No later generation's own confirmation was ever recognized as containing this content within the wait window.`;
+    host.enqueueStdin(sid, unresolvedNoticeText); // gen=4
+    const live42 = host.live.get(sid);
+    const timersBefore46 = live42.pendingMismatchUnresolvedTimers.size;
+    const lastReplayGenBefore46 = host.getLastMismatchReplay(sid)?.gen;
+    // THE ACTUAL TEST: the engine reports back gen=3's own write instead of gen=4's own (the -unresolved
+    // notice) — a mismatch, matching gen=3's recorded write exactly (the shape that, pre-widening, would be
+    // a "recognized replay" and mint a fresh plain notice + arm a fresh timer for gen=4).
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen2NoticeText });
+    check("46: RED-PROOF — gen=4's own lagged confirmation (its own intended text IS an -unresolved notice) arms NO new follow-up timer",
+      live42.pendingMismatchUnresolvedTimers.size === timersBefore46);
+    check("47: RED-PROOF — gen=4's own mismatch never reached the session-facing detection block (lastMismatchReplay unchanged)",
+      host.getLastMismatchReplay(sid)?.gen === lastReplayGenBefore46);
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // nothing was minted for gen=4, so this just advances past it
+
+    // TIMING-GUARD-SAFE: fully-awaited-completion — checks 46/47 above already, synchronously, prove the
+    // exemption held (no new timer armed, detection never ran); this sleep only confirms no delayed alarm
+    // trails in behind it, and check 45's own precondition (gen=2's alarm already fired) is unaffected by
+    // however long this sleep runs.
+    await new Promise((r) => setTimeout(r, WINDOW_MS + 300));
+    check("48: no NEW unresolved alarm fired for this session beyond gen=2's own genuine one",
+      unresolvedEvents.filter((e) => e.sessionId === sid).length === evsBefore46);
+
+    // ===== NEGATIVE CONTROL — startsWith, not includes(): a genuinely later, real message that merely
+    // QUOTES the -unresolved tag MID-STRING (not as its own leading prefix) must NOT be exempted. =====
+    const quotingText = `Following up on your earlier note: ${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} — anyway, here is the real content for this turn.`;
+    check("49: setup — the quoting text does NOT itself start with either notice tag (it's a REAL message that merely mentions one)",
+      !quotingText.startsWith(PROMPT_MISMATCH_NOTICE_TAG) && !quotingText.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG));
+    host.enqueueStdin(sid, quotingText); // gen=5
+    const timersBefore50 = host.live.get(sid).pendingMismatchUnresolvedTimers.size;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: gen1Text }); // reported=gen1Text, still in the ring -> a recognized replay
+    check("50: NEGATIVE CONTROL — a message merely QUOTING a notice tag mid-string is NOT exempted; detection runs normally",
+      host.getLastMismatchReplay(sid)?.gen === 5 && host.getLastMismatchReplay(sid)?.replayedGen === 1);
+    check("51: NEGATIVE CONTROL — and it DOES arm its own follow-up timer, exactly like any ordinary mismatch (proves this is a startsWith prefix test, not includes())",
+      host.live.get(sid).pendingMismatchUnresolvedTimers.size === timersBefore50 + 1);
+  }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear)."
+  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear); and card 87d2dc95's own lag-by-one replay chain is closed on BOTH axes — a mid-chain gen is retroactively resolved the instant a LATER generation's own detection recognizes its write (no false 'established loss' alarm), a notice's own lagged confirmation mints NO further notice and arms NO further timer (the self-sustaining loop cannot iterate a second time), and a genuinely terminal, never-recognized-again generation STILL alarms, exactly once, bounding the whole chain's alarm count to ONE rather than one-per-link (PART 7); and, per manager review, the SAME loop-breaker also exempts a generation whose own intended text is the OTHER notice family — `[loom:prompt-mismatch-unresolved]` (sessions/service.ts) — closing a reachability gap the original single-tag guard left open, while a negative control proves this stays a `startsWith` prefix test, never `.includes()`: a real message that merely QUOTES a notice tag mid-string is NOT exempted and still arms its own follow-up timer normally (PART 8)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

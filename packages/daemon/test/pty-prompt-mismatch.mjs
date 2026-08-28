@@ -973,6 +973,7 @@ try {
   // own logged fields showed, regardless of what upstream condition re-opens the gate. =====
   {
     const sid = newSession("ExactRepeat"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
     const stranded = "leftover text from yet another prior turn";
     const intended = "the message this turn actually intended to submit";
     host.enqueueStdin(sid, intended); // gen=1, live.lastPrompt = intended, enterConfirmed=false
@@ -1031,7 +1032,21 @@ try {
     // ===== 14b. NEGATIVE CONTROL — suppression must be scoped to the exact (gen, writtenHash,
     // reportedHash) triple, never a blanket "this session already got a notice" latch: a genuinely
     // DIFFERENT mismatch on a LATER generation must still fire in full. =====
-    host.deliverHook(sid, { hook_event_name: "Stop" }); // drains the one pending notice as its own new turn, advancing the generation
+    // Card 87d2dc95: drain the one pending notice as its own new turn, THEN confirm that notice's own turn
+    // CLEANLY (byteIdentical=true) before continuing — its own intended text IS a `[loom:prompt-mismatch]`
+    // notice, and card 87d2dc95's own loop-breaker deliberately exempts a generation whose own intended
+    // text is a notice from mismatch detection entirely (see PROMPT_MISMATCH_NOTICE_TAG's own doc), so this
+    // scenario's "genuinely DIFFERENT mismatch on a LATER generation" must land on a generation AFTER the
+    // notice's own turn, not ON it — mirrors scenario 7g's own "confirm the notice cleanly first" step.
+    const writesBeforeNotice14 = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // drains the one pending notice as its own new turn (gen=2)
+    await waitForChunkedWriteDone(fake.writes, writesBeforeNotice14);
+    const notice14Joined = fake.writes.slice(writesBeforeNotice14).join("");
+    const notice14EndIdx = notice14Joined.indexOf(BRACKET_PASTE_END_MARKER);
+    const notice14Text = notice14Joined.slice(6, notice14EndIdx);
+    check("14b: setup — gen=1's own hedge notice text was actually recovered whole", notice14EndIdx > 6 && notice14Text.length > 0);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: notice14Text }); // byteIdentical=true, gen=2 — the notice's own turn, not itself under test
+    host.deliverHook(sid, { hook_event_name: "Stop" }); // advances past the notice's own generation
     const laterIntended = "a completely different later message";
     const laterStranded = "unrelated stray content from a different prior turn";
     host.enqueueStdin(sid, laterIntended);
