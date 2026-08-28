@@ -42,14 +42,23 @@ function readCapBytes(): number {
  * neighbouring `testCount` values (never `poolSize` — see `selectStratum`'s own doc for why `poolSize`
  * stays exact) until the clean population reaches this floor or the read window's population is
  * exhausted. Named, not a bare literal, so the threshold and its rationale travel together; the actual
- * `testCountSpan` widening produced is always echoed on the returned band, never left implicit.
+ * widening produced is always echoed on the returned band's `testFileCountSpan`, never left implicit.
  */
 const MIN_BAND_N = 8;
 
 /** The one row `kind` this module ever looks at — `file`/`host-sample`/`run-start` rows (~86% of the
  *  file's rows; see the card's own row-count table) are skipped by a cheap substring check BEFORE
  *  JSON.parse, so the per-call cost stays close to "split the tail into lines", not "JSON.parse the
- *  tail". */
+ *  tail".
+ *
+ *  Card 1ec2e353: `testCount` here is deliberately kept BYTE-IDENTICAL to the on-disk NDJSON key
+ *  `test-daemon.mjs` has always written (`SELECTED.length` — a FILE count, one per hermetic test file,
+ *  never per individual test/assertion). Renaming it would require every future reader to understand
+ *  BOTH an old and a new key to stay compatible with existing history AND with the committed
+ *  `docs/investigations/6c1aadf7-daemon-suite-timing/data/per-file-timing.ndjson` snapshot, which
+ *  `f8b176f7` DoD-4 requires to stay schema-identical with live rows. The mislabel is real but lives at
+ *  the SURFACED layer, not here — see `GateTimingBand.testFileCount` below, which this module renames on
+ *  the way out precisely so a reader of the returned band never has to know this on-disk name exists. */
 interface RunSummaryRow {
   kind: "run-summary";
   opId?: string;
@@ -63,28 +72,32 @@ interface RunSummaryRow {
 
 export interface GateTimingBand {
   poolSize: number;
-  /** This op's OWN `testCount` (the exact value its own run-summary row carries) — the CENTER of the
-   *  band, not necessarily the only value contributing to it. See `testCountSpan` for what actually went
-   *  into `n`/`minSec`/`medianSec`/`maxSec`. */
-  testCount: number;
-  /** The inclusive `[min, max]` `testCount` actually included in the population `n`/`minSec`/`medianSec`/
-   *  `maxSec` are computed over. Equal to `[testCount, testCount]` when the exact stratum alone already
-   *  had `n >= MIN_BAND_N` clean samples (no widening happened); a real range means the match was widened
-   *  — see `MIN_BAND_N`'s own doc for why and when. Always present so a reader can never mistake a
-   *  widened band for an exact one. */
-  testCountSpan: [number, number];
-  /** Count of runs across `testCountSpan` (same `poolSize`, excluding this op's own row(s)) that were
-   *  BOTH complete (`executedCount === testCount`) AND zero-failure (`failedCount === 0`) — the
-   *  population `minSec`/`medianSec`/`maxSec` are computed over. Card 19c0ef1e's own correction: an
-   *  unfiltered median is silently skewed slow by failing runs, so a healthy run can misread as "faster
-   *  than typical" against a contaminated baseline. */
+  /** This op's OWN test-FILE count (the exact value its own run-summary row's on-disk `testCount` field
+   *  carries — see `RunSummaryRow`'s own doc for why that on-disk key stays unrenamed) — the CENTER of
+   *  the band, not necessarily the only value contributing to it. Named `testFileCount`, not `testCount`
+   *  (card 1ec2e353): the unit — one per hermetic test FILE, never per individual test/assertion — is
+   *  now stated at the field itself rather than only in this paragraph. See `testFileCountSpan` for what
+   *  actually went into `n`/`minSec`/`medianSec`/`maxSec`. */
+  testFileCount: number;
+  /** The inclusive `[min, max]` test-file counts actually included in the population `n`/`minSec`/
+   *  `medianSec`/`maxSec` are computed over. Equal to `[testFileCount, testFileCount]` when the exact
+   *  stratum alone already had `n >= MIN_BAND_N` clean samples (no widening happened); a real range means
+   *  the match was widened — see `MIN_BAND_N`'s own doc for why and when. Always present so a reader can
+   *  never mistake a widened band for an exact one. */
+  testFileCountSpan: [number, number];
+  /** Count of runs across `testFileCountSpan` (same `poolSize`, excluding this op's own row(s)) that were
+   *  BOTH complete (`executedCount === testCount` on the underlying row) AND zero-failure
+   *  (`failedCount === 0`) — the population `minSec`/`medianSec`/`maxSec` are computed over. Card
+   *  19c0ef1e's own correction: an unfiltered median is silently skewed slow by failing runs, so a
+   *  healthy run can misread as "faster than typical" against a contaminated baseline. */
   n: number;
-  /** Same population as `n` (same `testCountSpan`, same self-exclusion), WITHOUT the completeness/
+  /** Same population as `n` (same `testFileCountSpan`, same self-exclusion), WITHOUT the completeness/
    *  zero-failure filter — reported alongside `n` so a reader can see how much the filter excluded. */
   nUnfiltered: number;
-  /** The clean (complete + zero-failure) count restricted to the EXACT `testCount` match ONLY, regardless
-   *  of whether the band below was widened — so widening never hides how thin the exact match actually
-   *  was. `nExact <= n` always; `nExact === n` exactly when `testCountSpan` is `[testCount, testCount]`. */
+  /** The clean (complete + zero-failure) count restricted to the EXACT test-file-count match ONLY,
+   *  regardless of whether the band below was widened — so widening never hides how thin the exact match
+   *  actually was. `nExact <= n` always; `nExact === n` exactly when `testFileCountSpan` is
+   *  `[testFileCount, testFileCount]`. */
   nExact: number;
   minSec?: number;
   medianSec?: number;
@@ -225,7 +238,9 @@ function selectStratum(candidates: RunSummaryRow[], testCount: number, minCleanN
 
 /**
  * The band for `opId`'s own gate/merge run, stratified against every OTHER `run-summary` row with the
- * same `poolSize` found within the read window (see `selectStratum` for the `testCount`-widening rule).
+ * same `poolSize` found within the read window (see `selectStratum` for the test-file-count-widening
+ * rule — its own params/locals keep the on-disk `testCount` name; only the returned `GateTimingBand`
+ * renames it to `testFileCount`, see that interface's own doc).
  * Returns `undefined` (never a fabricated empty band) when the NDJSON doesn't exist, the read window
  * doesn't contain a `run-summary` row for this `opId` (a non-Loom gate command, a run older than the read
  * window, or a run whose gate command never shells out to `test-daemon.mjs` at all), or that row is
@@ -252,8 +267,8 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
 
   return {
     poolSize: self.poolSize,
-    testCount: self.testCount,
-    testCountSpan,
+    testFileCount: self.testCount,
+    testFileCountSpan: testCountSpan,
     n: durationsSec.length,
     nUnfiltered,
     nExact,
@@ -262,8 +277,8 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
       : {}),
     instrument: "run-summary.durationMs (runEndTs−runStartTs, the test-step wall clock — excludes gate queue wait, and is not a sum of per-file lane durations)",
     filter: widened
-      ? `same poolSize (exact), testCount widened to span [${testCountSpan[0]}, ${testCountSpan[1]}] because the exact testCount=${self.testCount} match alone had only nExact=${nExact} clean samples (< ${MIN_BAND_N}); excluding this run itself, restricted to executedCount===testCount and failedCount===0 runs`
-      : `same poolSize+testCount stratum (exact — the match already had >= ${MIN_BAND_N} clean samples, no widening needed), excluding this run itself; restricted to executedCount===testCount and failedCount===0 runs`,
+      ? `same poolSize (exact), testFileCount widened to span [${testCountSpan[0]}, ${testCountSpan[1]}] because the exact testFileCount=${self.testCount} match alone had only nExact=${nExact} clean samples (< ${MIN_BAND_N}); excluding this run itself, restricted to executedCount===testCount and failedCount===0 runs`
+      : `same poolSize+testFileCount stratum (exact — the match already had >= ${MIN_BAND_N} clean samples, no widening needed), excluding this run itself; restricted to executedCount===testCount and failedCount===0 runs`,
     readWindowBytes: readBytes,
     readWindowTruncated: truncated,
   };

@@ -67,8 +67,8 @@ const ndjsonPath = `${dir}/daemon-per-file-timing.ndjson`;
 
   const band = await computeGateTimingBand(SELF_OP, ndjsonPath);
   check("(1) band is found", band !== undefined);
-  check("(1) poolSize/testCount echo the SELF run's own stratum", band.poolSize === 3 && band.testCount === 700);
-  check("(1) testCountSpan is degenerate [700,700] — the exact match alone already had >= MIN_BAND_N", band.testCountSpan[0] === 700 && band.testCountSpan[1] === 700);
+  check("(1) poolSize/testFileCount echo the SELF run's own stratum", band.poolSize === 3 && band.testFileCount === 700);
+  check("(1) testFileCountSpan is degenerate [700,700] — the exact match alone already had >= MIN_BAND_N", band.testFileCountSpan[0] === 700 && band.testFileCountSpan[1] === 700);
   check("(1) nUnfiltered counts all 10 same-poolSize+testCount rows (8 clean + 1 incomplete + 1 failed)", band.nUnfiltered === 10);
   check("(1) n counts ONLY the 8 clean (complete + zero-failure) runs — no widening needed", band.n === 8);
   check("(1) nExact equals n (no widening happened)", band.nExact === band.n);
@@ -103,7 +103,7 @@ const ndjsonPath = `${dir}/daemon-per-file-timing.ndjson`;
   check("(4) n is 0 — no other runs at this poolSize to widen into", band.n === 0);
   check("(4) nUnfiltered is 0 too", band.nUnfiltered === 0);
   check("(4) nExact is 0", band.nExact === 0);
-  check("(4) testCountSpan stays degenerate [42,42] — nothing existed to widen into", band.testCountSpan[0] === 42 && band.testCountSpan[1] === 42);
+  check("(4) testFileCountSpan stays degenerate [42,42] — nothing existed to widen into", band.testFileCountSpan[0] === 42 && band.testFileCountSpan[1] === 42);
   check("(4) minSec/medianSec/maxSec are OMITTED, never fabricated as 0/null", band.minSec === undefined && band.medianSec === undefined && band.maxSec === undefined);
 }
 
@@ -173,9 +173,9 @@ const ndjsonPath = `${dir}/daemon-per-file-timing.ndjson`;
 
   const band = await computeGateTimingBand(SELF_OP, widenPath);
   check("(6) band found", band !== undefined);
-  check("(6) poolSize/testCount echo the SELF run's own EXACT values", band.poolSize === 4 && band.testCount === 500);
-  check("(6) nExact is 2 — the exact testCount=500 match alone, regardless of the widening below", band.nExact === 2);
-  check("(6) testCountSpan widened to [499,501] — never reaching the far testCount=550 bucket", band.testCountSpan[0] === 499 && band.testCountSpan[1] === 501);
+  check("(6) poolSize/testFileCount echo the SELF run's own EXACT values", band.poolSize === 4 && band.testFileCount === 500);
+  check("(6) nExact is 2 — the exact testFileCount=500 match alone, regardless of the widening below", band.nExact === 2);
+  check("(6) testFileCountSpan widened to [499,501] — never reaching the far testCount=550 bucket", band.testFileCountSpan[0] === 499 && band.testFileCountSpan[1] === 501);
   check("(6) n is 9 — 2 (exact) + 3 (499) + 4 (501), stopping the instant MIN_BAND_N=8 is reached", band.n === 9);
   check("(6) nUnfiltered is 10 — the same widened population PLUS the one failing row at testCount=501", band.nUnfiltered === 10);
   check("(6) minSec is the smallest of the 9 clean durations (480s)", band.minSec === 480);
@@ -207,8 +207,8 @@ const ndjsonPath = `${dir}/daemon-per-file-timing.ndjson`;
 
   const band = await computeGateTimingBand(SELF_OP, multiPath);
   check("(7) band found", band !== undefined);
-  check("(7) picks the LARGER-testCount row (750, the real full-suite run) as self — NOT the single-file retry's testCount:1", band.testCount === 750);
-  check("(7) testCountSpan is [750,750] — the exact match (8 clean historical) needed no widening", band.testCountSpan[0] === 750 && band.testCountSpan[1] === 750);
+  check("(7) picks the LARGER-testCount row (750, the real full-suite run) as self — NOT the single-file retry's testCount:1", band.testFileCount === 750);
+  check("(7) testFileCountSpan is [750,750] — the exact match (8 clean historical) needed no widening", band.testFileCountSpan[0] === 750 && band.testFileCountSpan[1] === 750);
   check("(7) nUnfiltered is 8 — BOTH of this op's own rows (the failed 750 AND the retry's testCount:1) are excluded from its own baseline", band.nUnfiltered === 8);
   check("(7) n is 8 — all 8 historical rows are clean", band.n === 8);
 }

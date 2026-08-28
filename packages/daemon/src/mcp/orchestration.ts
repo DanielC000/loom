@@ -286,24 +286,27 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "On a `settled` row with a recorded verdict, ALSO carries `timingBand?` (card 19c0ef1e) — a " +
       "stratified comparison against this project's OWN gate-timing history, computed ONLY when this " +
       "op's own `run-summary` row is found in the timing NDJSON (never fabricated otherwise, so its " +
-      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, testCount, " +
-      "testCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
+      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, " +
+      "testFileCount (a FILE count — one per hermetic test FILE, never per individual test/assertion; " +
+      "the on-disk NDJSON key stays `testCount` for compatibility with existing history, card 1ec2e353), " +
+      "testFileCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
       "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
-      "dominates run duration more than population size does — a smaller pool at a bigger testCount can " +
-      "run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a category " +
-      "error, not a convenience). `testCount` starts as an EXACT match but widens outward to the nearest " +
-      "neighbouring testCount values when the exact match alone has fewer than a named floor (8) of clean " +
-      "samples — measured live: `testCount` increments on every single test file added or removed, so an " +
-      "exact-only match is statistically empty (n<5) for the large majority of real strata, emptiest right " +
-      "after someone changes the suite, exactly when a duration comparison matters most. `testCountSpan` " +
-      "(`[min,max]`) is the ACTUAL testCount range the band below was computed over — equal to " +
-      "`[testCount,testCount]` when no widening happened, a real range when it did; always read this " +
-      "before trusting `n` describes an exact match. `n` counts runs across `testCountSpan` (same " +
-      "`poolSize`, excluding every row this op's own opId ever wrote — a retried op can leave more than " +
-      "one) that were BOTH complete and zero-failure — `minSec`/`medianSec`/`maxSec` are computed over " +
-      "exactly that filtered population; `nUnfiltered` is the same (possibly widened) population before " +
-      "that filter, so you can see how much a few flaky/failing runs would otherwise have skewed the " +
-      "median slow; `nExact` is the clean count for the EXACT testCount match alone, reported regardless " +
+      "dominates run duration more than population size does — a smaller pool at a bigger testFileCount " +
+      "can run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a " +
+      "category error, not a convenience). `testFileCount` starts as an EXACT match but widens outward to " +
+      "the nearest neighbouring testFileCount values when the exact match alone has fewer than a named " +
+      "floor (8) of clean samples — measured live: it increments on every single test file added or " +
+      "removed, so an exact-only match is statistically empty (n<5) for the large majority of real strata, " +
+      "emptiest right after someone changes the suite, exactly when a duration comparison matters most. " +
+      "`testFileCountSpan` (`[min,max]`) is the ACTUAL testFileCount range the band below was computed " +
+      "over — equal to `[testFileCount,testFileCount]` when no widening happened, a real range when it " +
+      "did; always read this before trusting `n` describes an exact match. `n` counts runs across " +
+      "`testFileCountSpan` (same `poolSize`, excluding every row this op's own opId ever wrote — a " +
+      "retried op can leave more than one) that were BOTH complete and zero-failure — " +
+      "`minSec`/`medianSec`/`maxSec` are computed over exactly that filtered population; `nUnfiltered` is " +
+      "the same (possibly widened) population before that filter, so you can see how much a few " +
+      "flaky/failing runs would otherwise have skewed the median slow; `nExact` is the clean count for the " +
+      "EXACT testFileCount match alone, reported regardless " +
       "of whether widening happened, so a widened band never hides how thin the exact match actually was. " +
       "`instrument`/`filter` name what produced the numbers (never read a duration without its producer " +
       "— `run-summary.durationMs` is NOT the same clock as this tool's own `durationMs`/`totalDurationMs` " +
@@ -474,24 +477,27 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "On a `settled` row with a recorded verdict, ALSO carries `timingBand?` (card 19c0ef1e) — a " +
       "stratified comparison against this project's OWN gate-timing history, computed ONLY when this " +
       "op's own `run-summary` row is found in the timing NDJSON (never fabricated otherwise, so its " +
-      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, testCount, " +
-      "testCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
+      "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, " +
+      "testFileCount (a FILE count — one per hermetic test FILE, never per individual test/assertion; " +
+      "the on-disk NDJSON key stays `testCount` for compatibility with existing history, card 1ec2e353), " +
+      "testFileCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
       "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
-      "dominates run duration more than population size does — a smaller pool at a bigger testCount can " +
-      "run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a category " +
-      "error, not a convenience). `testCount` starts as an EXACT match but widens outward to the nearest " +
-      "neighbouring testCount values when the exact match alone has fewer than a named floor (8) of clean " +
-      "samples — measured live: `testCount` increments on every single test file added or removed, so an " +
-      "exact-only match is statistically empty (n<5) for the large majority of real strata, emptiest right " +
-      "after someone changes the suite, exactly when a duration comparison matters most. `testCountSpan` " +
-      "(`[min,max]`) is the ACTUAL testCount range the band below was computed over — equal to " +
-      "`[testCount,testCount]` when no widening happened, a real range when it did; always read this " +
-      "before trusting `n` describes an exact match. `n` counts runs across `testCountSpan` (same " +
-      "`poolSize`, excluding every row this op's own opId ever wrote — a retried op can leave more than " +
-      "one) that were BOTH complete and zero-failure — `minSec`/`medianSec`/`maxSec` are computed over " +
-      "exactly that filtered population; `nUnfiltered` is the same (possibly widened) population before " +
-      "that filter, so you can see how much a few flaky/failing runs would otherwise have skewed the " +
-      "median slow; `nExact` is the clean count for the EXACT testCount match alone, reported regardless " +
+      "dominates run duration more than population size does — a smaller pool at a bigger testFileCount " +
+      "can run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a " +
+      "category error, not a convenience). `testFileCount` starts as an EXACT match but widens outward to " +
+      "the nearest neighbouring testFileCount values when the exact match alone has fewer than a named " +
+      "floor (8) of clean samples — measured live: it increments on every single test file added or " +
+      "removed, so an exact-only match is statistically empty (n<5) for the large majority of real strata, " +
+      "emptiest right after someone changes the suite, exactly when a duration comparison matters most. " +
+      "`testFileCountSpan` (`[min,max]`) is the ACTUAL testFileCount range the band below was computed " +
+      "over — equal to `[testFileCount,testFileCount]` when no widening happened, a real range when it " +
+      "did; always read this before trusting `n` describes an exact match. `n` counts runs across " +
+      "`testFileCountSpan` (same `poolSize`, excluding every row this op's own opId ever wrote — a " +
+      "retried op can leave more than one) that were BOTH complete and zero-failure — " +
+      "`minSec`/`medianSec`/`maxSec` are computed over exactly that filtered population; `nUnfiltered` is " +
+      "the same (possibly widened) population before that filter, so you can see how much a few " +
+      "flaky/failing runs would otherwise have skewed the median slow; `nExact` is the clean count for the " +
+      "EXACT testFileCount match alone, reported regardless " +
       "of whether widening happened, so a widened band never hides how thin the exact match actually was. " +
       "`instrument`/`filter` name what produced the numbers (never read a duration without its producer " +
       "— `run-summary.durationMs` is NOT the same clock as `totalDurationMs`/`Σ(steps)` above) and " +

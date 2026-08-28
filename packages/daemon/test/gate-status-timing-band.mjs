@@ -100,10 +100,10 @@ try {
   check("(MCP tool call) gate_status reports the same settled/passed verdict", toolStatus.state === "settled" && toolStatus.passed === true);
   check("(MCP tool call — THE FIX) timingBand is present at the actual tool-call boundary", toolStatus.timingBand !== undefined);
   const band = toolStatus.timingBand;
-  check("(MCP tool call) band echoes THIS op's own stratum (poolSize:3, testCount:700)", band?.poolSize === 3 && band?.testCount === 700);
+  check("(MCP tool call) band echoes THIS op's own stratum (poolSize:3, testFileCount:700)", band?.poolSize === 3 && band?.testFileCount === 700);
   // Only testCount:700 exists anywhere in this fixture, so there is nothing for MIN_BAND_N widening to
-  // reach even though the clean count (2) is below the widen threshold — testCountSpan stays degenerate.
-  check("(MCP tool call) testCountSpan stays [700,700] — nothing else in the fixture to widen into", band?.testCountSpan?.[0] === 700 && band?.testCountSpan?.[1] === 700);
+  // reach even though the clean count (2) is below the widen threshold — testFileCountSpan stays degenerate.
+  check("(MCP tool call) testFileCountSpan stays [700,700] — nothing else in the fixture to widen into", band?.testFileCountSpan?.[0] === 700 && band?.testFileCountSpan?.[1] === 700);
   check("(MCP tool call) n excludes the failing historical run — only the 2 clean ones", band?.n === 2);
   check("(MCP tool call) nExact equals n (no widening possible in this fixture)", band?.nExact === 2);
   check("(MCP tool call) nUnfiltered counts all 3 historical rows (2 clean + 1 failed), excluding this run itself", band?.nUnfiltered === 3);
