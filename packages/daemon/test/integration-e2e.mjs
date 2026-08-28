@@ -15,21 +15,35 @@
 // real spawn makes the daemon's ensureTrusted add a trust entry for our temp dir into the
 // real ~/.claude.json. The finally block surgically removes ONLY that entry and the temp
 // dir afterward, so the suite leaves ~/.claude.json and %TEMP% unchanged.
+//
+// The real spawn also makes Claude create an encoded project dir under the real
+// ~/.claude/projects (see encodeProjectDir below) to hold this run's engine transcript. Card
+// 89991ed0: this dir can't be avoided by HOME-sandboxing the way other tests do (b7f758f4,
+// 9878e520) — that would break the real-claude spawn this test exists to exercise — so cleanup
+// has to be cleanup-shaped, not redirection-shaped. `engineDir` below is `registerForCleanup`'d
+// the moment it's computable (same defense-in-depth-backstop pattern `_transcript-fixture.mjs`'s
+// withEngineTranscriptFixture already uses for the identical real-homedir problem), ON TOP OF an
+// explicit recursive removal in the `finally` below — never a substring/prefix match, always the
+// exact path this run computed. GUARANTEE: this survives an uncaught exception or an explicit
+// process.exit() (both routed through _tmp-fixture.mjs's exit hooks) and a transient
+// EBUSY/EPERM handle (bounded retry+backoff). It does NOT survive SIGKILL/taskkill/abort — those
+// bypass Node's JS-level shutdown entirely, and no JS-level cleanup can catch them.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { PLATFORM_DEFAULTS } from "@loom/shared";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
+import { encodeProjectDir } from "../dist/sessions/transcript.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
 const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) });
 const get = async (u) => (await fetch(BASE + u)).json();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const encodeProjectDir = (cwd) => path.resolve(cwd).replace(/[:\\/]/g, "-");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -40,6 +54,12 @@ fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# E2E Project\nIntegrated phase-1 pass.\n");
 fs.writeFileSync(path.join(dir, "docs", "note.md"), "# Note\nhello vault\n");
 execSync(`git init -q && git add . && git -c user.email=e2e@loom -c user.name=e2e commit -q -m "init e2e"`, { cwd: dir });
+
+// The exact real-homedir dir this run's spawn will create — computed with the SAME encoder
+// production uses (claude-transcript.js), not a hand-rolled copy, so this can never target the
+// wrong directory. Registered for cleanup immediately, before the real spawn even happens.
+const engineDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(dir));
+registerForCleanup(engineDir);
 
 // Hermeticity bookkeeping: the trust key ensureTrusted will add, and whether the real
 // ~/.claude.json already had it (it shouldn't — fresh temp dir — but only remove what we add).
@@ -110,7 +130,7 @@ try {
   // regardless of how long anything polls; read it back via the project's Archive listing instead.
   await post(`/api/sessions/${session.id}/stop`, { mode: "hard" });
   await sleep(1500);
-  if (engineId) fs.rmSync(path.join(os.homedir(), ".claude", "projects", encodeProjectDir(dir), `${engineId}.jsonl`), { force: true });
+  if (engineId) fs.rmSync(path.join(engineDir, `${engineId}.jsonl`), { force: true });
   const sweepRes = await postRaw("/internal/test/sweep-dead-sessions", {});
   if (sweepRes.status === 404) {
     throw new Error("8. /internal/test/sweep-dead-sessions is 404 — this test requires the daemon to be started with LOOM_TEST=1 (see this file's header comment)");
@@ -121,7 +141,9 @@ try {
   check("8. session greyed out as dead once its transcript vanished", dead);
 } finally {
   // Tear down so the suite is hermetic: stop a still-live session, remove ONLY the trust entry
-  // we caused (if we added it), and drop the temp dir.
+  // we caused (if we added it), drop the temp dir, and drop the real-homedir engine transcript
+  // dir this run's spawn created (card 89991ed0 — see the header comment for why this can't be
+  // HOME-sandboxed away like the other real-homedir tests).
   try { if (session?.id) await postRaw(`/api/sessions/${session.id}/stop`, { mode: "hard" }); } catch { /* ignore */ }
   await sleep(1500);
   if (!realHadKeyBefore) {
@@ -134,6 +156,19 @@ try {
     } catch { /* nothing to clean */ }
   }
   fs.rmSync(dir, { recursive: true, force: true });
+
+  // Exact path only — never a prefix/substring match. This tree also holds ~1761 live worker
+  // transcripts and 31 real human project dirs read at runtime by other daemon machinery; a
+  // fuzzy match here would be a real production hazard, not just a test-hygiene one.
+  try { fs.rmSync(engineDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+  catch (err) { console.error(`[integration-e2e] retained for exit-hook backstop: ${engineDir} — ${err}`); }
+  if (fs.existsSync(engineDir)) {
+    // Left in the registerForCleanup registry deliberately — the process-exit backstop gets
+    // another shot at it (a fresh EBUSY/EPERM backoff window) before the process actually ends.
+    console.error(`[integration-e2e] engineDir survived explicit teardown, relying on exit-hook backstop: ${engineDir}`);
+  } else {
+    unregister(engineDir);
+  }
 }
 
 console.log(failures === 0
