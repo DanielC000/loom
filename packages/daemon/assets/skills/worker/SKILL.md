@@ -339,10 +339,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    doctrine/skill that documents it. A fix whose docs still teach the workaround gets no adoption: it
    effectively did not ship. **A "X does not exist in the codebase" / "there's no such
    machinery" claim is an ASSERTION you must PROVE before you ship it** — an absence claim is not
-   reportable from memory or a couple of hopeful reads: run the repo-wide grep that FAILS to find it and
-   cite that negative search (the pattern you searched + zero hits) in your report. A confident absence
+   reportable from memory or a couple of hopeful reads, and a zero-hit grep alone doesn't prove it: this
+   is the same control-polarity rule from step 4 above ("Verify before reporting") (confirming something ABSENT needs a
+   check shown capable of returning non-zero, not just a negative control) — a broken pattern returns
+   zero exactly like a true absence does. Run the repo-wide grep that FAILS to find it, but also run that
+   SAME pattern somewhere the target is KNOWN PRESENT and confirm it returns a hit there; cite all three
+   in your report — the pattern, the zero-hit negative search, and the known-present hit that proves the
+   pattern itself works. A confident absence
    claim that turns out false — the thing existed all along — can send your manager to the owner with a
-   wrong premise; the cited grep is what makes "it isn't there" trustworthy. **The same discipline applies
+   wrong premise; the cited grep (with its positive control) is what makes "it isn't there" trustworthy.
+   **The same discipline applies
    to a COUNT you derive from logs or files, not just a bare existence claim: state which files you
    searched and which pattern you matched, and report your filtered count alongside the raw/broad-marker
    count it was filtered from** — a filter that silently drops most of its population produces a result
