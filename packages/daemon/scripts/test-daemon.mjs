@@ -432,7 +432,7 @@ export const NOT_HERMETIC = new Set([
 // the underscore-prefix rule below (`isUnderscoreExcluded`) — a further ~18 files invisible to a count
 // that only knows about (1) (646 vs. ~628, and even that corrected number wasn't certifiable, since it
 // still didn't account for `looksLikeTest` violations). The ONLY authoritative number is `HERMETIC.length`
-// (computed below) — read it from a real run's own "N/M hermetic daemon tests passed" line, or run this
+// (computed below) — read it from a real run's own "N/M hermetic daemon test files passed" line, or run this
 // script with `--count` for the same number without running the suite.
 // Exported (card 815b4b30) so `git/worktrees.ts`'s emit-compare reduced-gate classifier can dynamically
 // import THIS exact Set — the diff's own worktree copy of this file — rather than hand-copying the two
@@ -1227,7 +1227,7 @@ if (isMain) {
     // A second, independent silent-green trap: even with isMain correctly true, an empty discovered set
     // (a TEST_DIR/glob bug) would otherwise fall through to "0/0 passed" — indistinguishable from a real
     // green. "Ran nothing" and "everything passed" must never share an exit code.
-    console.error("❌ test-daemon.mjs: discovered ZERO hermetic tests — refusing to report a green suite that ran nothing.");
+    console.error("❌ test-daemon.mjs: discovered ZERO hermetic test files — refusing to report a green suite that ran nothing.");
     process.exit(1);
   }
 
@@ -1263,7 +1263,7 @@ if (isMain) {
     console.log(`  excluded — underscore-prefixed path segment: ${underscoreExcludedCount}`);
     console.log(`  excluded — NOT_HERMETIC (needs a live daemon/claude, run manually): ${NOT_HERMETIC_NAMES.length}`);
     console.log(`  discovery violations (neither helper nor test-shaped): ${DISCOVERY_VIOLATIONS.length}`);
-    console.log(`  → hermetic tests this gate will run: ${HERMETIC.length}`);
+    console.log(`  → hermetic test files this gate will run: ${HERMETIC.length}`);
     // Card fa52f555: `--count` exists to REPLACE a hand-rolled tracked-file count, so it must not print a
     // confident number while a known git-vs-walk drift condition sits undetected — but this mode is for a
     // fast read, so a drift here is a WARNING, not the fatal refusal the real run enforces below.
@@ -1309,7 +1309,7 @@ if (isMain) {
   }
   const SELECTED = selectionResult.selected;
   if (SELECTED !== HERMETIC) {
-    console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic tests (--only/--exclude applied)`);
+    console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic test files (--only/--exclude applied)`);
   }
   // Card 6185fbfc: --concurrency=N overrides the pool size for just this invocation (still clamped to
   // MAX_CONCURRENCY), leaving LOOM_GATE_TEST_CONCURRENCY-derived POOL_SIZE untouched when omitted — so
@@ -1456,7 +1456,7 @@ if (isMain) {
     const executedNames = new Set(results.filter((r) => !r.skipped).map((r) => r.name));
     const notExecuted = SELECTED.filter((name) => !executedNames.has(name));
     if (notExecuted.length) {
-      console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
+      console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test file(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
       process.exit(1);
     }
   }, { sampleIntervalMs: RSS_SAMPLE_INTERVAL_MS, onSample: onHostSample });
@@ -1466,7 +1466,7 @@ if (isMain) {
   const pass = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
 
-  console.log(`\n${pass}/${SELECTED.length} hermetic daemon tests passed. (pool size ${EFFECTIVE_POOL_SIZE})`);
+  console.log(`\n${pass}/${SELECTED.length} hermetic daemon test files passed. (pool size ${EFFECTIVE_POOL_SIZE})`);
   // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
   // is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
   // (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
