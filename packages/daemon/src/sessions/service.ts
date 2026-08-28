@@ -330,6 +330,14 @@ type GateRejectionDetail = {
   phase?: "typecheck" | "test" | "build";
   failedStep?: string;
   failingTest?: string;
+  /** Card 8fb09f4c: forwarded verbatim from {@link GateSequentialResult.failingTestCount} — how many lines
+   *  matched the SAME tier `failingTest` was drawn from. `undefined` iff `failingTest` is `undefined`
+   *  (nothing matched at all); NEVER `0`, and never a fabricated `1`. `1` means `failingTest` is a
+   *  COMPLETE account of the failure; `>1` means it is only the LAST of several matching lines, and the
+   *  others are not named anywhere in this result — a caller must never treat `failingTest` as "the only
+   *  failure" without checking this is exactly `1` first, and even at `1` this is a prompt that a fix
+   *  should be sized from the actual file, not proof by itself that nothing else could be wrong. */
+  failingTestCount?: number;
   /** Set ONLY when `failingTest` is absent — the honest reason nothing recognizable was found (card
    *  55cba5c5), so a consumer can tell "genuinely unattributable" apart from a field that was never
    *  populated at all. Never a substitute for a fabricated best-guess test name. */
@@ -614,6 +622,7 @@ function deriveWorkerGateVerdict(
       outputTail: v.outputTail,
       ...(v.passed ? {} : { gateDetail: v.gateDetail && {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
+        failingTestCount: v.gateDetail.failingTestCount,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
         signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
       } }),
@@ -735,6 +744,7 @@ function deriveMergeGateVerdict(
       retryPassed: v.retryPassed ?? null,
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
+        failingTestCount: v.gateDetail.failingTestCount,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
         signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
         // ⚠️ DELIBERATE DUPLICATION (card 361520a0 CR follow-up) vs. the sibling top-level `outputTail`
@@ -770,7 +780,7 @@ function deriveDeployGateVerdict(
       steps: result.steps,
       outputTail: result.outputTail,
       ...(result.passed ? {} : { gateDetail: {
-        failedStep: result.failedStep, failingTest: result.failingTest,
+        failedStep: result.failedStep, failingTest: result.failingTest, failingTestCount: result.failingTestCount,
         exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? undefined,
         timedOut: result.failedTimedOut,
       } }),
@@ -846,6 +856,7 @@ function recoverGateOpVerdict(
             phase: typeof d.phase === "string" ? d.phase : undefined,
             failedStep: typeof d.failedStep === "string" ? d.failedStep : undefined,
             failingTest: typeof d.failingTest === "string" ? d.failingTest : undefined,
+            failingTestCount: typeof d.failingTestCount === "number" ? d.failingTestCount : undefined,
             failingTestReason: typeof d.failingTestReason === "string" ? d.failingTestReason : undefined,
             exitCode: typeof d.exitCode === "number" ? d.exitCode : undefined,
             signal: typeof d.signal === "string" ? d.signal : undefined,
@@ -874,6 +885,7 @@ function recoverGateOpVerdict(
             phase: typeof d.phase === "string" ? d.phase : undefined,
             failedStep: typeof d.failedStep === "string" ? d.failedStep : undefined,
             failingTest: typeof d.failingTest === "string" ? d.failingTest : undefined,
+            failingTestCount: typeof d.failingTestCount === "number" ? d.failingTestCount : undefined,
             failingTestReason: typeof d.failingTestReason === "string" ? d.failingTestReason : undefined,
             exitCode: typeof d.exitCode === "number" ? d.exitCode : undefined,
             signal: typeof d.signal === "string" ? d.signal : undefined,
@@ -14029,6 +14041,11 @@ export class SessionService {
         // is now only a fallback for a caller (a test double) whose result never populated it.
         const rawFailingTest = gateResult.failingTest ?? (outputTail ? extractFailingTest(outputTail) : undefined);
         const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+        // Card 8fb09f4c: ONLY forward the runner's own count when `gateResult.failingTest` itself is what
+        // supplied `failingTest` above — a `failingTest` recovered via the `extractFailingTest(outputTail)`
+        // fallback has no corresponding tier-match count from the runner, so fabricating one (even `1`)
+        // here would be exactly the false-completeness claim this field exists to prevent.
+        const failingTestCount = gateResult.failingTest ? gateResult.failingTestCount : undefined;
         // Honest-null companion (card 55cba5c5 DoD): a caller reading gateDetail must be able to tell
         // "genuinely nothing recognizable found" apart from "this field was never populated" — never
         // fabricate a best-guess test name for the former.
@@ -14056,7 +14073,13 @@ export class SessionService {
           // column/`gate_status`'s field) is greppable across the nudge text and every structured surface;
           // no test asserted the old label's exact text (checked before renaming).
           `cap=${gateCap} concurrentGates=${concurrentAtStart} concurrentGatesMax=${concurrentGatesMax}`,
-          failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
+          // Card 8fb09f4c: `failingTest` alone is a FLOOR, not a complete account, whenever more than one
+          // line matched the same tier it was drawn from — say so inline rather than let a single named
+          // test read as "the only failure". `failingTestCount === 1` (the complete-account case) adds
+          // nothing here, matching the pre-card wording exactly.
+          failingTest
+            ? `failing: ${failingTest}${failingTestCount != null && failingTestCount > 1 ? ` (1 of ${failingTestCount} matching lines — run the file to enumerate the rest, don't size a fix from this one alone)` : ""}`
+            : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
         // Card 9f6598dd: the ONE piece of `gateDetail` the tool description promised was "folded into the
@@ -14080,7 +14103,7 @@ export class SessionService {
         const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}`;
         const { suppressed, sha } = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
-          reason: "gate", sha, phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
+          reason: "gate", sha, phase, failedStep: gateResult.failedStep, failingTest, failingTestCount, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
           gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
@@ -14108,7 +14131,7 @@ export class SessionService {
           merged: false,
           reason: headline, detailText,
           gateDetail: {
-            phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
+            phase, failedStep: gateResult.failedStep, failingTest, failingTestCount, failingTestReason, stderrTail: outputTail,
             exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
             steps: gateStepsResult,
           },
@@ -15512,6 +15535,10 @@ export class SessionService {
           // that never populated it.
           const rawFailingTest = gateResult.failingTest ?? (outputTail ? extractFailingTest(outputTail) : undefined);
           const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+          // Card 8fb09f4c: see confirmWorkerMerge's own identical guard's doc — only the runner's OWN
+          // `failingTest` (not the `extractFailingTest(outputTail)` fallback) has a matching tier-match
+          // count to forward.
+          const failingTestCount = gateResult.failingTest ? gateResult.failingTestCount : undefined;
           const failingTestReason = failingTest ? undefined : "no recognizable failing-test marker found in gate output";
           const headline = finalClass === "kill"
             ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""}`
@@ -15524,6 +15551,7 @@ export class SessionService {
           const failDurationMs = Date.now() - gateStartedAt;
           evt({
             passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
+            failingTestCount: failingTestCount ?? null,
             failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
             durationMs: failDurationMs, headCurrent: headCurrency.headCurrent,
@@ -15542,7 +15570,7 @@ export class SessionService {
             // Card 3407caad: same warn-before-breach signal as the pass path above.
             gateProximity: describeGateProximity(gateResult.steps, gateTimeoutMs),
             gateDetail: {
-              phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
+              phase, failedStep: gateResult.failedStep, failingTest, failingTestCount, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
             },
           };
@@ -15614,7 +15642,12 @@ export class SessionService {
           gd.failedStep ? `step: ${gd.failedStep}` : undefined,
           gd.phase ? `phase: ${gd.phase}` : undefined,
           killNote,
-          gd.failingTest ? `failing: ${gd.failingTest}` : (gd.failingTestReason ? `failing test: unknown (${gd.failingTestReason})` : undefined),
+          // Card 8fb09f4c: same "floor, not a complete account" wording as confirmWorkerMerge's own
+          // `[loom:merge-rejected]` detailBits — a partial rollout to only one of the two sibling nudges
+          // would recreate the exact trap this card exists to close.
+          gd.failingTest
+            ? `failing: ${gd.failingTest}${gd.failingTestCount != null && gd.failingTestCount > 1 ? ` (1 of ${gd.failingTestCount} matching lines — run the file to enumerate the rest, don't size a fix from this one alone)` : ""}`
+            : (gd.failingTestReason ? `failing test: unknown (${gd.failingTestReason})` : undefined),
         ].filter(Boolean).join("; ") : "";
         // Card 4c5bf820, DoD item 2: a PASSING self-check used to be near-silent — the verbatim before-
         // state was the bare `"gate passed (validated <sha>)."`, no duration, no steps, nothing a

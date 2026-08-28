@@ -1938,6 +1938,12 @@ export interface PendingGateOpVerdict {
     phase?: string;
     failedStep?: string;
     failingTest?: string;
+    /** Card 8fb09f4c: how many lines matched the SAME tier `failingTest` was drawn from — see
+     *  `GateRejectionDetail.failingTestCount`'s own doc (sessions/service.ts) for the full contract.
+     *  `undefined` iff `failingTest` is `undefined`; never `0`, never a fabricated `1`. `1` means
+     *  `failingTest` is a complete account; `>1` means it is a FLOOR — more failures exist and a caller
+     *  must go enumerate the named file rather than treat this one line as the whole story. */
+    failingTestCount?: number;
     failingTestReason?: string;
     exitCode?: number | null;
     signal?: string | null;

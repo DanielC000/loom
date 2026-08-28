@@ -78,10 +78,19 @@ const RUN_TESTS_SCRIPT = [
   "process.exitCode = 1;",
 ].join("\n");
 
-function makeRepo(p) {
+// Card 8fb09f4c: TWO genuinely distinct failing test files, each printing its own `FAIL <name>` line —
+// the multi-match polarity DoD-6 asks for (single-match alone, case (A), cannot see this bug).
+const RUN_TESTS_SCRIPT_MULTI = [
+  "console.log('running suite...');",
+  "console.error('FAIL widget.spec.js > renders correctly');",
+  "console.error('FAIL button.spec.js > handles click');",
+  "process.exitCode = 1;",
+].join("\n");
+
+function makeRepo(p, script = RUN_TESTS_SCRIPT) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgd\n");
-  fs.writeFileSync(path.join(p.repo, "run-tests.mjs"), RUN_TESTS_SCRIPT);
+  fs.writeFileSync(path.join(p.repo, "run-tests.mjs"), script);
   execSync(`git init -q && git config user.email mgd@loom && git config user.name mgd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
 
@@ -94,6 +103,7 @@ const mk = (label, file) => ({
 const A = mk("a", "feature-a.txt"); // (A) real failing gate step → diagnostic rejection
 const B = mk("b", "feature-b.txt"); // (B) green gate → exactly one merge_done, no gateDetail
 const C = mk("c", "feature-c.txt"); // (C) card 55cba5c5: unattributable failure → honest null + reason
+const D = mk("d", "feature-d.txt"); // (D) card 8fb09f4c: MULTIPLE matching FAIL lines → failingTestCount > 1
 
 try {
   // ── (A) DIAGNOSTIC REJECTION: a real `node run-tests.mjs` step fails with 1 ───────────────────────────
@@ -112,6 +122,9 @@ try {
     check("(A) gateDetail.phase derived as 'test' (step names run-tests.mjs)", confirmA.gateDetail?.phase === "test");
     check("(A) gateDetail.failedStep names the actual failing command", confirmA.gateDetail?.failedStep === "node run-tests.mjs");
     check("(A) gateDetail.failingTest extracted the FAIL line", confirmA.gateDetail?.failingTest?.includes("FAIL widget.spec.js") === true);
+    // Card 8fb09f4c: a single matching FAIL line ⇒ failingTestCount === 1 (a COMPLETE account) — the
+    // single-match polarity DoD-6 asks for.
+    check("(A) gateDetail.failingTestCount is 1 — a single matching line is a complete account", confirmA.gateDetail?.failingTestCount === 1);
     check("(A) gateDetail.stderrTail carries the real child output", (confirmA.gateDetail?.stderrTail ?? "").includes("AssertionError: expected 2 to equal 3"));
     check("(A) gateDetail.exitCode is the real exit code (1)", confirmA.gateDetail?.exitCode === 1);
     check("(A) gateDetail.signal is null (a plain non-zero exit, not a kill)", confirmA.gateDetail?.signal === null);
@@ -128,6 +141,7 @@ try {
     check("(A) signal text names the phase", text.includes("phase: test"));
     check("(A) signal text names the failed step", text.includes("step: node run-tests.mjs"));
     check("(A) signal text names the failing test", text.includes("FAIL widget.spec.js"));
+    check("(A) signal text does NOT add the multi-match caveat for a count of 1 (complete account, nothing more to say)", !text.includes("matching lines"));
     check("(A) signal text carries the gate output tail", text.includes("--- gate output tail ---") && text.includes("AssertionError"));
     // Card 9f6598dd — THE ACTUAL FIX (Finding 2): before this card, `gateDetail.steps` was populated on the
     // return value (asserted above) but genuinely ABSENT from this notification text — the tool description
@@ -192,9 +206,37 @@ try {
     check("(C) signal text never fabricates a 'failing: <name>' claim", !textC.includes("failing: "));
     check("(C) signal text names the honest reason instead", textC.includes(confirmC.gateDetail.failingTestReason));
   }
+
+  // ── (D) card 8fb09f4c: TWO distinct FAIL lines ⇒ gateDetail.failingTestCount > 1 — a caller must be
+  //        able to tell "the named test is the whole story" apart from "there's more, go enumerate" ──────
+  makeRepo(D, RUN_TESTS_SCRIPT_MULTI);
+  {
+    const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
+    D.worktreePath = worktreePath; D.branch = branch;
+    fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    seed(D, "node run-tests.mjs");
+
+    const confirmD = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
+    check("(D) rejected: merged:false", confirmD.merged === false);
+    // The tracker keeps the LAST matching line per tier — so `failingTest` names button.spec.js (the
+    // second FAIL line), while `failingTestCount` records that TWO lines matched.
+    check("(D) gateDetail.failingTest names the LAST matching line", confirmD.gateDetail?.failingTest?.includes("FAIL button.spec.js") === true);
+    check("(D) gateDetail.failingTestCount is 2 — TWO matching lines, not a complete account from one", confirmD.gateDetail?.failingTestCount === 2);
+
+    const rejectMsgsD = enqueued.filter((args) => args[0] === D.mgrId && typeof args[1] === "string" && args[1].includes("[loom:merge-rejected]"));
+    check("(D) exactly ONE [loom:merge-rejected] signal fired", rejectMsgsD.length === 1);
+    const textD = rejectMsgsD[0]?.[1] ?? "";
+    check("(D) signal text states the count and prompts enumeration — a caller can tell one failure from many", textD.includes("1 of 2 matching lines") && textD.includes("enumerate the rest"));
+
+    // The SAME count must reach the durable merge_rejected audit event (recoverGateOpVerdict's own read
+    // path after a daemon restart depends on it being persisted here, not just returned synchronously).
+    const rejectedEvent = eventsOfKind(D.mgrId, "merge_rejected")[0];
+    check("(D) the durable merge_rejected event ALSO persists failingTestCount", rejectedEvent?.detail?.failingTestCount === 2);
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C]) {
+  for (const p of [A, B, C, D]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
