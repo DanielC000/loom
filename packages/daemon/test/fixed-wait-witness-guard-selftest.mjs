@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles } from "./fixed-wait-witness-guard.mjs";
+import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles, scanModifiedTrackedTestFiles } from "./fixed-wait-witness-guard.mjs";
 import { sleepPast } from "./_wait.mjs";
 import { mkdtempManaged, cleanupPathSync, unregister } from "./_tmp-fixture.mjs";
 
@@ -343,7 +343,107 @@ check(`isWaitIdiomLine: a one-line block comment ("/** ${SLEEP_KW}(20); */") is 
   if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
 }
 
+// ── scanModifiedTrackedTestFiles: card 21e12d47's content-aware staged/unstaged-tracked-file scan ──────
+// Dependency-injected execFileSyncFn variants first (deterministic, no real git process spawned).
+{
+  const onGitFailure = scanModifiedTrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => { throw new Error("git not found"); });
+  check("scanModifiedTrackedTestFiles: a git failure returns null (visibility-check hiccup, not a false 'found none')", onGitFailure === null);
+}
+{
+  const empty = scanModifiedTrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => "");
+  check("scanModifiedTrackedTestFiles: an empty git diff returns zero files/hits/cleared",
+    empty.files.length === 0 && empty.hits.length === 0 && empty.cleared.length === 0);
+}
+
+// scanModifiedTrackedTestFiles, driven at the REAL git binary in a THROWAWAY fixture repo — DoD-4's
+// two-polarity positive control, BOTH asserted in this SAME run: (i) a staged-but-uncommitted test edit
+// containing a real fixed-wait violation is CAUGHT; (ii) a clean staged-but-uncommitted edit still
+// passes (a bare-presence check — "this tracked file has an uncommitted change, therefore FAIL" — would
+// wrongly fail this one; see the function's own header for why that shape was rejected). Same isolation
+// discipline as the listUntrackedTestFiles fixture test above: a throwaway repo, never the real shared
+// one, since this suite runs test files concurrently.
+{
+  const fixtureRoot = mkdtempManaged("loom-fwwg-modified-fixture-");
+  const git = (...args) => execFileSync("git", ["-C", fixtureRoot, ...args]);
+  git("init", "-q");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  const fixtureTestDir = path.join(fixtureRoot, "packages", "daemon", "test");
+  fs.mkdirSync(fixtureTestDir, { recursive: true });
+  const trackedFile = path.join(fixtureTestDir, "tracked-mod.mjs");
+  fs.writeFileSync(trackedFile, "// tracked, about to be modified\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "fixture: initial commit");
+
+  // (i) RED — DoD-4(i): stage (git add, deliberately NOT committed) an edit that adds a real unwitnessed
+  // fixed-wait violation to the already-tracked file — the exact specimen card 21e12d47 exists to fix
+  // (the worker's real 33-line diff that scanned as 0 until committed).
+  const violatingContent = [
+    "// tracked, about to be modified",
+    "{",
+    `  await ${SLEEP_KW}(20);`,
+    "  check(\"some claim\", true);",
+    "}",
+    "",
+  ].join("\n");
+  fs.writeFileSync(trackedFile, violatingContent);
+  git("add", "-A"); // staged, NOT committed
+  const redResult = scanModifiedTrackedTestFiles(fixtureRoot, "packages/daemon/test/*.mjs");
+  check("scanModifiedTrackedTestFiles DoD-4(i) RED: a staged-but-uncommitted edit WITH a real fixed-wait violation IS CAUGHT",
+    redResult !== null && redResult.hits.length === 1 &&
+    redResult.hits[0].file.replace(/\\/g, "/").endsWith("packages/daemon/test/tracked-mod.mjs"));
+
+  // (ii) GREEN — DoD-4(ii): same staged-but-uncommitted shape, but the edit is CLEAN (no fixed-wait idiom
+  // at all). Must still pass — a tracked file merely HAVING an uncommitted change is not itself a defect.
+  const cleanContent = [
+    "// tracked, about to be modified",
+    "{",
+    "  const x = 1;",
+    "  check(\"some unrelated claim\", x === 1);",
+    "}",
+    "",
+  ].join("\n");
+  fs.writeFileSync(trackedFile, cleanContent);
+  git("add", "-A"); // staged, NOT committed
+  const greenResult = scanModifiedTrackedTestFiles(fixtureRoot, "packages/daemon/test/*.mjs");
+  check("scanModifiedTrackedTestFiles DoD-4(ii) GREEN: a staged-but-uncommitted edit with NO violation still passes cleanly",
+    greenResult !== null && greenResult.hits.length === 0);
+
+  cleanupPathSync(fixtureRoot);
+  if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
+}
+
+// ── DoD-5 regression pin: BOTH population-visibility checks co-exist correctly on the SAME fixture repo
+// — the untracked check (card 40643460) still names a genuinely untracked file when the new modified-
+// tracked scan (card 21e12d47) also runs alongside it, and the new scan does NOT also swallow that
+// untracked file into its own result (an untracked file is invisible to `git diff HEAD` by definition —
+// the two checks stay disjoint, neither regresses nor duplicates the other's job).
+{
+  const fixtureRoot = mkdtempManaged("loom-fwwg-combined-fixture-");
+  const git = (...args) => execFileSync("git", ["-C", fixtureRoot, ...args]);
+  git("init", "-q");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  const fixtureTestDir = path.join(fixtureRoot, "packages", "daemon", "test");
+  fs.mkdirSync(fixtureTestDir, { recursive: true });
+  fs.writeFileSync(path.join(fixtureTestDir, "tracked.mjs"), "// tracked\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "fixture");
+  fs.writeFileSync(path.join(fixtureTestDir, "brand-new-untracked.mjs"), "// untracked\n"); // never git add'ed
+
+  const untracked = listUntrackedTestFiles(fixtureRoot, "packages/daemon/test/*.mjs");
+  check("DoD-5 regression pin: the untracked check (card 40643460) still names a real untracked file when the modified-tracked scan also runs alongside it",
+    Array.isArray(untracked) && untracked.some((f) => f.replace(/\\/g, "/").endsWith("packages/daemon/test/brand-new-untracked.mjs")));
+
+  const modified = scanModifiedTrackedTestFiles(fixtureRoot, "packages/daemon/test/*.mjs");
+  check("DoD-5 regression pin: the untracked file is invisible to scanModifiedTrackedTestFiles (git diff HEAD never sees an untracked path) — the two checks stay disjoint",
+    modified !== null && modified.files.length === 0 && modified.hits.length === 0);
+
+  cleanupPathSync(fixtureRoot);
+  if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, does not false-positive on the real 003a1080 specimen, and correctly names a REAL untracked file the diff-scan itself cannot see (card 40643460)."
+  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, does not false-positive on the real 003a1080 specimen, correctly names a REAL untracked file the diff-scan itself cannot see (card 40643460), and correctly catches (or clears) a REAL staged-but-uncommitted tracked-file edit the diff-scan also cannot see (card 21e12d47)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

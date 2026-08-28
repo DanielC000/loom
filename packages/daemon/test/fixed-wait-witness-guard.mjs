@@ -19,7 +19,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // WHAT COUNTS AS "ADDED": lines under `packages/daemon/test/*.mjs` (top-level only, same glob the card
 // specifies — not a recursive walk) that are new on this branch relative to its merge-base with the
 // project's mainline. Computed via `diffBranch` (git/worktrees.ts) — the SAME line-diffing mechanism the
-// merge-review diffstat already uses — not a second, hand-rolled git-diff implementation.
+// merge-review diffstat already uses — not a second, hand-rolled git-diff implementation. This core scan
+// is diff-scoped against COMMITTED `HEAD`, deliberately — it mirrors the merge-review diffstat's own
+// scope, which is a feature (see `main` below). That scope has a real blind spot, though: anything not
+// yet committed is invisible to it. Two supplementary, population-visibility checks close that gap
+// without touching the core scan's scope — `listUntrackedTestFiles` (card `40643460`) names a never-
+// `git add`ed file it can't see, and `scanModifiedTrackedTestFiles` (card `21e12d47`) directly scans a
+// tracked file's staged-and/or-unstaged uncommitted changes for a real violation. Both run every time
+// this guard does; see their own doc comments below for why they're shaped differently from each other.
 //
 // WHAT COUNTS AS A CANDIDATE: an added line matching a fixed-wait idiom (raw `sleep(...)`, a raw
 // `new Promise(r => setTimeout(r, ...))`, OR a `windowMs:` config key — the last one closes `0f744aa4`'s
@@ -308,6 +315,51 @@ export function listUntrackedTestFiles(repoRoot, testGlob, execFileSyncFn = exec
   }
 }
 
+/**
+ * Card 21e12d47 — THE MODIFIED-TRACKED-FILE SCAN, the OTHER half of the blind spot `40643460` (above)
+ * doesn't cover. `listUntrackedTestFiles` only ever sees a file that was NEVER `git add`ed. A file that
+ * IS tracked but has been changed since `HEAD` — staged, unstaged, or both — is neither untracked (so
+ * `git ls-files --others` never lists it) nor part of the committed `HEAD`-vs-merge-base diff the core
+ * scan reads (`main`, below) — so a fixed-wait violation added to it contributes zero lines to that scan
+ * and the guard prints `scanned 0 added line(s)` while genuinely scanning nothing. This is deliberately
+ * CONTENT-AWARE, unlike the bare-presence `listUntrackedTestFiles` check: a naming-only check ("this file
+ * has an uncommitted change, therefore FAIL") would make ANY uncommitted edit to a test file fail this
+ * guard — including a one-line comment fix with no fixed-wait content at all — which is not this guard's
+ * job to police and would train workers to distrust a legitimate FAIL. Instead this diffs the file's
+ * CURRENT on-disk content against its own committed `HEAD` blob (`git diff HEAD -- <glob>`, which reads
+ * the final working-tree bytes against `HEAD` regardless of index state, so it sees staged AND unstaged
+ * changes alike — there is no narrower git primitive that would see one but not the other without a
+ * second, redundant `--cached` pass), reparses that patch with the SAME `parseAddedLineNumbers` the core
+ * scan uses, and runs the SAME `scanFileForUnwitnessedHits` detection against the result — so an actual
+ * violation in an uncommitted edit is CAUGHT (named file + line + label, exactly like a committed hit),
+ * while a clean uncommitted edit passes cleanly, same as it should. Same null-vs-`{hits:[],cleared:[],
+ * files:[]}` contract as `listUntrackedTestFiles`: `null` means "could not check" (a git hiccup), never a
+ * false "found none".
+ */
+export function scanModifiedTrackedTestFiles(repoRoot, testGlob, execFileSyncFn = execFileSync) {
+  let patch;
+  try {
+    patch = execFileSyncFn("git", ["-C", repoRoot, "diff", "HEAD", "--", testGlob], { encoding: "utf8" });
+  } catch {
+    return null; // git itself failed (not "found none") — caller distinguishes via null, doesn't fail on it
+  }
+  const addedByFile = parseAddedLineNumbers(patch);
+  const hits = [];
+  const cleared = [];
+  const files = [];
+  for (const [file, addedLineNumbers] of addedByFile) {
+    if (addedLineNumbers.size === 0) continue;
+    files.push(file);
+    const abs = path.join(repoRoot, file);
+    if (!fs.existsSync(abs)) continue; // deleted in the working tree — nothing to scan
+    const sourceText = fs.readFileSync(abs, "utf8");
+    const scanned = scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers);
+    hits.push(...scanned.hits);
+    cleared.push(...scanned.cleared);
+  }
+  return { hits, cleared, files };
+}
+
 async function main() {
   let diffBranchFn, resolveMainlineBranchFn;
   try {
@@ -383,6 +435,26 @@ async function main() {
         (untrackedTestFiles.length > 0 ? `: ${untrackedTestFiles.join(", ")} — this scan is diff-scoped against committed HEAD and cannot see them; git add them and re-run` : "") +
         ")",
       untrackedTestFiles.length === 0
+    );
+  }
+
+  // Card 21e12d47 — THE OTHER HALF OF THE BLIND SPOT: a tracked test file with a staged-and/or-unstaged,
+  // NOT-YET-COMMITTED change. `40643460`'s untracked check above can't see it (it's tracked, so `git
+  // ls-files --others` never lists it) and the core `HEAD`-vs-merge-base scan can't see it either (it's
+  // not committed, so it contributes zero lines to that diff). Unlike the untracked check, this ACTUALLY
+  // SCANS the uncommitted content for a real violation — see `scanModifiedTrackedTestFiles`'s own header
+  // for why bare presence would be the wrong shape here.
+  const modifiedScan = scanModifiedTrackedTestFiles(REPO_ROOT, TEST_GLOB);
+  if (modifiedScan === null) {
+    console.log(`[fixed-wait-witness-guard] could not check for uncommitted changes to tracked ${TEST_GLOB} files (git diff failed) — skipping the modified-tracked-file scan`);
+  } else {
+    for (const h of modifiedScan.hits) console.log(`  UNCOMMITTED HIT  ${h.file}:${h.lineNo}  "${h.label}" (staged/unstaged, not yet committed — commit it to make this the ordinary diff-scoped hit above)`);
+    for (const c of modifiedScan.cleared) console.log(`  UNCOMMITTED CLEARED  ${c.file}:${c.lineNo}  ${c.reason}`);
+    check(
+      `no uncommitted (staged and/or unstaged) change to a tracked ${TEST_GLOB} file adds a fixed-wait-adjacent-to-check() site without a witness — scanned ${modifiedScan.files.length} modified file(s)` +
+        (modifiedScan.files.length > 0 ? ` (${modifiedScan.files.join(", ")})` : "") +
+        `, found ${modifiedScan.hits.length}`,
+      modifiedScan.hits.length === 0
     );
   }
 
