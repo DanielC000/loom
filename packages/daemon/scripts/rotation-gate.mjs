@@ -21,6 +21,8 @@
 // below was copied verbatim from that section (relayed through card 8e2a4252's kickoff, itself already
 // a copy) and MUST be re-checked against the live vault section by whoever next edits this file —
 // this local copy can drift silently, same as any other copied-not-pointed-at value.
+// Re-verified against the live vault section 2026-08-28 (card d78a6d5d): the 14-item marker list and
+// REQUIRED_LIVE_COMMITMENTS_COUNT=14 below still match §ROTATION-GATE verbatim — no drift found.
 //
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
@@ -75,7 +77,8 @@ Exit 0 = rotation may proceed. Exit 1 = refused (see stderr for every failure). 
 
 Checks run against --active:
   1. All ${MARKERS.length} markers below are present as exact substrings (see the case-sensitivity note in each).
-  2. The LIVE COMMITMENTS section (between its heading and the next MY-PEER-SEND-LEDGER heading) still
+  2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next MY-PEER-SEND-LEDGER
+     heading LINE — a prose mention of either token that is not itself a heading line is ignored) still
      contains ${REQUIRED_LIVE_COMMITMENTS_COUNT} numbered items, matched by /^\\d+\\. /gm.
 
 Checks run against --archive:
@@ -129,18 +132,46 @@ function findMissingMarkers(text) {
   return missing;
 }
 
-// Returns the count of /^\d+\. /gm matches strictly between the first "LIVE COMMITMENTS" heading and the
-// next "MY-PEER-SEND-LEDGER" heading after it, or null if either boundary can't be located (in which
-// case the marker check above will already have flagged the missing heading).
+// Finds the first line at or after `fromIndex` that is a real markdown heading (1-6 leading `#` followed
+// by whitespace — so "## ⛔⛔ §LIVE COMMITMENTS — ..." matches, an arbitrary run of emoji/`§` between the
+// hashes and the token is fine) AND contains `token` (case-insensitive). Returns the line index, or -1.
+function findHeadingLine(lines, token, fromIndex) {
+  const needle = token.toLowerCase();
+  const headingRe = /^#{1,6}\s/;
+  for (let i = fromIndex; i < lines.length; i++) {
+    if (headingRe.test(lines[i]) && lines[i].toLowerCase().includes(needle)) return i;
+  }
+  return -1;
+}
+
+// Returns { count, diagnostic }. `count` is the number of /^\d+\. /gm matches strictly between the LIVE
+// COMMITMENTS heading LINE and the next MY-PEER-SEND-LEDGER heading LINE after it (or end of file if
+// there is none) — null if the LIVE COMMITMENTS heading itself can't be located at all. `diagnostic`
+// always names WHERE the section was measured (matched line number + text, or "end of file"), so a count
+// mismatch is self-diagnosable without reading this script's source (card d78a6d5d DoD-3).
+//
+// BOTH boundaries are anchored to a markdown HEADING LINE, never a bare substring search — card
+// d78a6d5d: the prior version used plain case-insensitive `indexOf` on the raw text, so a PROSE mention
+// of either boundary token anywhere above its real heading (e.g. a doc's own header block documenting
+// this gate's contract in these exact words) silently redefined the measured span, producing a
+// maximally-alarming false "0 numbered item(s), expected 14" on a perfectly correct document. Anchoring
+// to a heading line makes a prose mention inert: it is never itself a heading line, so it can never open
+// or close the section.
 function countLiveCommitments(text) {
-  const lower = text.toLowerCase();
-  const startIdx = lower.indexOf("live commitments");
-  if (startIdx === -1) return null;
-  const afterStart = text.slice(startIdx + "live commitments".length);
-  const endIdxRel = afterStart.toLowerCase().indexOf("my-peer-send-ledger");
-  const section = endIdxRel === -1 ? afterStart : afterStart.slice(0, endIdxRel);
-  const matches = section.match(/^\d+\. /gm);
-  return matches ? matches.length : 0;
+  const lines = text.split(/\r\n|\r|\n/);
+  const startLine = findHeadingLine(lines, "live commitments", 0);
+  if (startLine === -1) {
+    return { count: null, diagnostic: "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active" };
+  }
+  const endLine = findHeadingLine(lines, "my-peer-send-ledger", startLine + 1);
+  const sectionLines = lines.slice(startLine + 1, endLine === -1 ? lines.length : endLine);
+  const matches = sectionLines.join("\n").match(/^\d+\. /gm);
+  const startDesc = `heading line ${startLine + 1} ("${lines[startLine].trim()}")`;
+  const endDesc =
+    endLine === -1
+      ? "end of file (no MY-PEER-SEND-LEDGER heading found after it)"
+      : `heading line ${endLine + 1} ("${lines[endLine].trim()}")`;
+  return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
 }
 
 function readRequiredFile(flagName, filePath) {
@@ -185,7 +216,7 @@ function main() {
   }
 
   const missing = findMissingMarkers(activeText);
-  const liveCount = countLiveCommitments(activeText);
+  const live = countLiveCommitments(activeText);
 
   const failures = [...archiveFailures];
   if (missing.length > 0) {
@@ -193,11 +224,11 @@ function main() {
       `missing ${missing.length}/${MARKERS.length} marker(s) from --active: ${missing.map((m) => m.token).join(", ")}`
     );
   }
-  if (liveCount === null) {
-    failures.push("could not locate the LIVE COMMITMENTS section (heading missing) — cannot verify its item count");
-  } else if (liveCount !== REQUIRED_LIVE_COMMITMENTS_COUNT) {
+  if (live.count === null) {
+    failures.push(`could not locate the LIVE COMMITMENTS section (heading missing) — cannot verify its item count (${live.diagnostic})`);
+  } else if (live.count !== REQUIRED_LIVE_COMMITMENTS_COUNT) {
     failures.push(
-      `LIVE COMMITMENTS section in --active holds ${liveCount} numbered item(s), expected ${REQUIRED_LIVE_COMMITMENTS_COUNT}`
+      `LIVE COMMITMENTS section in --active holds ${live.count} numbered item(s), expected ${REQUIRED_LIVE_COMMITMENTS_COUNT} (${live.diagnostic})`
     );
   }
 
