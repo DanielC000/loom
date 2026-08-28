@@ -7273,9 +7273,13 @@ export class SessionService {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = frameFromManager(text);
+    // Card 21a281b6: mint captured HERE, before enqueue — never baked into `framed` itself (see
+    // enqueueDurableMessage's own `mintedAtWallClock` doc for why: `hasAmbiguousMatch`'s resend auto-join
+    // compares this exact `framed` text, and a non-deterministic timestamp inside it would break that).
+    const mintedAtWallClock = Date.now();
     // Durable-tracked: if the worker is busy the message is HELD in its FIFO and persisted as
     // `session_message_queued` so a sender death / daemon restart can't drop it (card 2ca18433).
-    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null, resendOf });
+    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null, resendOf, mintedAtWallClock });
     // Card 343441bd: `msgId` (always minted — see enqueueDurableMessage's doc) lets the staleDirective
     // projection find THIS directive later. `turnSeqAtDelivery` is stamped HERE only on the immediate-
     // delivery path (r.delivered — `worker.turnSeq` was already read above and submit() itself never
@@ -7435,7 +7439,11 @@ export class SessionService {
     // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
     // receiver knows this REPLACED its pending direction and may have interrupted it mid-edit.
     const framed = opts.frame(text);
-    const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null });
+    // Card 21a281b6: mint captured here, never baked into `framed` — see enqueueDurableMessage's own
+    // `mintedAtWallClock` doc (this covers BOTH worker_redirect and the companion session-redirect, the
+    // two `:redirect` variants sharing this core).
+    const mintedAtWallClock = Date.now();
+    const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null, mintedAtWallClock });
     // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
@@ -7618,10 +7626,25 @@ export class SessionService {
    * (e.g. a `wake_me` fired back through a captured chat route) needs its route persisted too, or a
    * restart-triggered redrive would silently deliver it as a plain (routeless) nudge instead. Every caller
    * that omits it (the overwhelming majority) is byte-identical to before this field existed.
+   *
+   * `ctx.mintedAtWallClock` (card 21a281b6) — threaded straight through to `enqueueStdin`'s own
+   * `mintedAtWallClock` (see `QueuedMessage.mintedAtWallClock`'s doc, pty/host.ts) so a delivered
+   * agent-message frame (`messageWorker`/`deliverRedirect`/`deliverSessionMessage`/`messagePeerManager` —
+   * the ONLY four callers that pass it) carries a daemon-supplied mint time WITHOUT ever baking a
+   * wall-clock value into `framedText` itself: `hasAmbiguousMatch`'s content-based resend auto-join (card
+   * 4a0af485) compares this method's `framedText` argument verbatim, and a non-deterministic timestamp
+   * embedded there would make two resends of literally the same instruction compare as different content,
+   * silently breaking that join. Kept OUT of the stored/compared text and rendered only once, at actual
+   * drain time, by `joinSubmittedText`'s `annotateMintStamp` (pty/host.ts) — the exact discipline
+   * `annotatePasteRecoveryAge` already established for the same reason. Every other caller (omitting it)
+   * is byte-identical to before this field existed.
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
-    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string; chainDepth?: number; giveUpHeldUntil?: number; route?: CompanionRoute },
+    ctx: {
+      sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string;
+      chainDepth?: number; giveUpHeldUntil?: number; route?: CompanionRoute; mintedAtWallClock?: number;
+    },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
     const kind: QueuedMessageKind = ctx.kind ?? "agent";
@@ -7669,6 +7692,13 @@ export class SessionService {
         giveUpHeldUntil: ctx.giveUpHeldUntil,
         onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
+        mintedAtWallClock: ctx.mintedAtWallClock,
+        // Card 21a281b6 merge-gate fix: EXPLICIT opt-in, only when THIS call actually carries a fresh mint
+        // (never for a carry/re-mint call that omits `ctx.mintedAtWallClock`) — see EnqueueStdinTail
+        // .captureMintGen's own doc (pty/host.ts) for why a `mintedAtWallClock`-presence fallback there was
+        // wrong: it also caught cross-boundary carry sites that call `enqueueStdin` directly, not through
+        // this method.
+        captureMintGen: ctx.mintedAtWallClock !== undefined,
       },
     );
     if (!r.delivered) {
@@ -8654,12 +8684,16 @@ export class SessionService {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     const framed = `[${framing.tag}]\n${text}`;
+    // Card 21a281b6: mint captured here, never baked into `framed` — see enqueueDurableMessage's own
+    // `mintedAtWallClock` doc (this covers session_message for BOTH the Platform Lead and the Companion,
+    // the two callers sharing this method via PLATFORM_MESSAGE_FRAMING/COMPANION_MESSAGE_FRAMING).
+    const mintedAtWallClock = Date.now();
     const deliverLive = (target: typeof session) => {
       // Durable-tracked (card 2ca18433): a busy recipient holds it FIFO + we persist it, so a
       // cross-project dispatch survives a sender death / daemon restart before the recipient's next turn.
       // The sender is the caller's own session id (threaded from the router) so an undelivered dispatch
       // can be surfaced back to it on resume; `senderFallback` is a sentinel if no caller id was provided.
-      const r = this.enqueueDurableMessage(target.id, framed, { sender: senderSessionId ?? framing.senderFallback, taskId: target.taskId ?? null });
+      const r = this.enqueueDurableMessage(target.id, framed, { sender: senderSessionId ?? framing.senderFallback, taskId: target.taskId ?? null, mintedAtWallClock });
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: "", workerSessionId: target.id, taskId: target.taskId ?? null, kind: "session_message",
@@ -9214,7 +9248,12 @@ export class SessionService {
     let turnSeqAtDelivery: number | undefined;
     if (targetManager) {
       turnSeqAtDelivery = targetManager.turnSeq ?? 0;
-      const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: managerSessionId, taskId: targetManager.taskId ?? null });
+      // Card 21a281b6: mint captured here, never baked into `framed` — see enqueueDurableMessage's own
+      // `mintedAtWallClock` doc. `framed` also stamps the origin projectId/sessionId (card 63e423cc) —
+      // that existing tag line is left byte-identical; the mint stamp is a wholly separate, additive
+      // annotation rendered later at drain time, never inserted into this string.
+      const mintedAtWallClock = Date.now();
+      const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: managerSessionId, taskId: targetManager.taskId ?? null, mintedAtWallClock });
       result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id, msgId: r.msgId };
     } else {
       // No live manager in the target project: board a durable card on ITS OWN board (mirrors

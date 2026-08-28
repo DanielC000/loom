@@ -893,6 +893,70 @@ const AGENT_COALESCE_MAX_COUNT = Number(process.env.LOOM_AGENT_COALESCE_MAX_COUN
 const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTES) || 20_000;
 
 /**
+ * Card 21a281b6 — renders the shared daemon-supplied MINT-TIME stamp onto an ORDINARY agent-message frame
+ * (`peer_message`/`session_message`/`worker_message`, and their `:redirect` variants — the four
+ * `messageWorker`/`deliverRedirect`/`deliverSessionMessage`/`messagePeerManager` callers in sessions/
+ * service.ts, the ONLY ones that pass `ctx.mintedAtWallClock`) at the moment the text is ACTUALLY handed
+ * to the pty — mirroring `annotatePasteRecoveryAge`'s own "annotate at drain time, never bake it into
+ * `QueuedMessage.text`" discipline, for the identical reason: `hasAmbiguousMatch` (card 4a0af485) content-
+ * matches a fresh dispatch against `QueuedMessage.text` verbatim to auto-join a manual resend with no id —
+ * a non-deterministic wall-clock value baked into that STORED text at construction would make two resends
+ * of the literal same instruction compare as different content and silently break that join. Stamping only
+ * `mintedAtWallClock` on the entry (never inside `m.text`) and rendering it here, once, at write time,
+ * keeps the compared/stored text stable while still handing the recipient an absolute send time it cannot
+ * fake or omit (card 21a281b6 DoD-1/DoD-2).
+ *
+ * UNCONDITIONAL when `mintedAtWallClock` is defined (DoD-1: "every delivered agent-message frame") —
+ * unlike `annotatePasteRecoveryAge`, this never gates on a tag or a generation comparison: an absolute
+ * ISO-8601 UTC timestamp is legible and unambiguous whether delivery is instant or, per card 788781da's
+ * measurement, delayed 10-15 routine minutes behind a busy recipient's queue (DoD-3) — the recipient's own
+ * turn supplies "now"; this supplies the one fact (when this was actually minted) it cannot verify or fake
+ * for itself. Reuses `annotatePasteRecoveryAge`'s own "Originally sent at <ISO>." wording verbatim rather
+ * than inventing a second vocabulary (DoD-3) — tagged `[loom:mint-time]` so it can never be confused with
+ * sender-authored body text (DoD-2).
+ *
+ * A no-op when `mintedAtWallClock` is undefined — every message this card does not scope (worker_report,
+ * settle-nudges, warnings, and a paste-recovery notice, which is disclosed by `annotatePasteRecoveryAge`
+ * instead, not this).
+ *
+ * ⚠️ ONE GATE, borrowed verbatim from `annotatePasteRecoveryAge`'s guard (2): when `mintedAtGen` is defined
+ * and `currentGen` has not yet advanced past it, this is the message's OWN first write — return `text`
+ * UNCHANGED. Not an optimization: `enqueueStdin` (see its own `mintedAtGen` default-capture comment)
+ * guarantees `mintedAtGen === live.submitGeneration` at the moment THIS write's `currentGen` is captured
+ * for a message's first attempt, so this boundary is exactly "has anything else run since mint" — the
+ * SAME boundary `Live.ambiguousDispatches`/`hasAmbiguousMatch` (card 4a0af485) depend on a message's first
+ * write staying byte-identical to its pristine `QueuedMessage.text`. Skipping this gate would seed that
+ * signature from an ANNOTATED write no fresh resend's pristine text could ever equal, silently disabling
+ * resend auto-join for every message this card touches. `mintedAtGen === undefined` (a carried-forward
+ * entry that crossed a recycle/restart boundary, which deliberately drops `mintedAtGen` — see
+ * `QueuedMessage.mintedAtGen`'s own doc) skips this gate and always renders: there is no "first write"
+ * concept left to protect once the generation counter itself has been reset out from under it.
+ *
+ * ⚠️ SECOND GATE (card 78e4b3f2's own scenario, measured via `pty-giveup-marked-resend-autojoin.mjs`):
+ * `giveUpGen !== undefined` — this write is a RE-DELIVERY of a message that has ALREADY given up at least
+ * once — ALSO returns `text` unchanged, unconditionally, regardless of `mintedAtGen`/`currentGen`. The
+ * first gate alone only protects a message's OWN FIRST write; a message can give up, redrain (crossing
+ * generations — the first gate no longer applies), and give up AGAIN, at which point `requeueGiveUpOrigin`
+ * re-seeds `Live.ambiguousDispatches` from THAT second write. Without this second gate, that second write
+ * would carry the annotation, and a plain manual resend (which never knows about it — it types the tag-
+ * STRIPPED original content) could never content-match the now-annotated signature again. A message that
+ * has ever given up therefore never discloses its mint time via this path — it already carries
+ * `framePossibleDuplicate`'s own `[loom:possible-duplicate root:…]` marker instead, a distinct signal.
+ *
+ * ⭐ SHARED VOCABULARY: card 8e0d09e8 (escalation-notification mint-time stamping) is expected to reuse
+ * this EXACT `[loom:mint-time] Originally sent at <ISO>.` tag + wording rather than minting a second one.
+ */
+function annotateMintStamp(
+  text: string, giveUpGen: number | undefined, mintedAtGen: number | undefined, currentGen: number,
+  mintedAtWallClock: number | undefined,
+): string {
+  if (mintedAtWallClock === undefined) return text;
+  if (giveUpGen !== undefined) return text; // a re-delivery of a message that has already given up once
+  if (mintedAtGen !== undefined && currentGen <= mintedAtGen) return text; // this message's own first write
+  return `${text}\n\n[loom:mint-time] Originally sent at ${new Date(mintedAtWallClock).toISOString()}.`;
+}
+
+/**
  * Card 78e4b3f2: the text ACTUALLY submitted for a batch of drained (or `Live.giveUpOrigin`-captured)
  * messages — coalesces them with `DRAIN_SEPARATOR` exactly like before this card, but ALSO frames any
  * member whose `giveUpGen` is already set (this write is a genuine re-delivery of a message that was never
@@ -914,12 +978,21 @@ const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTE
  * run on whatever `drainPending` is about to actually write, and `requeueGiveUpOrigin` must reconstruct
  * that exact same annotated text (not the pristine one) to seed a matching signature. See both call
  * sites for why each passes the value it passes.
+ *
+ * Card 21a281b6: `annotateMintStamp` runs LAST, after any paste-recovery age disclosure — the two are
+ * mutually exclusive in practice (a paste-recovery notice's own `mintedAtWallClock` is fully consumed by
+ * `annotatePasteRecoveryAge`'s cross-boundary branch; an ordinary agent message never matches
+ * `PASTE_RECOVERY_TAG` so `annotatePasteRecoveryAge` no-ops on it and leaves it untouched for this
+ * function to stamp) but composing them regardless keeps this call site correct even if that changes.
  */
 function joinSubmittedText(messages: QueuedMessage[], currentGen: number): string {
   return messages
     .map((m) => {
       const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
-      return annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock);
+      return annotateMintStamp(
+        annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock),
+        m.giveUpGen, m.mintedAtGen, currentGen, m.mintedAtWallClock,
+      );
     })
     .join(DRAIN_SEPARATOR);
 }
@@ -2396,6 +2469,23 @@ export type EnqueueStdinTail = {
   logicalId?: string;
   mintedAtGen?: number;
   mintedAtWallClock?: number;
+  /**
+   * Card 21a281b6, merge-gate fix: an EXPLICIT opt-in — when `true` AND `mintedAtGen` was not itself
+   * supplied, `enqueueStdin` captures `live.submitGeneration` into `mintedAtGen` for THIS enqueue. Never a
+   * fallback triggered merely by `mintedAtWallClock`'s presence — that broader condition ALSO caught every
+   * cross-boundary carry site (`carryPendingToSuccessor`, `upgradeCompanionCapabilities`'s post-resume()
+   * redeliver, the restart replay in `getPersistablePendingSnapshot`'s counterpart) that carries
+   * `mintedAtWallClock` alone quite deliberately, with `mintedAtGen` OMITTED because a fresh/resumed
+   * `Live.submitGeneration` restarts at 0 and comparing a predecessor's counter against it is a unit error,
+   * not evidence (see `QueuedMessage.mintedAtGen`'s own doc, and the failing merge gate's own three specs:
+   * `companion-upgrade-carry-opposite-sites.mjs`, `paste-recovery-boundary-annotation.mjs`,
+   * `paste-recovery-boundary-carry.mjs` — none of them ever pass this flag, so none of them are affected by
+   * it). Set ONLY by `enqueueDurableMessage`'s own `ctx.mintedAtWallClock` callers (`messageWorker`,
+   * `deliverRedirect`'s shared core, `deliverSessionMessage`, `messagePeerManager` — sessions/service.ts) —
+   * every one of those is a FRESH mint with no boundary to cross, so capturing a live generation for them
+   * is correct precisely because none of the cross-boundary invariants above apply to them.
+   */
+  captureMintGen?: boolean;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -6823,12 +6913,32 @@ export class PtyHost {
     const giveUpHeldUntil = isTailObject ? tailOrGiveUpHeldUntil.giveUpHeldUntil : tailOrGiveUpHeldUntil;
     const onGiveUpExhausted = isTailObject ? tailOrGiveUpHeldUntil.onGiveUpExhausted : onGiveUpExhaustedPositional;
     const logicalId = isTailObject ? tailOrGiveUpHeldUntil.logicalId : logicalIdPositional;
-    const mintedAtGen = isTailObject ? tailOrGiveUpHeldUntil.mintedAtGen : mintedAtGenPositional;
+    let mintedAtGen = isTailObject ? tailOrGiveUpHeldUntil.mintedAtGen : mintedAtGenPositional;
     const mintedAtWallClock = isTailObject ? tailOrGiveUpHeldUntil.mintedAtWallClock : mintedAtWallClockPositional;
+    // Card 21a281b6: `captureMintGen` has NO positional form — it is only ever set by `enqueueDurableMessage`
+    // via the tail-OBJECT form (see EnqueueStdinTail's own doc for why this must be an explicit opt-in, not
+    // a `mintedAtWallClock`-presence fallback).
+    const captureMintGen = isTailObject ? tailOrGiveUpHeldUntil.captureMintGen === true : false;
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
     if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
+    // Card 21a281b6 (merge-gate fix — see EnqueueStdinTail.captureMintGen's own doc): an EXPLICIT opt-in,
+    // never a `mintedAtWallClock`-presence fallback. A caller that opts in AND supplies no `mintedAtGen` of
+    // its own (sessions/service.ts's four fresh-mint call sites have no access to `live.submitGeneration`,
+    // which lives only here) gets one captured NOW, mirroring the paste-recovery mint site's own
+    // `const mintedAtGen = live.submitGeneration;` (below, in `enqueueStdin`'s own caller at the
+    // paste-tripwire give-up site). This is NOT cosmetic: `annotateMintStamp`'s (joinSubmittedText) own
+    // "nothing to disclose on the first write" gate depends on `mintedAtGen` being set so THIS write's own
+    // `currentGen` (read moments later, still unchanged) equals it — keeping a message's FIRST write
+    // byte-identical to its pristine text. Without this, `Live.ambiguousDispatches`'s resend-auto-join
+    // signature (`hasAmbiguousMatch`, card 4a0af485) would be seeded from an ANNOTATED write carrying a
+    // wall-clock value no fresh resend's freshly-framed (pristine) text could ever equal — silently
+    // disabling that join for every message this card touches. `captureMintGen` being a strict opt-in (not
+    // a `mintedAtWallClock`-presence fallback) is what keeps every CROSS-BOUNDARY carry site (recycle,
+    // resume, restart replay) untouched — none of them ever pass it, so `mintedAtGen` stays exactly as they
+    // already leave it: deliberately absent.
+    if (captureMintGen && mintedAtGen === undefined) mintedAtGen = live.submitGeneration;
     // Shape guard (card 78a16dc5) — see the doc comments on both checks for why NEITHER tier drops: a
     // dropped "warning"-kind entry is a real stall hazard (the async run_gate failure nudge can legitimately
     // contain a lone surrogate — see sanitizeLoneSurrogates' doc comment), so this only ever sanitizes or
