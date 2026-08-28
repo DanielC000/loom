@@ -31,7 +31,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   NEGATIVE CASES (byte-identical to a no-flag spawn): LOOM_DEV off / no codescape CLI detected on the
 //       host / project not enabled / codescape has no manifest entry for this repo (never ingested) /
 //       serve not up (port null) — ALL clean-skip, never a stale/absent fallback.
-//   (b) CODESCAPE_TOOL_ALLOW carries exactly the 7 read tools, none of the 5 control/write tools; createPty
+//   (b) CODESCAPE_TOOL_ALLOW carries exactly the 9 read tools, none of the control/write tools; createPty
 //       allowlists them iff the mcpServers map actually carries the "codescape" entry (shape-independent —
 //       keys off presence, not transport).
 //   plus end-to-end: spawnWorker's opts carry repoPath (the project's MAIN repo, not its own worktree) and
@@ -43,6 +43,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
+import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -80,7 +81,7 @@ delete process.env.LOOM_CODESCAPE_BIN;
 process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeHttpMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeHttpMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS, codescapeUnclassifiedTools } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -132,29 +133,35 @@ check("(gate) dbPath param: an explicit REAL dbPath wins and resolves detected",
   isCodescapeSupervisorEnabled(process.execPath) === true);
 delete process.env.LOOM_DEV;
 
-// ===================== CODESCAPE_TOOL_ALLOW: exactly the 7 read tools, none of the 5 write tools =====================
+// ===================== CODESCAPE_TOOL_ALLOW: exactly the 9 read tools, none of the write tools =====================
+// Card 5a7491d3: `overview` joined the read side (it was mounted+advertised but sat in neither list —
+// the exact wedge this card fixed), and `clear_annotations` joined the write side. `declared_actions`
+// was placed on the write side FAIL-CLOSED at first, then moved to the read side once the peer project
+// (who own the server) confirmed it's registered as a read tool through the same wrapper as the others —
+// see CODESCAPE_TOOL_ALLOW's own doc for the name-collision trap that made a naive grep answer wrong.
 const expectedRead = ["mcp__codescape__list_flows", "mcp__codescape__trace_flow", "mcp__codescape__what_touches",
-  "mcp__codescape__describe_symbol", "mcp__codescape__render_tree", "mcp__codescape__boundary_map", "mcp__codescape__scenario_space"];
+  "mcp__codescape__describe_symbol", "mcp__codescape__render_tree", "mcp__codescape__boundary_map",
+  "mcp__codescape__scenario_space", "mcp__codescape__overview", "mcp__codescape__declared_actions"];
 const forbiddenWrite = ["mcp__codescape__focus_flow", "mcp__codescape__highlight", "mcp__codescape__open_view",
-  "mcp__codescape__annotate", "mcp__codescape__show_diff"];
-check("(allowlist) CODESCAPE_TOOL_ALLOW has exactly the 7 read tools",
-  CODESCAPE_TOOL_ALLOW.length === 7 && expectedRead.every((t) => CODESCAPE_TOOL_ALLOW.includes(t)));
-check("(allowlist) CODESCAPE_TOOL_ALLOW contains NONE of the 5 control/write tools",
+  "mcp__codescape__annotate", "mcp__codescape__show_diff", "mcp__codescape__clear_annotations"];
+check("(allowlist) CODESCAPE_TOOL_ALLOW has exactly the 9 read tools",
+  CODESCAPE_TOOL_ALLOW.length === 9 && expectedRead.every((t) => CODESCAPE_TOOL_ALLOW.includes(t)));
+check("(allowlist) CODESCAPE_TOOL_ALLOW contains NONE of the 6 control/write tools",
   forbiddenWrite.every((t) => !CODESCAPE_TOOL_ALLOW.includes(t)));
 
-// ===================== CR fix: the 5 write tools are actually UNREACHABLE, not just un-allowlisted =====================
+// ===================== CR fix: the write tools are actually UNREACHABLE, not just un-allowlisted =====================
 // The allowlist checks above only prove the write tools are absent from --allowedTools; under
 // `acceptEdits` a mounted-but-unallowlisted MCP tool still PROMPTS (it isn't auto-denied), which would
 // wedge a Loom-driven worker session. disallowedToolsForSpawn must union CODESCAPE_WRITE_TOOLS into
 // `--disallowedTools` whenever the codescape MCP is actually mounted — proving the write tools are
 // structurally unreachable, not merely unallowlisted. Shape-independent: it keys off the "codescape"
 // entry's mere PRESENCE in mcpServers, not its transport, so this holds for the http shape too.
-check("(CODESCAPE_WRITE_TOOLS) carries exactly the 5 control/write tool names",
-  CODESCAPE_WRITE_TOOLS.length === 5 && forbiddenWrite.every((t) => CODESCAPE_WRITE_TOOLS.includes(t)));
+check("(CODESCAPE_WRITE_TOOLS) carries exactly the 6 control/write tool names",
+  CODESCAPE_WRITE_TOOLS.length === 6 && forbiddenWrite.every((t) => CODESCAPE_WRITE_TOOLS.includes(t)));
 
 check("(disallow) codescapeMounted=false ⇒ disallowedToolsForSpawn has NONE of the write tools",
   forbiddenWrite.every((t) => !disallowedToolsForSpawn("worker", false, false).includes(t)));
-check("(disallow) codescapeMounted=true ⇒ disallowedToolsForSpawn has ALL 5 write tools",
+check("(disallow) codescapeMounted=true ⇒ disallowedToolsForSpawn has ALL write tools",
   forbiddenWrite.every((t) => disallowedToolsForSpawn("worker", false, true).includes(t)));
 check("(disallow) codescapeMounted=true still keeps the role's own disallow list (union, not replace)",
   ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"].every((t) => disallowedToolsForSpawn("worker", false, true).includes(t)));
@@ -169,14 +176,86 @@ check("(disallow) codescapeMounted + restrictedTools both off ⇒ byte-identical
   const mcpWithCodescape = { ...mcpNoCodescape, codescape: { type: "http", url: "http://127.0.0.1:55000/mcp/myrepo-abc12345" } };
   const argsWithout = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpNoCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpNoCodescape.codescape) });
   const argsWith = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpWithCodescape.codescape) });
-  check("(e2e-disallow) codescape NOT mounted: none of the 5 write tools appear in argv",
+  check("(e2e-disallow) codescape NOT mounted: none of the write tools appear in argv",
     forbiddenWrite.every((t) => !argsWithout.includes(t)));
-  check("(e2e-disallow) codescape MOUNTED: all 5 write tools appear in --disallowedTools argv",
+  check("(e2e-disallow) codescape MOUNTED: all write tools appear in --disallowedTools argv",
     forbiddenWrite.every((t) => argsWith.includes(t)));
   const d = argsWith.indexOf("--disallowedTools");
   const strict = argsWith.indexOf("--strict-mcp-config");
   check("(e2e-disallow) --disallowedTools still precedes --strict-mcp-config (flag-ordering invariant preserved)",
     d !== -1 && strict !== -1 && d < strict);
+}
+
+// ===================== codescapeUnclassifiedTools: the list-completeness check (card 5a7491d3, DoD-4) =====================
+// A test asserting the CURRENT membership of CODESCAPE_TOOL_ALLOW/CODESCAPE_WRITE_TOOLS (above) cannot see
+// this bug class — it can only fail if one of THOSE names moves, never if the mounted server advertises a
+// tool this repo hasn't classified at all (exactly how `overview` slipped through). This section proves
+// the completeness check itself can fail (positive control on a known-bad case), then proves it end-to-end
+// against a REAL `tools/list` HTTP round-trip to a real (fixture) spawned process — not just a pure-function
+// unit call — so the check is proven against something that actually advertises tools over the wire, not
+// just against arrays already in memory.
+const fullyKnownTools = [...CODESCAPE_TOOL_ALLOW, ...CODESCAPE_WRITE_TOOLS];
+check("(completeness, negative control) the current full known set has NO unclassified tools",
+  codescapeUnclassifiedTools(fullyKnownTools).length === 0);
+check("(completeness, positive control) an extra unadvertised name IS caught",
+  JSON.stringify(codescapeUnclassifiedTools([...fullyKnownTools, "mcp__codescape__mystery_tool"])) === JSON.stringify(["mcp__codescape__mystery_tool"]));
+check("(completeness) a name already in CODESCAPE_TOOL_ALLOW is never flagged",
+  codescapeUnclassifiedTools(["mcp__codescape__overview", "mcp__codescape__declared_actions"]).length === 0);
+check("(completeness) a name already in CODESCAPE_WRITE_TOOLS is never flagged",
+  codescapeUnclassifiedTools(["mcp__codescape__clear_annotations"]).length === 0);
+
+// End-to-end: spawn the fixture CLI's real `serve` process, hit its (fixture-simulated) `tools/list` MCP
+// route with a REAL HTTP POST, and run the completeness check against what actually came back over the
+// wire — proving the check is wired to something live, not just to two in-memory arrays.
+{
+  const { spawn } = await import("node:child_process");
+  const net = await import("node:net");
+  const pickPort = () => new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const p = addr && typeof addr === "object" ? addr.port : null;
+      srv.close(() => (p ? resolve(p) : reject(new Error("no free port"))));
+    });
+  });
+  const port = await pickPort();
+  const child = spawn(process.execPath, [fixtureCli, "serve", "--port", String(port)], { stdio: "ignore" });
+  try {
+    let healthy = false;
+    try {
+      await waitUntil(async () => {
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/graph/health`);
+          return res.ok;
+        } catch { return false; } // not listening yet
+      }, { timeoutMs: 2000, intervalMs: 20, label: "fixture serve process healthy" });
+      healthy = true;
+    } catch { /* reported as a failed check below */ }
+    check("(completeness, e2e) fixture serve process became healthy", healthy);
+
+    const askToolsList = async (advertise) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp/fake-e2e-id`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { advertise } }),
+      });
+      const json = await res.json();
+      return json?.result?.tools?.map((t) => t.name) ?? [];
+    };
+
+    const cleanAdvertised = await askToolsList(fullyKnownTools);
+    check("(completeness, e2e) a server advertising exactly the known set ⇒ no unclassified tools",
+      codescapeUnclassifiedTools(cleanAdvertised).length === 0);
+
+    const driftedAdvertised = await askToolsList([...fullyKnownTools, "mcp__codescape__mystery_tool"]);
+    const driftResult = codescapeUnclassifiedTools(driftedAdvertised);
+    check("(completeness, e2e) a server advertising ONE extra tool ⇒ the check catches exactly that name",
+      JSON.stringify(driftResult) === JSON.stringify(["mcp__codescape__mystery_tool"]));
+  } finally {
+    child.kill();
+  }
 }
 
 // ===================== codescapeHttpMcpServer: the streamable-HTTP URL resolver (P4 seam) =====================
@@ -443,6 +522,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape MCP wiring (P4 rewrite, card 088afc94): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeHttpMcpServer clean-skips when serve is down (port null) or codescape's manifest has no entry for the repo, and returns a real {type:'http', url} entry — bare /mcp/<id> or worktree-scoped /mcp/<id>/<worktreeId> — once both resolve, via a manifest read-back rather than a reimplemented id hash; buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+manifest-resolves+serve-up, with all 5 negative cases (incl. the NEW 'serve down' clean-skip — no stdio fallback) byte-identical off; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's opts carry the project's MAIN repoPath (never its own worktree) plus a stable worktreeId, its register-worktree hook fires exactly once under codescape's OWN manifest-resolved id (never Loom's), and buildMcpServers (fed those same opts) mounts the matching worktree-scoped route — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape MCP wiring (P4 rewrite, card 088afc94): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeHttpMcpServer clean-skips when serve is down (port null) or codescape's manifest has no entry for the repo, and returns a real {type:'http', url} entry — bare /mcp/<id> or worktree-scoped /mcp/<id>/<worktreeId> — once both resolve, via a manifest read-back rather than a reimplemented id hash; buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+manifest-resolves+serve-up, with all 5 negative cases (incl. the NEW 'serve down' clean-skip — no stdio fallback) byte-identical off; the 9-tool read-only allowlist excludes the control/write tools and they're structurally disallowed once mounted; codescapeUnclassifiedTools catches a tool advertised in neither list (proven both in-memory and against a real tools/list HTTP round-trip to a real spawned fixture process); end-to-end, spawnWorker's opts carry the project's MAIN repoPath (never its own worktree) plus a stable worktreeId, its register-worktree hook fires exactly once under codescape's OWN manifest-resolved id (never Loom's), and buildMcpServers (fed those same opts) mounts the matching worktree-scoped route — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

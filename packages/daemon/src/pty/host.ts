@@ -2040,11 +2040,22 @@ export function buildMcpServers(o: {
 }
 
 /**
- * Card C2: the `--allowedTools` contribution for a mounted Codescape MCP entry — ONLY the 7 read tools
- * (list_flows/trace_flow/what_touches/describe_symbol/render_tree/boundary_map/scenario_space), NEVER the
- * 5 control/write tools (focus_flow/highlight/open_view/annotate/show_diff). Read-only "agent orients
- * itself" integration (Q4). Named per-tool, not the whole `mcp__codescape`
- * server prefix, so the write surface stays unreachable even though the server itself exposes it.
+ * Card C2 (+ card 5a7491d3, DoD-1/DoD-3): the `--allowedTools` contribution for a mounted Codescape MCP
+ * entry — ONLY the 9 read tools (list_flows/trace_flow/what_touches/describe_symbol/render_tree/
+ * boundary_map/scenario_space/overview/declared_actions), NEVER the control/write tools in
+ * {@link CODESCAPE_WRITE_TOOLS}. `overview` was added by card 5a7491d3: it was mounted and advertised
+ * (it's the orientation entry point our own `/codescape` skill teaches agents to call FIRST) but sat in
+ * neither list — a pure read/orientation tool, same shape as `list_flows`, so it belongs here, not on the
+ * write side. `declared_actions` was ALSO added by card 5a7491d3, after initially being placed fail-closed
+ * on the write side pending confirmation: the peer project (who own the server) confirmed it is registered
+ * as a tool in their `src/mcp/server.ts`, through the SAME `logged(...)` wrapper as their other read tools,
+ * and its handler (`src/mcp/walk.ts`) only projects a field already stamped at ingest — it mutates nothing.
+ * ⚠️ NAME-COLLISION TRAP: `declared_actions` is ALSO a member of `open_view`'s VIEW enum in their
+ * `src/mcp/control.ts` (a control-surface concern, unrelated to the tool) — grepping the peer repo for the
+ * bare name lands mostly in THAT file and reads like a write tool. The discriminator is which file
+ * registers the name AS A TOOL (`server.ts`), never where the string merely appears. Read-only "agent
+ * orients itself" integration (Q4). Named per-tool, not the whole `mcp__codescape` server prefix, so the
+ * write surface stays unreachable even though the server itself exposes it.
  */
 export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__list_flows",
@@ -2054,17 +2065,27 @@ export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__render_tree",
   "mcp__codescape__boundary_map",
   "mcp__codescape__scenario_space",
+  "mcp__codescape__overview",
+  "mcp__codescape__declared_actions",
 ];
 
 /**
- * Card C2 hardening (post-hoc CR blocker): the 5 control/write Codescape tools — NEVER allowlisted (see
- * {@link CODESCAPE_TOOL_ALLOW}), but the mounted `codescape` MCP entry still ADVERTISES all 12 to the
- * model regardless. Under `--permission-mode acceptEdits`, a tool that's mounted but not allowlisted is
- * NOT auto-approved — it PROMPTS. A Loom-driven role (worker/setup/auditor/workspace-auditor, stdin owned
- * by its manager, `AskUserQuestion` disallowed) can never answer that prompt, so a stray call wedges the
- * turn until the busy-stuck watchdog fires. These names are unioned into `--disallowedTools` (see
- * {@link disallowedToolsForSpawn}) whenever the codescape MCP is actually mounted, so the write surface is
- * structurally unreachable rather than merely un-allowlisted.
+ * Card C2 hardening (post-hoc CR blocker) + card 5a7491d3 (DoD-2): the control/write Codescape tools —
+ * NEVER allowlisted (see {@link CODESCAPE_TOOL_ALLOW}), but the mounted `codescape` MCP entry still
+ * ADVERTISES every tool it registers to the model regardless — this array and `CODESCAPE_TOOL_ALLOW`
+ * TOGETHER are meant to partition that full advertised set; don't quote a fixed total here (see
+ * {@link codescapeUnclassifiedTools} for the drift check that keeps the partition honest instead of a
+ * hardcoded count going stale the moment either list changes). Under `--permission-mode acceptEdits`, a
+ * tool that's mounted but not allowlisted is NOT auto-approved — it PROMPTS. A Loom-driven role
+ * (worker/setup/auditor/workspace-auditor, stdin owned by its manager, `AskUserQuestion` disallowed) can
+ * never answer that prompt, so a stray call wedges the turn until the busy-stuck watchdog fires. These
+ * names are unioned into `--disallowedTools` (see {@link disallowedToolsForSpawn}) whenever the codescape
+ * MCP is actually mounted, so the write surface is structurally unreachable rather than merely
+ * un-allowlisted.
+ *
+ * `clear_annotations` (card 5a7491d3) is `annotate`'s own counterpart — clearing annotations mutates the
+ * graph's view state exactly like setting them does, so it belongs on this side for the same reason
+ * `annotate` does.
  */
 export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
   "mcp__codescape__focus_flow",
@@ -2072,7 +2093,27 @@ export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
   "mcp__codescape__open_view",
   "mcp__codescape__annotate",
   "mcp__codescape__show_diff",
+  "mcp__codescape__clear_annotations",
 ];
+
+/**
+ * Card 5a7491d3, DoD-4: list-completeness check for the Codescape tool partition — given the FULL set of
+ * tool names a mounted codescape MCP server actually advertises (e.g. from a live `tools/list` read),
+ * returns whichever names are in NEITHER {@link CODESCAPE_TOOL_ALLOW} nor {@link CODESCAPE_WRITE_TOOLS}.
+ * A non-empty result means the server has grown (or this repo has otherwise missed) a tool that isn't
+ * classified as read or write yet — exactly the gap that let `overview` sit mounted-but-unlisted and wedge
+ * a worker turn. Pure and side-effect-free; callers decide what to do with a non-empty result (fail a
+ * check, log a warning, etc). NOTE ON SCOPE: this cannot itself reach out to a live codescape server (the
+ * spawn hot path does no blocking work — see this file's own spawn-recipe doc — and nothing else in this
+ * repo holds a standing connection to one), so nothing calls this automatically against the REAL mounted
+ * server today; it's exercised by codescape-mcp-spawn.mjs against a real (fixture) `tools/list` HTTP
+ * round-trip instead. Whoever adds a real live-introspection caller should reuse this function rather than
+ * re-deriving the set difference.
+ */
+export function codescapeUnclassifiedTools(advertised: readonly string[]): string[] {
+  const known = new Set<string>([...CODESCAPE_TOOL_ALLOW, ...CODESCAPE_WRITE_TOOLS]);
+  return advertised.filter((t) => !known.has(t));
+}
 
 /**
  * Security hardening (card 7159466a): `browserTesting`'s `--allowedTools` grant is the WHOLE
@@ -3538,7 +3579,7 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
  * The FULL `--disallowedTools` list for a spawn: the role's disallow list ({@link disallowedToolsForRole}
  * — the human-prompt tools, the task-tracking tools, or both) UNIONed (de-duped, role tools first) with
  * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on, with {@link CODESCAPE_WRITE_TOOLS} iff
- * `codescapeMounted` is true (the mounted Codescape MCP still advertises its 5 write tools even though
+ * `codescapeMounted` is true (the mounted Codescape MCP still advertises its own write tools even though
  * they're never allowlisted — see CODESCAPE_WRITE_TOOLS's doc for why that alone isn't enough), AND with
  * {@link PLAYWRIGHT_DISALLOWED_TOOLS} iff `playwrightMounted` is true (the mounted Playwright MCP's
  * `--allowedTools` grant is the whole-server wildcard, which includes the RCE-equivalent

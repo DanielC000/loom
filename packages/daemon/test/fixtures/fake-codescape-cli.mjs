@@ -17,6 +17,9 @@
 //     append to `fake-codescape-calls.jsonl` (that log is for SUBPROCESS invocations; a registration is an
 //     HTTP call against the already-recorded `serve` process, and mixing it in would shift the
 //     position-indexed assertions elsewhere in codescape-supervisor.mjs that read that file).
+//     Card 5a7491d3: ALSO answers `POST /mcp/<anything>` with a minimal `tools/list` JSON-RPC stand-in —
+//     the caller passes the tool names to advertise via `params.advertise` and gets them echoed back as
+//     `result.tools`; used by codescape-mcp-spawn.mjs's list-completeness check, not a real MCP handshake.
 //     Also answers `GET /graph/health` — `{live:true, projects, version:"fake", build:"fake"}` normally.
 //     If env `FAKE_CODESCAPE_HEALTH_WEDGE_FILE` is set AND that path exists on disk at request time, the
 //     handler deliberately never responds (no `res.end`, connection just sits open) — simulating a serve
@@ -151,6 +154,30 @@ if (args[0] === "ingest") {
         if (rawBuild !== "__ABSENT__") body.build = rawBuild === "__NULL__" ? null : (rawBuild === undefined ? "fake" : rawBuild);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
+        return;
+      }
+      // Card 5a7491d3: a minimal `tools/list` JSON-RPC stand-in on the mounted MCP route itself
+      // (`/mcp/<id>` or `/mcp/<id>/<worktreeId>`) — real enough to round-trip a real HTTP POST for the
+      // list-completeness check in codescape-mcp-spawn.mjs, without implementing the full MCP handshake
+      // (no test here needs anything beyond tools/list). The caller supplies the advertised tool names
+      // itself via `params.advertise` — this fixture has no opinion on what a "real" codescape server
+      // would list, it only echoes back whatever the test wants to simulate being mounted.
+      if (req.method === "POST" && req.url.startsWith("/mcp/")) {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          let parsed;
+          try { parsed = JSON.parse(body); } catch { res.writeHead(400, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "invalid JSON body" })); return; }
+          const { id, method, params } = parsed ?? {};
+          if (method !== "tools/list") {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: { code: -32601, message: `method not found: ${method}` } }));
+            return;
+          }
+          const advertise = Array.isArray(params?.advertise) ? params.advertise : [];
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result: { tools: advertise.map((name) => ({ name })) } }));
+        });
         return;
       }
       if (req.method === "POST" && req.url === "/project") {
