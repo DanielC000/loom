@@ -87,11 +87,19 @@ try {
     );
     if (entries.length > 0) console.log(`  leaked entries: ${JSON.stringify(entries)}`);
 
-    // Discriminating-control sanity: the prefix this file is KNOWN to have leaked under, pre-fix, must be
-    // the shape we're checking for — proves this test's own pattern isn't vacuously matching nothing.
+    // Positive control on the DETECTOR itself, not on the target: plant a directory named with this
+    // target's own known pre-fix leak prefix directly into a fresh fake home's .claude/projects, then
+    // confirm leakedEntries() actually reports it. This is what makes the "does NOT write..." PASS above
+    // meaningful — without it, a leakedEntries() that always returned [] (wrong path, swallowed error,
+    // etc.) would make every one of those PASSes vacuous, and nothing in this file would catch that.
+    const controlHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-leak-iso-realhome-ctrl-"));
+    roots.push(controlHome);
+    const plantedName = `${leakPrefix}fixture`;
+    fs.mkdirSync(path.join(controlHome, ".claude", "projects", plantedName), { recursive: true });
+    const controlEntries = leakedEntries(controlHome);
     check(
-      `${file}: the known pre-fix leak prefix ("${leakPrefix}") is well-formed (self-check on this test's own fixture)`,
-      typeof leakPrefix === "string" && leakPrefix.length > 0,
+      `${file}: leakedEntries() DOES detect a planted "${leakPrefix}"-prefixed directory (positive control on the detector)`,
+      controlEntries.includes(plantedName),
     );
   }
 } finally {
