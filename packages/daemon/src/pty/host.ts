@@ -797,6 +797,27 @@ const BRACKET_PASTE_END = "\x1b[201~";
 const DRAIN_SEPARATOR = "\n\n────────\n\n";
 
 /**
+ * Card eac3464d DoD-1/DoD-2/DoD-4: bounds on a SAME-SENDER agent-kind coalesced run (see
+ * `drainPending`'s same-sender branch and `enqueueStdin`'s reorder-on-enqueue) — a run stops at
+ * whichever binds first. Both are a DELIBERATE, STATED bound: card eac3464d's own "LIVE RISK" section
+ * (sharpened by that card's DoD-0 finding) is that coalescing makes writes BIGGER on a write path with a
+ * live, unresolved confirmation-loss defect (cards c23e2869/3ce3fa39, and DoD-0's own give-up/re-mint
+ * finding, card 8af2b9bd) — an unbounded run is not acceptable.
+ *
+ * COUNT (5): handles the common 2-3-message same-sender burst DoD-0 measured in production without
+ * letting one sender's backlog balloon into a single enormous write. Also used as the REORDER LOOKBACK
+ * in `enqueueStdin` (see there) — sharing one constant keeps the "how far can one sender reach" mental
+ * model single-valued instead of two knobs that can silently drift apart.
+ *
+ * BYTES (20,000 chars): comfortably clears typical single-report sizes observed in production (up to
+ * ~15KB) — a head entry already over this bound is NEVER excluded by it and still drains alone, exactly
+ * as today; the bound only limits how much MORE gets folded onto an already-large head. It bounds the
+ * INCREMENTAL growth coalescing adds, not any single message's own size.
+ */
+const AGENT_COALESCE_MAX_COUNT = Number(process.env.LOOM_AGENT_COALESCE_MAX_COUNT) || 5;
+const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTES) || 20_000;
+
+/**
  * Card 78e4b3f2: the text ACTUALLY submitted for a batch of drained (or `Live.giveUpOrigin`-captured)
  * messages — coalesces them with `DRAIN_SEPARATOR` exactly like before this card, but ALSO frames any
  * member whose `giveUpGen` is already set (this write is a genuine re-delivery of a message that was never
@@ -2076,18 +2097,27 @@ export type QueueSource = "human" | "system";
  */
 export type TurnRoute = CompanionRoute;
 /**
- * Coalescing classification (owner-directed, 2026-07-03): `"warning"` = a Loom operational nudge
- * (idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
- * memory-recall injection) — always safe to concatenate with its neighbors into one turn. `"agent"` =
- * a message AUTHORED by an agent or a human TO the recipient (a Lead's `session_message`, a human
- * composer turn, a worker→manager report, a manager→worker direction/redirect, a companion inbound or
- * proactive reminder/heartbeat) — drained ALONE, one-per-turn, UNLESS `coalesceAgentMessages` is on
- * (see drainPending). Defaults to `"warning"` at the `enqueueStdin` call boundary so every pre-existing
+ * Coalescing classification (owner-directed, 2026-07-03; AMENDED 2026-08-28 by card eac3464d): `"warning"`
+ * = a Loom operational nudge (idle/context/busy-stuck watchdogs, restart/boot continuation notes,
+ * rate-limit/usage nudges, memory-recall injection) — always safe to concatenate with its neighbors into
+ * one turn, from ANY sender. `"agent"` = a message AUTHORED by an agent or a human TO the recipient (a
+ * Lead's `session_message`, a human composer turn, a worker→manager report, a manager→worker
+ * direction/redirect, a companion inbound or proactive reminder/heartbeat) — drained ONE-PER-TURN
+ * **ACROSS senders** (the 2026-07-03 guarantee this classification exists to protect: two DIFFERENT
+ * senders' directives are never mashed together), but a run of CONSECUTIVE queued entries from the SAME
+ * sender now coalesces into one turn (card eac3464d, owner-authorized 2026-08-28 ask 3 — "concatenated
+ * and sent together as one prompt... so it's clear to the user what is happening" — with
+ * `DRAIN_SEPARATOR` as the legibility mitigation), bounded by `AGENT_COALESCE_MAX_COUNT`/
+ * `AGENT_COALESCE_MAX_BYTES` and excluding any give-up/re-mint (`giveUpGen`-tagged) entry (see
+ * `drainPending`'s same-sender branch). This is a STATED trade: the WITHIN-sender one-per-turn guarantee
+ * is deliberately given up; the CROSS-sender guarantee is not. Full legacy behavior (every kind, every
+ * sender, the whole leading same-route run) is still available via `coalesceAgentMessages` (see
+ * `drainPending`). Defaults to `"warning"` at the `enqueueStdin` call boundary so every pre-existing
  * caller that predates this classification (tests, and any call site this change didn't touch) keeps
  * the old full-coalesce behavior byte-identical; every real production call site is classified
  * explicitly (see host.ts's callers). Bias for anything genuinely ambiguous: `"agent"` — the harm this
- * classification exists to prevent is coalescing agent messages, so a warning wrongly delivered
- * one-per-turn is merely a few extra benign turns.
+ * classification exists to prevent is coalescing DIFFERENT senders' agent messages together, so a
+ * warning wrongly delivered one-per-turn is merely a few extra benign turns.
  */
 export type QueuedMessageKind = "warning" | "agent";
 /**
@@ -6684,11 +6714,48 @@ export class PtyHost {
     // — only the boot restart-replay seam passes it, to restore a give-up hold onto the freshly re-enqueued
     // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
+    let insertAt = live.pending.length;
     {
       const id = randomUUID();
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) });
+      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) };
+      // Card eac3464d DoD-2 (owner ask 2, 2026-08-28): a SAME-SENDER agent-kind message jumps ahead of
+      // any OTHER senders' messages queued after its own sender's last (eligible) entry, landing right
+      // after it instead of at the FIFO tail — so drainPending's same-sender coalescing (above) actually
+      // has something adjacent to coalesce with even when another sender's message interleaved the
+      // arrivals. Never reorders past a give-up-held entry or a giveUpGen-tagged (possible-duplicate)
+      // entry — those keep their FIFO/front position untouched, exactly like the coalescing exclusion.
+      //
+      // FAIRNESS BOUND (a real, STATED trade — a chatty sender CAN delay a quiet one, card eac3464d's
+      // own correction 3 requires this be explicit, not silent): the search for "this sender's last
+      // eligible entry" only looks back AGENT_COALESCE_MAX_COUNT positions from the CURRENT tail. Once
+      // an entry has that many OTHER arrivals queued behind it, it has aged out of the lookback window
+      // and can never again be leapfrogged — capping the worst-case extra delay any one message can
+      // accumulate from this reordering at AGENT_COALESCE_MAX_COUNT same-kind arrivals, not unbounded.
+      // A NULL/undefined `senderId` never matches another null-sender entry (same reasoning as
+      // drainPending's own senderKey !== null guard — see that comment): identity can't be established
+      // from an absent id, so this whole reorder is skipped for a message with no genuine sender.
+      const senderKey = senderId ?? null;
+      if (kind === "agent" && senderKey !== null) {
+        const lookbackStart = Math.max(0, live.pending.length - AGENT_COALESCE_MAX_COUNT);
+        for (let i = live.pending.length - 1; i >= lookbackStart; i--) {
+          const candidate = live.pending[i]!;
+          // Manager review finding (card eac3464d): a `continue` here would only skip THIS candidate
+          // and keep scanning further back, so a match found on the far side would splice the new
+          // message in BEFORE this held/giveUpGen entry — moving its index, contradicting the doc
+          // comment just above ("keep their FIFO/front position untouched"). `break` makes code and
+          // comment agree: the scan stops dead the instant it meets a held/giveUpGen entry, so nothing
+          // is EVER inserted before it — its position is genuinely never touched, not merely "not
+          // matched against". Regression-covered: pty-agent-sender-coalesce.mjs scenario (G).
+          if (this.isGiveUpHeld(candidate) || candidate.giveUpGen !== undefined) break;
+          if (candidate.kind === "agent" && (candidate.senderId ?? null) === senderKey && routeKeyOf(candidate.route) === routeKeyOf(route)) {
+            insertAt = i + 1;
+            break;
+          }
+        }
+      }
+      live.pending.splice(insertAt, 0, entry);
     }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary UNLESS redelivery is ultimately exhausted, in which
@@ -6696,9 +6763,12 @@ export class PtyHost {
     // `handleGiveUpExhausted` in sessions/service.ts, card 417cea0a), instead of leaving a
     // `delivered:false` reader to wonder whether it's a drop. `busyForMs` is only meaningful while the
     // hold is actually busy-caused (not-ready/composer-dirty/rate-limited holds have no busy-since edge
-    // to measure from).
+    // to measure from). `position` is `insertAt`'s own 1-based index (card eac3464d DoD-2): almost
+    // always the tail (`live.pending.length` post-insert, byte-identical to pre-eac3464d), but for a
+    // same-sender agent-kind reorder it's the entry's REAL queue position, not the tail — reporting the
+    // tail here would silently lie about where a reordered message actually landed.
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
-    return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
+    return { delivered: false, position: insertAt + 1, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
   }
 
   /**
@@ -7310,16 +7380,20 @@ export class PtyHost {
    * Deliver queued messages when it's safe (idle + composer free). Shared by Stop + reconcile + the
    * markReady / box-free transitions.
    *
-   * ONE-PER-TURN for AGENT messages, COALESCE for WARNING messages (owner-directed, 2026-07-03): a
-   * queued entry's `kind` (see QueuedMessageKind) decides whether it may share a turn with its
-   * neighbors. When `coalesceAgentMessages` is OFF (the default), an `"agent"`-kind head entry drains
-   * ALONE — submit() re-arms busy SYNCHRONOUSLY (M1), so the NEXT agent message drains on the next Stop
-   * hook (self-chaining); the reconcile timer is the backstop, so nothing is stranded. A `"warning"`-kind
-   * head entry still coalesces the leading run of same-route WARNING entries exactly as before — Loom's
-   * own operational nudges are safe to concatenate. A run NEVER mixes kinds: it stops at the first
-   * differently-kinded entry (in addition to the existing route-key break), so a turn is either all-agent
-   * (in practice always exactly one, since agent-kind never coalesces when the toggle is off) or
-   * all-warning, never both.
+   * ONE-PER-TURN ACROSS SENDERS for AGENT messages, COALESCE for WARNING messages (owner-directed,
+   * 2026-07-03; AMENDED 2026-08-28 by card eac3464d — see QueuedMessageKind's own doc for the full
+   * framing of the trade). A queued entry's `kind` (see QueuedMessageKind) decides whether it may share
+   * a turn with its neighbors. When `coalesceAgentMessages` is OFF (the default), an `"agent"`-kind head
+   * entry coalesces ONLY with a CONSECUTIVE run from the SAME sender (same route + same `senderId`,
+   * bounded by `AGENT_COALESCE_MAX_COUNT`/`AGENT_COALESCE_MAX_BYTES`, excluding any give-up/re-mint
+   * `giveUpGen`-tagged entry — see the branch below) — a DIFFERENT sender (or a route/kind/bound
+   * mismatch) still breaks the run exactly as a route mismatch always did, so submit() re-arms busy
+   * SYNCHRONOUSLY (M1) and the NEXT, different-sender agent message drains on the next Stop hook
+   * (self-chaining); the reconcile timer is the backstop, so nothing is stranded. A `"warning"`-kind head
+   * entry still coalesces the leading run of same-route WARNING entries exactly as before — Loom's own
+   * operational nudges are safe to concatenate regardless of sender. A run NEVER mixes kinds: it stops at
+   * the first differently-kinded entry (in addition to the existing route-key break), so a turn is either
+   * all-agent (from exactly one sender) or all-warning, never both.
    *
    * When `coalesceAgentMessages` is ON (legacy, opt-in via Settings), `kind` is ignored entirely and the
    * ENTIRE leading same-route run coalesces into ONE concatenated turn — byte-identical to the
@@ -7376,8 +7450,59 @@ export class PtyHost {
     const head = live.pending[startIdx]!;
     let drained: QueuedMessage[];
     if (!this.coalesceAgentMessages && head.kind === "agent") {
-      // One-per-turn (default): an agent-authored message never shares a turn with anything else.
-      drained = live.pending.splice(startIdx, 1);
+      // SAME-SENDER coalescing (card eac3464d DoD-1/DoD-2/DoD-3, owner-authorized 2026-08-28). This
+      // DELIBERATELY TRADES the WITHIN-sender one-per-turn guarantee the 2026-07-03 classification
+      // established, in favor of the owner's 2026-08-28 ask 3 ("concatenated and sent together as one
+      // prompt ... so it's clear to the user what is happening"). The CROSS-sender guarantee that
+      // 2026-07-03 rule actually exists to protect — two DIFFERENT senders' directives never mashed
+      // together — is UNCHANGED below: the run breaks on any route, sender, or kind mismatch exactly
+      // like the warning-kind branch, and DRAIN_SEPARATOR (via joinSubmittedText) keeps same-sender
+      // items legible as distinct entries within the one turn.
+      //
+      // EXCLUDED from this run (both as an extension candidate, via the loop guard, and as a head that
+      // can extend at all, via the `head.giveUpGen === undefined` gate below): any entry carrying
+      // `giveUpGen` — a give-up/re-mint redelivery (framed `[loom:possible-duplicate root:...]`). Card
+      // eac3464d's own DoD-0 measured these arriving 10-40s AFTER the original attempt already drained
+      // or parked — nothing is ever actually adjacent to coalesce them with — while stacking a bigger
+      // write onto exactly the unconfirmed-write path that produced them would only raise exposure on
+      // that separate, already-carded defect (card 8af2b9bd). A giveUpGen-tagged head therefore drains
+      // alone, byte-identical to pre-eac3464d behavior.
+      //
+      // BOUNDED by count AND bytes (DoD-4's "LIVE RISK" — coalescing makes writes bigger on a path with
+      // a live, unresolved confirmation-loss defect): see AGENT_COALESCE_MAX_COUNT/_MAX_BYTES's own doc.
+      // Per-msgId accounting is unaffected — `submit()`'s `origin` array and `requeueGiveUpOrigin` already
+      // iterate a multi-member `drained` array member-by-member (this mechanism was already exercised by
+      // the warning-kind route-keyed branch below; agent-kind now reuses it, not a new one), and every
+      // drained entry's own `onDeliver` still fires independently after submit (see the loop after this
+      // if/else) — a partial confirmation failure re-queues and re-tags EACH constituent message on its
+      // own `giveUpRequeues`/`giveUpGen`, never collapsing N outcomes into one.
+      // A NULL/undefined `senderId` (a real, pre-existing shape: e.g. the restart-replay seam and the
+      // kickoff give-up remint both enqueue agent-kind text with senderId deliberately omitted) never
+      // matches ANOTHER null-sender entry here — identity can't be established from an absent id, so
+      // "both omitted a sender" must NOT be read as "same sender". Without this, two UNRELATED messages
+      // that merely both happen to skip senderId (e.g. two different original senders' entries replayed
+      // through the restart seam, which drops the original senderId) could wrongly coalesce/reorder
+      // together. Only a message with a GENUINE (non-null) senderId ever participates in this branch.
+      const key = routeKeyOf(head.route);
+      const senderKey = head.senderId ?? null;
+      let n = 1;
+      let bytes = head.text.length;
+      if (head.giveUpGen === undefined && senderKey !== null) {
+        while (
+          startIdx + n < live.pending.length
+          && n < AGENT_COALESCE_MAX_COUNT
+          && !this.isGiveUpHeld(live.pending[startIdx + n]!)
+          && live.pending[startIdx + n]!.kind === "agent"
+          && live.pending[startIdx + n]!.giveUpGen === undefined
+          && routeKeyOf(live.pending[startIdx + n]!.route) === key
+          && (live.pending[startIdx + n]!.senderId ?? null) === senderKey
+          && bytes + live.pending[startIdx + n]!.text.length <= AGENT_COALESCE_MAX_BYTES
+        ) {
+          bytes += live.pending[startIdx + n]!.text.length;
+          n++;
+        }
+      }
+      drained = live.pending.splice(startIdx, n); // the leading eligible same-sender (+ same-route) run, bounded
     } else {
       // ROUTE-KEYED coalescing (Loom Companion multi-channel): coalesce ONLY the LEADING run of pending
       // messages that share the FIRST entry's route key. Messages with NO route (the manager→worker direction
