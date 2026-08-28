@@ -728,6 +728,61 @@ try {
     check(`VaultVersioner.start() RETURNS despite a never-resolving checkIsRepo (bounded boot path) — took ${Math.round(elapsed2)}ms (cap ~${tinyMs * 2}ms across the two bounded call sites)`, elapsed2 < tinyMs * 8 + 2000);
     await vto.stop();
   }
+
+  {
+    // whenReady() (card 86b41129): before this card, a pre-ready chokidar error left the watcher's
+    // readyPromise permanently unresolved (deliberately — see start()'s "error" listener doc), so a
+    // caller that awaited whenReady() hung until the TEST HARNESS'S OWN blanket 120s TEST_TIMEOUT_MS
+    // and reported an opaque, anonymous "timeout" — losing the real cause entirely. whenReady() now
+    // owns its own bound and NAMES the failure. `vv.watcher` is reached directly here (TS `private` is
+    // compile-time-only; the compiled field is a plain property) to inject a synthetic chokidar "error"
+    // deterministically, without depending on real filesystem timing.
+    const vaultWR1 = path.join(root, "vaultWhenReady1");
+    fs.mkdirSync(vaultWR1, { recursive: true });
+    const vv1 = new VaultVersioner(vaultWR1);
+    await vv1.start();
+    // Emitted synchronously, right after start() returns and before any timer/IO callback can run — the
+    // real chokidar "ready" event needs at least one macrotask (fs.readdir I/O), so this is guaranteed to
+    // land BEFORE ready, not racing it.
+    vv1.watcher.emit("error", new Error("SIMULATED_PRE_READY_FAILURE"));
+    let err1;
+    try { await vv1.whenReady(); } catch (e) { err1 = e; }
+    check("a pre-ready error already seen at call time rejects whenReady() (not silently pending)", err1 instanceof Error);
+    check("...and the rejection NAMES the real cause, not an anonymous timeout", /SIMULATED_PRE_READY_FAILURE/.test(err1?.message ?? ""));
+    await vv1.stop();
+
+    // Same case, but the error arrives WHILE whenReady() is already waiting (not before) — proves the
+    // in-flight racer path, not just the call-time fast path above.
+    const vaultWR2 = path.join(root, "vaultWhenReady2");
+    fs.mkdirSync(vaultWR2, { recursive: true });
+    const vv2 = new VaultVersioner(vaultWR2);
+    await vv2.start();
+    const pending2 = vv2.whenReady().catch((e) => e);
+    vv2.watcher.emit("error", new Error("SIMULATED_MID_WAIT_FAILURE"));
+    const err2 = await pending2;
+    check("an error arriving WHILE whenReady() is waiting also rejects (not just a pre-existing one)", err2 instanceof Error);
+    check("...and also NAMES the real cause", /SIMULATED_MID_WAIT_FAILURE/.test(err2?.message ?? ""));
+    await vv2.stop();
+
+    // Neither "ready" nor "error" ever arrives (e.g. ignorePermissionErrors:true fully swallows the
+    // failure) — whenReady()'s own bound must still produce a NAMED failure, not hang until some
+    // external harness timeout. Force this deterministically (never wait out a real 60s default) via the
+    // ctor's whenReadyTimeoutMs test override; readyPromise is overwritten with a promise that never
+    // settles so this cannot flake on a real chokidar scan finishing first.
+    const vaultWR3 = path.join(root, "vaultWhenReady3");
+    fs.mkdirSync(vaultWR3, { recursive: true });
+    const tinyReadyMs = 100;
+    const vv3 = new VaultVersioner(vaultWR3, 5000, undefined, undefined, tinyReadyMs);
+    await vv3.start();
+    vv3.readyPromise = new Promise(() => {}); // simulate "scan never completes, no error either"
+    const t3 = performance.now(); // MONOTONIC
+    let err3;
+    try { await vv3.whenReady(); } catch (e) { err3 = e; }
+    const elapsed3 = performance.now() - t3;
+    check(`whenReady() with no pre-ready error or ready event still rejects within its own bound (took ${Math.round(elapsed3)}ms, cap ${tinyReadyMs}ms)`, elapsed3 < tinyReadyMs + 2000);
+    check("...and the timeout rejection is a NAMED Error (not undefined / an anonymous hang)", err3 instanceof Error && /did not become ready/.test(err3.message));
+    await vv3.stop();
+  }
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }
   // root's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup

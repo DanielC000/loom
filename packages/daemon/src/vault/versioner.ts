@@ -837,6 +837,15 @@ function isVaultAutoCommitPaused(commitPath: string): boolean {
  *  see {@link VaultVersioner.warnIfLarge}. Not a cap: nothing is skipped or throttled at this size. */
 const LARGE_VAULT_WATCH_WARN_THRESHOLD = 20_000;
 
+/**
+ * Default bound for {@link VaultVersioner.whenReady} (card 86b41129). Chokidar's initial scan is a
+ * readdir walk, not a git op, so this doesn't need to be in {@link VAULT_GIT_OP_TIMEOUT_MS}'s league —
+ * but a vault at or above {@link LARGE_VAULT_WATCH_WARN_THRESHOLD} entries still does real, uncapped I/O
+ * per entry, so this leaves real headroom above a small/typical vault's sub-second scan. Test-only
+ * override via the constructor (same shape as `watchWarnThreshold`/`gitDeps`) — real callers never pass one.
+ */
+const WHEN_READY_TIMEOUT_MS = 60_000;
+
 export class VaultVersioner {
   private git: BoundedVaultGit;
   private watcher?: FSWatcher;
@@ -844,8 +853,16 @@ export class VaultVersioner {
   private externallyManaged = false;
   /** The folder we actually watch + commit — the governing repo ROOT, resolved in `start()`. */
   private commitPath: string;
-  /** Resolves once chokidar's initial scan completes ("ready") — see {@link whenReady}. */
+  /** Resolves once chokidar's initial scan completes ("ready") — see {@link whenReady}. Never rejects
+   *  (see `start()`'s "error" listener doc) — a pre-ready error is tracked separately via
+   *  {@link preReadyError} so a rejected-and-unobserved promise can never trigger an unhandled rejection
+   *  in production, where nothing calls {@link whenReady}. */
   private readyPromise?: Promise<void>;
+  /** Set true the instant chokidar's real "ready" fires — lets {@link preReadyError} distinguish "this
+   *  error happened before we were ready" from "this happened after, and doesn't matter to whenReady()". */
+  private ready = false;
+  /** The most recent watcher "error" seen BEFORE `ready` flipped true, if any — see {@link whenReady}. */
+  private preReadyError?: Error;
   /** The matcher passed to chokidar as `ignored` — retained so {@link hasUnexcludedTopLevelEntry} can
    *  reuse it (never a second, possibly-divergent copy of the exclusion logic). */
   private matcher?: (p: string) => boolean;
@@ -860,6 +877,10 @@ export class VaultVersioner {
     /** Test-only bounded-git injection seam (card 509716cc) — real callers never pass this; see
      *  {@link VaultGitDeps}. */
     private gitDeps: VaultGitDeps = {},
+    /** Test-only override for {@link WHEN_READY_TIMEOUT_MS} (card 86b41129) — real callers never pass
+     *  this; lets a test force {@link whenReady}'s bound down to milliseconds instead of waiting out a
+     *  real 60s timeout to prove the timeout path names its failure. */
+    private whenReadyTimeoutMs = WHEN_READY_TIMEOUT_MS,
   ) {
     this.commitPath = vaultPath;
     this.git = boundedVaultGit(vaultPath, gitDeps).git;
@@ -908,25 +929,71 @@ export class VaultVersioner {
     // exists to prevent — a single transient, often-recoverable error (chokidar frequently still reaches
     // "ready" afterward) would otherwise turn into an unhandled-rejection risk for any caller (a test, or
     // a future consumer) that awaits whenReady() without its own try/catch.
-    this.readyPromise = new Promise((resolve) => { this.watcher!.once("ready", resolve); });
+    this.readyPromise = new Promise((resolve) => { this.watcher!.once("ready", () => { this.ready = true; resolve(); }); });
     this.watcher.on("all", () => this.schedule());
     this.watcher.on("ready", () => this.warnIfLarge());
     this.watcher.on("error", (err) => {
-      console.warn(`[vault-versioner] ${this.commitPath} watcher error (ignored, watcher continues): ${(err as Error)?.message ?? err}`);
+      const e = err as Error;
+      if (!this.ready) this.preReadyError = e;
+      console.warn(`[vault-versioner] ${this.commitPath} watcher error (ignored, watcher continues): ${e?.message ?? err}`);
     });
   }
 
   /**
-   * Resolves once the watcher's initial filesystem scan completes (chokidar's own "ready" event). Never
-   * REJECTS — a pre-ready chokidar error is logged (see `start()`) but does not settle this promise, so a
-   * transient error chokidar itself recovers from (the common case) doesn't spuriously fail an awaiter. If
-   * the watcher truly never reaches "ready", this will not resolve; a caller that needs a bound should use
-   * its own timeout (e.g. this test suite's `waitFor`) rather than have this method guess at what counts as
-   * "fatal enough" to give up on. A no-op (resolves immediately) if `start()` hasn't been called. Exposed
-   * for callers/tests that need to anchor on this OBSERVABLE event rather than a fixed wait.
+   * Resolves once the watcher's initial filesystem scan completes (chokidar's own "ready" event). A no-op
+   * (resolves immediately) if `start()` hasn't been called. Exposed for callers/tests that need to anchor
+   * on this OBSERVABLE event rather than a fixed wait.
+   *
+   * **Bounded, and a pre-ready failure surfaces NAMED (card 86b41129) — this method owns its own timeout
+   * rather than requiring every caller to bring one.** The shared {@link readyPromise} field itself still
+   * never rejects (`start()`'s "error" listener stays swallow-and-log, matching `sessions/liveness.ts`'s
+   * doctrine — a transient, often-recoverable chokidar error must not poison state nothing may ever
+   * observe), so production is unaffected: nothing outside this method calls `whenReady()` today. But a
+   * caller that DOES call this one is, by definition, asking to be told — so this method rejects as soon
+   * as it can name why, rather than making a real defect indistinguishable from "still scanning":
+   *   1. A watcher error already seen before `ready` fired (checked at call time) rejects immediately,
+   *      naming that error.
+   *   2. A watcher error that arrives WHILE this call is waiting rejects immediately, same message shape —
+   *      by construction this means a rejection is NEVER anonymous: any pre-ready error is always caught
+   *      by (1) or (2) before {@link whenReadyTimeoutMs} could ever elapse with one outstanding.
+   *   3. Neither `ready` nor an error ever arrives (e.g. `ignorePermissionErrors:true` fully swallows the
+   *      failure with no "error" event at all, or the scan is simply still running) — this rejects once
+   *      {@link whenReadyTimeoutMs} elapses, naming the bound that was exceeded. Either way this is a real
+   *      `Error` a caller can inspect, never `undefined`/an anonymous test-harness timeout.
    */
   async whenReady(): Promise<void> {
-    await this.readyPromise;
+    if (!this.readyPromise || this.ready) return;
+    if (this.preReadyError) {
+      throw new Error(`vault watcher for ${this.commitPath} failed before becoming ready: ${this.preReadyError.message}`);
+    }
+    const readyPromise = this.readyPromise;
+    const watcher = this.watcher;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        watcher?.off("error", onError);
+      };
+      const onError = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`vault watcher for ${this.commitPath} failed before becoming ready: ${(err as Error)?.message ?? err}`));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`vault watcher for ${this.commitPath} did not become ready within ${this.whenReadyTimeoutMs}ms`));
+      }, this.whenReadyTimeoutMs);
+      watcher?.once("error", onError);
+      readyPromise.then(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      });
+    });
   }
 
   /**
