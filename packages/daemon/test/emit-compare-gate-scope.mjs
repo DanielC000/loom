@@ -27,12 +27,19 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
-import {
-  sleep, GIT_ID, FULL_GATE, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile, REAL_TEST_DAEMON_SCRIPT,
-} from "./_emit-compare-fixtures.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecgs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+
+// `_emit-compare-fixtures.mjs` has its OWN top-level `await import("../dist/git/worktrees.js")` (to
+// derive GUARD_BASENAMES from the real STATIC_GUARD_REPO_PATHS) — a STATIC import of it here would be
+// hoisted and evaluated before the LOOM_HOME lines above ever run, letting that transitive import lock
+// paths.js's module-level DB_PATH to the real ~/.loom before this file's own override takes effect (the
+// prod-DB guard then correctly refuses `new Db()` below). Importing it dynamically, after LOOM_HOME is
+// set, keeps this file's own env setup ahead of anything that reads it.
+const {
+  sleep, GIT_ID, FULL_GATE, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile, REAL_TEST_DAEMON_SCRIPT,
+} = await import("./_emit-compare-fixtures.mjs");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
