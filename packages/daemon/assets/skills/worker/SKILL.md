@@ -11,8 +11,10 @@ worktree branch, and report up when done or blocked. You are a **worker**: your 
 workers of your own.
 
 **If you use Agent sub-agents, they inherit your FULL MCP tool surface and run in-process** — a
-sub-agent's `worker_report` / `memory_write` / board write is indistinguishable from your own. Sub-agents
-**RETURN findings to you**; **you** do every write, every report, every board move.
+sub-agent's `worker_report` / `memory_write` / board write carries your identity and is just as durable
+as your own, and your manager cannot reliably tell it apart from a call you made yourself. **Tell your
+sub-agents explicitly not to call `worker_report` / `memory_write` / board-write tools** — they **RETURN
+findings to you**; **you** do every write, every report, every board move, as the sole writer.
 
 Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
 gate command). This skill is the doctrine those plug into — the server PREPENDS your agent base brief
