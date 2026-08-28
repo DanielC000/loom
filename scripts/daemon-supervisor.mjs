@@ -286,7 +286,9 @@ for (;;) {
   //
   // 1) shared + daemon (turbo ^build handles the shared dependency) — FATAL on failure: never start
   //    a broken daemon.
-  const buildCode = sh("pnpm exec turbo build --filter=@loom/daemon", repoRoot);
+  // "stamp" runs right after "build" (turbo.json: dependsOn:["build"], cache:false — see card 3d7dccb9)
+  // so dist/build-info.json always reflects THIS checkout's real HEAD, cache hit or miss.
+  const buildCode = sh("pnpm exec turbo build stamp --filter=@loom/daemon", repoRoot);
   if (buildCode !== 0) {
     console.error(`[supervisor] daemon build failed (exit ${buildCode}) — NOT starting a broken daemon.`);
     process.exit(buildCode);
@@ -295,8 +297,10 @@ for (;;) {
   //    to avoid serving a stale bundle. But a web build failure is NON-FATAL: the gateway boots fine on
   //    a missing/stale dist (server.ts logs + skips static), so a BAD web build must not block the WHOLE
   //    daemon boot (all-project orchestration). Log loudly and boot on the previous dist. Turbo/vite
-  //    does not wipe dist on a failed build, so the prior good bundle survives.
-  const webBuildCode = sh("pnpm exec turbo build --filter=@loom/web", repoRoot);
+  //    does not wipe dist on a failed build, so the prior good bundle survives — and turbo's own DAG skips
+  //    "stamp" too when "build" fails, so the prior dist's build-info.json (still describing that prior
+  //    surviving bundle correctly) is left untouched rather than re-stamped over a build that never ran.
+  const webBuildCode = sh("pnpm exec turbo build stamp --filter=@loom/web", repoRoot);
   if (webBuildCode !== 0) {
     console.error("[supervisor] WARNING: web build failed — booting with the previous packages/web/dist (UI may be stale)");
   }

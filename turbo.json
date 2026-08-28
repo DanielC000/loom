@@ -28,20 +28,35 @@
     "@loom/daemon#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"],
-      // @loom/daemon's build script runs scripts/sync-claude-skills.mjs and scripts/write-build-info.mjs
-      // (both outside this package's own file tree), so it needs its own inputs entry keying the cache on
-      // those scripts too — otherwise a script-only change is invisible to turbo and a bare `pnpm build`
-      // can replay a stale cache hit without re-running them. $TURBO_DEFAULT$ preserves the normal
-      // git-tracked-files inputs.
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/sync-claude-skills.mjs", "$TURBO_ROOT$/scripts/write-build-info.mjs"]
+      // @loom/daemon's build script runs scripts/sync-claude-skills.mjs (outside this package's own file
+      // tree), so it needs its own inputs entry keying the cache on that script too — otherwise a
+      // script-only change is invisible to turbo and a bare `pnpm build` can replay a stale cache hit
+      // without re-running it. $TURBO_DEFAULT$ preserves the normal git-tracked-files inputs.
+      // scripts/write-build-info.mjs is DELIBERATELY not listed here any more — see the "stamp" task below.
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/sync-claude-skills.mjs"]
     },
     "@loom/web#build": {
       "dependsOn": ["^build", "clean"],
-      "outputs": ["dist/**"],
-      // @loom/web's build script also runs scripts/write-build-info.mjs (card f26339d7) — same reasoning
-      // as @loom/daemon#build above: a script outside this package's own file tree is invisible to turbo's
-      // default inputs, so it needs to be named explicitly to key the cache on it too.
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/write-build-info.mjs"]
+      "outputs": ["dist/**"]
+    },
+    // Card 3d7dccb9 — writes <package>/dist/build-info.json (scripts/write-build-info.mjs), split OUT of
+    // the cached "build" task on purpose. `cache:false` means this task's script runs on EVERY invocation,
+    // cache hit or miss for its "build" dependency — a turbo cache HIT for "build" proves (by turbo's own
+    // cache-correctness guarantee) that the restored dist/** content is equivalent to actually compiling
+    // THIS checkout's current tree, so re-stamping the CURRENT checkout's real `git rev-parse HEAD` here is
+    // always correct — unlike the old design, where write-build-info.mjs ran INSIDE the cached "build"
+    // script and so was cacheable+replayable itself: turbo shares its local cache directory across every
+    // git worktree of the same repo (a deliberate turbo 2.x feature — confirmed via
+    // `TURBO_LOG=debug turbo build`: "Using shared worktree cache at: <main checkout>/.turbo/cache",
+    // `is_shared_worktree=true`), so a worker's own `pnpm build` (e.g. during its merge-gate self-check)
+    // could populate a cache entry whose content matched a LATER build on a completely different checkout
+    // — replaying that worker worktree's OWN `dist/build-info.json`, stamped with a sha that may not even
+    // be reachable from mainline, into the canonical dist. See deploy-staleness.ts's module doc for the
+    // full incident. Only @loom/daemon and @loom/web define a "stamp" script; a package with none (e.g.
+    // @loom/shared, which ships no served artifact) is silently skipped by turbo, same as "lint" above.
+    "stamp": {
+      "cache": false,
+      "dependsOn": ["build"]
     },
     "typecheck": {
       "dependsOn": ["^build"]

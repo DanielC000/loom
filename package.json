@@ -9,7 +9,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "turbo build",
+    "build": "turbo build stamp",
     "dev": "turbo dev",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",

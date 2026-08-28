@@ -364,7 +364,14 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // silently diverge on which packages a deploy actually rebuilds. Covers @loom/daemon, @loom/shared, AND
     // @loom/web — the daemon serves packages/web/dist statically, so a deploy that only rebuilt the daemon
     // left the SERVED UI stale.
-    { label: "build", command: process.execPath, args: [turboBin(), "build", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
+    // "stamp" (card 3d7dccb9) runs in the SAME turbo invocation, right after "build" (turbo.json:
+    // dependsOn:["build"], cache:false) — it (re)writes dist/build-info.json fresh from THIS checkout's
+    // real HEAD, cache hit or miss, so the deploy build's own artifact identity can never be a stale/
+    // foreign sha replayed off turbo's cache (which — see deploy-staleness.ts's module doc — is SHARED
+    // across every git worktree of this repo). `--force` already made "build" itself immune to this by
+    // always recompiling here; "stamp" closes the same gap for every OTHER, non-forced build path
+    // (daemon-supervisor.mjs's boot build, a plain `pnpm build`) that still relies on turbo's cache.
+    { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }
 

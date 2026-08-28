@@ -1,11 +1,17 @@
 #!/usr/bin/env node
-// Card f26339d7 — bakes the resolved `git rev-parse HEAD` into <dist-dir>/build-info.json at BUILD time,
-// so a running daemon/web artifact's actual source commit is falsifiable independent of any clock. Run as
-// the LAST step of each deployable package's own build script (after tsc/vite has produced dist/), so this
-// file lands INSIDE turbo's cached `dist/**` output for that task — see deploy-staleness.ts's own doc for
-// why that placement is load-bearing: a turbo cache-hit replay restores this file's ORIGINAL baked sha
-// verbatim (even though the replay advances every file's mtime), which is exactly what lets a cache-replay
-// be detected instead of silently invisible.
+// Card f26339d7 — bakes the resolved `git rev-parse HEAD` into <dist-dir>/build-info.json, so a running
+// daemon/web artifact's actual source commit is falsifiable independent of any clock.
+//
+// Card 3d7dccb9 — run as each deployable package's SEPARATE, UNCACHED `stamp` turbo task
+// (`dependsOn: ["build"], cache: false` — see turbo.json), never as a step INSIDE the `build` script
+// itself. `build`'s own output (dist/**) is cached by turbo, and — a deliberate turbo 2.x feature,
+// confirmed live via `TURBO_LOG=debug`: "Using shared worktree cache" / `is_shared_worktree=true` — that
+// cache is SHARED across every git worktree of this repo, not scoped to the checkout that populated it.
+// Baking this file INSIDE the cached `build` output used to mean a cache HIT could replay a DIFFERENT
+// worktree's own baked sha (e.g. a worker's merge-gate self-check build) into whichever checkout asked for
+// a build next — content-correct (that's what makes a cache hit valid at all) but IDENTITY-wrong. Running
+// this as its own uncached task means it re-executes on every build invocation, cache hit or miss, always
+// stamping the sha of the checkout that is actually asking right now.
 //
 // Degrades to {"sha": null, "dirty": null} — NEVER a stale or fabricated sha — when this isn't a git
 // checkout (e.g. a published npm tarball's own build), git isn't installed, or a call times out. An

@@ -87,6 +87,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        result unavailable — degrades to webDistBuiltAt:null with every web/src commit ever counting
 //        as unbuilt, same tolerant-of-absence style as packages/shared/dist in section (7).
 //
+// Card 3d7dccb9 — builtContentMatchesHead, the CONTENT-based fallback for the one case a sha comparison
+// alone cannot resolve: a REAL, non-ancestor commit whose shipped tree is nonetheless byte-identical to
+// mainline HEAD (a worker worktree's own union-forward merge commit vs. its later squash-merge onto
+// mainline — see the module doc's mechanism section for the live incident this answers):
+//   (23a) BOTH POLARITIES, positive: a genuine divergent branch (real `git merge-base --is-ancestor`
+//         failure, not a hypothetical sha) with IDENTICAL content ⇒ builtContentMatchesHead:true.
+//   (23b) BOTH POLARITIES, negative: the SAME divergent shape but with a REAL content difference ⇒
+//         builtContentMatchesHead:false — proves (23a)'s `true` isn't a check that always reads true.
+//   (23c) the ordinary-ancestor case (processBuiltSha equals mainline HEAD) never spends the extra git
+//         calls — builtContentMatchesHead stays null; the already-correct processBuiltShaMatchesHead/stale
+//         answer that case instead.
+//   (23d) an unresolvable processBuiltSha ⇒ null, never a fabricated verdict.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/deploy-staleness.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -736,6 +749,89 @@ try {
     r22.mainlineHeadSha === null && r22.processBuiltShaMatchesHead === null && r22.deploySignatureMismatch === false);
 
   try { fs.rmSync(shaCorpusRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (23) Card 3d7dccb9 — builtContentMatchesHead: the CONTENT-based fallback =====================
+  // A `processBuiltSha` that is a REAL commit but NOT an ancestor of mainline HEAD is exactly the shape of
+  // a worker worktree's own union-forward merge commit vs. its later squash-merge onto mainline: same
+  // shipped content, different commit identity. Reproduced with a genuine divergent branch (not a
+  // hypothetical sha) so `git merge-base --is-ancestor` and `git diff` run against real objects.
+  const caRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-carepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(caRepo, "packages", "daemon", "src"), { recursive: true });
+  const gitCa = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: caRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitCa("init -q");
+  gitCa('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-02-01T00:00:00Z");
+  const caDefaultBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: caRepo }).toString().trim(); // "main" or "master" — never assumed
+
+  const caDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-cadist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(caDistDir, { recursive: true });
+  const caDistEntry = path.join(caDistDir, "index.js");
+  const buildCaDistAt = (iso) => {
+    fs.writeFileSync(caDistEntry, "// fixture ca dist entry\n");
+    fs.utimesSync(caDistEntry, new Date(iso), new Date(iso));
+  };
+  buildCaDistAt("2027-02-05T00:00:00Z"); // after everything below — commitsBehind/stale are not what this section tests
+
+  // ---- (23a) IDENTICAL-CONTENT divergent commit — must report NOT-stale-BY-CONTENT ----
+  gitCa("checkout -qb worktree-branch");
+  fs.writeFileSync(path.join(caRepo, "packages", "daemon", "src", "identical.ts"), "export const same = 1;\n");
+  gitCa("add packages/daemon/src/identical.ts");
+  gitCa('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add identical"', "2027-02-02T00:00:00Z");
+  const workerSha = execSync("git rev-parse HEAD", { cwd: caRepo }).toString().trim();
+
+  gitCa(`checkout -q ${caDefaultBranch}`);
+  // Re-applies the SAME file content as a SEPARATE commit — simulates a squash-merge landing content
+  // identical to the worktree branch above, under a different commit identity/parent/timestamp.
+  // `git checkout` prunes packages/daemon/src back to empty (it held only the just-left branch's
+  // now-absent identical.ts) and removes the now-empty dir entirely — recreate it before writing.
+  fs.mkdirSync(path.join(caRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.writeFileSync(path.join(caRepo, "packages", "daemon", "src", "identical.ts"), "export const same = 1;\n");
+  gitCa("add packages/daemon/src/identical.ts");
+  gitCa('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add identical (squash)"', "2027-02-03T00:00:00Z");
+  const mainlineShaIdentical = execSync("git rev-parse HEAD", { cwd: caRepo }).toString().trim();
+
+  check("(23a-setup) workerSha is genuinely NOT an ancestor of mainline HEAD (a real divergent branch, never merged)",
+    (() => { try { execSync(`git merge-base --is-ancestor ${workerSha} ${mainlineShaIdentical}`, { cwd: caRepo }); return false; } catch (e) { return e.status === 1; } })());
+  const r23a = computeDeployStaleness({ distEntry: caDistEntry, repoRoot: caRepo, processBuiltSha: workerSha, processBuiltDirty: false });
+  check("(23a-setup) processBuiltShaMatchesHead:false — the sha genuinely differs from mainline HEAD" + reasonSuffix(r23a),
+    r23a.processBuiltShaMatchesHead === false);
+  check("(23a) THE FIX: builtContentMatchesHead:true — a non-ancestor commit whose shipped tree is byte-identical to mainline HEAD is correctly NOT flagged stale by content, despite the sha mismatch",
+    r23a.builtContentMatchesHead === true);
+
+  // ---- (23b) NEGATIVE POLARITY — a genuinely stale build (real content difference) must still report stale ----
+  gitCa("checkout -qb worktree-branch-2"); // branches from caDefaultBranch's current tree — identical.ts stays present
+  fs.mkdirSync(path.join(caRepo, "packages", "daemon", "src"), { recursive: true }); // defensive, mirrors (23a)'s note
+  fs.writeFileSync(path.join(caRepo, "packages", "daemon", "src", "divergent.ts"), "export const divergent = 1;\n");
+  gitCa("add packages/daemon/src/divergent.ts");
+  gitCa('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add divergent"', "2027-02-04T00:00:00Z");
+  const staleWorkerSha = execSync("git rev-parse HEAD", { cwd: caRepo }).toString().trim();
+
+  // computeDeployStaleness resolves "mainline HEAD" as whatever THIS repoRoot's checked-out HEAD
+  // currently is (see the module doc — it has no notion of a named "main" branch) — check back out to
+  // caDefaultBranch so mainlineHeadSha resolves to mainlineShaIdentical again, not to staleWorkerSha
+  // itself (which is what's currently checked out after the branch-create above).
+  gitCa(`checkout -q ${caDefaultBranch}`);
+  // mainline HEAD (mainlineShaIdentical from (23a)) never got this change — the trees genuinely differ.
+  const r23b = computeDeployStaleness({ distEntry: caDistEntry, repoRoot: caRepo, processBuiltSha: staleWorkerSha, processBuiltDirty: false });
+  check("(23b-setup) this staleWorkerSha is ALSO not an ancestor of mainline HEAD (same divergent shape as (23a))" + reasonSuffix(r23b),
+    r23b.processBuiltShaMatchesHead === false);
+  check("(23b) BOTH POLARITIES: builtContentMatchesHead:false — a REAL content difference (divergent.ts, never on mainline) is correctly still flagged, proving (23a)'s true isn't a check that always reads true",
+    r23b.builtContentMatchesHead === false);
+
+  // ---- (23c) the ORDINARY-ancestor case never spends the extra git calls — builtContentMatchesHead stays null ----
+  const r23c = computeDeployStaleness({ distEntry: caDistEntry, repoRoot: caRepo, processBuiltSha: mainlineShaIdentical, processBuiltDirty: false });
+  check("(23c) processBuiltSha EQUALS mainline HEAD (trivially its own ancestor) ⇒ builtContentMatchesHead stays null — the ordinary case is answered by processBuiltShaMatchesHead/stale instead, not this field",
+    r23c.processBuiltShaMatchesHead === true && r23c.builtContentMatchesHead === null);
+
+  // ---- (23d) an UNRESOLVABLE processBuiltSha ⇒ null, never a fabricated verdict ----
+  const r23d = computeDeployStaleness({ distEntry: caDistEntry, repoRoot: caRepo, processBuiltSha: "f".repeat(40), processBuiltDirty: false });
+  check("(23d) an unresolvable processBuiltSha ⇒ builtContentMatchesHead:null (merge-base can't resolve it — degrades, never throws or fabricates)",
+    r23d.builtContentMatchesHead === null);
+
+  try { fs.rmSync(caRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(caDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
   // Sweeps EVERY fixture root registered via trackDir() above, not just this section's own —
   // the per-section rmSync calls above only run on the happy path; a thrown error anywhere in the
@@ -747,6 +843,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer, and (card f26339d7) distBuiltSha reads the build-time-baked sha FRESH every call while processBuiltSha is a PURE echo of the caller-supplied processBuiltSha option (no caching inside computeDeployStaleness itself — see AMENDMENT 1), distBuiltShaDiffersFromProcess correctly flags a rebuild-without-restart in one call with no cache-timing race, both degrade to null/false gracefully when build-info.json or the override is absent, and deploySignatureMismatch correctly flags a simulated turbo cache-replay (mtime says fresh, the process's own baked sha proves it's genuinely behind) while staying false on a clean, matching process. (The 'captured once at REAL process start, frozen despite a later on-disk change' property this amendment introduces is proven separately, against the actual production module, by served-status-process-sha.mjs.)"
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer, and (card f26339d7) distBuiltSha reads the build-time-baked sha FRESH every call while processBuiltSha is a PURE echo of the caller-supplied processBuiltSha option (no caching inside computeDeployStaleness itself — see AMENDMENT 1), distBuiltShaDiffersFromProcess correctly flags a rebuild-without-restart in one call with no cache-timing race, both degrade to null/false gracefully when build-info.json or the override is absent, and deploySignatureMismatch correctly flags a simulated turbo cache-replay (mtime says fresh, the process's own baked sha proves it's genuinely behind) while staying false on a clean, matching process. (The 'captured once at REAL process start, frozen despite a later on-disk change' property this amendment introduces is proven separately, against the actual production module, by served-status-process-sha.mjs.) (Card 3d7dccb9) builtContentMatchesHead correctly resolves the one case a sha comparison can't — a real, non-ancestor divergent commit with identical shipped content reads NOT-stale-by-content, the same divergent shape with a real content difference still reads stale, both proven on a genuine git branch (not a hypothetical sha), the ordinary-ancestor case never spends the extra git calls (stays null), and an unresolvable sha degrades to null rather than a fabricated verdict."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

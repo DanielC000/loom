@@ -58,17 +58,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * log, and `webStale`'s own web-relevant log), each capped at `GIT_TIMEOUT_MS`, PLUS a conditional FOURTH
  * (see `deploySignatureMismatch` below — a single-object `git log -1 <sha>` lookup, not a graph walk, fired
  * only when the date-based clock already claims `stale:false` and `processBuiltSha` differs from `mainlineHeadSha`)
- * — worst case 4×`GIT_TIMEOUT_MS` of the event loop fully blocked (this is a synchronous `execFileSync`,
- * unlike the async claude-version cache — see the call-site doc at `manager-prompt.ts` for why that's an
- * acceptable tradeoff here) PLUS the (cheap, synchronous `fs`) dist scans. Manager spawns can BURST
- * (boot-reconcile resumes every manager across every project at once), so keep the git timeout constant
- * small. Card c6e7ebe7 measured the THREE-call baseline directly on Windows: 147–275ms at IDLE, 220–465ms
- * at 3× CPU oversubscription — NOT the "tens of ms" this comment used to claim (a real 15–27% of the 1s
- * budget consumed at idle alone). Still a comfortable margin even with the fourth call added (a
- * single-object lookup, cheap relative to the two full-history `git log` walks already in the baseline),
- * and no observed in-flight call — idle or oversubscribed — has ever come close to the timeout (see that
- * card for the full data); a *different* tail shows up only in the outer node process's own scheduling
- * latency under heavy oversubscription, which is not a git-call tail and must not be conflated with one.
+ * PLUS a conditional FIFTH and SIXTH (card 3d7dccb9 — `builtContentMatchesHead`'s `git merge-base
+ * --is-ancestor` + `git diff --name-only`, fired only when `processBuiltSha` is resolvable AND not an
+ * ancestor of `mainlineHeadSha` — the same rare, already-anomalous branch the fourth call's sibling logic
+ * lives in, not an additional unconditional cost) — worst case 6×`GIT_TIMEOUT_MS` of the event loop fully
+ * blocked (this is a synchronous `execFileSync`, unlike the async claude-version cache — see the call-site
+ * doc at `manager-prompt.ts` for why that's an acceptable tradeoff here) PLUS the (cheap, synchronous `fs`)
+ * dist scans. Manager spawns can BURST (boot-reconcile resumes every manager across every project at
+ * once), so keep the git timeout constant small. Card c6e7ebe7 measured the THREE-call baseline directly
+ * on Windows: 147–275ms at IDLE, 220–465ms at 3× CPU oversubscription — NOT the "tens of ms" this comment
+ * used to claim (a real 15–27% of the 1s budget consumed at idle alone). Still a comfortable margin even
+ * with the fourth call added (a single-object lookup, cheap relative to the two full-history `git log`
+ * walks already in the baseline) — the fifth/sixth calls are UNMEASURED directly, but are the same shape
+ * (a single-object ancestry check + one bounded `git diff --name-only` against three pathspecs, not a
+ * full-history walk) and share the SAME rare gate as the fourth, so they are not expected to change that
+ * margin materially — and no observed in-flight call — idle or oversubscribed — has ever come close to the
+ * timeout (see that card for the full data); a *different* tail shows up only in the outer node process's
+ * own scheduling latency under heavy oversubscription, which is not a git-call tail and must not be
+ * conflated with one.
  * NEVER throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist
  * not built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and
  * this applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades
@@ -80,15 +87,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * `distBuiltSha`/`processBuiltSha` are the missing POSITIVE signal: the actual `git rev-parse HEAD` an
  * artifact was compiled from, baked into `dist/build-info.json` at BUILD time by
  * `scripts/write-build-info.mjs` (never at runtime).
- * ⭐ THE MECHANISM (not obvious — write this down before someone "optimizes" it away): `build-info.json`
- * lands INSIDE the same `dist/**` output turbo caches for the `build` task. A turbo cache-HIT replay
- * restores that file's ORIGINAL baked sha verbatim — even though the replay simultaneously advances every
- * restored file's mtime to "now" — because a cache restore is a file-content restore, not a rebuild. That
- * is EXACTLY what makes a cache-replay detectable: the mtime-derived clocks above all read fresh (mtime
- * moved), but the baked sha still names the OLD commit the cached output was actually compiled from. If
- * `build-info.json` were regenerated on every build outside the cached outputs (e.g. written by a
- * postinstall hook, or excluded from `outputs` in turbo.json), a cache replay would silently regenerate a
- * FRESH (wrong) sha and this detector would go blind while every test still passed. Do not move it.
+ * ⭐ THE MECHANISM, AS OF CARD 3d7dccb9 (this changed — read this before trusting an older description
+ * elsewhere): `build-info.json` is written by `scripts/write-build-info.mjs` as its OWN, SEPARATE,
+ * UNCACHED turbo task (`stamp`, `cache:false`, `dependsOn:["build"]` — see turbo.json), never as a step
+ * INSIDE the cached `build` task's own script. It ALWAYS re-executes, cache hit or miss, stamping the
+ * CURRENT checkout's real `git rev-parse HEAD` on every single build invocation.
+ * ⚠️ WHY IT USED TO BE THE OPPOSITE, AND WHY THAT WAS WRONG: the original design ran this step LAST inside
+ * the cached `build` script, on the theory that a turbo cache-HIT replay restoring the file's ORIGINAL
+ * baked sha (while every mtime-derived clock reads fresh) would make a cache-replay DETECTABLE, not
+ * silently invisible. That reasoning missed a load-bearing fact about turbo itself: turbo 2.x's local
+ * cache is SHARED ACROSS EVERY GIT WORKTREE OF THE SAME REPO by default (confirmed live via
+ * `TURBO_LOG=debug turbo build`: "Using shared worktree cache at: <main checkout>/.turbo/cache",
+ * `is_shared_worktree=true` — NOT scoped to `node_modules`, which Loom otherwise deliberately never shares
+ * across worktrees). A worker's OWN `pnpm build` (e.g. during its merge-gate self-check, run inside its
+ * own isolated worktree) can populate a cache entry whose CONTENT matches a later build on a completely
+ * different checkout — turbo correctly serves that cache hit (the content really is equivalent), but the
+ * OLD design then replayed that worker worktree's own baked `build-info.json` along with it: content-right,
+ * IDENTITY-wrong, and that identity could name a commit (e.g. an ephemeral union-forward merge commit
+ * created only inside that worker's worktree) not even reachable from mainline HEAD. Card 3d7dccb9 caught
+ * this live: a genuinely-current daemon read `processBuiltShaMatchesHead:false` / `deploySignatureMismatch:
+ * true` — the CRY-WOLF direction, a false "not deployed" for code that was actually current — because the
+ * running daemon's own boot build (daemon-supervisor.mjs, a non-`--force` turbo build) had cache-hit-served
+ * a worker worktree's stamp. The uncached `stamp` task closes this: since a cache hit already proves
+ * content-equivalence to compiling THIS checkout right now, re-stamping THIS checkout's own HEAD on every
+ * invocation is always correct, and — unlike excluding the file from `build`'s cached `outputs` entirely —
+ * never leaves a stale or absent stamp behind on the (common) cache-hit path either. See
+ * `builtContentMatchesHead`'s own doc below for the belt-and-suspenders CONTENT-based check this incident
+ * also motivated, for the residual case a sha comparison alone can never resolve on its own: two different,
+ * non-ancestor commits with byte-identical shipped trees (exactly what a squash merge vs. its own
+ * unsquashed worktree form produces).
  * ⚠️ TWO FIELDS, ONE PER QUESTION — AMENDMENT 1, the correction that produced this shape: an earlier draft
  * of this card had ONE cached `builtSha` field, read once per dist dir and frozen. That is WRONG for a
  * subtle reason worth stating precisely: a per-process/per-distDir cache is "read once at FIRST USE", not
@@ -263,6 +290,23 @@ export interface DeployStalenessResult {
    * whenever `stale` is already `true` (ordinary staleness isn't a "disagreement" — both signals already
    * agree something needs a rebuild). */
   deploySignatureMismatch: boolean;
+  /** Card 3d7dccb9 — the CONTENT-based fallback `processBuiltShaMatchesHead` cannot give you: a sha
+   * comparison alone can never distinguish "different commit, identical shipped tree" from "genuinely
+   * stale" — and the former is exactly what a squash-merged card looks like from the vantage of its own
+   * unsquashed worktree form (see the module doc's mechanism section for the incident this answers).
+   * Computed ONLY when `processBuiltSha` is resolvable AND is NOT an ancestor of `mainlineHeadSha` (a
+   * `git merge-base --is-ancestor` check) — the one case a plain sha/date comparison is structurally
+   * unable to answer; when `processBuiltSha` IS an ancestor (the ordinary case — ordinary commit history,
+   * an ordinary rebuild), the existing `stale`/`commitsBehind`/`processBuiltShaMatchesHead` signals already
+   * answer the question correctly and this stays `null` (no git call spent confirming what's already
+   * known). `true` means `git diff --name-only` between `processBuiltSha` and `mainlineHeadSha`, scoped to
+   * the shipped paths (`packages/`, `scripts/`, `bin/` — see `CONTENT_CHECK_PATHSPECS`), came back EMPTY:
+   * the built tree is byte-identical to mainline HEAD across everything actually served, so this is NOT
+   * stale despite the sha mismatch. `false` means that diff was non-empty — a genuine content difference,
+   * i.e. actually stale. `null` also when the diff itself couldn't be computed (an unresolvable sha, a
+   * pruned/GC'd commit, a timeout) — never fabricates a verdict without proof, same discipline as every
+   * other field in this module. */
+  builtContentMatchesHead: boolean | null;
   /** Card f26339d7 — the WEB analogue of `distBuiltSha`: the git commit sha baked into
    * `packages/web/dist/build-info.json` at build time, read fresh every call. `packages/web/dist` is
    * already served live from disk with no restart needed (card c3ce92ea), so there is no
@@ -281,6 +325,11 @@ export interface DeployStalenessResult {
 const RESTART_RELEVANT_PATHSPECS = DEPLOY_PACKAGES.filter((p) => p.restartRequired).map((p) => p.srcPathspec);
 /** Paths whose changes need only a REBUILD (no restart) — currently just `packages/web/src`. */
 const REBUILD_ONLY_PATHSPECS = DEPLOY_PACKAGES.filter((p) => !p.restartRequired).map((p) => p.srcPathspec);
+/** Card 3d7dccb9 — the paths `builtContentMatchesHead` diffs: everything actually SHIPPED, not just the
+ * restart-relevant `src` trees above (a compiled `dist/` isn't diffable against a git ref, so this checks
+ * the SOURCE that produces what's served — `packages/` (daemon+shared+web src), `scripts/` (the build/
+ * deploy scripts themselves — this file included), and `bin/` (the packaged CLI entry)). */
+const CONTENT_CHECK_PATHSPECS = ["packages/", "scripts/", "bin/"];
 
 const GIT_TIMEOUT_MS = 1000;
 const UNIT_SEP = "\x1f";
@@ -328,6 +377,8 @@ function unavailable(reason: string, baked?: Partial<Pick<DeployStalenessResult,
     // Can't compare against mainlineHeadSha or run a commit-date lookup without git — always null/false.
     processBuiltShaMatchesHead: null,
     deploySignatureMismatch: false,
+    // Can't run `git merge-base`/`git diff` without git — always null, same "unknown, not a verdict" rule.
+    builtContentMatchesHead: null,
     webBuiltSha: baked?.webBuiltSha ?? null,
     webBuiltDirty: baked?.webBuiltDirty ?? null,
   };
@@ -392,6 +443,22 @@ function commitDateMs(repoRoot: string, sha: string): number | null {
     const ms = new Date(out).getTime();
     return Number.isNaN(ms) ? null : ms;
   } catch {
+    return null;
+  }
+}
+
+/** `git merge-base --is-ancestor <sha> <of>` — exit 0 means `sha` IS an ancestor of (or equal to) `of`,
+ * exit 1 means it is definitively NOT (both are legitimate, well-defined answers from git). Any OTHER
+ * outcome (an unresolvable/GC'd sha, a timeout, git itself missing) degrades to `null` — "unknown", never
+ * a fabricated `true`/`false`. Used only by `builtContentMatchesHead`'s gate, below: the content diff is
+ * worth its git cost only in the one case ancestry can't already answer the question. */
+function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
+  try {
+    runGit(repoRoot, ["merge-base", "--is-ancestor", sha, of]);
+    return true;
+  } catch (err) {
+    const status = (err as { status?: number | null }).status;
+    if (status === 1) return false;
     return null;
   }
 }
@@ -618,6 +685,26 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   // already resolved above (before the `.git` bail) and are reused here via `baked` — not re-read.
   const distBuiltShaDiffersFromProcess = distBuiltSha !== null && processBuiltSha !== null && distBuiltSha !== processBuiltSha;
 
+  // Card 3d7dccb9 — the CONTENT-based fallback: only worth its two extra git calls when a sha comparison
+  // has already told us it CAN'T answer the question, i.e. `processBuiltSha` names a real commit that is
+  // NOT an ancestor of `mainlineHeadSha` (a divergent/foreign commit — the exact shape of a worker
+  // worktree's own union-forward merge commit vs. its later squash-merge onto mainline). When
+  // `processBuiltSha` IS an ancestor (the ordinary case), `stale`/`commitsBehind`/`processBuiltShaMatchesHead`
+  // already answer this correctly and no extra git call is spent confirming it.
+  let builtContentMatchesHead: boolean | null = null;
+  if (processBuiltSha) {
+    const ancestor = isAncestor(repoRoot, processBuiltSha, mainlineHeadSha);
+    if (ancestor === false) {
+      try {
+        const diffOut = runGit(repoRoot, ["diff", "--name-only", processBuiltSha, mainlineHeadSha, "--", ...CONTENT_CHECK_PATHSPECS]).trim();
+        builtContentMatchesHead = diffOut.length === 0;
+      } catch {
+        // An unresolvable sha on either side, or a timeout — unknown, not a fabricated verdict.
+        builtContentMatchesHead = null;
+      }
+    }
+  }
+
   return {
     available: true,
     distBuiltAt,
@@ -638,6 +725,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
     distBuiltShaDiffersFromProcess,
     processBuiltShaMatchesHead,
     deploySignatureMismatch,
+    builtContentMatchesHead,
     webBuiltSha,
     webBuiltDirty,
   };

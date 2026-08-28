@@ -3937,7 +3937,18 @@ export class OrchestrationMcpRouter {
           "{available, stale, commitsBehind, distBuiltAt, processStartedAt, runningCodeBuiltAt, " +
           "distAheadOfProcess, mainlineHeadSha, mainlineHeadDate, webStale, webCommitsBehind, webDistBuiltAt, " +
           "distBuiltSha, distBuiltDirty, processBuiltSha, processBuiltDirty, distBuiltShaDiffersFromProcess, " +
-          "processBuiltShaMatchesHead, deploySignatureMismatch, webBuiltSha, webBuiltDirty, reason?}. Card " +
+          "processBuiltShaMatchesHead, deploySignatureMismatch, builtContentMatchesHead, webBuiltSha, " +
+          "webBuiltDirty, reason?}. ⛔ Card 3d7dccb9: `processBuiltSha`/`mainlineHeadSha` are NOT, on their " +
+          "own, an authoritative \"did my deploy land\" pair — a sha MISMATCH (`processBuiltShaMatchesHead:" +
+          "false`, even `deploySignatureMismatch:true`) can be a FALSE ALARM: a different, non-ancestor " +
+          "commit (e.g. a worker worktree's own union-forward merge commit) whose SHIPPED TREE is byte-" +
+          "identical to mainline HEAD reads exactly like staleness on sha alone, and was observed doing so " +
+          "live on a genuinely-current daemon. `builtContentMatchesHead` is the fix: computed only in that " +
+          "exact non-ancestor case, `true` means the mismatch is cosmetic (diff came back empty across the " +
+          "shipped paths — trust the deploy), `false` means it's real, `null` means undetermined (git " +
+          "couldn't resolve one side, or the ordinary-ancestor case where this field is never computed at " +
+          "all — read `processBuiltShaMatchesHead`/`stale` instead there). When `processBuiltShaMatchesHead` " +
+          "is `false`, check `builtContentMatchesHead` before concluding the deploy is actually stale. Card " +
           "f26339d7: every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
           "are the BAKED signal, split into TWO questions on purpose: `distBuiltSha`/`distBuiltDirty` are a " +
           "FRESH read of `dist/build-info.json` on EVERY call (\"what's on disk right now\" — a rebuild " +
@@ -3963,12 +3974,14 @@ export class OrchestrationMcpRouter {
           "to agree; it means mainline moved on a non-restart-relevant commit (docs/assets/tests/scripts) " +
           "after this process's build — the deliberate CRY-WOLF CONTROL case (deploy-staleness.mjs test 20), " +
           "not a defect. `deploySignatureMismatch` is the field that actually flags disagreement worth acting on. " +
-          "`deploySignatureMismatch:true` is the actual defect detector, fed from `processBuiltSha` " +
+          "`deploySignatureMismatch:true` is a defect detector, fed from `processBuiltSha` " +
           "(deliberately, not `distBuiltSha` — the question is what THIS PROCESS is running): the date-" +
           "based clock claims `stale:false` (caught up) BUT `processBuiltSha`'s own real commit date " +
           "proves a restart-relevant commit landed after it — i.e. the mtime clock and the baked-sha " +
-          "ground truth disagree, the exact signature of a turbo cache-replay that bumps dist's mtime " +
-          "without rebuilding from current source. `webBuiltSha`/`webBuiltDirty` are the WEB analogue of " +
+          "ground truth disagree. Card 3d7dccb9: this can ALSO be the cry-wolf case above (a non-ancestor " +
+          "commit with an identical shipped tree) rather than a genuine cache-replay — check " +
+          "`builtContentMatchesHead` before treating a `true` here as confirmed staleness. `webBuiltSha`/" +
+          "`webBuiltDirty` are the WEB analogue of " +
           "`distBuiltSha`/`distBuiltDirty` (fresh every call, no process/dist split — `packages/web/dist` " +
           "is already served live with no " +
           "restart needed) — informational only, no mismatch detector for web in this card. ⭐ This same " +

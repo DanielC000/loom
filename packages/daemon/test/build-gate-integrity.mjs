@@ -59,6 +59,13 @@ try {
     build.args.includes("--force") && build.args.some((a) => /turbo/.test(a)) && build.args.indexOf("--force") > build.args.findIndex((a) => /turbo/.test(a)));
   check("(A) build covers BOTH @loom/daemon and @loom/web (served UI can't go stale)",
     build.args.includes("--filter=@loom/daemon") && build.args.includes("--filter=@loom/web"));
+  // Card 3d7dccb9 — "stamp" (turbo.json: cache:false, dependsOn:["build"]) must ride the SAME turbo
+  // invocation as "build", right after it, so dist/build-info.json is always re-stamped from THIS
+  // checkout's real HEAD even though "build" itself is already --force'd (a different, non-forced build
+  // path — daemon-supervisor.mjs's boot build, a plain `pnpm build` — is what actually needed this fix;
+  // this deploy path just carries the same invocation shape for consistency, see restart.ts's own comment).
+  check("(3d7dccb9) build ALSO runs the \"stamp\" task, positioned right after \"build\" (turbo's own dependsOn ordering, not this array's)",
+    build.args.includes("stamp") && build.args.indexOf("stamp") === build.args.indexOf("build") + 1);
   // The aad5fff3 footgun guard: the build must NOT be the `pnpm … build --force` shape (where --force
   // reaches vite, not turbo). Proven by the absence of a `pnpm`-script invocation in the command/args.
   check("(A) build is NOT the `pnpm run build --force` footgun shape (--force would forward to vite)",
@@ -129,6 +136,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it force-builds turbo directly, a failing install short-circuits the build, and a broken build can't verify a broken main green."
+  ? "\n✅ ALL PASS — the deploy build installs (--frozen-lockfile) BEFORE it force-builds turbo directly, a failing install short-circuits the build, a broken build can't verify a broken main green, and (card 3d7dccb9) the same invocation also runs the uncached \"stamp\" task right after \"build\"."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
