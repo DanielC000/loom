@@ -508,7 +508,11 @@ when your session was provisioned such a connection**; assume it's absent unless
   even a report built entirely from real facts can mis-*frame* them (e.g. calling a failure "pre-existing"
   or "a false positive" without having checked) and mislead just as badly — verify the characterization,
   not only the details. Naming the commit SHA your report describes (see `done`, below) only proves
-  *which* commit you mean; it does not prove your description of it is true. **Also use it when your own turn is done but a
+  *which* commit you mean; it does not prove your description of it is true. Nor does a commit's own
+  `type(scope):` subject — that classifies how the author categorized the change, not what it touched;
+  run `git show --stat` before citing what a commit changed. And type-tag every bare short hex id you
+  write (`commit <sha>` / `card <id>` / `session <id>`) — a raw hex string carries no type of its own,
+  so an unlabeled one is easy to misread as the wrong kind of id. **Also use it when your own turn is done but a
   background child you spawned is still outstanding** — a background sub-agent, or any other backgrounded
   task you're relying on a completion notification to bring you back to (see the gate-verification rule
   above: that notification is not a guaranteed wake). A worker that kicks off one of these and then goes

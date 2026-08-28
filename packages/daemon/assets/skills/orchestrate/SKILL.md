@@ -539,6 +539,11 @@ what you checked. Found none? Treat it as live.
      cites is real (a genuine failure characterized as "pre-existing" or "a false positive" without ever
      being checked). Treat a `progress` report exactly like the worker claim it is (see Transport, above)
      — weigh it, don't build on it — until the `done` report and your own read of the tree confirm it.
+   - **A commit's `type(scope):` prefix classifies the change; it doesn't manifest what the commit
+     touched.** Run `git show --stat` before citing a commit's scope in a card, a report, or an
+     escalation. And type-tag every bare short hex id you write or relay (`commit <sha>` / `card <id>` /
+     `session <id>`) — a raw hex string carries no type of its own, so an unlabeled one is easy to
+     misread as the wrong kind of id.
    - **Verify a claim before you write it into a DoD or use it to close/retract a card — same evidence
      bar whichever direction it points.** Disputing part of a worker's report doesn't test the rest of
      it: an unverified sub-claim inside a report you were otherwise arguing with survives because it
