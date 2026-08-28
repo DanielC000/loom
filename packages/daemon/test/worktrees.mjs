@@ -88,11 +88,92 @@ try {
     git(repo, "log -1 --format=%b").includes(`Loom-Worker-Branch: ${brF}`));
   check("(f) NO Co-Authored-By trailer (repo-config identity only)",
     git(repo, "log -1 --format=%b").includes("Co-Authored-By") === false);
+  // Card 8b7b81e0 DoD-3: the worker's OWN per-commit messages ("f commit 1"/"f commit 2" — both distinct
+  // from the squash subject) used to be discarded at the squash boundary entirely; they now survive in the
+  // commit BODY, chronological (oldest first, via --reverse), as bullets under a "Worker commits:" heading.
+  {
+    const bodyF = git(repo, "log -1 --format=%b");
+    check("(f) body records BOTH the worker's own commit messages (not discarded at the squash boundary)",
+      bodyF.includes("Worker commits:") && bodyF.includes("- f commit 1") && bodyF.includes("- f commit 2"));
+    check("(f) worker commits appear CHRONOLOGICAL (oldest first), not git-log's default newest-first",
+      bodyF.indexOf("- f commit 1") < bodyF.indexOf("- f commit 2"));
+    // NEGATIVE CONTROL for the positive check above: a subject this branch never had must NOT appear —
+    // proves `.includes` is discriminating, not vacuously true on any string.
+    check("(f) negative control: a fabricated subject this branch never had is absent",
+      !bodyF.includes("- f commit 3 (never happened)"));
+    // The subject remains the card title VERBATIM (unchanged by the new body) — the load-bearing
+    // card-title = squash-subject convention this whole card is scoped to never touch.
+    check("(f) subject is STILL exactly the coerced task title, unaffected by the new body",
+      git(repo, "log -1 --format=%s") === "chore: Feature F task title");
+    // The body must not swallow the trailers into itself: `git interpret-trailers --parse` is a REAL
+    // trailer read (not a substring match) — it fails to recognize a trailer that a careless body/blank-
+    // line arrangement demoted to ordinary prose.
+    const fullMessageF = git(repo, "log -1 --format=%B");
+    const parsedTrailersF = execSync("git interpret-trailers --parse", { cwd: repo, input: fullMessageF }).toString();
+    check("(f) Loom-Worker-Branch still parses as a REAL trailer (git interpret-trailers), not swallowed by the new body",
+      /^Loom-Worker-Branch:\s*\S+$/m.test(parsedTrailersF) && parsedTrailersF.includes(`Loom-Worker-Branch: ${brF}`));
+    check("(f) Loom-Worker-PathSet still parses as a REAL trailer too",
+      /^Loom-Worker-PathSet:\s*\S+$/m.test(parsedTrailersF));
+  }
   check("(f) both worker files landed on main", fs.existsSync(path.join(repo, "f.txt")) && fs.existsSync(path.join(repo, "f2.txt")));
   await removeWorktree(repo, wtF);
   await deleteBranch(repo, brF);
   check("(f) merged branch is GONE after deleteBranch (force-deleted — not in main's ancestry)", git(repo, `branch --list ${brF}`) === "");
   check("(f) merged worktree removed", !fs.existsSync(wtF));
+
+  // (f2) card 8b7b81e0 DoD-3, dedup: a SINGLE worker commit whose subject already matches the squash
+  //      subject (case-insensitive) is pure duplication — the body is correctly OMITTED. Paired with (f3)
+  //      below as a positive/negative control pair: same shape (one commit, tasked merge), only the
+  //      match/mismatch of the text differs, so this isolates the dedup condition itself.
+  {
+    const tF2 = "dedup-cccc-3333";
+    const { worktreePath: wtF2, branch: brF2 } = await createWorktree(repo, "projWT", tF2);
+    const titleF2 = "fix(daemon): tidy the F2 helper";
+    commitInto(wtF2, "f2-dedup.txt", "f2\n", "FIX(daemon): Tidy The F2 Helper"); // same text, different case
+    const mF2 = await mergeBranch(repo, brF2, titleF2);
+    check("(f2) dedup squash ok", mF2.ok === true);
+    const bodyF2 = git(repo, "log -1 --format=%b");
+    check("(f2) body has NO 'Worker commits:' section — the one commit is pure duplication of the subject",
+      !bodyF2.includes("Worker commits:"));
+    check("(f2) trailer is still present despite the omitted body", bodyF2.includes(`Loom-Worker-Branch: ${brF2}`));
+    await removeWorktree(repo, wtF2);
+    await deleteBranch(repo, brF2);
+  }
+
+  // (f3) NEGATIVE CONTROL for (f2): a single worker commit whose subject genuinely DIFFERS from the squash
+  //      subject must still produce a body — proves the dedup check in (f2) is discriminating (it can
+  //      fail), not just "single-commit branches never get a body".
+  {
+    const tF3 = "dedup-dddd-4444";
+    const { worktreePath: wtF3, branch: brF3 } = await createWorktree(repo, "projWT", tF3);
+    commitInto(wtF3, "f3-dedup.txt", "f3\n", "fix(daemon): actually touched a completely different helper");
+    const mF3 = await mergeBranch(repo, brF3, "fix(daemon): tidy the F3 helper");
+    check("(f3) squash ok", mF3.ok === true);
+    const bodyF3 = git(repo, "log -1 --format=%b");
+    check("(f3) a single commit whose text genuinely DIFFERS from the subject DOES get a body (dedup check discriminates)",
+      bodyF3.includes("Worker commits:") && bodyF3.includes("- fix(daemon): actually touched a completely different helper"));
+    await removeWorktree(repo, wtF3);
+    await deleteBranch(repo, brF3);
+  }
+
+  // (f4) card 8b7b81e0 DoD-3, bound: a branch with more commits than WORKER_COMMIT_LOG_MAX_ENTRIES (20)
+  //      is TRUNCATED, with the omission count made visible rather than silently dropped.
+  {
+    const tF4 = "bound-eeee-5555";
+    const { worktreePath: wtF4, branch: brF4 } = await createWorktree(repo, "projWT", tF4);
+    for (let i = 1; i <= 25; i++) commitInto(wtF4, `f4-${i}.txt`, `${i}\n`, `chore(daemon): f4 filler commit ${i}`);
+    const mF4 = await mergeBranch(repo, brF4, "chore(daemon): land the f4 filler batch");
+    check("(f4) squash ok", mF4.ok === true);
+    const bodyF4 = git(repo, "log -1 --format=%b");
+    const bulletCountF4 = (bodyF4.match(/^- /gm) || []).length;
+    check("(f4) entry count is BOUNDED at 20 real bullets + 1 omission-count bullet, not all 25",
+      bulletCountF4 === 21);
+    check("(f4) the omission is named, not silent", bodyF4.includes("- …(5 more commit"));
+    check("(f4) the first real entry (oldest, --reverse) is commit 1, not commit 6",
+      bodyF4.includes("- chore(daemon): f4 filler commit 1"));
+    await removeWorktree(repo, wtF4);
+    await deleteBranch(repo, brF4);
+  }
 
   // (g) H1.2 — a REJECTED merge retains the worktree+branch; re-spawning on the same task must NOT throw.
   const tG = "rejected-bbbb-2222";

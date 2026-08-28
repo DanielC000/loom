@@ -575,14 +575,26 @@ what you checked. Found none? Treat it as live.
      reclassification needed to make it wrong. Move that description into the commit body instead: it
      stays equally searchable there (`git log --grep` matches the full commit message, body included, not
      only the subject) without freezing a false claim into subject-line history that a "don't rewrite
-     published history" rule would then never let you correct.
-   - **Title-staleness has (at least) three axes you can mechanically check against the diff before merge
+     published history" rule would then never let you correct. **This assumes your commits carry a real
+     body you write yourself.** Check whether your platform's own merge does — if it instead SQUASHES a
+     worker's whole branch down to just the card title plus machine-generated trailers, there may be no
+     body of your own to move the description into, and the card title becomes the ENTIRE searchable
+     mainline record for that merge (some platforms carry the worker's own per-commit messages forward
+     into the squash body automatically, within a bound — check that too before assuming there's none at
+     all). Where no body-based mitigation is actually available to you, get the title's SCOPE right at
+     filing/retitling time instead — see the axes below.
+   - **Title-staleness has (at least) four axes you can mechanically check against the diff before merge
      or close — TYPE** (does the conventional-commit type still match what landed?), **RETRACTION** (did
-     the card's premise not survive — see above), **and TENSE** (does the subject still describe a defect
-     rather than the change, per the rule above). A fourth thing — whether the evidence behind a title's
-     claim actually belongs to the component it names — has no reliable trigger of its own: it only turns
-     up via independent re-verification of the underlying claim, not from running a check. Stay alert for
-     it; don't treat it as a fourth tick alongside the other three.
+     the card's premise not survive — see above), **TENSE** (does the subject still describe a defect
+     rather than the change, per the rule above), **and SCOPE** (does the title's breadth match what the
+     diff actually touched?). Check SCOPE in both directions: a title naming ONE file/thing when the fix
+     actually landed on several silently hides the extra work from anyone searching by title later; a
+     title claiming MORE than the diff touched silently overstates it. This is not cosmetic on a platform
+     where the title is the whole searchable mainline record (see the note above) — treat it as
+     deliberately as the other three. A fifth thing — whether the evidence behind a title's claim actually
+     belongs to the component it names — has no reliable trigger of its own: it only turns up via
+     independent re-verification of the underlying claim, not from running a check. Stay alert for it;
+     don't treat it as a fifth tick alongside the other four.
    - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
      wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` /

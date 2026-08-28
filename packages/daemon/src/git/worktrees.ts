@@ -3959,6 +3959,73 @@ export async function deriveTasklessSubject(repoPath: string, branch: string, de
   }
 }
 
+/** Bounds for {@link deriveWorkerCommitLogBody} — see that function's own doc for why both exist. */
+const WORKER_COMMIT_LOG_MAX_ENTRIES = 20;
+const WORKER_COMMIT_LOG_MAX_CHARS = 2000;
+
+/**
+ * Card 8b7b81e0 DoD-3: a squash commit's SUBJECT is always the card title (never the worker's own commit
+ * messages — that convention is load-bearing, see {@link mergeBranchLocked}'s own doc), but until this
+ * card the worker's own per-commit messages were discarded entirely at the squash boundary. The incident
+ * that exposed this: a card titled for ONE file, a worker whose OWN commit correctly said it touched FIVE
+ * — and the squash kept the narrower title and threw the accurate message away, unrecoverable by `git log
+ * --grep` forever after (pathspec-only, which nobody reaches for).
+ *
+ * This recovers that information into the squash commit's BODY (a real git commit body — the paragraph
+ * between the subject and the `Loom-Worker-Branch:`/`Loom-Worker-PathSet:` trailers — not a new trailer;
+ * trailers are for single-token machine-readable facts, not prose), so it survives on main by construction
+ * instead of by a human remembering to write it in the card title. Returns `undefined` (caller omits the
+ * body entirely, byte-identical to pre-8b7b81e0 behavior) when there is nothing worth adding:
+ *  - no non-merge commits found on the branch (any git error/timeout also degrades here — best-effort,
+ *    like {@link changedPathSetDigest}'s own capture, never blocks the commit), or
+ *  - EXACTLY one commit whose subject already matches the squash `subject` (case/whitespace-insensitive)
+ *    — the overwhelmingly common single-clean-commit case, where a body would be pure duplication.
+ *
+ * `--no-merges` excludes the real merge commit {@link mergeMainIntoWorktree} leaves on the branch when it
+ * unions canonical main's tip in before the gate runs — that commit is main's own history replayed onto
+ * the branch, never the worker's own work, and including it would misattribute main's commit messages to
+ * this worker.
+ *
+ * BOUNDED two ways, deliberately: `WORKER_COMMIT_LOG_MAX_ENTRIES` (a branch with dozens of WIP commits
+ * doesn't get a dozens-of-bullets body) and `WORKER_COMMIT_LOG_MAX_CHARS` (one very long commit message
+ * doesn't blow the body past what a `git log --oneline`-skimming human tolerates) — either cap truncates
+ * with a trailing count of what was omitted, so truncation is visible, never silent.
+ */
+async function deriveWorkerCommitLogBody(
+  repoPath: string, branch: string, mergeBase: string, subject: string, deps: BoundedGitDeps = {},
+): Promise<string | undefined> {
+  let subjects: string[];
+  try {
+    // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
+    // (GitConstructError, see scanMergedCommitMap's own doc) — kept INSIDE this try, not before it, so
+    // that failure degrades this best-effort body exactly like every other failure mode below.
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const raw = await withTimeout(
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..${branch}`]),
+      timeoutMs, "git log (canonical, worker commit-log body)",
+    );
+    subjects = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return undefined; // best-effort: the squash still lands with a title-only body, exactly as before this card
+  }
+  if (subjects.length === 0) return undefined;
+  if (subjects.length === 1 && subjects[0]!.toLowerCase() === subject.trim().toLowerCase()) return undefined;
+
+  const lines: string[] = [];
+  let omitted = 0;
+  let usedChars = 0;
+  for (const s of subjects) {
+    if (lines.length >= WORKER_COMMIT_LOG_MAX_ENTRIES) { omitted++; continue; }
+    const bullet = `- ${s}`;
+    if (usedChars + bullet.length + 1 > WORKER_COMMIT_LOG_MAX_CHARS) { omitted++; continue; }
+    lines.push(bullet);
+    usedChars += bullet.length + 1;
+  }
+  if (lines.length === 0) return undefined; // every entry was too long to fit even one — degrade to title-only
+  if (omitted > 0) lines.push(`- …(${omitted} more commit${omitted === 1 ? "" : "s"})`);
+  return `Worker commits:\n${lines.join("\n")}`;
+}
+
 /**
  * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
  * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
@@ -4500,21 +4567,29 @@ async function mergeBranchLocked(
     // gone — see changedPathSetDigest's doc for why a full content hash doesn't work here and a path-set does.
     // Best-effort: a capture failure just omits the trailer (falls back to the pre-fix degraded behavior for
     // THIS commit) rather than blocking a real, already-successful merge.
+    // Both the path-set trailer and the worker-commit-log body (card 8b7b81e0 DoD-3, below) need the SAME
+    // merge-base(HEAD, branch) — computed ONCE here so a transient failure of this single call degrades
+    // both together rather than paying for (and separately failing) two near-identical git calls.
     let pathSetTrailer = "";
+    let workerCommitLogBody: string | undefined;
     try {
-      const mergeBaseForPathSet = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, path-set fingerprint)")).trim();
-      const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch, timeoutMs);
+      const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
+      const digest = await changedPathSetDigest(git, mergeBaseForSquashMeta, branch, timeoutMs);
       pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
+      workerCommitLogBody = await deriveWorkerCommitLogBody(repoPath, branch, mergeBaseForSquashMeta, subject, deps);
     } catch (e) {
-      // Best-effort; the commit still lands, just without this trailer — but this IS a real degradation of a
-      // brand-new, live commit (not a legacy artifact), so it must be logged here, at the moment it happens —
-      // findLandedSquashCommit/scanMergedCommitMap only ever see the trailer's ABSENCE later and can't tell a
-      // capture failure apart from genuinely predating the trailer (card 9f776570).
+      // Best-effort; the commit still lands, just without this trailer/body — but the PathSet omission IS a
+      // real degradation of a brand-new, live commit (not a legacy artifact), so it must be logged here, at
+      // the moment it happens — findLandedSquashCommit/scanMergedCommitMap only ever see the trailer's
+      // ABSENCE later and can't tell a capture failure apart from genuinely predating the trailer (card
+      // 9f776570). The commit-log body has no such downstream reader to mislead, so its own loss here rides
+      // along silently under the same log line rather than needing one of its own.
       // eslint-disable-next-line no-console
       console.warn(`[git] mergeBranchLocked: Loom-Worker-PathSet capture failed for ${branch} — commit lands ` +
         `without the trailer: ${(e as Error).message}`);
     }
-    const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
+    const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
+    const message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
     try {
       await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
     } catch (e) {
