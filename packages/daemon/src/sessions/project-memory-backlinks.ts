@@ -1,0 +1,128 @@
+import type { Db } from "../db.js";
+
+/**
+ * Resolve INBOUND `[[wikilink]]` backlinks for a memory note — the fix for card e4e180ad's one-way-link
+ * gap: when an overflow note is split off a capped canonical note (the store's own too-long rejection in
+ * mcp/memory.ts recommends exactly this remedy), the overflow links FORWARD to the canonical note, but the
+ * canonical note — being at its cap, which is precisely why the split happened — has no room left to add
+ * the back-pointer. A reader who lands on the canonical note is then never led to the overflow.
+ *
+ * Mirrors project-memory-request-links.ts's shape deliberately: resolved fresh, at READ time, from every
+ * surface that shows a note (memory_read/memory_list via mcp/memory.ts's `withLinks`, the kickoff digest
+ * via project-memory-recall.ts's `annotate` callback) — never stored on the note itself, so it can NEVER
+ * count against that note's own stored `text` byte cap (MAX_TEXT_BYTES / MAX_NEVER_DROP_TEXT_BYTES).
+ *
+ * A "backlink" here is any OTHER note in the same project whose `text` contains a literal `[[key]]`
+ * wikilink referencing this note's key — a plain-substring scan, deliberately not Obsidian's `[[key|alias]]`
+ * piping syntax: every memory note observed in this project's own store links with bare `[[key]]` (the
+ * store's own too-long-rejection message in mcp/memory.ts recommends exactly that form), so a plain
+ * key-token regex is sufficient and this doesn't invent syntax the store has never actually used.
+ */
+
+/** Mirrors mcp/memory.ts's `KEY_RE` character class exactly (letters/digits/-/_, 1-64 chars) — a wikilink
+ *  can only ever reference a syntactically-valid memory key, so the same charset bounds what this matches. */
+const WIKILINK_RE = /\[\[([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})\]\]/g;
+
+/** Every DISTINCT memory key `text` references via `[[key]]`, in first-seen order. Exported for direct
+ *  unit coverage — no DB involved, pure string parsing. */
+export function extractWikilinkKeys(text: string): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const m of text.matchAll(WIKILINK_RE)) {
+    const key = m[1];
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      ordered.push(key);
+    }
+  }
+  return ordered;
+}
+
+/**
+ * Card e4e180ad DoD-3 — bounds the blast radius on a note many others happen to link to, for an
+ * ON-DEMAND read (memory_read/memory_list) — an explicit, one-off pull an agent chose to make, not a cost
+ * repeated on every kickoff. A backlink beyond this cap is NOT lost — it still exists in its source note
+ * — just not listed inline; {@link annotateBacklinks} always names the true total so a reader can still
+ * discover the rest via `memory_list` rather than the overflow being silent.
+ */
+export const MAX_BACKLINKS = 20;
+
+/**
+ * A MUCH tighter cap for the ONE path where this cost is NOT a one-off: ANY note's backlinks, as rendered
+ * into the KICKOFF DIGEST (project-memory-annotations.ts's `annotateNote`, which mcp/memory.ts's
+ * `computeNeverDropStatus` mirrors for its byte estimate) — every note the digest packs is SIZED against
+ * the shared budget on EVERY kickoff, whether or not it ends up surviving the pack (an ordinary pinned
+ * note that later gets dropped for budget still paid this sizing cost first) — this is not a `never-drop`-
+ * specific concern, it's a "does the digest render this note at all" one.
+ *
+ * Measured live against this project's real corpus (2026-08-28, 400 notes / 31 pinned): at the general
+ * `MAX_BACKLINKS=20`, the project's 8 real floor-tier (`pinned && never-drop`) notes would add ≈10,370
+ * bytes / ≈2,593 estimated tokens COMBINED — but the 23 ORDINARY pinned notes add a comparable ≈10,594
+ * bytes / ≈2,649 estimated tokens too (all pinned combined: ≈20,964 bytes / ≈5,241 est tokens), on a
+ * project whose digest is ALREADY reported dropping 21 pinned notes for budget. An earlier version of this
+ * cap applied only to the floor tier; that predicate was an unexamined default (it happened to be the tier
+ * this card's evidence led with), not a reasoned boundary — the actual line is DIGEST vs ON-DEMAND, and
+ * every digest-rendered note sits on the same side of it regardless of tier. At `cap=5` the SAME 31 pinned
+ * notes add only ≈8,586 bytes / ≈2,147 est tokens combined — roughly a 59% reduction. The goal here is only
+ * "tell the reader an overflow companion exists" (card e4e180ad's own bound — never the content), which a
+ * handful of names satisfies as well as twenty. `memory_read`/`memory_list` keep the full {@link
+ * MAX_BACKLINKS}, since an agent pulling one note on demand isn't paying this cost on every OTHER
+ * session's kickoff too.
+ */
+export const MAX_BACKLINKS_DIGEST = 5;
+
+/** One note that wikilinks to a target key. */
+export interface InboundBacklink {
+  key: string;
+}
+
+/**
+ * Every OTHER note in the project whose text wikilinks to `targetKey`, most-recently-updated first,
+ * capped at `cap` (default {@link MAX_BACKLINKS}), alongside the TRUE total found (before the cap). A
+ * full-corpus scan per call — this store is "dozens to low-hundreds of short notes" by design (see
+ * project-memory-recall.ts's own doc comment), so this is cheap; not indexed, since the corpus is
+ * deliberately never expected to be large enough to need it.
+ */
+export function findInboundBacklinks(
+  db: Db,
+  projectId: string,
+  targetKey: string,
+  cap: number = MAX_BACKLINKS,
+): { matches: InboundBacklink[]; totalFound: number } {
+  const all = db.listProjectMemory(projectId);
+  const matching = all
+    .filter((m) => m.key !== targetKey && extractWikilinkKeys(m.text).includes(targetKey))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+  return {
+    matches: matching.slice(0, cap).map((m) => ({ key: m.key })),
+    totalFound: matching.length,
+  };
+}
+
+/** One backlink's annotation line — deliberately names ONLY the key (already a safe, KEY_RE-bounded
+ *  slug), never the linking note's title or any of its body: "surfacing [[companion]] tells a reader
+ *  something exists; it does not deliver its content" (card e4e180ad's explicit bound) — a free-form title
+ *  would also need the same header-forging sanitization noteBlock's own title does, for zero benefit over
+ *  just naming the key a reader can `memory_read` themselves. */
+function backlinkLine(b: InboundBacklink): string {
+  return `[backlink: [[${b.key}]] links here]`;
+}
+
+/**
+ * Every inbound-backlink annotation line for `targetKey`, in order, PLUS a truncation notice when the
+ * project has more inbound links than `cap` shows (never silent — same "N of M" idiom
+ * project-memory-recall.ts's own dropped-tier notices use). `[]` when nothing links here — a MEASURED
+ * zero: this function always returns an array, so "no backlinks" and "backlinks not resolved at all" are
+ * never the same shape at the call site (see mcp/memory.ts's `ProjectMemoryEntryWithLinks.backlinks`,
+ * which is likewise always present, never omitted). `cap` defaults to {@link MAX_BACKLINKS} (the
+ * on-demand-read cap); project-memory-annotations.ts's `annotateNote` passes the tighter {@link
+ * MAX_BACKLINKS_DIGEST} unconditionally, for EVERY note the kickoff digest renders.
+ */
+export function annotateBacklinks(db: Db, projectId: string, targetKey: string, cap: number = MAX_BACKLINKS): string[] {
+  const { matches, totalFound } = findInboundBacklinks(db, projectId, targetKey, cap);
+  const lines = matches.map(backlinkLine);
+  if (totalFound > matches.length) {
+    lines.push(`[backlinks: showing ${matches.length} of ${totalFound} inbound links — see memory_list for the rest]`);
+  }
+  return lines;
+}

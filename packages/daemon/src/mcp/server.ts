@@ -470,7 +470,11 @@ export class TaskMcpRouter {
           "Each note also carries `everDelivered` (`retrievalCount > 0`) — false means this note has NEVER " +
           "once been included in an actually-injected kickoff digest (a merely-explicit memory_read/memory_list " +
           "doesn't count), regardless of whether it's pinned or matched by a related-tier search — if you wrote " +
-          "a note and it shows `everDelivered:false`, nobody has received it yet.",
+          "a note and it shows `everDelivered:false`, nobody has received it yet. Each note also carries " +
+          "`backlinks` — one line per OTHER note whose text `[[wikilinks]]` to this note's key, resolved live " +
+          "at THIS read (never stored, never counted against this note's own byte cap); `[]` is a measured " +
+          "zero (nothing links here), not an absent field; past 20 inbound links a trailing line reports " +
+          "\"showing 20 of N\" rather than truncating silently.",
         inputSchema: strictShape({}),
       },
       async () => okLines(listProjectMemoryEntries(db, projectId)),
@@ -482,7 +486,11 @@ export class TaskMcpRouter {
           "Read ONE project-scoped memory note in full by key. Carries `requestAnnotations` — one line per " +
           "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
           "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
-          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
+          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve. " +
+          "Also carries `backlinks` — one line per OTHER note whose text `[[wikilinks]]` to THIS note's key, " +
+          "resolved live at THIS read (never stored, never counted against this note's own byte cap); `[]` " +
+          "is a measured zero (nothing links here), not an absent field; past 20 inbound links a trailing " +
+          "line reports \"showing 20 of N\" rather than truncating silently.",
         inputSchema: strictShape({ key: z.string() }),
       },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),

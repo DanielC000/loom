@@ -2,6 +2,8 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
+import { annotateBacklinks } from "../sessions/project-memory-backlinks.js";
+import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
@@ -238,7 +240,11 @@ function computeNeverDropStatus(
     };
   }
   const pinnedNow = db.listPinnedProjectMemory(projectId);
-  const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
+  // Card e4e180ad: uses the SAME combined annotate as the real kickoff digest (project-memory-recall.ts's
+  // retrieveProjectMemoryForKickoff) — backlinks ride in the floor tier's rendered size exactly like
+  // linked-request annotations already did, so this status can never under-report against what the
+  // packer's own in-digest ALARM line actually computes (see composeProjectMemoryDigest's DoD-6 cross-check).
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
   return {
     floorCount: status.floorCount,
@@ -268,14 +274,23 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  a raw number an author has to know to interpret; this exposes the actual FACT it encodes (`retrievalCount
  *  > 0`, matching `ProjectMemoryEntry`'s own doc comment: bumped only on actual kickoff-digest inclusion,
  *  never on an explicit `memory_read`/`memory_list`) so an author can see at a glance that their note has
- *  never once reached a reader — no judgement about the note's quality, just the fact. */
-export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean };
+ *  never once reached a reader — no judgement about the note's quality, just the fact.
+ *
+ *  `backlinks` (card e4e180ad) — every OTHER note in this project whose text `[[wikilink]]`s to THIS
+ *  note's key, resolved fresh at read time exactly like `requestAnnotations` (see
+ *  sessions/project-memory-backlinks.ts): the fix for the one-way-link gap where a capped canonical note
+ *  has no room to add the forward link its own overflow companion already carries back to it. Kept as
+ *  its OWN field, deliberately never merged into `requestAnnotations` — the two are unrelated kinds of
+ *  link. ALWAYS an array (never omitted), so an empty `backlinks: []` is a MEASURED zero — "this note has
+ *  no inbound links" — structurally distinguishable from the field being absent altogether. */
+export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
 
 function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry): ProjectMemoryEntryWithLinks {
   return {
     ...entry,
     requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
     everDelivered: entry.retrievalCount > 0,
+    backlinks: annotateBacklinks(db, projectId, entry.key),
   };
 }
 

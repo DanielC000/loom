@@ -1,7 +1,7 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import { annotateRequestLinks } from "./project-memory-request-links.js";
+import { annotateNote } from "./project-memory-annotations.js";
 
 /**
  * Loom PROJECT MEMORY — project-scoped SHARED knowledge (card 2fd9abf9), the fleet-wide sibling of the
@@ -290,7 +290,8 @@ export function composeProjectMemoryDigest(
   /** Card e6d270b3 — resolves a note's linked Request ids to live annotation lines. Defaults to "no
    *  annotations" so every pre-existing call site (incl. every hermetic test fixed against fixture
    *  entries with no DB) stays byte-identical. The real caller ({@link retrieveProjectMemoryForKickoff})
-   *  passes a callback backed by {@link annotateRequestLinks}. */
+   *  passes a callback backed by {@link annotateNote} (linked-Request state + inbound wikilink
+   *  backlinks — card e4e180ad). */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
 ): {
   digest: string | null;
@@ -481,7 +482,10 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const pinned = db.listPinnedProjectMemory(projectId);
   const related = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
   if (pinned.length === 0 && related.length === 0) return null;
-  const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
+  // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks) — the SAME
+  // function mcp/memory.ts's computeNeverDropStatus uses to size the floor tier, so the two can never
+  // silently diverge on what counts toward a note's rendered/estimated size.
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
   if (droppedFloorKeys.length > 0) {
