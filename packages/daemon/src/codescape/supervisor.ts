@@ -5,6 +5,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { resolveCodescapeConfig, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 import { resolveCodescapeProjectId } from "./manifest.js";
+import { probeAdvertisedTools } from "./tools-probe.js";
+import { writeToolDriftState } from "./drift-notice.js";
+import { codescapeUnclassifiedTools } from "../pty/host.js";
 
 /**
  * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION, updated by card 503a30a0. Under
@@ -123,6 +126,14 @@ const DEFAULT_HEALTH_PROBE_INTERVAL_MS = 30_000;
 /** Bound (ms) for a single `/graph/health` probe call — short, since a healthy serve answers fast. */
 const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 5_000;
 /**
+ * Bound (ms) for a single tool-drift `tools/list` round-trip (card `350bc307`) — a real MCP handshake
+ * (`initialize` then `tools/list`) against the live mounted server, layered onto the same health-probe
+ * tick as {@link DEFAULT_HEALTH_PROBE_TIMEOUT_MS} and {@link DEFAULT_VERSION_PROBE_TIMEOUT_MS}. Same
+ * order of magnitude as those: a healthy server answers a handshake fast, and a slow/wedged one is
+ * already caught by the health probe itself.
+ */
+const DEFAULT_TOOLS_PROBE_TIMEOUT_MS = 5_000;
+/**
  * Consecutive probe failures required before treating `serve` as wedged. NOT 1 — a busy serve can miss a
  * single beat under load, and a lone blip must not be mistaken for a real wedge (see `probeHealth`'s own
  * doc). Reset to 0 on ANY successful probe, so only a genuinely SUSTAINED run of failures counts.
@@ -209,6 +220,15 @@ export interface CodescapeSupervisorOpts {
   versionProbeRetryDelayMs?: number;
   /** Test seam: shrink/lengthen {@link DEFAULT_DRIFT_STABILITY_MS} so a stability-window test doesn't wait real minutes. */
   driftStabilityMs?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_TOOLS_PROBE_TIMEOUT_MS}. */
+  toolsProbeTimeoutMs?: number;
+  /**
+   * Test seam: pre-seed {@link projectIds} with ONE `(repoKey(repoRoot) -> codescapeProjectId)` entry,
+   * mirroring the `port` seam above (exercise the control-plane client / {@link checkToolDrift} against
+   * a fake HTTP server with no real spawn AND no real `registerProject` round-trip). Production always
+   * populates this map itself, via {@link registerProjectWithRetry}.
+   */
+  seedProjectId?: { repoRoot: string; projectId: string };
 }
 
 export interface CodescapeRequestResult {
@@ -432,6 +452,7 @@ export class CodescapeSupervisor {
   private readonly versionProbeMaxAttempts: number;
   private readonly versionProbeRetryDelayMs: number;
   private readonly driftStabilityMs: number;
+  private readonly toolsProbeTimeoutMs: number;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -549,6 +570,16 @@ export class CodescapeSupervisor {
    */
   private lastHealthAnsweredErrorStatus: number | null = null;
   /**
+   * Card `350bc307`: the unclassified-tool-name set (per {@link codescapeUnclassifiedTools}) from the
+   * MOST RECENT successful {@link checkToolDrift} probe — `null` before the first probe ever completes,
+   * `[]` once a probe finds the partition complete. Latched (like {@link driftCheckState}) purely so a
+   * TRANSITION gets logged once, not every ~30s tick forever; the actual addressed signal is the
+   * persisted state file {@link checkToolDrift} writes via `writeToolDriftState`, read by
+   * `readCodescapeToolDriftNote` — this field is a diagnostic/test seam, not itself the mechanism a
+   * human ever sees. Reset on {@link stop}/{@link start}, matching every other drift-tracking field.
+   */
+  private lastToolDriftUnclassified: string[] | null = null;
+  /**
    * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
    * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
    * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
@@ -612,10 +643,15 @@ export class CodescapeSupervisor {
     this.versionProbeMaxAttempts = opts?.versionProbeMaxAttempts ?? DEFAULT_VERSION_PROBE_MAX_ATTEMPTS;
     this.versionProbeRetryDelayMs = opts?.versionProbeRetryDelayMs ?? DEFAULT_VERSION_PROBE_RETRY_DELAY_MS;
     this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
+    this.toolsProbeTimeoutMs = opts?.toolsProbeTimeoutMs ?? DEFAULT_TOOLS_PROBE_TIMEOUT_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
       this.alive = true;
+    }
+    if (opts?.seedProjectId) {
+      // Test-only — see the opt's own doc.
+      this.projectIds.set(repoKey(opts.seedProjectId.repoRoot), opts.seedProjectId.projectId);
     }
   }
 
@@ -663,6 +699,12 @@ export class CodescapeSupervisor {
   /** Diagnostic/test seam — see {@link driftCheckState}. `null` before the first probe tick completes. */
   getDriftCheckState(): DriftCheckState | null {
     return this.driftCheckState;
+  }
+
+  /** Diagnostic/test seam — see {@link lastToolDriftUnclassified}. `null` before the first tool-drift
+   *  probe ever completes. */
+  getUnclassifiedTools(): string[] | null {
+    return this.lastToolDriftUnclassified;
   }
 
   /**
@@ -741,6 +783,7 @@ export class CodescapeSupervisor {
       this.lastExhaustedDriftAnnounced = null;
       this.driftCheckState = null;
       this.lastHealthAnsweredErrorStatus = null;
+      this.lastToolDriftUnclassified = null;
       this.spawnServe();
       this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
@@ -790,6 +833,7 @@ export class CodescapeSupervisor {
     this.lastExhaustedDriftAnnounced = null;
     this.driftCheckState = null;
     this.lastHealthAnsweredErrorStatus = null;
+    this.lastToolDriftUnclassified = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -979,6 +1023,7 @@ export class CodescapeSupervisor {
           this.lastHealthAnsweredErrorStatus = null;
         }
         await this.checkBuildDrift(res.json);
+        await this.checkToolDrift();
         return;
       }
       if (res.status != null) {
@@ -1011,6 +1056,71 @@ export class CodescapeSupervisor {
     } finally {
       this.probeInFlight = false;
       this.completedProbeTicks++;
+    }
+  }
+
+  /**
+   * Card `350bc307`: the ONE live-introspection caller of {@link codescapeUnclassifiedTools}
+   * (`pty/host.ts`) — a real `tools/list` round-trip against the RUNNING mounted server, not just the
+   * two in-memory arrays it partitions. Layered onto a SUCCESSFUL health probe, mirroring
+   * {@link checkBuildDrift}'s own placement and discipline: async, bounded ({@link toolsProbeTimeoutMs}),
+   * best-effort, NEVER throws, and NEVER blocks a spawn/boot/gate (DoD-3 — fail soft) — a probe failure
+   * just means "couldn't check this tick," identical in effect to a probe that never ran.
+   *
+   * Needs a resolvable Codescape PROJECT id to build the `/mcp/<id>` URL {@link probeAdvertisedTools}
+   * hits — `tools/list` is a property of the served MCP APPLICATION (which tools it registers), not of
+   * per-project graph DATA, so ANY currently-registered project id observes the same tool registration a
+   * genuinely drifted server would expose on every scope; this instance's own {@link projectIds} cache
+   * (populated by {@link registerProjectWithRetry} at boot) is reused rather than re-resolving anything.
+   * A no-args case (nothing registered yet — codescape just started, or every registration attempt so
+   * far has failed) is a clean skip: nothing to probe against yet, not a failure.
+   *
+   * On a successful round-trip, ALWAYS persists the result via `writeToolDriftState` (even an EMPTY
+   * unclassified set) — so the state file's `checkedAt` stays fresh and a since-cleared drift doesn't
+   * linger stale in what `readCodescapeToolDriftNote` reads back. The in-memory
+   * {@link lastToolDriftUnclassified} latch exists purely so a TRANSITION logs once (a new/changed
+   * finding, or a recovery back to clean) rather than spamming this line every ~30s tick forever — the
+   * persisted file (read by the Platform Lead's kickoff note, DoD-2) is the real addressed signal; this
+   * console line is a supplementary breadcrumb, not the mechanism itself.
+   */
+  private async checkToolDrift(): Promise<void> {
+    const port = this.getPort();
+    if (port == null) return;
+    const projectId = this.projectIds.values().next().value;
+    if (!projectId) return; // nothing registered yet to probe against — clean skip, not a failure
+    const res = await probeAdvertisedTools(`http://127.0.0.1:${port}/mcp/${projectId}`, this.toolsProbeTimeoutMs);
+    if (this.stopped) return; // stop() may have raced this in-flight probe — abandon silently
+    if (!res.ok || !res.tools) return; // couldn't check this tick — leave prior persisted state as-is
+    const unclassified = codescapeUnclassifiedTools(res.tools);
+    writeToolDriftState(this.homeDir, { checkedAt: new Date().toISOString(), unclassified, advertisedCount: res.tools.length });
+    const changed = JSON.stringify(unclassified) !== JSON.stringify(this.lastToolDriftUnclassified);
+    if (changed) {
+      if (unclassified.length > 0) {
+        console.warn(`[codescape] tool-drift check: the running server advertises ${unclassified.length} tool(s) not classified as read or write in pty/host.ts: ${unclassified.join(", ")} — flagged to the Platform Lead's next kickoff.`);
+      } else if (this.lastToolDriftUnclassified !== null && this.lastToolDriftUnclassified.length > 0) {
+        console.warn(`[codescape] tool-drift check: recovered — the previously-flagged tool(s) are now classified.`);
+      }
+      this.lastToolDriftUnclassified = unclassified;
+    }
+  }
+
+  /**
+   * Test seam: run ONE {@link checkToolDrift} pass directly, without waiting on the real
+   * {@link healthProbeIntervalMs} timer (itself only armed inside a real {@link start} spawn) —
+   * exercises the SAME production code path (`port`/`seedProjectId` test seams feed it a fake server +
+   * project id) a live health-probe tick would run, hermetically. A genuine health-probe tick only ever
+   * runs while {@link stopped} is false (set by a real `start()`); simulating "one tick happened" without
+   * a real spawn means this seam must establish that same precondition itself, so it flips `stopped`
+   * false for the duration of this ONE call — never touches it otherwise, and never affects a real
+   * `start()`/`stop()` sequence a test may run around it.
+   */
+  async runToolDriftProbeForTest(): Promise<void> {
+    const wasStopped = this.stopped;
+    this.stopped = false;
+    try {
+      await this.checkToolDrift();
+    } finally {
+      this.stopped = wasStopped;
     }
   }
 

@@ -298,6 +298,18 @@ function shippedAssetsFiles(assetsRoot) {
 // `resolveCodescapeConfig`/`resolveCodescapeIntegrationPath`) were added when card `97776a17` widened this
 // scan to the shared dist root.
 //
+// Card `350bc307` (2026-08-28) added the next 10: `codescape/drift-notice.*` and `codescape/tools-probe.*`
+// are BRAND-NEW files, `codescape` in their own path by construction — the same shape as the already-
+// accepted `codescape/manifest.*`/`codescape/supervisor.*` above, not a spread into a new AREA. `sessions/
+// platform-lead-prompt.*` is an EXISTING file that newly imports `readCodescapeToolDriftNote` — the same
+// shape `sessions/service.*` (already on this list) was accepted for. INVESTIGATED, not quarantined
+// (per this list's own rule above): all three are pure server-side logic (an MCP client probe, a small
+// state-file reader/writer, a prompt-note composer) with no web/skill/docs/rendered-UI surface — nothing
+// a user encounters without grepping the published tarball, the exact line the 2026-07-23 ruling draws.
+// This addition is a plain extension of that SAME ruling to the SAME category of file, not a fresh
+// judgment call — flag it for a second look anyway if the category read is wrong (only .d.ts/.js hit for
+// platform-lead-prompt — no .map pair; its sourcemap happens not to embed the string).
+//
 // Paths are relative to the repo root, POSIX-separated (portable across OSes/worktrees).
 const KNOWN_LEAKING_FILES = [
   // packages/daemon/dist — 24 files (every match of `grep -ril codescape packages/daemon/dist/`).
@@ -328,6 +340,17 @@ const KNOWN_LEAKING_FILES = [
   // packages/shared/dist — 2 files, added when card 97776a17 widened the scan to the shared dist root.
   "packages/shared/dist/config.d.ts",
   "packages/shared/dist/config.js",
+  // packages/daemon/dist — 10 files added by card 350bc307 (see the provenance note above).
+  "packages/daemon/dist/codescape/drift-notice.d.ts",
+  "packages/daemon/dist/codescape/drift-notice.d.ts.map",
+  "packages/daemon/dist/codescape/drift-notice.js",
+  "packages/daemon/dist/codescape/drift-notice.js.map",
+  "packages/daemon/dist/codescape/tools-probe.d.ts",
+  "packages/daemon/dist/codescape/tools-probe.d.ts.map",
+  "packages/daemon/dist/codescape/tools-probe.js",
+  "packages/daemon/dist/codescape/tools-probe.js.map",
+  "packages/daemon/dist/sessions/platform-lead-prompt.d.ts",
+  "packages/daemon/dist/sessions/platform-lead-prompt.js",
 ];
 
 if (KNOWN_LEAKING_FILES.length === 0) {

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
 import { resumeDocSizeWarning } from "./resume-doc-notes.js";
+import { readCodescapeToolDriftNote } from "../codescape/drift-notice.js";
 
 /**
  * Card 2fed1663 — lineage-scope the Platform Lead resume doc so concurrent Leads never contend on one
@@ -175,14 +176,24 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
  *    itself (mirrors the /platform-lead doctrine's own "inherit the freshest sibling handoff" guidance).
  *    Fires whenever a fresher sibling exists and either the resolved doc doesn't exist yet or the gap
  *    exceeds {@link SIBLING_STALENESS_MS}.
+ * 3. **Codescape tool drift** (card `350bc307`) — {@link readCodescapeToolDriftNote} reports whether the
+ *    RUNNING Codescape MCP server currently advertises a tool `pty/host.ts`'s CODESCAPE_TOOL_ALLOW/
+ *    CODESCAPE_WRITE_TOOLS partition hasn't classified yet. This is the ADDRESSED signal for that check
+ *    (not a log line) — the Lead owns platform-wide concerns and reads every `[loom:*]` kickoff note as
+ *    a directive, so a non-empty finding rides the SAME already-established channel as the two checks
+ *    above rather than a new, easy-to-ignore surface. Fails soft like the others: no state yet, or
+ *    codescape disabled/never probed, silently contributes nothing.
  *
- * Returns "" when neither check fires (the common, single-lineage, well-maintained-doc case).
+ * Returns "" when none of the checks above fire (the common, healthy-state case).
  */
 export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string): string {
   const notes: string[] = [];
 
   const sizeNote = resumeDocSizeWarning(resumeDocPath);
   if (sizeNote) notes.push(sizeNote);
+
+  const toolDriftNote = readCodescapeToolDriftNote(homePath);
+  if (toolDriftNote) notes.push(toolDriftNote);
 
   let resolvedMtimeMs: number | null = null;
   try {
