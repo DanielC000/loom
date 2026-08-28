@@ -7513,6 +7513,27 @@ export class SessionService {
   }
 
   /**
+   * Card 60b26261's dedup: `worker_report_get` calls this right after it reads ONE `worker_report` event
+   * straight from durable storage — a still-queued `[loom:worker-report]` nudge announcing THAT SAME
+   * report (tagged with the report's own event id at enqueue — see `workerReport`'s `reportEventId`) is
+   * now redundant: the manager already has the report's full body via this very read, so left queued it
+   * would drain as its own wasted turn. Thin wrapper over `pty.purgeQueuedByReportEventIds` (see there for
+   * the selective-splice contract, byte-identical mechanics to `purgeAnsweredQuestionNudges` above) —
+   * deliberately keyed on the report's OWN event id, never the worker id, so an unread EARLIER report
+   * (e.g. a `progress` filed before this `done`) is never silently dropped by this call. Resolves each
+   * purged entry's durable record honestly (`onDeliver("read")` — mirrors `purgeAnsweredQuestionNudges`'s
+   * own defensive resolve) so a purged nudge never afterwards reads as undelivered/lost; today's only
+   * caller (`worker_report_get`, mcp/orchestration.ts) reads via this same durable event storage, so this
+   * purge can never race the report it's dropping a copy of.
+   */
+  purgeQueuedWorkerReportNudge(sessionId: string, reportEventId: string): void {
+    const removed = this.pty.purgeQueuedByReportEventIds(sessionId, [reportEventId]);
+    for (const m of removed) {
+      if (m.onDeliver) { try { m.onDeliver("read"); } catch { /* purge must never fail the read */ } }
+    }
+  }
+
+  /**
    * Manager-driven ABSOLUTE permission-mode override (worker_set_mode, card 610abe29) — the manual
    * recovery affordance for a worker landed in (or pushed into) a bad mode: a worker can never change its
    * own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker —
@@ -7644,6 +7665,13 @@ export class SessionService {
     ctx: {
       sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string;
       chainDepth?: number; giveUpHeldUntil?: number; route?: CompanionRoute; mintedAtWallClock?: number;
+      /** Card 60b26261: threaded straight through to `enqueueStdin`'s own `reportEventId` (see
+       *  `QueuedMessage.reportEventId`'s own doc, pty/host.ts) — set ONLY by `workerReport`'s own
+       *  manager-bound push, tagged with the SAME id `db.appendEvent` just minted for that report, so
+       *  `purgeQueuedByReportEventIds` can later drop this exact queued nudge once `worker_report_get`
+       *  reads the report it announces. Every other caller omits it, byte-identical to before this field
+       *  existed. */
+      reportEventId?: string;
     },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
@@ -7693,6 +7721,7 @@ export class SessionService {
         onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
         mintedAtWallClock: ctx.mintedAtWallClock,
+        reportEventId: ctx.reportEventId,
         // Card 21a281b6 merge-gate fix: EXPLICIT opt-in, only when THIS call actually carries a fresh mint
         // (never for a carry/re-mint call that omits `ctx.mintedAtWallClock`) — see EnqueueStdinTail
         // .captureMintGen's own doc (pty/host.ts) for why a `mintedAtWallClock`-presence fallback there was
@@ -10163,8 +10192,12 @@ export class SessionService {
     // delivered live, queued, or boarded — a boarded report's own strand backstop (recordUndeliveredReport,
     // below) is a DIFFERENT, narrower signal (no live taker at all); this one also catches the
     // delivered-live-yet-unconsumed case that backstop cannot.
+    // Card 60b26261: minted HERE (not inside the appendEvent call) so this SAME id can also tag the queued
+    // manager-bound nudge below (`reportEventId`) — `worker_report_get` returns this exact id as `eventId`,
+    // and `purgeQueuedByReportEventIds` matches on it to drop a still-queued copy once that report is read.
+    const reportEventId = randomUUID();
     this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
+      id: reportEventId, ts: new Date().toISOString(),
       managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
       // noChanges recorded ONLY when true (additive, forensics completeness — CR follow-up): also what the
       // auto-recovery re-confirmation dedupe above reads back via lastReport.detail.noChanges. `awaiting`
@@ -10212,8 +10245,11 @@ export class SessionService {
       // `session_message_queued` record on the held path and survives exactly that gap, matching the other
       // six converted sites. `sender: workerSessionId` (this report's real origin, not the "system" sentinel
       // the one-shot settle-nudge callers use) lets recoverUndeliveredMessagesOnBoot surface a still-stuck
-      // report to the WORKER if its manager never comes back live.
-      const r = this.enqueueDurableMessage(managerSessionId, framed, { sender: workerSessionId, taskId, kind: "agent" });
+      // report to the WORKER if its manager never comes back live. `reportEventId: reportEventId` (card
+      // 60b26261) tags this queued nudge with the SAME id the worker_report event above was just minted
+      // with, so a later `worker_report_get` read of THIS SAME report can find and drop it if it's still
+      // queued (see `purgeQueuedByReportEventIds`'s own doc, pty/host.ts).
+      const r = this.enqueueDurableMessage(managerSessionId, framed, { sender: workerSessionId, taskId, kind: "agent", reportEventId });
       deliveryStatus = this.deliveryStatusFor(r);
       // STRAND BACKSTOP (incident 22a44352, broadened by card fc9a27d5): if the report reached no LIVE
       // FIFO at all — `delivered:false` with NO queue position (the manager's pty isn't alive: it idle-

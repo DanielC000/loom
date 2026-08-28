@@ -2318,6 +2318,18 @@ export type QueuedMessageKind = "warning" | "agent";
  * separate turns and each find nothing left to pull.
  */
 /**
+ * `reportEventId` (card 60b26261) is the SAME shape of tag `questionId` is, one field down: it OPTIONALLY
+ * tags a queued `[loom:worker-report] …` nudge with the `worker_report` orchestration event's own id —
+ * the same id `worker_report_get` returns as `eventId`. Only `SessionService.workerReport`'s manager-bound
+ * push sets it (stamped with the id it just gave `db.appendEvent` for that same report); every other
+ * caller leaves it undefined. It exists solely so `purgeQueuedByReportEventIds` can find and drop a
+ * still-queued copy of a report the manager already read straight from durable storage via
+ * `worker_report_get` — WITHOUT keying on the worker id (a worker can file `progress` then `done`; purging
+ * by worker id would silently drop an UNREAD earlier report). A worker id has no such ambiguity problem
+ * for `purgeQueuedWorkerIdleNudges` (only ever one live idle-nudge per worker at a time), which is why that
+ * helper keys on worker id and this one deliberately does not.
+ */
+/**
  * `giveUpRequeues` (card 441499ee) OPTIONALLY counts how many times THIS EXACT message has already been
  * put back on `live.pending` after a submit give-up (see `fireEnterAndVerify`'s GIVE-UP RECOVERY branch
  * and `GIVE_UP_REQUEUE_LIMIT`) — undefined/0 for every message that has never given up. Identity-scoped
@@ -2396,7 +2408,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * message they've already read. Never touched by any other caller, so every existing enqueue stays
  * byte-identical.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2469,6 +2481,9 @@ export type EnqueueStdinTail = {
   logicalId?: string;
   mintedAtGen?: number;
   mintedAtWallClock?: number;
+  /** See `QueuedMessage.reportEventId`'s own doc. No positional legacy form — only ever set via this
+   *  options-object tail, by `enqueueDurableMessage`'s `ctx.reportEventId` (SessionService.workerReport). */
+  reportEventId?: string;
   /**
    * Card 21a281b6, merge-gate fix: an EXPLICIT opt-in — when `true` AND `mintedAtGen` was not itself
    * supplied, `enqueueStdin` captures `live.submitGeneration` into `mintedAtGen` for THIS enqueue. Never a
@@ -6915,6 +6930,9 @@ export class PtyHost {
     const logicalId = isTailObject ? tailOrGiveUpHeldUntil.logicalId : logicalIdPositional;
     let mintedAtGen = isTailObject ? tailOrGiveUpHeldUntil.mintedAtGen : mintedAtGenPositional;
     const mintedAtWallClock = isTailObject ? tailOrGiveUpHeldUntil.mintedAtWallClock : mintedAtWallClockPositional;
+    // `reportEventId` has no positional legacy form (see EnqueueStdinTail's own doc) — undefined on every
+    // positional-form call, which is every existing call site except enqueueDurableMessage's tail-object form.
+    const reportEventId = isTailObject ? tailOrGiveUpHeldUntil.reportEventId : undefined;
     // Card 21a281b6: `captureMintGen` has NO positional form — it is only ever set by `enqueueDurableMessage`
     // via the tail-OBJECT form (see EnqueueStdinTail's own doc for why this must be an explicit opt-in, not
     // a `mintedAtWallClock`-presence fallback).
@@ -6992,7 +7010,7 @@ export class PtyHost {
         // same function the drain path uses, so there is exactly one place this logic lives. In practice
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
-        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
         this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
@@ -7023,7 +7041,7 @@ export class PtyHost {
       const id = randomUUID();
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) };
+      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) };
       // Card eac3464d DoD-2 (owner ask 2, 2026-08-28): a SAME-SENDER agent-kind message jumps ahead of
       // any OTHER senders' messages queued after its own sender's last (eligible) entry, landing right
       // after it instead of at the FIFO tail — so drainPending's same-sender coalescing (above) actually
@@ -7401,6 +7419,33 @@ export class PtyHost {
     for (let i = live.pending.length - 1; i >= 0; i--) {
       const m = live.pending[i]!;
       if (m.questionId != null && ids.has(m.questionId)) {
+        removed.push(m);
+        live.pending.splice(i, 1);
+      }
+    }
+    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+  }
+
+  /**
+   * Drop still-queued `[loom:worker-report] …` entries TAGGED to any of the given `reportEventId`s (see
+   * QueuedMessage.reportEventId) — card 60b26261's dedup: `worker_report_get` calls this right after it
+   * reads a report straight from durable event storage, so a queued copy of THAT SAME report never also
+   * drains later as a wasted turn. Byte-identical mechanics to `purgeQueuedByQuestionIds` (SELECTIVE
+   * splice, FIFO-preserving, synchronous — see that method's own doc for the full contract this mirrors);
+   * only the tag field differs. Keyed on the report event's own id, deliberately NEVER on a worker id — a
+   * worker can file `progress` then `done`, and purging by worker id would silently drop an UNREAD earlier
+   * report the manager hasn't seen yet. Returns the removed entries (onDeliver included, mirroring
+   * `purgeQueuedByQuestionIds`) so the caller can resolve them; [] for a dead/unknown session, an empty
+   * `reportEventIds`, or when nothing matched.
+   */
+  purgeQueuedByReportEventIds(sessionId: string, reportEventIds: readonly string[]): QueuedMessage[] {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || reportEventIds.length === 0) return [];
+    const ids = new Set(reportEventIds);
+    const removed: QueuedMessage[] = [];
+    for (let i = live.pending.length - 1; i >= 0; i--) {
+      const m = live.pending[i]!;
+      if (m.reportEventId != null && ids.has(m.reportEventId)) {
         removed.push(m);
         live.pending.splice(i, 1);
       }

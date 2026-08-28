@@ -2892,6 +2892,14 @@ export class OrchestrationMcpRouter {
         } else {
           target = reports[reports.length - 1]!;
         }
+        // Card 60b26261: this IS "the manager reads a report" — drop any still-queued
+        // `[loom:worker-report]` nudge announcing THIS SAME report (tagged with `target.id` at enqueue —
+        // see `workerReport`'s `reportEventId`) so it doesn't ALSO drain later as a wasted turn. Keyed on
+        // the report's own event id, never the worker id, so an unread earlier report (e.g. a `progress`
+        // filed before this `done`) is left untouched. Best-effort — never let a purge fault block the read.
+        if (w.parentSessionId) {
+          try { sessions.purgeQueuedWorkerReportNudge(w.parentSessionId, target.id); } catch { /* never block the read */ }
+        }
         const detail = target.detail ?? {};
         const summary = typeof detail.summary === "string" ? detail.summary : "";
         const { summary: _omitSummary, ...restDetail } = detail;
