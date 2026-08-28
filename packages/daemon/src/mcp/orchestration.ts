@@ -3882,7 +3882,13 @@ export class OrchestrationMcpRouter {
           "which infers the same fact from clocks and can be fooled by a cache-replay's mtime bump. " +
           "`processBuiltShaMatchesHead` is \"is `processBuiltSha` a provably-clean match for " +
           "`mainlineHeadSha`\" — often `false` in ordinary healthy operation (mainline moves on unrelated " +
-          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. " +
+          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. Card 7a44e7a1: " +
+          "`stale`/`commitsBehind` reading CLEAN (`false`/`0`) in the SAME response where " +
+          "`processBuiltShaMatchesHead` reads `false` is NOT a contradiction — the two answer DIFFERENT " +
+          "questions (restart-relevant paths only, vs. an exact sha match on ANY file) and are not required " +
+          "to agree; it means mainline moved on a non-restart-relevant commit (docs/assets/tests/scripts) " +
+          "after this process's build — the deliberate CRY-WOLF CONTROL case (deploy-staleness.mjs test 20), " +
+          "not a defect. `deploySignatureMismatch` is the field that actually flags disagreement worth acting on. " +
           "`deploySignatureMismatch:true` is the actual defect detector, fed from `processBuiltSha` " +
           "(deliberately, not `distBuiltSha` — the question is what THIS PROCESS is running): the date-" +
           "based clock claims `stale:false` (caught up) BUT `processBuiltSha`'s own real commit date " +

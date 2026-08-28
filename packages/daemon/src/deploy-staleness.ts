@@ -193,9 +193,15 @@ export interface DeployStalenessResult {
   mainlineHeadSha: string | null;
   /** Mainline HEAD's committer date, ISO. */
   mainlineHeadDate: string | null;
-  /** Count of `packages/daemon/src` / `packages/shared/src` commits committed AFTER distBuiltAt. */
+  /** Count of `packages/daemon/src` / `packages/shared/src` commits committed AFTER distBuiltAt.
+   * Card 7a44e7a1: this is DELIBERATELY path-scoped, so it is NOT comparable 1:1 with
+   * `processBuiltShaMatchesHead` (which is unscoped — any file). Reading `0` here while
+   * `processBuiltShaMatchesHead` is `false` is NOT a contradiction: it means mainline moved on a
+   * non-restart-relevant commit (docs/assets/tests/scripts) — the same case test (20)'s CRY-WOLF CONTROL
+   * in deploy-staleness.mjs asserts is correct, not a defect. */
   commitsBehind: number;
-  /** commitsBehind > 0 — mainline carries daemon-src/shared changes this running process was not built with. */
+  /** commitsBehind > 0 — mainline carries daemon-src/shared changes this running process was not built with.
+   * Same scoping caveat as `commitsBehind` applies — see its own doc. */
   stale: boolean;
   /** ISO mtime of the NEWEST file under `packages/web/dist`, or `null` if that dir is missing/empty (web
    * never built). Card c3ce92ea — the WEB analogue of `distBuiltAt`, kept fully independent so a web-only
