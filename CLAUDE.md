@@ -71,7 +71,13 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   to show it. It logs to `<LOOM_HOME>/logs/daemon-supervisor.log` (build output, restart-loop messages
   ONLY — the detached child's console mirror is off, so this does not also absorb the daemon's own stream)
   and `<LOOM_HOME>/logs/daemon-output.log`, the bounded/rotating/timestamped copy of the daemon's own
-  output (as before). Tracks its PID (+ port) at `<LOOM_HOME>/daemon-supervisor.pid`, best-effort-removed
+  output (as before). **`LOOM_LOG_MESSAGE_CONTENT` (default OFF, card `16c93a50`):** this log is shared
+  across every tenant on the host, so message CONTENT (a raw excerpt of session/agent text) is redacted to
+  a length+hash signature at the handful of diagnostics that would otherwise quote it — length/hash
+  diagnostics themselves (`submit-write`/`prompt-echo`/`prompt-mismatch`) are unaffected either way. Set
+  `LOOM_LOG_MESSAGE_CONTENT=1` in the daemon's own env (e.g. `<LOOM_HOME>/.env`) to opt this host back into
+  raw content for local debugging — never flip it in code; see `paths.ts`'s `isLogMessageContentEnabled`.
+  Tracks its PID (+ port) at `<LOOM_HOME>/daemon-supervisor.pid`, best-effort-removed
   on its own exit. Stop it with `pnpm daemon:stable:stop` (the same graceful `POST /internal/shutdown`
   hook the packaged CLI's `loom stop` uses, resolving the port from the SAME pid-file record the launcher
   wrote rather than re-deriving it from stop's own env — the two can otherwise disagree, e.g. a `LOOM_PORT`

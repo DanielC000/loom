@@ -306,6 +306,22 @@ export function isPtyUseConptyDllEnabled(): boolean {
 }
 
 /**
+ * Opt-in verbosity gate (`LOOM_LOG_MESSAGE_CONTENT=1`, default OFF — same family as {@link isLoomDev}).
+ * Card 16c93a50 (owner ruling, request `0eb43216`): `scripts/daemon-supervisor.mjs` tees every daemon
+ * `console.*` line into a ROTATED, MULTI-TENANT `daemon-output.log` — a handful of diagnostics (pty/
+ * host.ts's `redactedExcerpt` call sites) additionally quote a raw excerpt of session/message TEXT there.
+ * The owner's ruling: that content is OFF by default for every user, opt-in only via this flag on a host
+ * where the operator has decided the debugging value is worth it. Length/hash diagnostics — the
+ * `submit-write`/`prompt-echo`/`prompt-mismatch` "backbone" — are UNAFFECTED; this gates only the raw-text
+ * excerpts layered on top of them. Read at CALL time (like `isLoomDev`) so a single test process can
+ * exercise both polarities. Unset/absent/any value other than the literal `"1"` (including a truthy-
+ * looking typo like `"true"`) all resolve to OFF — there is no implicit-default-ON path.
+ */
+export function isLogMessageContentEnabled(): boolean {
+  return process.env.LOOM_LOG_MESSAGE_CONTENT === "1";
+}
+
+/**
  * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
  * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
  * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is

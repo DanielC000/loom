@@ -19,7 +19,7 @@ import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -120,6 +120,22 @@ function fnv1a32Continue(priorHash: string, s: string): string {
  */
 function textSignature(text: string): { len: number; hash: string } {
   return { len: text.length, hash: fnv1a32(text) };
+}
+
+/**
+ * Card 16c93a50 (owner ruling, request `0eb43216`): the single chokepoint every content-bearing diagnostic
+ * in this file (and `sessions/service.ts`'s `[give-up] … PARKED` line) routes its excerpt through, instead
+ * of quoting `JSON.stringify(<excerpt>)` directly. Every call site passes the ALREADY-SLICED/windowed
+ * candidate excerpt (never the full session text) — with {@link isLogMessageContentEnabled} OFF (the
+ * shipped default), this returns that excerpt's own length + the SAME cheap `fnv1a32` hash `ptyWrite`'s
+ * own log line already uses, never its bytes, so a reader can still confirm two occurrences are byte-
+ * identical without the daemon ever writing the content itself to the rotated, multi-tenant
+ * `daemon-output.log`. With the flag on, this returns exactly what the call site used to inline
+ * unconditionally (`JSON.stringify(excerpt)`) — byte-identical to pre-16c93a50 behavior.
+ */
+export function redactedExcerpt(excerpt: string): string {
+  if (isLogMessageContentEnabled()) return JSON.stringify(excerpt);
+  return `<redacted len=${excerpt.length} hash=${fnv1a32(excerpt)}>`;
 }
 
 /**
@@ -5611,7 +5627,7 @@ export class PtyHost {
               // no way to tell that apart from a real loss. It reports every transformation as a corruption
               // unless the transform is explicitly named and checked for, which is what the two suppression
               // checks below do.
-              const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
+              const around = (s: string, at: number) => redactedExcerpt(s.slice(Math.max(0, at - 20), at + 40));
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
               // Card c2c750a9: the sum+hash composer-accumulation detector — CONSUMES the very fields
@@ -5736,7 +5752,7 @@ export class PtyHost {
                 ? findRecognizedSubstring(reported, live.recentWrittenTurns.slice(0, -1))
                 : null;
               if (unmatchedRecognized) {
-                const excerpt = (s: string) => JSON.stringify(s.length > 80 ? `${s.slice(0, 80)}…` : s);
+                const excerpt = (s: string) => redactedExcerpt(s.length > 80 ? `${s.slice(0, 80)}…` : s);
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-unmatched-remainder] ${sessionId} gen=${live.submitGeneration} recognizedGen=${unmatchedRecognized.gen} matchedLen=${unmatchedRecognized.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${unmatchedRecognized.leadingRemainder.length} trailingRemainderLen=${unmatchedRecognized.trailingRemainder.length} leadingRemainder=${excerpt(unmatchedRecognized.leadingRemainder)} trailingRemainder=${excerpt(unmatchedRecognized.trailingRemainder)} — card d005f55b DoD-3: otherwise-unmatched, but reported CONTAINS generation ${unmatchedRecognized.gen}'s own recorded write as a substring; the remainder(s) above are NOT accounted for. No mechanism or confirmation is claimed by this alone.`);
               }
@@ -6642,7 +6658,7 @@ export class PtyHost {
     const { text: sanitizedText, sanitized } = sanitizeLoneSurrogates(text, kind);
     if (sanitized) {
       // eslint-disable-next-line no-console
-      console.warn(`[pty] ${sessionId} sanitized an invalid (not well-formed UTF-16) system nudge — delivering the cleaned text: ${JSON.stringify(sanitizedText.slice(0, 200))}`);
+      console.warn(`[pty] ${sessionId} sanitized an invalid (not well-formed UTF-16) system nudge — delivering the cleaned text: ${redactedExcerpt(sanitizedText.slice(0, 200))}`);
     }
     text = sanitizedText;
     // LOG-ONLY: missing the [loom:* ] tag is an anomaly worth flagging, NOT proof of corruption — a
@@ -6650,7 +6666,7 @@ export class PtyHost {
     // DELIVERED, not silently dropped. Falls through to the normal enqueue/deliver path below.
     if (isUntaggedSystemNudge(text, kind)) {
       // eslint-disable-next-line no-console
-      console.warn(`[pty] ${sessionId} a "warning"-kind system nudge is missing its [loom:*] tag (delivering anyway — this sender should be tagged): ${JSON.stringify(text.slice(0, 200))}`);
+      console.warn(`[pty] ${sessionId} a "warning"-kind system nudge is missing its [loom:*] tag (delivering anyway — this sender should be tagged): ${redactedExcerpt(text.slice(0, 200))}`);
     }
     this.healIfStuck(live, sessionId);
     // Card 9e27f4d2 (code review follow-up): a restored give-up hold still in the future must NEVER take
@@ -7678,7 +7694,7 @@ export class PtyHost {
     // log this same instrumentation adds to setBusy) — this line is what lets a future recurrence be
     // diagnosed straight from daemon-output.log instead of requiring an engine-transcript cross-reference.
     // eslint-disable-next-line no-console
-    console.log(`[submit-write] ${sessionId} reason=${reason} busyBefore=${live.busy} len=${text.length} head=${JSON.stringify(text.slice(0, 60))}`);
+    console.log(`[submit-write] ${sessionId} reason=${reason} busyBefore=${live.busy} len=${text.length} head=${redactedExcerpt(text.slice(0, 60))}`);
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
     // Card 0f9268cc: a structured submit() starting supersedes any earlier raw-terminal baseline — the
     // composer-dirty gate (deferForHumanDraft) already stops this from racing a DIRTY raw draft, but a
@@ -9415,9 +9431,16 @@ export class PtyHost {
         setTimeout(tryRead, MODE_LOG_POLL_MS);
         return;
       }
+      // Card 16c93a50 (manager review): `collapseFooter` does NOT isolate a footer region — it only strips
+      // ANSI escapes and collapses whitespace (see its own doc above) — so this 160-char tail is "whatever
+      // was last rendered to the terminal", ANSI-stripped, not a guaranteed footer-only excerpt. The footer
+      // usually dominates it (it repaints last, and collapsed is only ~15-30 chars), but the rest of the
+      // window can carry whatever was drawn just before it in the SAME repaint — plausibly composer/session
+      // text. Gated through `redactedExcerpt` like every other raw excerpt this card covers; `kind=`/`mode=`/
+      // `matched=` stay unconditional — pure classification, never session text.
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
-      console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
+      console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${redactedExcerpt(snippet)}`);
       if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to ${healTarget}`);
@@ -9474,7 +9497,7 @@ export class PtyHost {
     // key is a handful of bytes; a pasted paragraph (the shape a stray report replay would take) is not.
     if (live && data.length > 20) {
       // eslint-disable-next-line no-console
-      console.log(`[stdin-write] ${sessionId} busy=${live.busy} len=${data.length} head=${JSON.stringify(data.slice(0, 60))}`);
+      console.log(`[stdin-write] ${sessionId} busy=${live.busy} len=${data.length} head=${redactedExcerpt(data.slice(0, 60))}`);
     }
     // Write the human's bytes to the pty FIRST — they must stay AHEAD of any held programmatic turn in
     // the pty's FIFO input stream. A box-freeing key (e.g. Enter) is a tiny chunk written synchronously

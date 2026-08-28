@@ -12,7 +12,7 @@ import {
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
@@ -7825,7 +7825,7 @@ export class SessionService {
     // PARKED: budget exhausted at every level (in-session AND cross-remint). Stop dispatching — no further
     // enqueueStdin call for this message — and make the outcome loud + durable + sender-visible instead.
     // eslint-disable-next-line no-console
-    console.error(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, ${text.length} chars, head=${JSON.stringify(text.slice(0, 60))}) PARKED after ${GIVE_UP_REMINT_LIMIT} re-mint attempts — Loom will NOT retry this automatically; surfacing to the sender`);
+    console.error(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, ${text.length} chars, head=${redactedExcerpt(text.slice(0, 60))}) PARKED after ${GIVE_UP_REMINT_LIMIT} re-mint attempts — Loom will NOT retry this automatically; surfacing to the sender`);
     // Card 085d9422: computed BEFORE the durable park event below, so that event's OWN detail can carry
     // whether the sender-facing notice actually went out — the parked outcome is recorded EITHER way (a
     // suppressed notice never means a suppressed AUDIT record); only the notice dispatch itself is gated.
@@ -8200,6 +8200,29 @@ export class SessionService {
    * doc): `recognizedGen`/`matchedLen`/`leadingRemainderLen`/`trailingRemainderLen` name WHICH earlier
    * generation this mismatch replayed and how much of it matched — lengths and a generation number, never
    * the matched/remainder TEXT itself, consistent with `intendedLen`/`writtenHash` already stored here.
+   *
+   * Card 16c93a50 — the STILL-DEFERRED content half (c23e2869's own "bounded remainder excerpts" clause,
+   * deferred item `ea4793d9`) does NOT ship here, and deliberately isn't gated behind this card's own
+   * `LOOM_LOG_MESSAGE_CONTENT` flag either: request `0eb43216`'s ruling and this card's DoD are both scoped
+   * in terms to "the rotated daemon log" (the console.* stream `daemon-output.log` tees) — a bounded,
+   * 60MB-capped file. A durable `orchestration_events` row is a STRUCTURALLY DIFFERENT artifact: it never
+   * rotates away, and is queryable indefinitely (`events_search` and friends) by any session with access —
+   * a materially different, arguably HIGHER-stakes exposure than a line in a capped log file. Extending
+   * this card's ruling to cover it would be inferring an owner decision on an artifact nobody actually
+   * asked them about. If a durable record of the unmatched remainder text is wanted, that's a fresh policy
+   * question for its own request, not a corollary of `0eb43216`.
+   *
+   * DoD-3's OWN ask ("decide the durability boundary deliberately … not a request to durably log all
+   * 685[+ console notices] — a request to say which shapes are worth surviving rotation, and why") IS
+   * answered here: only a mismatch that reaches THIS method — i.e. one that never resolved within
+   * `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` and is therefore treated as an established loss — earns a durable
+   * row. Every other classified shape logged in `pty/host.ts` (composer-accumulation, wrapper-deficit,
+   * ANSI-strip-deficit, wrapper-aware-fusion, and an unresolved-but-still-pending unmatched-remainder) is
+   * either confirmed benign or still within its resolve window, and stays console-only by design: those
+   * are debugging breadcrumbs for a human reading the live log, not accountability records for an outcome
+   * that already happened. Durability is reserved for the one shape that needs to survive log rotation —
+   * a loss nobody can any longer verify by re-reading the log — not for every classification this file
+   * makes along the way.
    */
   handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number }): void {
     const s = this.db.getSession(sessionId);
