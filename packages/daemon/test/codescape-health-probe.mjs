@@ -27,8 +27,62 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Card 5112d392 DoD-2: this file alone was measured (gen 192, gate `c1499a5e`) to have consumed the
+// ENTIRE `outputTail` of a shared gate run (a bounded `OUTPUT_TAIL_BYTES`=4096-byte ring — see
+// gate-runner.ts — shared across EVERY step of the WHOLE gate), hiding a DIFFERENT test's failure. Two
+// sources drive this file's own volume, BOTH low-information on a normal (green) run: (a) ~90 check()s,
+// most of which PASS (per the corpus, card 5112d392: 18/487 = 3.70% full-suite failure rate), each with a
+// long descriptive label (many 150-400+ chars); and (b), measured to be the LARGER of the two once (a) is
+// capped, the supervisor's OWN `console.warn`/`console.error` diagnostics that scenarios forward live to
+// the real console via `captureWarnings`/`captureErrors` below (e.g. scenario (16)'s repeated
+// restart-cycle logging) purely so a human watching an interactive run can see them — never the actual
+// test assertion. FAIL lines are the rare, load-bearing diagnostic signal and are NEVER capped or deferred
+// anywhere in this file: `check()`'s FAIL branch prints immediately, in full, uncapped, so the gate's LIVE
+// failing-test scanner (`createFailingTestTracker` in gate-runner.ts — explicitly NOT subject to
+// `outputTail`'s own truncation) always sees it regardless of these caps. `createBoundedLogger` returns an
+// INDEPENDENT counter/budget instance per call so `passLogger`, `diagnosticLogger`, and the dedicated
+// POSITIVE+NEGATIVE CONTROL scenario near the end of this file (which deliberately re-exercises this same
+// mechanism on its own fresh instances) can never pollute each other's byte accounting.
+function createBoundedLogger(maxBytes, kind) {
+  let bytesPrinted = 0;
+  let suppressed = 0;
+  let capped = false;
+  const printed = [];
+  return {
+    log(line) {
+      const size = Buffer.byteLength(line, "utf8") + 1;
+      if (bytesPrinted + size > maxBytes) {
+        suppressed++;
+        if (!capped) {
+          capped = true;
+          const note = `... ${kind} output capped at ${maxBytes} bytes (card 5112d392 DoD-2) — further ${kind} lines suppressed, counted only`;
+          console.log(note);
+          printed.push(note);
+        }
+        return;
+      }
+      bytesPrinted += size;
+      console.log(line);
+      printed.push(line);
+    },
+    get bytesPrinted() { return bytesPrinted; },
+    get suppressed() { return suppressed; },
+    get capped() { return capped; },
+    get printed() { return printed; },
+  };
+}
+
+const MAX_PASS_OUTPUT_BYTES = 800; // well under half of gate-runner.ts's OUTPUT_TAIL_BYTES(4096), even alone
+const passLogger = createBoundedLogger(MAX_PASS_OUTPUT_BYTES, "PASS");
+const MAX_DIAGNOSTIC_OUTPUT_BYTES = 1200; // forwarded supervisor console.warn/console.error — live-run visibility only, never the assertion itself (that's always captured into `lines` below, uncapped, for check() to read)
+const diagnosticLogger = createBoundedLogger(MAX_DIAGNOSTIC_OUTPUT_BYTES, "diagnostic");
+
 let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const check = (label, cond) => {
+  if (cond) { passLogger.log(`PASS  ${label}`); return; }
+  console.log(`FAIL  ${label}`); // always printed in full, uncapped — see header comment above
+  failures++;
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Card cc43c74d: waits for `cond()` WITHOUT a guessed total-duration budget — a fixed iteration cap
@@ -98,22 +152,25 @@ const attemptSuffix = (expected, actual) => actual !== expected ? ` — observed
 
 // Card 90550a97 review follow-up: an unresolvable installed build must warn LOUDLY but only ONCE per
 // distinct reason (never once per ~30s probe tick forever). Intercepts console.warn for the duration of a
-// scenario (still forwarding to the real console, so failures stay visible in test output) and counts
-// matches against a substring, so a test can assert "warned exactly once" over many probe ticks.
+// scenario and counts matches against a substring, so a test can assert "warned exactly once" over many
+// probe ticks. `lines` (what check() actually reads) captures EVERY call, uncapped — only the live console
+// forward (human-visible, not the assertion itself) goes through `diagnosticLogger`'s byte budget (card
+// 5112d392 DoD-2 — see that constant's own doc for why forwarded supervisor diagnostics are bounded here).
 function captureWarnings() {
   const original = console.warn;
   const lines = [];
-  console.warn = (...args) => { lines.push(args.join(" ")); original(...args); };
+  console.warn = (...args) => { lines.push(args.join(" ")); diagnosticLogger.log(args.join(" ")); };
   return { lines, restore: () => { console.warn = original; } };
 }
 
 // Card 4c7a337d: same technique as captureWarnings, for the give-up path's `console.error` — the loud
 // "codescape serve is DOWN … needs a human" diagnostic must be provably REACHABLE for a sustained crash
-// loop, not just inferred from getPort() going null.
+// loop, not just inferred from getPort() going null. Same DoD-2 treatment as captureWarnings above: `lines`
+// stays uncapped for check()'s own use, only the live console forward is budgeted.
 function captureErrors() {
   const original = console.error;
   const lines = [];
-  console.error = (...args) => { lines.push(args.join(" ")); original(...args); };
+  console.error = (...args) => { lines.push(args.join(" ")); diagnosticLogger.log(args.join(" ")); };
   return { lines, restore: () => { console.error = original; } };
 }
 
@@ -1321,6 +1378,39 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 }
 
+// ===================== (17) POSITIVE + NEGATIVE CONTROL (card 5112d392 DoD-2/4): both output caps actually fire ====
+// Exercises `createBoundedLogger` directly, on FRESH instances independent of `passLogger`/`diagnosticLogger`
+// above — whatever this file's own real checks/scenarios have already printed cannot pollute this control's
+// byte accounting. Runs the SAME shape of proof against BOTH kinds this file caps (PASS-line volume and
+// forwarded supervisor-diagnostic volume) — capping only one of the two would leave the other free to
+// reproduce the exact incident (gen 192) this card exists to close.
+for (const kind of ["PASS", "diagnostic"]) {
+  // NEGATIVE CONTROL: a burst safely under the cap must print every line and never trip the suppression
+  // note — without this, "the cap fires" could be a mechanism that fires unconditionally regardless of
+  // actual volume, and a vacuously-satisfied control looks exactly like a real one.
+  const smallLogger = createBoundedLogger(800, kind);
+  smallLogger.log("a short line");
+  check(`(17) negative control (${kind}): a burst well under the cap prints in full and never trips the cap`,
+    smallLogger.printed.length === 1 && smallLogger.capped === false && smallLogger.suppressed === 0);
+
+  // POSITIVE CONTROL: force real volume well past the cap (a burst of realistic-length lines, the same
+  // shape this file's own labels/diagnostics actually take) and confirm the cap actually FIRES — printed
+  // bytes stay bounded at/under the configured budget, and the suppression note appears exactly once even
+  // though many lines exceeded it (never once per suppressed line, which would just reintroduce the same
+  // problem this card exists to close).
+  const bigLogger = createBoundedLogger(800, kind);
+  const longLabel = "x".repeat(200);
+  for (let i = 0; i < 20; i++) bigLogger.log(`${longLabel} #${i}`); // ~20 * ~204 bytes ~= 4080 bytes >> the 800-byte cap
+  check(`(17) positive control (${kind}): a burst well past the cap actually truncates (the cap genuinely fired)`,
+    bigLogger.capped === true);
+  check(`(17) positive control (${kind}): printed bytes stay bounded at/under the configured cap`,
+    bigLogger.bytesPrinted <= 800);
+  check(`(17) positive control (${kind}): excess lines were counted as suppressed, not silently dropped without a trace`,
+    bigLogger.suppressed > 0);
+  check(`(17) positive control (${kind}): the suppression note fires exactly ONCE despite many lines exceeding the cap`,
+    bigLogger.printed.filter((l) => l.includes(`${kind} output capped`)).length === 1);
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -1331,7 +1421,17 @@ delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
+// Card 5112d392 DoD-2: this summary used to restate the full per-scenario DoD inline (~3.4KB, printed
+// unconditionally on every green run) — itself a real contributor to a passing run's own stdout volume,
+// duplicating what the scenario-header comments above already document in full. Kept short; see this
+// file's own per-scenario `// =====` headers for the complete, authoritative per-scenario DoD text.
+const suppressionNote = () => {
+  const parts = [];
+  if (passLogger.suppressed > 0) parts.push(`${passLogger.suppressed} PASS line(s) capped at ${MAX_PASS_OUTPUT_BYTES} bytes`);
+  if (diagnosticLogger.suppressed > 0) parts.push(`${diagnosticLogger.suppressed} forwarded diagnostic line(s) capped at ${MAX_DIAGNOSTIC_OUTPUT_BYTES} bytes`);
+  return parts.length > 0 ? ` (${parts.join("; ")} — FAIL lines above are never capped.)` : "";
+};
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and the health-probe timer now arms regardless of codescape-enabled project count, so a sustained wedge with ZERO codescape-enabled projects is detected and restarted the same as any other boot. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout; and (card f0718488) a version probe that TIMES OUT specifically is retried (a genuine timeout rescued by a retry never even reaches the loud diagnostic, asserted on the observed attempt COUNT, never wall-clock), while a persistently-timing-out probe still exhausts EXACTLY its bounded attempt budget, still fails the tick loudly (latched, once, same discipline as (8)), and — the property most likely to break under a refactor of this retry loop — STILL never triggers a restart, across repeated ticks. Card 545ef479: the drift-check outcome (match / mismatch / not-checked:running-absent / not-checked:installed-null / not-checked:installed-read-failed) is now a DISTINGUISHABLE, latched signal (getDriftCheckState()) rather than three silent, byte-identical early returns; and a sustained /graph/health 500 (a response that ARRIVES, just can't determine something) is proven — over many multiples of the old kill threshold — to never count as wedge evidence, never kill the child, and never produce an unbounded respawn cycle, while still being reported once (latched) and its recovery announced once — claude-free, network-free beyond loopback."
-  : `\n❌ ${failures} FAILURE(S).`);
+  ? "\n✅ ALL PASS — Codescape supervisor health probe (17 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
+  : `\n❌ ${failures} FAILURE(S).${suppressionNote()}`);
 process.exit(failures === 0 ? 0 : 1);
