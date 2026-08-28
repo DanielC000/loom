@@ -26,15 +26,44 @@
 //
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
-// Both paths are REQUIRED and are read as given — this script never hardcodes a vault path. The doc
-// lives outside this repo, at a location that differs per machine.
+//   node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
+//   node rotation-gate.mjs --active <path> --lint
+// --active is always REQUIRED and is read as given — this script never hardcodes a vault path. The doc
+// lives outside this repo, at a location that differs per machine. --archive is REQUIRED unless --lint
+// is passed (see LINT MODE below).
 //
-// EXIT CODES (never a print-and-continue): 0 = rotation may proceed. 1 = REFUSED — every failure is
-// named on stderr. 2 = usage error (missing/unreadable args), not a gate verdict.
+// --rules <path> (OPTIONAL, card 9a5837b2): a UNION, not a replacement. A marker is satisfied if it is
+// present in --active, OR — when --rules is supplied — in the --rules file. Omitting --rules leaves
+// behavior byte-identical to before this flag existed: every marker must still be found in --active
+// alone. The union exists because some of the durable-marker content is meant to move OUT of the
+// rotating doc into the non-rotating `Operations/Orchestrator Rules.md`, and the gate must not go blind
+// to a marker the moment it's relocated there — this makes the two landings (script change, vault move)
+// order-independent: the gate passes via --active alone before the move and via --rules after, with no
+// window where a marker that still genuinely exists somewhere durable is treated as missing. A marker
+// absent from BOTH files still fails — this never weakens what "present" means, it only adds a second
+// durable place to look. On success, the script names WHICH file satisfied each marker (see below) so a
+// green never obscures where a rule now actually lives.
 //
-// WHAT "--archive" IS CHECKED FOR: that it exists and is non-empty. A rotation that names an archive
-// path which was never actually written is not a rotation that happened — this is a minimal, structural
-// sanity check that the archive side of the operation is real, not a review of its content.
+// LINT MODE (--lint, card 9a5837b2): runs the SAME marker + LIVE COMMITMENTS checks against --active
+// (plus --rules if given) WITHOUT requiring or checking --archive at all. Rotation only happens at a
+// rotation; a marker can silently break mid-seat (e.g. a card-line rewrite that carries a marker token
+// away with it) and nothing would catch it until the next rotation, under exactly the time pressure the
+// doc warns against. --lint lets anyone run the marker check against the LIVE doc, any time, for free.
+// The archive check verifies "a rotation actually produced an archive file" — a question that has no
+// meaning outside an actual rotation, so lint mode SKIPS it entirely rather than requiring a throwaway
+// archive path: inventing a dummy file on every lint run is friction that would just discourage the
+// thing this mode exists to encourage (running it often), and a REUSED throwaway risks misleading a
+// future reader into thinking it's a real rotation artifact. This is deliberately a SEPARATE, explicit
+// flag — the ROTATION path (no --lint) is completely unchanged and still hard-requires a real, non-empty
+// --archive; lint mode can never be reached by accident.
+//
+// EXIT CODES (never a print-and-continue): 0 = rotation/lint may proceed / passes. 1 = REFUSED — every
+// failure is named on stderr. 2 = usage error (missing/unreadable args), not a gate verdict.
+//
+// WHAT "--archive" IS CHECKED FOR (rotation path only — skipped entirely under --lint): that it exists
+// and is non-empty. A rotation that names an archive path which was never actually written is not a
+// rotation that happened — this is a minimal, structural sanity check that the archive side of the
+// operation is real, not a review of its content.
 //
 // ⚠️ HONEST LIMIT — READ BEFORE TRUSTING A GREEN: every marker check here is an EXACT-SUBSTRING grep.
 // It can prove a token's literal text is still present; it CANNOT see a rule that survived rotation only
@@ -71,17 +100,29 @@ const HELP = `rotation-gate.mjs — refuse to promote a resume-doc rotation that
 
 USAGE:
   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
+  node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
+  node rotation-gate.mjs --active <path> --lint [--rules <path>]
   node rotation-gate.mjs --help
 
-Exit 0 = rotation may proceed. Exit 1 = refused (see stderr for every failure). Exit 2 = usage error.
+Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failure). Exit 2 = usage error.
 
-Checks run against --active:
+--rules <path> (OPTIONAL): a marker is satisfied if present in --active OR in --rules (a union, never a
+  replacement — a marker in neither still fails). On success, the script names which file satisfied each
+  marker. Omit it and behavior is byte-identical to a script with no --rules flag at all.
+
+--lint: skip the --archive requirement/check entirely and run only the marker + LIVE COMMITMENTS checks
+  against --active (and --rules, if given). For running the gate against the LIVE doc any time, not only
+  at a rotation. --archive is never read or required in this mode. The rotation path (no --lint) is
+  unchanged and still hard-requires a real, non-empty --archive.
+
+Checks run against --active (unioned with --rules when supplied):
   1. All ${MARKERS.length} markers below are present as exact substrings (see the case-sensitivity note in each).
   2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next MY-PEER-SEND-LEDGER
      heading LINE — a prose mention of either token that is not itself a heading line is ignored) still
-     contains ${REQUIRED_LIVE_COMMITMENTS_COUNT} numbered items, matched by /^\\d+\\. /gm.
+     contains ${REQUIRED_LIVE_COMMITMENTS_COUNT} numbered items, matched by /^\\d+\\. /gm. (This section is
+     only ever measured in --active — it is not a candidate for the --rules union.)
 
-Checks run against --archive:
+Checks run against --archive (skipped entirely under --lint):
   3. The path exists, is a regular file, and is non-empty.
 
 Markers (case-INsensitive unless noted):
@@ -101,7 +142,7 @@ const HONEST_LIMIT_NOTE =
   "not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict.";
 
 function parseArgs(argv) {
-  const out = { active: null, archive: null, help: false };
+  const out = { active: null, archive: null, rules: null, lint: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -110,10 +151,16 @@ function parseArgs(argv) {
       out.active = argv[++i];
     } else if (a === "--archive") {
       out.archive = argv[++i];
+    } else if (a === "--rules") {
+      out.rules = argv[++i];
+    } else if (a === "--lint") {
+      out.lint = true;
     } else if (a.startsWith("--active=")) {
       out.active = a.slice("--active=".length);
     } else if (a.startsWith("--archive=")) {
       out.archive = a.slice("--archive=".length);
+    } else if (a.startsWith("--rules=")) {
+      out.rules = a.slice("--rules=".length);
     } else {
       console.error(`[rotation-gate] unrecognized argument: ${a}`);
       process.exit(2);
@@ -122,14 +169,30 @@ function parseArgs(argv) {
   return out;
 }
 
-function findMissingMarkers(text) {
+function textIncludes(text, marker) {
+  const haystack = marker.caseSensitive ? text : text.toLowerCase();
+  const needle = marker.caseSensitive ? marker.token : marker.token.toLowerCase();
+  return haystack.includes(needle);
+}
+
+// Returns { missing: Marker[], satisfiedBy: Map<token, "active"|"rules"> }. A marker is satisfied by
+// --active first (checked first so an --active hit is never reported as coming from --rules even if the
+// token also happens to appear there); only if absent from --active AND rulesText is non-null is --rules
+// consulted. A marker absent from BOTH is missing — the union only ever ADDS a place to look, it never
+// removes --active as a valid source.
+function checkMarkers(activeText, rulesText) {
   const missing = [];
+  const satisfiedBy = new Map();
   for (const marker of MARKERS) {
-    const haystack = marker.caseSensitive ? text : text.toLowerCase();
-    const needle = marker.caseSensitive ? marker.token : marker.token.toLowerCase();
-    if (!haystack.includes(needle)) missing.push(marker);
+    if (textIncludes(activeText, marker)) {
+      satisfiedBy.set(marker.token, "active");
+    } else if (rulesText !== null && textIncludes(rulesText, marker)) {
+      satisfiedBy.set(marker.token, "rules");
+    } else {
+      missing.push(marker);
+    }
   }
-  return missing;
+  return { missing, satisfiedBy };
 }
 
 // Finds the first line at or after `fromIndex` that is a real markdown heading (1-6 leading `#` followed
@@ -187,41 +250,61 @@ function readRequiredFile(flagName, filePath) {
   }
 }
 
+// --rules is OPTIONAL: null (not provided) is a valid, distinct state from "provided but unreadable"
+// (a real error, exit 1) — unlike readRequiredFile, an absent path here is never a usage error.
+function readOptionalFile(flagName, filePath) {
+  if (!filePath) return null;
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    console.error(`[rotation-gate] cannot read --${flagName} ${filePath}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(HELP);
     process.exit(0);
   }
-  if (!args.active || !args.archive) {
+  if (!args.active) {
+    console.error(HELP);
+    process.exit(2);
+  }
+  if (!args.lint && !args.archive) {
     console.error(HELP);
     process.exit(2);
   }
 
   const activeText = readRequiredFile("active", args.active);
+  const rulesText = readOptionalFile("rules", args.rules);
 
-  let archiveStat;
-  try {
-    archiveStat = fs.statSync(args.archive);
-  } catch (err) {
-    console.error(`[rotation-gate] REFUSED: --archive ${args.archive} does not exist or is unreadable (${err.message})`);
-    console.error(`[rotation-gate] a rotation must actually produce an archive file before its new active doc is promoted`);
-    process.exit(1);
-  }
+  let archiveStat = null;
   const archiveFailures = [];
-  if (!archiveStat.isFile()) {
-    archiveFailures.push(`--archive ${args.archive} is not a regular file`);
-  } else if (archiveStat.size === 0) {
-    archiveFailures.push(`--archive ${args.archive} is empty`);
+  if (!args.lint) {
+    try {
+      archiveStat = fs.statSync(args.archive);
+    } catch (err) {
+      console.error(`[rotation-gate] REFUSED: --archive ${args.archive} does not exist or is unreadable (${err.message})`);
+      console.error(`[rotation-gate] a rotation must actually produce an archive file before its new active doc is promoted`);
+      process.exit(1);
+    }
+    if (!archiveStat.isFile()) {
+      archiveFailures.push(`--archive ${args.archive} is not a regular file`);
+    } else if (archiveStat.size === 0) {
+      archiveFailures.push(`--archive ${args.archive} is empty`);
+    }
   }
 
-  const missing = findMissingMarkers(activeText);
+  const { missing, satisfiedBy } = checkMarkers(activeText, rulesText);
   const live = countLiveCommitments(activeText);
 
   const failures = [...archiveFailures];
   if (missing.length > 0) {
+    const source = rulesText !== null ? "--active or --rules" : "--active";
     failures.push(
-      `missing ${missing.length}/${MARKERS.length} marker(s) from --active: ${missing.map((m) => m.token).join(", ")}`
+      `missing ${missing.length}/${MARKERS.length} marker(s) from ${source}: ${missing.map((m) => m.token).join(", ")}`
     );
   }
   if (live.count === null) {
@@ -233,17 +316,36 @@ function main() {
   }
 
   if (failures.length > 0) {
-    console.error(`[rotation-gate] REFUSED — rotation must not promote ${args.active}:`);
+    console.error(`[rotation-gate] REFUSED — ${args.lint ? "lint failed for" : "rotation must not promote"} ${args.active}:`);
     for (const f of failures) console.error(`  - ${f}`);
     console.error(HONEST_LIMIT_NOTE);
     process.exit(1);
   }
 
-  console.log(
-    `[rotation-gate] OK — ${args.active} carries all ${MARKERS.length} markers and a ` +
-      `${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section; --archive ${args.archive} exists ` +
-      `(${archiveStat.size} bytes). Rotation may proceed.`
-  );
+  if (args.lint) {
+    console.log(
+      `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and a ` +
+        `${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section. (lint mode: --archive not checked — this is not a rotation.)`
+    );
+  } else {
+    console.log(
+      `[rotation-gate] OK — ${args.active} carries all ${MARKERS.length} markers and a ` +
+        `${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section; --archive ${args.archive} exists ` +
+        `(${archiveStat.size} bytes). Rotation may proceed.`
+    );
+  }
+  if (rulesText !== null) {
+    const fromRules = MARKERS.filter((m) => satisfiedBy.get(m.token) === "rules");
+    if (fromRules.length > 0) {
+      console.log(`[rotation-gate] ${fromRules.length}/${MARKERS.length} marker(s) satisfied via --rules (absent from --active): ${fromRules.map((m) => m.token).join(", ")}`);
+    } else {
+      console.log(`[rotation-gate] all ${MARKERS.length} markers satisfied via --active alone (--rules supplied but not needed)`);
+    }
+    console.log(`[rotation-gate] marker sources:`);
+    for (const m of MARKERS) {
+      console.log(`  - ${m.token}: ${satisfiedBy.get(m.token)}`);
+    }
+  }
   console.log(HONEST_LIMIT_NOTE);
   process.exit(0);
 }
