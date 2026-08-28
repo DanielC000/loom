@@ -2444,6 +2444,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // reproduced cache-replay chain and for what this guard deliberately does NOT flag (bare
   // `computeDeployStaleness()` calls, and `buildServedStatus()`'s two deliberate real-tree tests).
   "packages/daemon/test/deploy-staleness-fixture-guard.mjs",
+  // Card 82bb198a: the gate's own verdict (`runOne` in scripts/test-daemon.mjs) is exit-code-only — a
+  // hermetic test file whose `check()`/`failures` bookkeeping never reaches a real `process.exit`/
+  // `finishAndExit`/`process.exitCode=`/`node:test`/`node:assert`/`throw new` route exits 0 by Node's own
+  // default regardless of printed FAIL lines, so the gate reports PASS for a file that actually failed.
+  // Confirmed once for real (merge-confirm-verdict-cache.mjs, fixed in this same card). Belongs here on the
+  // same ground as its corpus-wide-scan siblings above: a source-TEXT property the reduced/emit-compare
+  // path cannot reason about, so a NEW test file missing this route must still be caught even when the
+  // diff that adds it doesn't happen to touch this guard file itself. See the guard's own header for why a
+  // static source scan (this) was chosen over a runner-level output-scan backstop (the guard self-tests in
+  // this corpus that deliberately print failure-shaped text as their own positive control would false-
+  // positive an output scan — see card 2f0b2e57).
+  "packages/daemon/test/exit-code-verdict-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */

@@ -162,3 +162,10 @@ async function setupWorkerProject(sfx, reposDir) {
 console.log(failures === 0
   ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"base-advanced\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b. CARD 4aedde84: the cache-hit branch above now ALSO carries a POSITIVE `cacheHit` marker (never inferred from freshMint's absence), and BOTH polarities are proven in this one run — a cache hit is positively marked, and a genuinely fresh/re-gated run carries freshMint and NEVER the cache marker."
   : `\n❌ ${failures} FAILURE(S).`);
+
+// Card 82bb198a: this file previously had NO exit-code decision at all — Node's default exit(0)
+// applied regardless of `failures`, so the gate's exit-code-only verdict (test-daemon.mjs `runOne`)
+// reported PASS even with printed FAIL lines above. registerForCleanup (imported above) already
+// installs _tmp-fixture.mjs's `exit`-event sync backstop, so a plain process.exit here still gets
+// guaranteed cleanup — matching the corpus's own dominant idiom rather than inventing a second one.
+process.exit(failures === 0 ? 0 : 1);
