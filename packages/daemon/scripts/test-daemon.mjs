@@ -963,6 +963,101 @@ const TEST_TIMEOUT_OVERRIDES = {
   "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention
   "merge-gate-reuse": 360_000, // measured 52-58s x6 + one 130s outlier (7 standalone runs, quiet host); heaviest of these by git+merge-call volume and the one that actually timed out in production (card 2bb7a114) — ~6.7x the steady median / ~2.8x the observed outlier
 };
+
+// Card 0f0816e2: a JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames that run FIRST and
+// SEQUENTIALLY (pool size 1 — ISOLATED_PHASE_POOL_SIZE below), fully to completion, before the remainder
+// runs in the existing concurrent pool exactly as before this card. Same discipline `STATIC_GUARD_REPO_PATHS`
+// (git/worktrees.ts) already uses, for the same reason: a `*real*`/`*gate*` name-pattern derivation is a
+// folk recipe that answers the wrong question later — this list is curated by reading each file, not by
+// grepping a naming convention, and it changes over time by the same discipline.
+//
+// ⛔ THIS DOES NOT CLAIM (and must not be read as claiming) that running these sequentially fixes the
+// intermittent full-suite timeouts documented in project memory `repo-guard-only-handoff-intermittent-hang`.
+// That note is explicit that no code-level mechanism was ever identified, and that the always-concurrent
+// internal pool is present in every run including passes, so it does not discriminate on its own — this is
+// a plausible contributing condition with no specimen proving causation. This change stands on its own
+// merit regardless: a real-spawn test competing with pool-sized siblings for the box (real OS subprocess
+// spawns, repeated in-process Db/SessionService boots, real `git worktree add` calls) is a known-bad
+// scheduling shape independent of whether it explains those timeouts.
+//
+// Membership, verified by reading each file (not by name pattern) — grep counts are `new Db(`/
+// `new SessionService(` (in-process daemon boot) and `createWorktree`/`createPty`/`PtyHost` (real OS
+// subprocess spawns), each measured directly against the file at card-filing time:
+//   kickoff-real-spawn              — real node-pty child spawns (createPty x5): the paradigm real-spawn file.
+//   merge-gate-inert-diff           — 11x Db/SessionService boot, 15x real createWorktree.
+//   emit-compare-gate               — 10x Db/SessionService boot, 10x real createWorktree.
+//   gate-status                     — 11x Db/SessionService boot, 11x real createWorktree, 920 lines — by far
+//                                      the heaviest of the gate-status-*.mjs family; the other three
+//                                      (gate-status-deploy-opid/-reduced-gate-facts/-timing-band, 121-189
+//                                      lines each) are narrower splits and deliberately NOT included here.
+//   merge-confirm-completion-nudge  — real PtyHost (x3) + real createWorktree (x7).
+//   merge-spawn-tracked             — real PtyHost (x4) + real createWorktree (x7).
+//   gate-timeout-circuit-breaker    — 7x Db/SessionService boot, 5x real createWorktree; already carries a
+//                                      TEST_TIMEOUT_OVERRIDES entry above with a MEASURED standalone cost
+//                                      (~50-52s, 3/3 runs) entirely from real confirmWorkerMerge/
+//                                      createWorktree/commits.
+//   merge-repo-mutex                — ADDED (not one of the 7 memory-note files): already in
+//                                      TEST_TIMEOUT_OVERRIDES above with documented evidence of timing out
+//                                      under concurrent gate load ("timed out on an unrelated card's gate,
+//                                      all-green standalone") — 15 trials x 2 concurrent real merges plus a
+//                                      full content-integrity sweep, real git throughout.
+//   merge-stranded-backstop         — ADDED, same reason: TEST_TIMEOUT_OVERRIDES documents it "flaked the
+//                                      same way at cap=2/concurrent=2".
+//   merge-gate-reuse                — ADDED, same reason: TEST_TIMEOUT_OVERRIDES names it the HEAVIEST of
+//                                      this family by real git-work volume (50 git invocations, 52
+//                                      createWorktree/confirmWorkerMerge calls) and the one that actually
+//                                      rejected a real production merge gate with `exit timeout` (card
+//                                      2bb7a114); measured up to 130s standalone (7 runs, quiet host, zero
+//                                      concurrent contention) — already past the blanket 120s ceiling alone.
+// Exported (not just module-local) so a test that depends on two specific basenames landing on the SAME
+// side of this split — e.g. test-daemon-gate-timing-sigkill.mjs's FAST/SLOW race, which needs both to run
+// in the SAME phase for its `--concurrency=1` ordering assumption to hold — can assert that at import time
+// instead of discovering a silent membership drift as an inexplicable timeout months later. This is
+// exactly the failure this card's own verification hit: adding merge-repo-mutex here (see the membership
+// comment above) moved it out of that test's flat pool and into this sequential phase, breaking the race
+// it was chosen to win; test-daemon-gate-timing-sigkill.mjs was fixed alongside this list and now asserts
+// its own SLOW/FAST pairing against this exported set directly.
+export const ISOLATED_REAL_SPAWN_BASENAMES = [
+  "kickoff-real-spawn",
+  "merge-gate-inert-diff",
+  "emit-compare-gate",
+  "gate-status",
+  "merge-confirm-completion-nudge",
+  "merge-spawn-tracked",
+  "gate-timeout-circuit-breaker",
+  "merge-repo-mutex",
+  "merge-stranded-backstop",
+  "merge-gate-reuse",
+];
+export const ISOLATED_REAL_SPAWN_SET = new Set(ISOLATED_REAL_SPAWN_BASENAMES);
+// Fixed at 1, deliberately NOT an env-tunable dial — out of scope per the card: this changes scheduling
+// SHAPE, not the concurrency BUDGET (LOOM_GATE_TEST_CONCURRENCY/DEFAULT_CONCURRENCY/MAX_CONCURRENCY, all
+// unchanged by this card).
+const ISOLATED_PHASE_POOL_SIZE = 1;
+
+// Card 0f0816e2 CR follow-up (Loom lead direction, 2026-08-28): OPT-IN, default OFF. MEASURED wall-clock
+// cost of running exactly these 10 files sequentially instead of in the existing 3-lane pool, on this host
+// (`--only=<these 10 basenames>`, from packages/daemon):
+//   BEFORE (flat pool, --concurrency=3, this subset alone): aggregate 493.2s, wall-clock 196.7s.
+//   AFTER  (isolated sequential, pool 1):                   aggregate 426.0s, wall-clock 426.1s (pool 1
+//                                                            means wall-clock tracks aggregate, as expected).
+//   Net for this subset alone: +229.4s / +117%.
+// Estimated marginal cost once embedded in the real ~774-file full gate (not directly measured — a
+// standalone 10-file run has less lane-backfill contention than a saturated real gate, so the true full-
+// gate number sits somewhere between this subset's own +229s delta and an aggregate/poolSize-based
+// saturated-pool estimate, roughly +230s to +285s): on the order of +24% to +30% of a ~16-minute gate.
+// Either end of that range is a PERMANENT tax on every merge gate on this daemon-global, capped, SHARED
+// resource (a busy fleet's other projects queue behind it too) — for a benefit this card's own DoD-4
+// forbids claiming (no causal mechanism behind the intermittent timeouts was ever identified). So: default
+// OFF, byte-identical scheduling to before this card (isolatedNames is empty, concurrentNames === SELECTED,
+// same as the original flat-pool dispatch). Set LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1 to opt in
+// deliberately — e.g. to run the DoD-5 timeout-rate observation against a real corpus, both ways, on
+// purpose — never as a default, and never via the gate command or any daemon config pin (same posture as
+// `gate-cap-is-2-by-owner-decision-never-change-silently`: a daemon-global setting is never flipped
+// silently). With the flag off, isolatedPhaseFileCount/isolatedPhasePoolSize on the NDJSON rows both read
+// 0 — the honest signal that a run was flat, not a fabricated "1" for a phase that never actually ran.
+const ISOLATED_REAL_SPAWN_PHASE_ENABLED = process.env.LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE === "1";
+
 const tmpRoots = [];
 
 // Card e26f3199: on a timeout the harness used to report `status: "timeout"` and DISCARD the child's
@@ -1321,6 +1416,18 @@ if (isMain) {
   if (SELECTED !== HERMETIC) {
     console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic test files (--only/--exclude applied)`);
   }
+  // Card 0f0816e2: split SELECTED, preserving each subset's own relative order, into the isolated
+  // sequential phase (ISOLATED_REAL_SPAWN_SET) and everything else (the ordinary concurrent pool below,
+  // unchanged). A `--only=` selection that excludes every isolated basename legitimately yields an empty
+  // `isolatedNames` — phase 1 below is skipped entirely in that case, not an error. Gated on
+  // ISOLATED_REAL_SPAWN_PHASE_ENABLED (default OFF — see that constant's own doc for the measured cost):
+  // disabled, `isolatedNames` is always empty and `concurrentNames === SELECTED`, so dispatch below is
+  // byte-identical to the original flat-pool-only behavior.
+  const isolatedNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? SELECTED.filter((name) => ISOLATED_REAL_SPAWN_SET.has(name)) : [];
+  const concurrentNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? SELECTED.filter((name) => !ISOLATED_REAL_SPAWN_SET.has(name)) : SELECTED;
+  if (isolatedNames.length) {
+    console.log(`ℹ isolated phase: running ${isolatedNames.length} real-spawn/daemon-boot-heavy file(s) first and sequentially (pool size ${ISOLATED_PHASE_POOL_SIZE}): ${isolatedNames.join(", ")}`);
+  }
   // Card 6185fbfc: --concurrency=N overrides the pool size for just this invocation (still clamped to
   // MAX_CONCURRENCY), leaving LOOM_GATE_TEST_CONCURRENCY-derived POOL_SIZE untouched when omitted — so
   // the zero-argv default path's concurrency is exactly what it was before this card.
@@ -1350,7 +1457,13 @@ if (isMain) {
   // first completion is captured too, not just gaps between completions) and, on a genuine harness crash,
   // prints the two lines itself (labelled partial) before rethrowing — see that function's own comment.
   const RSS_SAMPLE_INTERVAL_MS = 5000;
-  const results = new Array(SELECTED.length);
+  // Card 0f0816e2: two local arrays, one per phase — `results` (below) is assigned once both phases have
+  // completed, by concatenating these in isolated-then-concurrent order. Downstream code only ever
+  // filters/counts `results` or checks name membership via a Set, so this concatenation order has no
+  // effect on any existing assertion.
+  const isolatedResults = new Array(isolatedNames.length);
+  const concurrentResults = new Array(concurrentNames.length);
+  let results = [];
   // Card 17069e7e: wall-clock bounds for the gate-timing run-summary row + human summary below — captured
   // around the WHOLE instrumented run (lane execution + tmp cleanup + the executed-set assertion), not just
   // the lane dispatch, so it reads as "how long this gate run's test phase actually took" end to end.
@@ -1386,6 +1499,17 @@ if (isMain) {
       runStartTs: gateTimingRunStartTs,
       poolSize: EFFECTIVE_POOL_SIZE,
       testCount: SELECTED.length,
+      // Card 0f0816e2 DoD-3: additive fields — an OLDER reader simply lacks these keys (same additivity
+      // convention as every other field on this row). Per the convention `1ec2e353` established for this
+      // row family (see gate-timing-band.ts's own `testCount` doc), an on-disk key already present here is
+      // NEVER renamed to disclose a new unit/semantic — `poolSize` above keeps its on-disk name and keeps
+      // meaning "the pool size for whatever ran in the ordinary concurrent pool", now phase 2 rather than
+      // the whole run; that narrowing is disclosed in this comment, not in the key name. These two keys are
+      // new, so they're named plainly from the start: how many files ran in the isolated sequential phase,
+      // and at what pool size — together with `poolSize`/`testCount` above, a later reader can tell an
+      // isolated-phase run (isolatedPhaseFileCount > 0) from a flat pre-card run (key absent).
+      isolatedPhaseFileCount: isolatedNames.length,
+      isolatedPhasePoolSize: ISOLATED_REAL_SPAWN_PHASE_ENABLED ? ISOLATED_PHASE_POOL_SIZE : 0,
       testSourceBytes: gateTimingTestSourceBytes,
       selected: SELECTED.slice(),
       hostBefore: gateTimingHostBefore,
@@ -1443,11 +1567,27 @@ if (isMain) {
     }
   };
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
-    const nextIndex = makeCursor(SELECTED.length);
     const gateTimingCtx = { runIndex: gateTimingRunIndex, runUid: gateTimingRunUid };
+
+    // Card 0f0816e2 DoD-1: PHASE 1 — the isolated real-spawn/daemon-boot-heavy set (ISOLATED_REAL_SPAWN_SET
+    // above) runs FIRST and fully to completion, at ISOLATED_PHASE_POOL_SIZE (1) — so none of these files
+    // ever compete with a concurrent sibling for the box. Reuses the SAME runLane/runOne machinery as the
+    // ordinary pool below; only the pool size and the input set differ. Skipped entirely (no lanes started)
+    // when a `--only=` selection excludes every isolated basename.
+    if (isolatedNames.length) {
+      const isolatedCursor = makeCursor(isolatedNames.length);
+      await Promise.all(
+        Array.from({ length: Math.min(ISOLATED_PHASE_POOL_SIZE, isolatedNames.length) }, (_, lane) => runLane(lane, isolatedNames, isolatedCursor, isolatedResults, completionTimestamps, gateTimingCtx)),
+      );
+    }
+
+    // PHASE 2 — everything else, in the existing pool, exactly as before this card (same EFFECTIVE_POOL_SIZE
+    // computation, just bounded by the remaining file count instead of SELECTED.length).
+    const concurrentCursor = makeCursor(concurrentNames.length);
     await Promise.all(
-      Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, SELECTED.length) }, (_, lane) => runLane(lane, SELECTED, nextIndex, results, completionTimestamps, gateTimingCtx)),
+      Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, concurrentNames.length) }, (_, lane) => runLane(lane, concurrentNames, concurrentCursor, concurrentResults, completionTimestamps, gateTimingCtx)),
     );
+    results = isolatedResults.concat(concurrentResults);
 
     // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
     // Reuses _tmp-fixture.mjs's proven-correct bounded retry WITH A REAL DELAY between attempts — the
@@ -1516,6 +1656,10 @@ if (isMain) {
       durationMs: gateTimingWallClockMs,
       poolSize: EFFECTIVE_POOL_SIZE,
       testCount: SELECTED.length,
+      // Card 0f0816e2 DoD-3: same additive fields as the write-ahead row above — see that row's own comment
+      // for the on-disk-key-never-renamed convention this follows.
+      isolatedPhaseFileCount: isolatedNames.length,
+      isolatedPhasePoolSize: ISOLATED_REAL_SPAWN_PHASE_ENABLED ? ISOLATED_PHASE_POOL_SIZE : 0,
       testSourceBytes: gateTimingTestSourceBytes,
       executedCount: results.filter((r) => !r.skipped).length,
       failedCount: failed.length,

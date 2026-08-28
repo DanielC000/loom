@@ -18,21 +18,29 @@
 // exported functions directly against synthetic inputs specifically to AVOID a real spawn; that pattern is
 // wrong here, because a clean-exit path proves nothing about surviving a kill. The kill IS the test.
 //
-// SLOW is "merge-repo-mutex" — one of the TEST_TIMEOUT_OVERRIDES-listed real-git tests (documented there as
-// 15 trials x 2 concurrent real merges + a full content-integrity sweep), chosen specifically because it
-// reliably takes multiple seconds: with --concurrency=1 forcing strict sequential order, SLOW cannot even
+// SLOW is "worktrees" — the heaviest real-git hermetic test in the corpus by createWorktree volume (35
+// calls), chosen specifically because it reliably takes multiple seconds (measured standalone: ~34s) with
+// zero timeout history of its own: with --concurrency=1 forcing strict sequential order, SLOW cannot even
 // START until FAST's own completion row has already landed, so the kill (fired the instant FAST's row is
 // observed) always lands while SLOW is still mid-setup — no timing race. Because SLOW forks its own real
 // git subprocesses, killing only OUR directly-spawned child would orphan them to keep running in the
 // background on every normal gate invocation (this file is itself a discovered hermetic test) — `killTree`
 // below kills the whole process tree rooted at the PID we captured at spawn, never by name/port, so nothing
 // survives the kill to linger after this test exits.
+//
+// Card 0f0816e2: SLOW was originally "merge-repo-mutex" — this test broke the instant that card's isolated
+// real-spawn phase added merge-repo-mutex to ISOLATED_REAL_SPAWN_SET, because an isolated-set member no
+// longer obeys --concurrency=1's flat-pool ordering at all: it runs in phase 1 REGARDLESS of concurrency,
+// so FAST (not isolated) could never even start until SLOW's own phase had already finished — the race
+// this test depends on inverted, and FAST's completion row never landed within the wait timeout. Fixed by
+// picking a SLOW that stays outside that set, plus the same-side assertion right below so a FUTURE
+// membership change fails loudly here instead of reproducing that exact multi-minute-timeout confusion.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { neverCompletedFiles } from "../scripts/test-daemon.mjs";
+import { neverCompletedFiles, ISOLATED_REAL_SPAWN_SET } from "../scripts/test-daemon.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
@@ -89,7 +97,18 @@ function killTree(child) {
 }
 
 const FAST = "test-daemon-cli-args"; // pure-logic self-test of this same script — near-instant, no subprocess of its own.
-const SLOW = "merge-repo-mutex"; // TEST_TIMEOUT_OVERRIDES-listed real-git test — several seconds minimum.
+const SLOW = "worktrees"; // heaviest real-git hermetic test by createWorktree volume — several seconds minimum, no timeout history of its own.
+// Card 0f0816e2: FAST and SLOW must land on the SAME side of the isolated-real-spawn split, or --concurrency=1
+// no longer governs their relative order at all (an isolated-set member always runs in phase 1, regardless
+// of concurrency) — see this file's own header comment for the exact incident this guards against. A loud,
+// immediate assertion here beats rediscovering that as an inexplicable 20s wait timeout below.
+if (ISOLATED_REAL_SPAWN_SET.has(FAST) !== ISOLATED_REAL_SPAWN_SET.has(SLOW)) {
+  throw new Error(
+    `test-daemon-gate-timing-sigkill: FAST (${FAST}) and SLOW (${SLOW}) are no longer on the same side of ` +
+    "ISOLATED_REAL_SPAWN_SET — this test's --concurrency=1 race depends on both running in the SAME phase; " +
+    "pick a new SLOW/FAST pair that agrees with the current split.",
+  );
+}
 // Card 937bdb18: a real opId, threaded onto the killed child's env exactly the way gateOpIdEnvOverride
 // does for a real merge/deploy gate — proves the run-start row (the one write-ahead row a SIGKILL cannot
 // defeat) actually carries it end to end through a REAL kill, not just through the pure gateTimingOpId()/
