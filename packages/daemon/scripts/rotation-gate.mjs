@@ -57,6 +57,26 @@
 // flag — the ROTATION path (no --lint) is completely unchanged and still hard-requires a real, non-empty
 // --archive; lint mode can never be reached by accident.
 //
+// --was <bytes> (OPTIONAL, card c7c0a493): an independent byte-shrinkage check for "any rewrite you are
+// calling a CUT" — NOT rotation-scoped (a rotation is a REPLACEMENT; old-vs-new size is the wrong
+// comparison there and would false-positive on a legitimate early rotation). It is accepted, and checked
+// identically, in BOTH --lint and rotation mode: the check itself is orthogonal to which mode is running
+// — a rotation invocation can equally be marketed as "also a cut," and there is no reason to special-case
+// it out of the one mode where a real rewrite happens. It is pure opt-in: omitting it changes no check,
+// no verdict, and no exit code in either mode — the only difference is one added status line saying the
+// byte check did not run (DoD-2's visibility requirement below), so output is NOT byte-identical, only
+// behaviour/exit-code is.
+// Semantics: fails (adds to the refusal list) when byteLength(--active) >= --was; passes when strictly
+// smaller. `--was` is the CALLER's own pre-edit measurement — this script has no access to the previous
+// version and never tries to infer it. Bytes are read via fs.statSync(...).size (the file's real on-disk
+// byte count), not a decoded-string length, so multi-byte characters are counted correctly.
+// Omitting --was is itself visible, not silent: every successful run says explicitly whether the byte
+// check ran or was skipped, so a caller can never mistake "no --was given" for "shrinkage was verified."
+// A malformed --was (non-numeric, negative, ZERO, or missing its value) is a usage error (exit 2), never
+// a silent pass — zero is rejected deliberately, not merely non-numeric: a real --active document is
+// never genuinely 0 bytes pre-edit, so --was 0 could only ever be a bug in the caller, and accepting it
+// would silently refuse every doc forever (see parseWasBytes's own comment for the full reasoning).
+//
 // EXIT CODES (never a print-and-continue): 0 = rotation/lint may proceed / passes. 1 = REFUSED — every
 // failure is named on stderr. 2 = usage error (missing/unreadable args), not a gate verdict.
 //
@@ -102,6 +122,7 @@ USAGE:
   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
   node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
   node rotation-gate.mjs --active <path> --lint [--rules <path>]
+  node rotation-gate.mjs --active <path> [--archive <path> | --lint] --was <bytes>
   node rotation-gate.mjs --help
 
 Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failure). Exit 2 = usage error.
@@ -115,6 +136,19 @@ Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failu
   at a rotation. --archive is never read or required in this mode. The rotation path (no --lint) is
   unchanged and still hard-requires a real, non-empty --archive.
 
+--was <bytes> (OPTIONAL, CUT-scoped, NOT rotation-scoped): checks that --active actually SHRANK relative
+  to a byte count the caller measured before editing. Fails when byteLength(--active) >= --was; passes
+  when strictly smaller. Accepted identically in both --lint and rotation mode — the check is orthogonal
+  to which mode is running. Omitting it changes no check, no verdict, and no exit code in either mode — a
+  run with no --was still exits 0 on an otherwise-clean doc — but it is NOT output-identical: it prints one
+  added status line saying the byte check did not run, so "no --was given" is never mistaken for
+  "shrinkage was verified." A malformed value (non-numeric, negative, ZERO, or missing) is a usage error
+  (exit 2), not a silent pass — zero is rejected deliberately: a real --active document is never genuinely
+  0 bytes pre-edit, so --was 0 could only ever be a caller bug, and accepting it would silently refuse
+  every doc forever. This is NOT a check that a ROTATION is smaller than what it replaces — a rotation is
+  a replacement, not a cut, and this flag is for a caller who is explicitly claiming an edit is a CUT (of
+  --active itself, whether or not this run also happens to be a rotation).
+
 Checks run against --active (unioned with --rules when supplied):
   1. All ${MARKERS.length} markers below are present as exact substrings (see the case-sensitivity note in each).
   2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next MY-PEER-SEND-LEDGER
@@ -124,6 +158,9 @@ Checks run against --active (unioned with --rules when supplied):
 
 Checks run against --archive (skipped entirely under --lint):
   3. The path exists, is a regular file, and is non-empty.
+
+Byte check (only when --was is given — OPTIONAL, independent of everything above):
+  4. --active's real on-disk byte count is strictly smaller than --was.
 
 Markers (case-INsensitive unless noted):
 ${MARKERS.map((m) => `  - ${m.token}${m.caseSensitive ? " (case-SENSITIVE)" : ""}${m.note ? ` — ${m.note}` : ""}`).join("\n")}
@@ -142,7 +179,7 @@ const HONEST_LIMIT_NOTE =
   "not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict.";
 
 function parseArgs(argv) {
-  const out = { active: null, archive: null, rules: null, lint: false, help: false };
+  const out = { active: null, archive: null, rules: null, was: null, lint: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -153,6 +190,8 @@ function parseArgs(argv) {
       out.archive = argv[++i];
     } else if (a === "--rules") {
       out.rules = argv[++i];
+    } else if (a === "--was") {
+      out.was = argv[++i];
     } else if (a === "--lint") {
       out.lint = true;
     } else if (a.startsWith("--active=")) {
@@ -161,12 +200,48 @@ function parseArgs(argv) {
       out.archive = a.slice("--archive=".length);
     } else if (a.startsWith("--rules=")) {
       out.rules = a.slice("--rules=".length);
+    } else if (a.startsWith("--was=")) {
+      out.was = a.slice("--was=".length);
     } else {
       console.error(`[rotation-gate] unrecognized argument: ${a}`);
       process.exit(2);
     }
   }
   return out;
+}
+
+// --was is OPTIONAL like --rules, but unlike --rules its value must be a POSITIVE integer byte count,
+// not a path — validated separately so a malformed value (non-numeric, negative, zero, or the flag given
+// with no following value at all) is a usage error (exit 2), never silently treated as "not given."
+//
+// ⭐ EXPLICIT CALL (card c7c0a493's third question): --was 0 is rejected, not accepted as a degenerate-but-
+// legal "the previous doc was empty." `^\d+$` alone would let 0 through, and 0 passes as a NUMBER but can
+// never be a genuine caller measurement here: every gate-passing --active must already carry all
+// MARKERS.length markers plus a REQUIRED_LIVE_COMMITMENTS_COUNT-item section, so its real pre-edit size
+// was never 0 bytes for anything this script would ever be asked to check. Any real --was 0 is therefore
+// always a bug in the CALLER (an uncomputed value, an integer default slipping through) dressed up as a
+// legal input that would then silently refuse EVERY doc forever (byteLength >= 0 is always true) — the
+// exact "silently-always-failing input" shape --was exists to prevent elsewhere, so it is refused here
+// too rather than left unconsidered.
+function parseWasBytes(raw) {
+  if (raw === undefined || raw === null || raw === "") {
+    console.error(`[rotation-gate] --was requires a byte-count value (e.g. --was 20128)`);
+    process.exit(2);
+  }
+  if (!/^\d+$/.test(raw)) {
+    console.error(`[rotation-gate] invalid --was value ${JSON.stringify(raw)}: must be a positive integer byte count`);
+    process.exit(2);
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    console.error(`[rotation-gate] invalid --was value ${JSON.stringify(raw)}: out of safe integer range`);
+    process.exit(2);
+  }
+  if (n === 0) {
+    console.error(`[rotation-gate] invalid --was value 0: a real --active document is never genuinely 0 bytes pre-edit (it must already carry ${MARKERS.length} markers plus a ${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section) — --was 0 would silently refuse every doc forever, so it is rejected as a usage error rather than accepted as a degenerate check`);
+    process.exit(2);
+  }
+  return n;
 }
 
 function textIncludes(text, marker) {
@@ -276,6 +351,7 @@ function main() {
     console.error(HELP);
     process.exit(2);
   }
+  const wasBytes = args.was !== null ? parseWasBytes(args.was) : null;
 
   const activeText = readRequiredFile("active", args.active);
   const rulesText = readOptionalFile("rules", args.rules);
@@ -300,6 +376,26 @@ function main() {
   const { missing, satisfiedBy } = checkMarkers(activeText, rulesText);
   const live = countLiveCommitments(activeText);
 
+  // The byte check reads --active's REAL on-disk byte count (fs.statSync, not a decoded-string length)
+  // so multi-byte characters are counted correctly — this is exactly the case the check exists to catch:
+  // fewer LINES can still be MORE bytes. Kept OUT of `failures` below (a separate flag instead) so its
+  // status line is never duplicated between the itemized failure list and its own dedicated line — it is
+  // printed on EVERY exit path (skip/pass/fail), not only on success, per DoD-2's visibility requirement.
+  let byteCheckLine;
+  let byteCheckFailed = false;
+  if (wasBytes === null) {
+    byteCheckLine = `[rotation-gate] byte check: SKIPPED — no --was given, so this run does NOT verify --active actually shrank`;
+  } else {
+    const activeBytes = fs.statSync(args.active).size;
+    const delta = activeBytes - wasBytes;
+    if (activeBytes >= wasBytes) {
+      byteCheckFailed = true;
+      byteCheckLine = `[rotation-gate] byte check: FAILED — --active is ${activeBytes} byte(s), not smaller than --was ${wasBytes} byte(s) (delta ${delta >= 0 ? "+" : ""}${delta}) — a rewrite claiming to be a cut must shrink`;
+    } else {
+      byteCheckLine = `[rotation-gate] byte check: passed — --active is ${activeBytes} byte(s) < --was ${wasBytes} byte(s) (shrank by ${-delta} byte(s))`;
+    }
+  }
+
   const failures = [...archiveFailures];
   if (missing.length > 0) {
     const source = rulesText !== null ? "--active or --rules" : "--active";
@@ -315,9 +411,10 @@ function main() {
     );
   }
 
-  if (failures.length > 0) {
+  if (failures.length > 0 || byteCheckFailed) {
     console.error(`[rotation-gate] REFUSED — ${args.lint ? "lint failed for" : "rotation must not promote"} ${args.active}:`);
     for (const f of failures) console.error(`  - ${f}`);
+    if (byteCheckFailed) console.error(`  - ${byteCheckLine.replace(/^\[rotation-gate\] byte check: /, "byte check: ")}`);
     console.error(HONEST_LIMIT_NOTE);
     process.exit(1);
   }
@@ -346,6 +443,7 @@ function main() {
       console.log(`  - ${m.token}: ${satisfiedBy.get(m.token)}`);
     }
   }
+  console.log(byteCheckLine);
   console.log(HONEST_LIMIT_NOTE);
   process.exit(0);
 }
