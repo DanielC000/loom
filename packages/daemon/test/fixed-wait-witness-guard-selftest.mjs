@@ -14,9 +14,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // be measured, not asserted.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines } from "./fixed-wait-witness-guard.mjs";
+import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles } from "./fixed-wait-witness-guard.mjs";
 import { sleepPast } from "./_wait.mjs";
+import { mkdtempManaged, cleanupPathSync, unregister } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -293,7 +295,55 @@ check(`isWaitIdiomLine: a one-line block comment ("/** ${SLEEP_KW}(20); */") is 
   check("scanFileForUnwitnessedHits: a sleep() mentioned only inside a multi-line block comment produces ZERO hits", hits.length === 0);
 }
 
+// ── listUntrackedTestFiles: card 40643460's population-visibility check ────────────────────────────
+// Dependency-injected `execFileSyncFn` — no real git process spawned, so this is deterministic and has
+// no dependency on this repo's actual untracked-file state at test time (which can vary run to run).
+{
+  const fakeListing = (stdout) => () => stdout;
+  const found = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs",
+    fakeListing("packages/daemon/test/new-thing.mjs\npackages/daemon/test/other-thing.mjs\n"));
+  check("listUntrackedTestFiles: parses a multi-line git ls-files listing into a trimmed array",
+    JSON.stringify(found) === JSON.stringify(["packages/daemon/test/new-thing.mjs", "packages/daemon/test/other-thing.mjs"]));
+}
+{
+  const empty = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => "\n");
+  check("listUntrackedTestFiles: an empty git ls-files listing returns []", JSON.stringify(empty) === "[]");
+}
+{
+  const onGitFailure = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => { throw new Error("git not found"); });
+  check("listUntrackedTestFiles: a git failure returns null (visibility-check hiccup, not a false 'found none')", onGitFailure === null);
+}
+{
+  // THE REGRESSION THIS CARD FIXES, driven at the REAL git binary (not the fake above) — in a THROWAWAY
+  // fixture repo, never the real shared repo: writing an untracked scratch file directly into this
+  // process's OWN packages/daemon/test/ dir would race any concurrently-running real
+  // fixed-wait-witness-guard.mjs process reading THIS repo's untracked state (this suite runs test files
+  // concurrently — see CLAUDE.md's gate-concurrency notes) and could produce a spurious guard FAIL
+  // unrelated to anyone's actual diff. Same isolation discipline working-tree-eol-guard.mjs's own
+  // fixture-repo block already uses for exactly this reason.
+  const fixtureRoot = mkdtempManaged("loom-fwwg-untracked-fixture-");
+  const git = (...args) => execFileSync("git", ["-C", fixtureRoot, ...args]);
+  git("init", "-q");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "test");
+  const fixtureTestDir = path.join(fixtureRoot, "packages", "daemon", "test");
+  fs.mkdirSync(fixtureTestDir, { recursive: true });
+  fs.writeFileSync(path.join(fixtureTestDir, "tracked.mjs"), "// tracked\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "fixture");
+  fs.writeFileSync(path.join(fixtureTestDir, "new-untracked.mjs"), "// untracked\n");
+  const found = listUntrackedTestFiles(fixtureRoot, "packages/daemon/test/*.mjs");
+  check("listUntrackedTestFiles: a REAL untracked file, in a real (throwaway) fixture repo, IS reported by the real git binary",
+    Array.isArray(found) && found.some((f) => f.replace(/\\/g, "/").endsWith("packages/daemon/test/new-untracked.mjs")));
+  cleanupPathSync(fixtureRoot);
+  // unregister ONLY once removal is actually confirmed (_tmp-fixture.mjs's own contract:
+  // cleanupPathSync can fail silently on a transient EBUSY/EPERM handle — see its own header — so
+  // unregistering unconditionally would discard the exit-hook backstop for a dir that's still there).
+  // Same guard working-tree-eol-guard.mjs's own fixture-repo block already uses.
+  if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, and does not false-positive on the real 003a1080 specimen."
+  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, does not false-positive on the real 003a1080 specimen, and correctly names a REAL untracked file the diff-scan itself cannot see (card 40643460)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

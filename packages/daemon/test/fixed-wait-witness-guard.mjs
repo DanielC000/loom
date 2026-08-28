@@ -71,6 +71,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // Run: node packages/daemon/test/fixed-wait-witness-guard.mjs (needs a build — imports dist/git/worktrees.js)
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -283,6 +284,30 @@ async function resolveBaseRef(repoPath, resolveMainlineBranchFn) {
   }
 }
 
+/**
+ * Card 40643460 — THE POPULATION-VISIBILITY CHECK. This guard diffs COMMITTED `HEAD` against the
+ * merge-base (see `main` below); an UNTRACKED file (created but never `git add`ed) contributes nothing
+ * to that diff and is therefore invisible to the scan — a brand-new test file with a genuinely
+ * unwitnessed fixed wait would otherwise report `found 0`, byte-identical to a real clean scan. This is
+ * NOT a second scanning mechanism (the diff scope stays correct and unchanged for what it's for — only
+ * newly-ADDED, committed lines); it only NAMES what the diff-based scan above could not have seen, via
+ * `git ls-files --others --exclude-standard`, the standard way to list untracked-but-not-ignored paths
+ * matching a pathspec. Never throws: returns `null` (NOT `[]`) if git itself fails — `null` means "could
+ * not check", `[]` means "checked, found none", and a caller must not conflate the two (e.g. a bare
+ * `.length === 0` reads `null` as "found none" instead of "no answer"). This is a visibility check, not
+ * the core guard; a git hiccup here must not itself fail an unrelated build (same fail-safe posture as
+ * `resolveBaseRef`/the diff try/catch above) — the caller is expected to skip the check on `null`, not
+ * treat it as a clean result.
+ */
+export function listUntrackedTestFiles(repoRoot, testGlob, execFileSyncFn = execFileSync) {
+  try {
+    const raw = execFileSyncFn("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "--", testGlob], { encoding: "utf8" });
+    return raw.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return null; // git itself failed (not "found none") — caller distinguishes via null, doesn't fail on it
+  }
+}
+
 async function main() {
   let diffBranchFn, resolveMainlineBranchFn;
   try {
@@ -335,6 +360,31 @@ async function main() {
   check(`no newly-added fixed-wait-adjacent-to-check() site without a witness (sleepPast / positiveControl / companion check() / TIMING-GUARD comment) — found ${allHits.length}`, allHits.length === 0);
   for (const h of allHits) console.log(`  HIT  ${h.file}:${h.lineNo}  "${h.label}"`);
   for (const c of allCleared) console.log(`  CLEARED  ${c.file}:${c.lineNo}  ${c.reason}`);
+
+  // Card 40643460 — SELF-DESCRIBE THE SCANNED POPULATION. A bare "found 0" reads identically whether
+  // this diff genuinely added no candidate, or whether the diff-scoped mechanism above simply never had
+  // anything to look at. State the actual population size at the point a human reads the result, so the
+  // count can never be misread by someone who never opens the regex.
+  const totalAddedLines = [...addedByFile.values()].reduce((sum, s) => sum + s.size, 0);
+  console.log(`[fixed-wait-witness-guard] population: scanned ${totalAddedLines} added line(s) across ${addedByFile.size} file(s) vs "${base}"`);
+
+  // THE UNTRACKED-FILE BLIND SPOT ITSELF (the defect this card exists to fix): this guard is
+  // diff-scoped against COMMITTED HEAD — a file created but never `git add`ed contributes NOTHING to
+  // that diff and is invisible to everything above. Name any such file explicitly rather than let it
+  // silently pass as part of "found 0". `null` (git itself failed) is a visibility-check hiccup, not
+  // evidence either way — skip rather than fail an unrelated build over it (same fail-safe posture as
+  // the base/diff resolution above).
+  const untrackedTestFiles = listUntrackedTestFiles(REPO_ROOT, TEST_GLOB);
+  if (untrackedTestFiles === null) {
+    console.log(`[fixed-wait-witness-guard] could not check for untracked ${TEST_GLOB} files (git ls-files failed) — skipping the untracked-visibility check`);
+  } else {
+    check(
+      `no untracked file(s) matching ${TEST_GLOB} are invisible to this diff-scoped scan (found ${untrackedTestFiles.length}` +
+        (untrackedTestFiles.length > 0 ? `: ${untrackedTestFiles.join(", ")} — this scan is diff-scoped against committed HEAD and cannot see them; git add them and re-run` : "") +
+        ")",
+      untrackedTestFiles.length === 0
+    );
+  }
 
   console.log(failures === 0
     ? "\n✅ ALL PASS — no newly-added raw-sleep synchronisation probe on this branch is missing a witness. This never reaches the ~240 pre-existing sites (df88c1b2 DoD-3) — it is diff-scoped by construction, not a baseline."
