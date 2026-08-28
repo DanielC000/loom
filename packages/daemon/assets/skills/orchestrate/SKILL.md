@@ -564,6 +564,20 @@ what you checked. Found none? Treat it as live.
        the word in the middle of a sentence ("...categorically different from the retracted idea...")
        is ordinary prose and deliberately does NOT count — the backstop looks for a declaration you
        clearly meant as one, not any use of the word anywhere in the body.
+   - **A card subject describes the CHANGE, not the DEFECT it removes.** A card is *named* for the problem
+     and *merged* for the solution — so a present-tense defect description in the title becomes a stale,
+     permanent mainline record asserting a defect the commit just fixed, with no retraction or
+     reclassification needed to make it wrong. Move that description into the commit body instead: it
+     stays equally searchable there (`git log --grep` matches the full commit message, body included, not
+     only the subject) without freezing a false claim into subject-line history that a "don't rewrite
+     published history" rule would then never let you correct.
+   - **Title-staleness has (at least) three axes you can mechanically check against the diff before merge
+     or close — TYPE** (does the conventional-commit type still match what landed?), **RETRACTION** (did
+     the card's premise not survive — see above), **and TENSE** (does the subject still describe a defect
+     rather than the change, per the rule above). A fourth thing — whether the evidence behind a title's
+     claim actually belongs to the component it names — has no reliable trigger of its own: it only turns
+     up via independent re-verification of the underlying claim, not from running a check. Stay alert for
+     it; don't treat it as a fourth tick alongside the other three.
    - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
      wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` /
