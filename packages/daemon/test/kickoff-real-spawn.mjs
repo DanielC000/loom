@@ -102,7 +102,7 @@ const KICKOFF_PRE_DELIVERY_FLOOR_MS = MODE_LOG_MAX_ATTEMPTS * MODE_LOG_POLL_MS;
 // arbitrary pick.
 const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 
-// ============ Stall-aware delivery wait (card ae476ab1) ============
+// ============ Stall-aware waits (card ae476ab1, extended by card d73bfc00) ============
 // A flat waitUntil(..., {timeoutMs}) can't tell "the real child hasn't finished yet" apart from "the real
 // child is dead/wedged" — both just run out the same clock. Measured directly (this card, solo run 6 of 6
 // on an otherwise-idle host with NOTHING else in the suite running): a single real spawn's own
@@ -139,31 +139,46 @@ const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 const HEARTBEAT_STALL_MS = GIVE_UP_HOLD_MS + KICKOFF_PRE_DELIVERY_FLOOR_MS;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Poll for `/FIXTURE_RECEIVED/` in the harness's accumulated pty text. Fails only on a genuine STALL (no
- * new output of any kind — heartbeat included — for `HEARTBEAT_STALL_MS`) rather than on total elapsed
- * time, or if `absoluteCeilingMs` is exceeded despite continued liveness (a backstop against a child that
- * heartbeats forever without ever actually delivering — a real bug, not jitter).
- */
-async function waitForDeliveryStallAware(label, sessionId, absoluteCeilingMs) {
+// Card d73bfc00: the FIXTURE_READY wait above was the one wait in this file 25e2a6fe/fa7fc12a never
+// converted — it stayed a flat `waitUntil(..., {timeoutMs: FIXTURE_READY_TIMEOUT_MS})`, unable to tell
+// "the real child is still booting" apart from "the real child never came up", exactly the defect class
+// ae476ab1 diagnosed and fixed for the delivery wait. Forced directly (this card, TEMP-CONTROL-A: real
+// child alive and heartbeating throughout, FIXTURE_READY_DELAY_MS=21000 against the old code's flat
+// 20000ms ceiling): FAILED at 21108ms — a 1.1x overshoot, the SAME ratio ae476ab1 already measured for the
+// delivery wait's own historical trip (the `auditor` role at 20879ms against a 19000ms budget). Same
+// mechanism, same signature, never remediated. `waitForStallAware` below generalizes
+// `waitForDeliveryStallAware` to gate EITHER sentinel on the SAME liveness signal (the fixture emits
+// FIXTURE_ALIVE from boot — see fake-claude-cli.mjs's own doc — independent of readiness or delivery), so
+// this file no longer has a single wait left that treats mere elapsed time as evidence of a hang.
+//
+// Poll for `matchPattern` in the harness's accumulated pty text. Fails only on a genuine STALL (no new
+// output of any kind — heartbeat included — for `HEARTBEAT_STALL_MS`) rather than on total elapsed time,
+// or if `absoluteCeilingMs` is exceeded despite continued liveness (a backstop against a child that
+// heartbeats forever without ever actually reaching `matchPattern` — a real bug, not jitter).
+async function waitForStallAware(matchPattern, label, description, sessionId, absoluteCeilingMs) {
   const t0 = Date.now();
   let lastText = harness.text(sessionId);
   let lastActivityAt = t0;
   for (;;) {
     const text = harness.text(sessionId);
-    if (/FIXTURE_RECEIVED/.test(text)) return;
+    if (matchPattern.test(text)) return;
     if (text.length !== lastText.length) { lastText = text; lastActivityAt = Date.now(); }
     const now = Date.now();
     const idleMs = now - lastActivityAt;
     if (idleMs > HEARTBEAT_STALL_MS) {
-      throw new Error(`${label} real fixture reports FIXTURE_RECEIVED — STALLED: no new output (heartbeat included) for ${idleMs}ms (budget ${HEARTBEAT_STALL_MS}ms), ${now - t0}ms total elapsed`);
+      throw new Error(`${label} ${description} — STALLED: no new output (heartbeat included) for ${idleMs}ms (budget ${HEARTBEAT_STALL_MS}ms), ${now - t0}ms total elapsed`);
     }
     if (now - t0 > absoluteCeilingMs) {
-      throw new Error(`${label} real fixture reports FIXTURE_RECEIVED — exceeded absolute backstop ${absoluteCeilingMs}ms despite continued liveness (heartbeats kept arriving but delivery never completed)`);
+      throw new Error(`${label} ${description} — exceeded absolute backstop ${absoluteCeilingMs}ms despite continued liveness (heartbeats kept arriving but ${description} never completed)`);
     }
     await sleep(10);
   }
 }
+// FIXTURE_READY's absolute backstop: reuses the SAME "2x the old flat-ceiling formula" convention the
+// delivery wait already established below (deliveryAbsoluteCeilingMs), applied to FIXTURE_READY_TIMEOUT_MS
+// unchanged (still derived from READY_FALLBACK_MS — see its own doc above) rather than inventing a new
+// number — this is a WAIT-MECHANISM change (elapsed-time gate -> stall gate), not a budget widening.
+const READY_ABSOLUTE_CEILING_MS = 2 * FIXTURE_READY_TIMEOUT_MS;
 
 const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
 const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
@@ -269,13 +284,15 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
     host.live.get(sessionId)?.lastPrompt === kickoff);
 
   // Wait for the REAL child process to boot and announce readiness over the REAL pty's data stream.
-  // Elapsed time is printed on EVERY run (pass or fail — the `finally` runs even if waitUntil throws on
-  // timeout) so a gate rejection carries a real measured number instead of just a bare timeout message.
+  // Stall-aware (see the stall-aware doc above) — gates on the SAME liveness signal (FIXTURE_ALIVE,
+  // emitted from boot) as the delivery wait below, rather than on total elapsed time. Elapsed time is
+  // still printed on EVERY run (pass or fail — the `finally` runs even if the wait throws) so a gate
+  // rejection carries a real measured number instead of just a bare timeout message.
   const readyWaitStartedAt = performance.now();
   try {
-    await waitUntil(() => /FIXTURE_READY/.test(harness.text(sessionId)), { label: `${label} real fixture process signals FIXTURE_READY`, timeoutMs: FIXTURE_READY_TIMEOUT_MS });
+    await waitForStallAware(/FIXTURE_READY/, label, "real fixture process signals FIXTURE_READY", sessionId, READY_ABSOLUTE_CEILING_MS);
   } finally {
-    console.log(`   [measured ${label}] spawn()→FIXTURE_READY: ${Math.round(performance.now() - readyWaitStartedAt)}ms (budget ${FIXTURE_READY_TIMEOUT_MS}ms)`);
+    console.log(`   [measured ${label}] spawn()→FIXTURE_READY: ${Math.round(performance.now() - readyWaitStartedAt)}ms (stall budget ${HEARTBEAT_STALL_MS}ms, absolute backstop ${READY_ABSOLUTE_CEILING_MS}ms)`);
   }
   check(`${label} the real child process never reported an extra positional argv entry`, !/FIXTURE_FAIL/.test(harness.text(sessionId)));
 
@@ -293,7 +310,7 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   const deliveryAbsoluteCeilingMs = 2 * (KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2));
   const deliveryWaitStartedAt = performance.now();
   try {
-    await waitForDeliveryStallAware(label, sessionId, deliveryAbsoluteCeilingMs);
+    await waitForStallAware(/FIXTURE_RECEIVED/, label, "real fixture reports FIXTURE_RECEIVED", sessionId, deliveryAbsoluteCeilingMs);
   } finally {
     console.log(`   [measured ${label}] SessionStart→FIXTURE_RECEIVED: ${Math.round(performance.now() - deliveryWaitStartedAt)}ms (stall budget ${HEARTBEAT_STALL_MS}ms, absolute backstop ${deliveryAbsoluteCeilingMs}ms, kickoff ${kickoff.length} chars)`);
   }
