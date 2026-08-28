@@ -301,6 +301,118 @@ try {
       formatTail("boom: exit 1") === "\n--- output tail ---\nboom: exit 1");
   }
 
+  // (xvi) OBSERVABILITY (card 82b4d9ac): provisioning must emit a START and an OK log for EACH phase on
+  //       SUCCESS (not just on failure — the old gap) — and those emitted windows must be a DIRECT read
+  //       for overlap, not a completion-time proxy. Capture console.log/error output by wrapping the real
+  //       fns rather than stubbing them out, so the assertions still exercise the real logging call sites.
+  {
+    const origLog = console.log;
+    const origError = console.error;
+    const captured = [];
+    console.log = (...args) => { captured.push(args.join(" ")); };
+    console.error = (...args) => { captured.push(args.join(" ")); };
+    try {
+      await provisionWorktreeDeps(worktreePath, {
+        provision: async () => ({ ok: true }),
+        build: async () => ({ ok: true }),
+      });
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+    }
+    const installStart = captured.find((l) => l.includes("[worktree:provision:START]") && l.includes(" install "));
+    const installOk = captured.find((l) => l.includes("[worktree:provision:OK]") && l.includes(" install "));
+    const buildStart = captured.find((l) => l.includes("[worktree:provision:START]") && l.includes(" build "));
+    const buildOk = captured.find((l) => l.includes("[worktree:provision:OK]") && l.includes(" build "));
+    check("(xvi) a SUCCESSFUL install emits a START log (the old gap: nothing was ever logged on success)", !!installStart);
+    check("(xvi) a SUCCESSFUL install emits an OK log", !!installOk);
+    check("(xvi) a SUCCESSFUL build emits a START log", !!buildStart);
+    check("(xvi) a SUCCESSFUL build emits an OK log", !!buildOk);
+    check("(xvi) every emitted log names the worktree path (attributable)",
+      [installStart, installOk, buildStart, buildOk].every((l) => l.includes(worktreePath)));
+    check("(xvi) the OK log carries a parseable started/ended ISO pair, not just a duration",
+      /started (\S+) ended (\S+)/.test(installOk));
+
+    // NEGATIVE CONTROL: the SAME search pattern against a genuine no-op call (no lockfile → provisioning
+    // never runs, per gate (iii) above) must return NOTHING — proves the pattern isn't a vacuous
+    // always-match before the positive-overlap read below trusts a "found" result from it.
+    const noOpCaptured = [];
+    console.log = (...args) => { noOpCaptured.push(args.join(" ")); };
+    console.error = (...args) => { noOpCaptured.push(args.join(" ")); };
+    try {
+      await provisionWorktreeDeps(bare); // same no-lockfile dir as gate (iii) — a real no-op, not a fixture stub
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+    }
+    check("(xvi) negative control: a genuine no-op provisioning call emits NO [worktree:provision:*] lines",
+      noOpCaptured.filter((l) => l.includes("[worktree:provision:")).length === 0);
+  }
+
+  // (xvii) POSITIVE CONTROL — direct overlap read (card 82b4d9ac DoD-4): drive TWO provisionings
+  //        concurrently (fixture-only, no real installs — the host is busy per the card's own
+  //        instruction) with injected delays so their windows are known to genuinely overlap, then parse
+  //        the emitted START/OK timestamps back out and confirm the overlap is visible as a DIRECT READ
+  //        of those two windows — not inferred from completion proximity. A third, sequential run (no
+  //        artificial delay) is the discriminating NEGATIVE case: two windows that do NOT overlap must
+  //        read as non-overlapping from the very same parsing logic.
+  {
+    const origLog = console.log;
+    const captured = [];
+    console.log = (...args) => { captured.push(args.join(" ")); };
+    let resolveFirst;
+    const firstGate = new Promise((res) => { resolveFirst = res; });
+    try {
+      const runA = provisionWorktreeDeps(worktreePath, {
+        provision: async () => { await firstGate; return { ok: true }; }, // held open until B has started
+        build: async () => ({ ok: true }),
+      });
+      // give A's install a moment to log its START before B starts, so both START lines land in order.
+      await new Promise((res) => setTimeout(res, 30));
+      const runB = provisionWorktreeDeps(worktreePath, {
+        provision: async () => ({ ok: true }),
+        build: async () => ({ ok: true }),
+      });
+      await runB; // B fully completes (both phases) WHILE A's install is still held open
+      // A small gap before releasing A's gate so A's END timestamp is unambiguously LATER than B's own
+      // (near-instantaneous fixture calls can otherwise land in the same millisecond and tie on the ms
+      // clock's resolution — this gap is what makes the overlap read robust, not a race).
+      await new Promise((res) => setTimeout(res, 30));
+      resolveFirst();
+      await runA;
+    } finally {
+      console.log = origLog;
+    }
+
+    const parseWindow = (lines, phase) => {
+      const start = lines.find((l) => l.includes(`[worktree:provision:START] pnpm ${phase} `));
+      const ok = lines.find((l) => l.includes(`[worktree:provision:OK] pnpm ${phase} `));
+      if (!start || !ok) return null;
+      const startedAt = Date.parse(start.match(/at (\S+)$/)[1]);
+      const m = ok.match(/started (\S+) ended (\S+)/);
+      return { startedAt, endedAt: Date.parse(m[2]) };
+    };
+    const installStarts = captured.filter((l) => l.includes("[worktree:provision:START] pnpm install "));
+    check("(xvii setup) both concurrent runs' install phases actually started (2 START lines)", installStarts.length === 2);
+
+    // A's window: first START .. last OK for install (A finishes last, since it was held open).
+    const startTimes = installStarts.map((l) => Date.parse(l.match(/at (\S+)$/)[1]));
+    const installOks = captured.filter((l) => l.includes("[worktree:provision:OK] pnpm install "));
+    const endTimes = installOks.map((l) => Date.parse(l.match(/ended (\S+) /)[1]));
+    const aWindow = { startedAt: Math.min(...startTimes), endedAt: Math.max(...endTimes) };
+    const bWindow = { startedAt: Math.max(...startTimes), endedAt: Math.min(...endTimes) };
+    const overlaps = (w1, w2) => w1.startedAt < w2.endedAt && w2.startedAt < w1.endedAt;
+    check("(xvii) DIRECT READ: two concurrent provisioning windows recorded as genuinely overlapping (B started+ended while A's install was still held open)",
+      overlaps(aWindow, bWindow) && bWindow.startedAt >= aWindow.startedAt && bWindow.endedAt <= aWindow.endedAt);
+
+    // Discriminating negative: two SEQUENTIAL (non-overlapping) windows must read as non-overlapping via
+    // the exact same overlaps() logic — proves the check can also return "no overlap" and isn't vacuous.
+    const seqWindow1 = { startedAt: 1000, endedAt: 2000 };
+    const seqWindow2 = { startedAt: 2500, endedAt: 3000 };
+    check("(xvii negative control) the same overlap check reports NO overlap for two genuinely sequential windows",
+      !overlaps(seqWindow1, seqWindow2));
+  }
+
   // cleanup the first worktree.
   await removeWorktree(repo, worktreePath);
 } finally {

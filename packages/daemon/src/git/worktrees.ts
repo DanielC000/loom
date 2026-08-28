@@ -501,13 +501,15 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
   const timeoutMs = deps.timeoutMs ?? PROVISION_TIMEOUT_MS;
   const run = deps.provision ?? INSTALLERS[manager];
   let installOk = false;
+  const installStartedAt = logProvisionStart("install", manager, worktreePath);
   try {
     const res = await run(worktreePath, timeoutMs, manager);
     installOk = res.ok;
-    if (!res.ok) logProvisionFailure("install", manager, worktreePath, res.reason ?? "unknown reason");
+    if (res.ok) logProvisionSuccess("install", manager, worktreePath, installStartedAt);
+    else logProvisionFailure("install", manager, worktreePath, res.reason ?? "unknown reason", installStartedAt);
   } catch (e) {
     // A provisioner should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
-    logProvisionFailure("install", manager, worktreePath, (e as Error).message);
+    logProvisionFailure("install", manager, worktreePath, (e as Error).message, installStartedAt);
   }
 
   if (!installOk || !isWorkspaceMonorepo(worktreePath, manager)) return;
@@ -515,13 +517,48 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
 
   const buildTimeoutMs = deps.buildTimeoutMs ?? PROVISION_BUILD_TIMEOUT_MS;
   const buildRunner = deps.build ?? ((wt: string, ms: number, mgr: PackageManager) => runBoundedInstall(WORKSPACE_BUILD_COMMANDS[mgr], wt, ms));
+  const buildStartedAt = logProvisionStart("build", manager, worktreePath);
   try {
     const res = await buildRunner(worktreePath, buildTimeoutMs, manager);
-    if (!res.ok) logProvisionFailure("build", manager, worktreePath, res.reason ?? "unknown reason");
+    if (res.ok) logProvisionSuccess("build", manager, worktreePath, buildStartedAt);
+    else logProvisionFailure("build", manager, worktreePath, res.reason ?? "unknown reason", buildStartedAt);
   } catch (e) {
     // A builder should never throw, but belt-and-suspenders: a throw here must NOT abort createWorktree.
-    logProvisionFailure("build", manager, worktreePath, (e as Error).message);
+    logProvisionFailure("build", manager, worktreePath, (e as Error).message, buildStartedAt);
   }
+}
+
+/**
+ * Card `82b4d9ac`: START/OK/FAILED are a matched triple per phase (install, build) — the fix for the
+ * old failure-only logging, which left duration and concurrency of provisioning structurally
+ * unobservable (no start timestamp, no success emission at all). `console.log`/`.error` only — NOT an
+ * `orchestration_event` row: {@link createWorktree}'s one call site (`sessions/service.ts` `spawnWorker`)
+ * runs BEFORE a worker session row exists, so there is no `manager_session_id`/`worker_session_id`/
+ * `task_id` yet to key such a row on, and inventing a parallel event shape just to carry a worktree path
+ * is exactly what the card's DoD says not to do. `worktreePath` already encodes the project id as a path
+ * segment ({@link WORKTREES_DIR}`/<projectId>/<taskKey>`), so it alone makes a window attributable to a
+ * project without a separate field. Each line embeds explicit ISO wall-clock timestamps (not just a
+ * duration) so two provisioning windows can be read DIRECTLY off the log for overlap — no proxy, no
+ * inference from unrelated completion events. Purely diagnostic: `Date.now()`/`console.log` are cheap,
+ * synchronous, non-blocking calls already used throughout this file (see {@link logProvisionFailure}'s
+ * prior `console.error`-only form) — this adds no I/O and changes no provisioning behavior/timeout/
+ * precedence.
+ */
+function logProvisionStart(stage: "install" | "build", manager: PackageManager, worktreePath: string): number {
+  const startedAt = Date.now();
+  // eslint-disable-next-line no-console
+  console.log(`[worktree:provision:START] ${manager} ${stage} for ${worktreePath} at ${new Date(startedAt).toISOString()}`);
+  return startedAt;
+}
+
+/** Success counterpart to {@link logProvisionStart} — see its doc comment for why this is a plain log,
+ *  not an `orchestration_event`. Emitted on EVERY successful phase (the gap this card fixes: the old
+ *  code logged nothing at all on success, making a completed provisioning window indistinguishable from
+ *  one that never ran). Carries both endpoints' ISO timestamps plus the derived duration. */
+function logProvisionSuccess(stage: "install" | "build", manager: PackageManager, worktreePath: string, startedAt: number): void {
+  const endedAt = Date.now();
+  // eslint-disable-next-line no-console
+  console.log(`[worktree:provision:OK] ${manager} ${stage} for ${worktreePath} started ${new Date(startedAt).toISOString()} ended ${new Date(endedAt).toISOString()} (${endedAt - startedAt}ms)`);
 }
 
 /**
@@ -532,14 +569,17 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
  * (see {@link appendTail}/{@link formatTail}), mirroring the markitdown provisioning-status pattern: a
  * specific classified reason plus enough context to diagnose without re-running the command by hand.
  * `console.error` (not `.warn`) so it isn't lost among the daemon's routine warnings. Still purely a log
- * — this never throws or blocks {@link provisionWorktreeDeps}/createWorktree.
+ * — this never throws or blocks {@link provisionWorktreeDeps}/createWorktree. `startedAt` (from {@link
+ * logProvisionStart}) lets a failure's window be read directly too — the same START/OK-pair shape,
+ * just with a reason instead of an OK.
  */
-function logProvisionFailure(stage: "install" | "build", manager: PackageManager, worktreePath: string, reason: string): void {
+function logProvisionFailure(stage: "install" | "build", manager: PackageManager, worktreePath: string, reason: string, startedAt: number): void {
+  const endedAt = Date.now();
   const consequence = stage === "install"
     ? "the worker will install its own dependencies before it can build"
     : "the worker will build sibling workspace packages (e.g. a monorepo's shared package) itself before its gate can pass";
   // eslint-disable-next-line no-console
-  console.error(`[worktree:provision:FAILED] ${manager} ${stage} for ${worktreePath} did not complete — ${consequence}.\nReason: ${reason}`);
+  console.error(`[worktree:provision:FAILED] ${manager} ${stage} for ${worktreePath} started ${new Date(startedAt).toISOString()} ended ${new Date(endedAt).toISOString()} (${endedAt - startedAt}ms) — did not complete — ${consequence}.\nReason: ${reason}`);
 }
 
 /**
