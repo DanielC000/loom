@@ -3178,6 +3178,13 @@ export class OrchestrationMcpRouter {
           "recoverable in general — respawning is a SEPARATE, more destructive escalation with its own " +
           "tradeoffs (see worker_stop's own docs), not something this tool's success or failure should be " +
           "read as evidence for or against. " +
+          "`recovered` (card 29b3c396) distinguishes the TWO shapes `confirmed:false` can mean: " +
+          "`recovered:true` means THIS call's own retry ladder gave up waiting for a confirming hook and " +
+          "cleared busy for you, re-queuing whatever was stranded for delivery on the worker's next natural " +
+          "drain — the state is UNSTUCK, don't keep calling worker_flush on it. `recovered:false` (or " +
+          "absent) alongside `confirmed:false` means it's still genuinely unresolved — either a real turn " +
+          "may still land the hook shortly, or it's still stuck and another `worker_flush` (or an " +
+          "escalation) is worth trying. " +
           "Also returns `resumability` (\"dead\"|\"resumable\"|\"unknown\") as a SECOND, independent " +
           "discriminator alongside the flush outcome — a \"dead\" worker's process/transcript is already " +
           "confirmed gone, which makes a submit-only retry moot regardless of what `ok`/`confirmed` say; " +

@@ -409,7 +409,12 @@ alongside `worker_message` (which APPENDS, compounding an already-oversized unco
 `worker_stop` + respawn (which DISCARDS whatever the worker had accumulated) — but call it FIRST, before
 either of those, and always before any destructive remedy. It's a documented no-op on a genuinely clean
 composer, so calling it speculatively costs nothing; a `confirmed:false` result on a truly dirty one just
-means this attempt didn't land, not that nothing can be done.
+means this attempt didn't land, not that nothing can be done. **Read `recovered` alongside `confirmed`
+(card 29b3c396)**: `recovered:true` means your OWN call is what unstuck the worker — busy was cleared and
+the stranded text requeued for delivery on its next natural drain, so don't keep re-flushing a state that
+already resolved. `recovered:false`/absent alongside `confirmed:false` means it's still genuinely
+unresolved — either a real turn may still land the hook shortly, or the worker is still stuck and another
+`worker_flush` (or an escalation) is worth trying.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 

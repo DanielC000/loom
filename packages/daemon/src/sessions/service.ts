@@ -7655,8 +7655,12 @@ export class SessionService {
    * session (its process/transcript already confirmed gone) makes a submit-only retry moot regardless of
    * what `ok`/`confirmed` report. The parent card (b9b8f8db) flagged this as possibly useful but left it
    * unverified — surfaced here as an ADDITIONAL signal, not a replacement for `ok`/`reason`/`confirmed`.
+   * Card 29b3c396 adds `recovered`: `confirmed:false` alone no longer distinguishes "still genuinely
+   * running, just slow to confirm" from "was stuck and this flush just cleared it" — `recovered:true`
+   * means THIS call's own give-up ladder fell through to GIVE-UP RECOVERY (busy cleared, the original
+   * message requeued for redelivery on the next natural drain), so the caller should stop retrying.
    */
-  async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; resumability: string }> {
+  async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; resumability: string }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const result = await this.pty.flushComposer(workerSessionId);

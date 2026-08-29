@@ -40,10 +40,6 @@ import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function sleepUntil(t0, targetMs) {
-  const remaining = targetMs - (Date.now() - t0);
-  if (remaining > 0) await sleep(remaining);
-}
 // Retrofitted onto the shared _wait.mjs waitUntil (card c9bba0b2) — same timeoutMs default and 2ms
 // interval, still throws on timeout (its own single call site never catches, so the throw propagates
 // exactly as before); only difference is the added [waitUntil-outcome] diagnostic ahead of the throw.
@@ -73,14 +69,17 @@ const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
-const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS;
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
-const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
+// Card 29b3c396: the SUPPRESSED branch now opens a bounded hook-based re-check
+// (`awaitGiveUpConfirmSettle`) before treating itself as terminal — sized generously here (well past this
+// test's own timeline) so scenario (1)'s explicit, immediate `deliverHook` below is unambiguously WITHIN
+// the window, never racing a default-sized one closing first and firing GIVE-UP RECOVERY out from under it.
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = "50";
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = "40";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -130,7 +129,6 @@ try {
     const SID = "sess-suppressed-sticky";
     const TEXT = "STRANDED_BUT_TURN_ACTUALLY_STARTED";
     const { fake, entryCount } = spawnReady(SID);
-    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(1) setup: idle-submit delivered, busy armed", r.delivered === true && busyLog[SID]?.at(-1) === true);
 
@@ -139,7 +137,12 @@ try {
     await waitForCount(entryCount, MAX_ATTEMPTS);
     await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
     fake.emitOutput("spinner-tick-after-final-enter");
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    // Card 29b3c396: detect the SUPPRESSED branch firing via its own synchronous side effect
+    // (composerDirtyLen marked) rather than a fixed sleep, then deliver the confirming hook IMMEDIATELY —
+    // this must land well inside the (generously-sized, see above) bounded re-check window the SUPPRESSED
+    // branch now opens, or this scenario's own premise (a REAL, later-confirming turn) races against the
+    // fix's own give-up-recovery fallback and this test would flake.
+    await sharedWaitUntil(() => host.getComposerDirtyLen(SID) === TEXT.length, { timeoutMs: 5000, intervalMs: 2, label: "(1) suppression mark" });
     check("(1) GIVE-UP SUPPRESSED fired (busy still true)", busyLog[SID]?.at(-1) === true);
     check("(1) composerDirtyLen marked SYNCHRONOUSLY at suppression, exact stranded length",
       host.getComposerDirtyLen(SID) === TEXT.length);

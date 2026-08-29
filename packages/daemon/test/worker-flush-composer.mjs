@@ -227,9 +227,39 @@ try {
       host.getComposerDirtyLen(SID) === TEXT.length);
     check("(3) the stranded body was still never re-pasted",
       fakes[SID].writes.join("").split(TEXT).length - 1 === 1);
+    // Card 29b3c396 (CR follow-up): THIS is exactly the false-positive shape a reviewer traced from the
+    // diff — `stranded` above (host.ts) is satisfied by `composerDirtyLen > 0` alone, with `busy` already
+    // false (matches the /orchestrate doctrine's own documented shape: a SUPPRESSED mark stuck non-zero
+    // against an already-idle, healthy session) — so a bare `!busy` read at settle time would read
+    // `recovered:true` here even though THIS call fixed nothing (busy was never true to begin with).
+    // `recovered` is gated on a captured `wasBusy` precisely to keep this false.
+    check("(3) recovered correctly reads NOT true — busy was ALREADY false before this flush, so this call "
+      + "cannot claim credit for clearing it (state, not transition)",
+      result.recovered !== true);
+  }
+
+  // ===================== (4) TRUE POSITIVE for `recovered` (CR follow-up, card 29b3c396): busy IS true =====
+  // ===================== at flush time, and a genuine true->false transition happens during this call =====
+  {
+    const SID = "sess-flush-was-busy";
+    const TEXT = "STRANDED_PAYLOAD_BUSY_AT_FLUSH_TIME";
+    spawnReady(SID);
+    const r0 = host.enqueueStdin(SID, TEXT);
+    check("(4) setup: idle-submit delivered, busy armed", r0.delivered === true && busyLog[SID].at(-1) === true);
+
+    // Call flushComposer WHILE busy is still true (no confirming hook is ever delivered in this SID) — this
+    // call's own re-entered ladder (racing the original submit's own, still in flight) is what genuinely
+    // clears busy; `recovered` must reflect that real transition.
+    const result = await host.flushComposer(SID);
+    check("(4) flushComposer honestly reports confirmed:false (no hook ever arrives)",
+      result.ok === true && result.confirmed === false);
+    check("(4) THE FIX: recovered:true — busy genuinely transitioned true->false during this call's own lifetime",
+      result.recovered === true);
+    check("(4) busy is in fact false now (the transition recovered claims actually happened)",
+      busyLog[SID].at(-1) === false);
   }
 } finally {
-  for (const sid of ["sess-flush-empty", "sess-flush-confirms", "sess-flush-never-confirms"]) {
+  for (const sid of ["sess-flush-empty", "sess-flush-confirms", "sess-flush-never-confirms", "sess-flush-was-busy"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

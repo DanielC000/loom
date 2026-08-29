@@ -101,6 +101,32 @@ process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 const HOLD_MS = 10;
 process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 const HOLD_WAIT = HOLD_MS + 20;
+// Card 29b3c396: the output-based GIVE-UP SUPPRESSED branch this file's `emitData` forces now ALSO falls
+// through to GIVE-UP RECOVERY on its own bounded hook-based re-check (fireEnterAndVerify's
+// awaitGiveUpConfirmSettle), rather than staying suppressed forever until this file's own scripted
+// `host.reconcile()` calls drive `healIfStuck`'s stale-busy backstop. Left at its default (~300ms) bound,
+// that internal re-check would fire — and requeue the stranded text with an already-expired hold — WELL
+// BEFORE scenario (1)/(2)'s own manually-timed heal point (giveUpAt()+600ms / +750ms), so the FIRST
+// scripted `host.reconcile()` call would redrain it a full cycle earlier than this suite's story expects
+// (harmlessly — it's the SAME requeueGiveUpOrigin mechanism firing sooner, not a different one — but it
+// invalidates the "redrain happens on the SECOND reconcile()" timing this suite asserts).
+//
+// NOT MADE EVENT-BASED, and here's why: unlike the sticky test's own fix (which replaced a fixed sleep with
+// waiting on the SUPPRESSED branch's synchronous side effect), there is no event to wait FOR here — both
+// `healIfStuck`'s own staleness gate (`now - busySince > staleMs`) and this re-check's own give-up decision
+// are ABSENCE-over-time claims (nothing fires when a duration elapses; nothing signals "no hook arrived
+// yet"). This bound is therefore inherently a margin, not an event — but it is a categorically CHEAPER
+// margin than a `sleep()` this file itself awaits: grep confirms neither this constant nor its POLL/MAX_POLLS
+// components feed any `sleep`/`sleepUntil` call in THIS file — they only configure a ceiling on a
+// background chain in the PRODUCTION code that this file's own scripted `host.reconcile()` calls never wait
+// on. Raising it costs this file's own wall-clock runtime NOTHING (its total runtime is governed entirely
+// by its own pre-existing FIRST_TURN_STALE_MS/busyStaleMs-based sleeps, unchanged by this card). Given that,
+// size it for overwhelming headroom rather than a "comfortable" multiple: 30000ms is ~50x scenario (1)'s
+// ~600ms need and ~40x scenario (2)'s ~750ms need — under any host contention severe enough to close a 40x+
+// gap, this file's OWN waits (bounded at a few seconds) would already be failing outright, a symptom with
+// nothing to do with this specific knob.
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = "100";
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = "300"; // 30000ms bound — ~40-50x headroom, see comment above
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 

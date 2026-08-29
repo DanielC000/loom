@@ -89,12 +89,64 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;       // mirrors LOOM_SUBMIT_ENTER_DELAY_MS
 const VERIFY_TIMEOUT = 600;   // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;       // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
-const FIRST_TURN_STALE = 400; // mirrors LOOM_FIRST_TURN_STALE_MS — small so healIfStuck's window is fast to test
+// Card 29b3c396 shrank this from 400 to 100: its OWN comment already said it was picked "small so
+// healIfStuck's window is fast to test", and it is used in exactly ONE place in this whole file (scenario
+// (2)'s own manual heal-trigger wait, below) — shrinking it further serves that SAME stated purpose better,
+// and buys headroom for the re-check bound this card adds (see that bound's own comment for why the two
+// had to be balanced together, not chosen independently).
+const FIRST_TURN_STALE = 100; // mirrors LOOM_FIRST_TURN_STALE_MS
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
 const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms — sendEnterAndVerify's own pre-Enter reassert-settle
-const CONFIRM_SETTLE_POLL = 10;
-const CONFIRM_SETTLE_MAX_POLLS = 15; // 150ms bound — the post-give-up settle wait before committing RECOVERY
+const CONFIRM_SETTLE_POLL = 50;
+// Card 29b3c396: this bound now ALSO gates the output-based SUPPRESSED branch (fireEnterAndVerify no
+// longer treats it as terminal — it falls through to this SAME hook-based re-check before committing
+// GIVE-UP RECOVERY). Scenario (2) below deliberately keeps B's own SUPPRESSED give-up alive past a
+// manually-driven heal point to mirror the real specimen's gen2->gen3 transition via healIfStuck
+// specifically — so this bound must stay LARGER than that window, or B would self-recover via THIS card's
+// OWN new re-check before the test's own manual `host.reconcile()` heal step ever runs, invalidating
+// scenario (2)'s "SUPPRESSED never requeues by itself" setup assertions (harmlessly, not incorrectly: this
+// card's own internal re-check would simply win the race and requeue B slightly earlier than this test's
+// story intends — a real, desired improvement this file isn't testing).
+// ⚠️ THE NOMINAL heal target is `giveUpAt() + FIRST_TURN_STALE*1.5` (150ms past B's give-up at
+// FIRST_TURN_STALE=100), but the EFFECTIVE one is later: scenario (2)'s own earlier check already waits
+// past `giveUpAt() + VERIFY_TIMEOUT/2` (300ms) on the SAME `sleepUntil(t1, …)` clock, and `sleepUntil` can
+// only wait REMAINING time (never rewind) — so by the time this heal wait runs, its own target is already
+// in the past and it no-ops, and `host.reconcile()` actually fires at ~300ms, not ~150ms. Harmless (300ms
+// is staler still, so healIfStuck's own condition holds even more easily), but the MARGIN below is sized
+// against the REAL (300ms) trigger point, not the nominal one, to avoid quietly overstating it.
+//
+// NOT MADE EVENT-BASED, and here's why: both `healIfStuck`'s staleness gate and this re-check's own give-up
+// decision are ABSENCE-over-time claims (nothing fires when a duration elapses; nothing signals "no hook
+// arrived yet") — there is no event to wait FOR, unlike the sticky test's own fix (pty-giveup-suppressed-
+// composerdirty-sticky.mjs), which could replace its fixed sleep with waiting on a synchronous side effect.
+//
+// UNLIKE pty-healifstuck-clear.mjs's identical-looking bound (which costs that file NOTHING — every one of
+// its scenarios forces the OUTPUT-based branch via emitData), this bound is NOT free here: scenario (1) (A
+// AND B, both), scenario (2)'s own SETUP step for A, and scenario (3) (both its cycles) are all the PLAIN
+// no-output give-up case, which already routed through this SAME awaitGiveUpConfirmSettle window BEFORE
+// this card (that branch is unchanged by this fix) — FIVE cycles total in this file now pay this bound as
+// ADDED wall-clock time, file-wide, since Node reads this env var once at module load and it cannot be
+// varied per-scenario within one process.
+//
+// EMPIRICALLY MEASURED, not assumed (three iterations, each timed): (1) 2000ms (~3.3x over the ORIGINAL
+// 600ms heal point) is the ratio the manager's review flagged as under-justified — a fair call, since
+// nothing at the time explained why 3.3x was enough. (2) Blindly enlarging it to 30000ms (mirroring the
+// OTHER file, on the theory that a bigger ceiling is free) made THIS file take 43s instead of its original
+// ~4-5s, and independently made scenario (1) TIME OUT outright — `waitForBusyFalseAfter`'s own hardcoded
+// 10_000ms ceiling was blown by a single now-30s-long genuine give-up. So "raise it, it's free" does NOT
+// generalize across files: whether a bound is free depends on whether the SAME file ALSO pays it on its own
+// no-output happy path, not on which card introduced it — this file does, pty-healifstuck-clear.mjs
+// doesn't. (3) Shrinking FIRST_TURN_STALE (above) — a test-owned dial with exactly one consumer in this
+// file, already documented as chosen "small" for speed — and landing this bound at 1500ms (POLL=50 * 30
+// below) gives a 5x margin over the REAL ~300ms trigger point computed above (not the fictional 10x a naive
+// reading of FIRST_TURN_STALE*1.5 would suggest), while measuring at ~22s total for this file (vs. ~4-5s
+// before this card) — the five no-output cycles above are what that added time actually is. 5x is smaller
+// than the 40-50x this card uses where the bound genuinely is free; it is the deliberate, reasoned floor
+// for a file that pays this cost on every one of its own no-output cycles, not a value chosen for
+// convenience. This residual slowdown is the accepted, explained cost of sharing one process-wide knob
+// across both give-up flavors in a file that exercises both.
+const CONFIRM_SETTLE_MAX_POLLS = 30; // 1500ms bound (POLL=50ms above) — 5x margin over the REAL ~300ms trigger point, see comment above
 // Card 4796f999 flake fix: scenarios (1)/(3) below fire `host.reconcile()` in the SAME turn B's own
 // give-up settles (no intervening `sleep`) — deliberately, so B's hold is still fresh and A's is provably
 // long expired at that instant (see scenario (1)'s own comment). A too-small HOLD_MS gave that a real race

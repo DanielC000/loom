@@ -8550,6 +8550,21 @@ export class PtyHost {
     setTimeout(() => this.awaitGiveUpConfirmSettle(sessionId, gen, polls + 1, onSettled), GIVE_UP_CONFIRM_SETTLE_POLL_MS);
   }
 
+  /**
+   * Mark this generation's stranded injection possibly-dirty — shared by BOTH of `fireEnterAndVerify`'s
+   * give-up outcomes (the output-based provisional suppression and the eventual GIVE-UP RECOVERY), which
+   * used to each carry their own copy of this identical five-line block (card 29b3c396). Same
+   * composerLen===0 human-draft gate (card e1829591) and composerDirtyMarkedGens/composerBodyWrittenForGen
+   * double-mark guards (cards b9b8f8db/c148f118) as before — de-duplicated, not changed.
+   */
+  private markGiveUpDirty(live: Live, gen: number): void {
+    if (live.composerLen === 0 && live.lastPrompt && !live.composerDirtyMarkedGens.has(gen) && live.composerBodyWrittenForGen === gen) {
+      live.composerDirtyLen += live.lastPrompt.length;
+      live.composerDirtyLenBelieved += live.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
+      live.composerDirtyMarkedGens.set(gen, live.lastPrompt.length);
+    }
+  }
+
   /** Write this attempt's Enter and arm its verify-timeout — the second half of `sendEnterAndVerify`,
    *  split out so the give-up attempt can route through `awaitReassertSettle` first. */
   private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
@@ -8611,9 +8626,24 @@ export class PtyHost {
         // 0fa5beef). Keying on `lastOutputAt` instead is LOAD-TOLERANT — it asks "did the engine actually do
         // something" rather than "did enough wall-clock time pass," so it stays correct regardless of how
         // bad the contention gets.
-        if (l.lastOutputAt > enterWrittenAt) {
+        // Card 29b3c396: the OUTPUT discriminator below is a heuristic, not proof (card 3ce3fa39) — it
+        // used to `return` immediately on a positive read, committing FOREVER to "a turn is running" with
+        // no later re-check. A LIVE specimen showed that commitment can be wrong in a way that never
+        // self-corrects: our OWN reassert-paste write can provoke a deterministic engine echo (see
+        // `healIfStuck`'s doc for a first-hand confirmed instance), which satisfies this discriminator
+        // even when no turn ever starts — and because `busySince` only re-arms on a GENUINE confirming
+        // hook (`setBusy(sessionId, true, "user-prompt-submit-hook")`), a session stuck here never becomes
+        // stale enough for `healIfStuck`'s own OUTPUT-keyed backstop either: every `worker_flush` retry
+        // re-triggers the identical echo, indefinitely refreshing `lastOutputAt` out from under it. Fix:
+        // route BOTH discriminators (output-seen below, and the pre-existing no-output branch) through the
+        // SAME bounded hook-based re-check (`awaitGiveUpConfirmSettle` — the free, decisive signal is
+        // `enterConfirmed`, the local proxy for "a turnSeq-advancing hook fired for this generation") before
+        // treating EITHER as terminal. A session that never once confirms now always reaches GIVE-UP
+        // RECOVERY, regardless of which heuristic suppressed it first.
+        const outputSeen = l.lastOutputAt > enterWrittenAt;
+        if (outputSeen) {
           // eslint-disable-next-line no-console
-          console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize`);
+          console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); verifying before committing to this suppression`);
           // Card 3ce3fa39: this discriminator is a heuristic, not proof — observed output after our Enter
           // write can belong to unrelated concurrent activity rather than THIS write's own turn actually
           // starting (first-hand confirmed: a specimen stayed suppressed here, a real Stop fired 64.5s later
@@ -8626,12 +8656,7 @@ export class PtyHost {
           // never resolves any other way) doesn't double-count the identical text — see that field's doc.
           // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db) — an Enter-only redelivery generation
           // never wrote a fresh body, so there is nothing new here to mark; see that field's own doc.
-          if (l.composerLen === 0 && l.lastPrompt && !l.composerDirtyMarkedGens.has(gen) && l.composerBodyWrittenForGen === gen) {
-            l.composerDirtyLen += l.lastPrompt.length;
-            l.composerDirtyLenBelieved += l.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
-            l.composerDirtyMarkedGens.set(gen, l.lastPrompt.length);
-          }
-          return;
+          this.markGiveUpDirty(l, gen);
         }
         // Card 441499ee (hardening — card 04de8bbf measured ~86% of give-ups reaching THIS point are
         // followed by a confirming hook, i.e. the OUTPUT discriminator above just missed a turn that
@@ -8640,21 +8665,24 @@ export class PtyHost {
         // against a DIFFERENT signal than the discriminator above (the hook itself, not inferred output);
         // it does not change that discriminator's own logic. See `awaitGiveUpConfirmSettle`'s doc for why
         // this is short and does not try to cover the full hook-latency distribution — `purgeConfirmedGiveUpRequeue`
-        // remains the defense-in-depth for a confirmation that arrives after this window closes.
+        // remains the defense-in-depth for a confirmation that arrives after this window closes. Reusing
+        // this SAME short window for the output-seen branch (card 29b3c396) is not a new gamble: that
+        // branch has STRONGER a-priori evidence a turn is running (there was real pty output) than the
+        // no-output branch this window was already shipped and measured against.
         this.awaitGiveUpConfirmSettle(sessionId, gen, 0, (confirmed) => {
           if (confirmed) {
             // eslint-disable-next-line no-console
-            console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — a confirming hook arrived during the post-give-up settle wait (turn actually started; the output discriminator missed it, but the hook proves it); leaving busy/composer untouched`);
+            console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — a confirming hook arrived${outputSeen ? "" : " during the post-give-up settle wait"} (turn actually started${outputSeen ? "" : "; the output discriminator missed it, but the hook proves it"}); leaving busy/composer untouched`);
             return;
           }
           const l2 = this.live.get(sessionId);
           if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
-          console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge`);
+          console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; turn never confirmed started; recovering busy so the session doesn't wedge`);
           // Card 3ce3fa39 (superseding card ee082fbb's immediate clear): do NOT attempt the clear HERE.
-          // Give-up firing at all means the engine produced no output during the ENTIRE retry window — i.e.
-          // it wasn't reading — which is exactly the condition under which a raw backspace burst is LEAST
-          // likely to be safely interpreted (first-hand confirmed: two specimens' abandoned text survived a
+          // Give-up reaching this point means no CONFIRMING HOOK ever arrived — i.e. the engine wasn't
+          // reading — which is exactly the condition under which a raw backspace burst is LEAST likely to
+          // be safely interpreted (first-hand confirmed: two specimens' abandoned text survived a
           // backspace-clear attempted at THIS point fully intact, only to resurface — once doubled — glued
           // onto a much later, unrelated submit). Mark the amount possibly-stranded instead (ADDITIVE — see
           // `composerDirtyLen`'s doc: a second unresolved give-up on top of an already-dirty composer must
@@ -8675,11 +8703,7 @@ export class PtyHost {
           // redelivery path never wrote a fresh body, so this give-up has nothing new to mark — marking it
           // anyway would inflate composerDirtyLen for bytes that were never actually (re)typed this
           // generation, which is exactly the wasted-byte accounting this card's fix removes.
-          if (l2.composerLen === 0 && l2.lastPrompt && !l2.composerDirtyMarkedGens.has(gen) && l2.composerBodyWrittenForGen === gen) {
-            l2.composerDirtyLen += l2.lastPrompt.length;
-            l2.composerDirtyLenBelieved += l2.lastPrompt.length; // card c148f118: same additive mark, mirrored onto the optimistic reading
-            l2.composerDirtyMarkedGens.set(gen, l2.lastPrompt.length);
-          }
+          this.markGiveUpDirty(l2, gen);
           this.setBusy(sessionId, false, "give-up-recovery");
           this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
         });
@@ -8754,11 +8778,17 @@ export class PtyHost {
    * press-Enter remedy, nothing more; a worker whose composer holds genuinely lost/corrupted state is
    * outside what pressing Enter can fix.
    */
-  flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean }> {
+  flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean }> {
     const live = this.live.get(sessionId);
     if (!live?.alive) return Promise.resolve({ ok: false, reason: "session-dead" });
     const stranded = !live.enterConfirmed && (live.busy || live.composerDirtyLen > 0);
     if (!stranded) return Promise.resolve({ ok: false, reason: "composer-empty" });
+    // Card 29b3c396 (CR follow-up): captured BEFORE this call writes anything, so `recovered` below can
+    // require a genuine true->false TRANSITION during this call's own lifetime — `stranded` above is also
+    // satisfied by `composerDirtyLen > 0` alone with `busy` already false (card d4b3fa6c's own documented
+    // shape: a SUPPRESSED mark stuck non-zero against an already-idle, healthy session), and a bare `!busy`
+    // read at settle time can't tell "this flush cleared it" from "it was never true to begin with".
+    const wasBusy = live.busy;
     const gen = live.submitGeneration;
     // Mirrors submit()'s own dirty-branch stamp — see that call site's comment: this generation is the
     // one attempting to resolve any outstanding dirty residue, so the confirming hook's existing
@@ -8770,7 +8800,19 @@ export class PtyHost {
     this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
     this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
     return new Promise((resolve) => {
-      this.awaitFlushConfirmSettle(sessionId, 0, (confirmed) => resolve({ ok: true, confirmed }));
+      // Card 29b3c396: `confirmed:false` no longer means "still hopelessly stuck" — the give-up ladder
+      // this call re-enters (`fireEnterAndVerify`, via `awaitGiveUpConfirmSettle`) now falls through to
+      // GIVE-UP RECOVERY on its own bounded window instead of holding busy=true forever. Surface that:
+      // `recovered:true` tells the caller busy genuinely transitioned true->false during THIS call's own
+      // lifetime (and the original message was requeued for redelivery on the next natural drain), so it
+      // should stop retrying a call that already worked — gated on `wasBusy` (captured above, before this
+      // call wrote anything) precisely so an already-idle session with only a stale composerDirtyLen mark
+      // (nothing for THIS call to have fixed) can never read as a false `recovered:true`.
+      this.awaitFlushConfirmSettle(sessionId, 0, (confirmed) => {
+        const l = this.live.get(sessionId);
+        const recovered = !confirmed && wasBusy && !!l?.alive && !l.busy;
+        resolve({ ok: true, confirmed, recovered });
+      });
     });
   }
 
