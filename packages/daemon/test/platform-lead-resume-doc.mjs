@@ -222,6 +222,29 @@ try {
   const staleNotes = composeResumeDocOperationalNotes(home4, doc4);
   check("(4) a materially-fresher sibling ⇒ the staleness note fires", staleNotes.includes("[loom:resume-doc-stale]"));
   check("(4) the staleness note names the FRESHEST sibling's path", staleNotes.includes(siblingPath4));
+  // Card 7f0888b5: the staleness note must render BOTH compared mtimes as absolute ISO-8601 timestamps,
+  // labelled which is which, so the recipient can diff them against an action they themselves took.
+  const isoRe = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g;
+  const staleIsoStamps = staleNotes.match(isoRe) ?? [];
+  const ownDocMtimeIso = new Date(fs.statSync(doc4).mtimeMs).toISOString();
+  const siblingMtimeIso = new Date(fs.statSync(siblingPath4).mtimeMs).toISOString();
+  check("(4) the staleness note carries at least 3 ISO-8601 stamps (own doc mtime, sibling mtime, measured-at)", staleIsoStamps.length >= 3);
+  check("(4) the staleness note carries the resolved doc's OWN mtime as an ISO-8601 stamp", staleNotes.includes(ownDocMtimeIso));
+  check("(4) the staleness note carries the sibling's mtime as an ISO-8601 stamp", staleNotes.includes(siblingMtimeIso));
+  check("(4) the staleness note labels which mtime belongs to the sibling vs. the recipient's own doc", /sibling resume doc.*last modified/i.test(staleNotes) && /own doc at.*last modified/i.test(staleNotes));
+  check("(4) the staleness note carries a measured-at stamp distinct from send-time", /measured-at/i.test(staleNotes));
+
+  // An explicit `now` is honored — the measured-at stamp tracks it, not a fresh Date.now() read.
+  const fixedNow = 1_700_000_000_000;
+  const staleNotesFixedNow = composeResumeDocOperationalNotes(home4, doc4, fixedNow);
+  check("(4) an explicit `now` is honored in the staleness note's measured-at stamp", staleNotesFixedNow.includes(new Date(fixedNow).toISOString()));
+
+  // The doc doesn't exist yet, but a materially-fresher sibling does ⇒ still fires, and labels the own-doc
+  // side as "does not exist yet" rather than fabricating a timestamp for a file with no mtime to report.
+  const missingDoc4 = path.join(home4, "missing-doc.md");
+  const staleNotesMissing = composeResumeDocOperationalNotes(home4, missingDoc4, fixedNow);
+  check("(4) a nonexistent own doc + a fresher sibling ⇒ the staleness note still fires", staleNotesMissing.includes("[loom:resume-doc-stale]"));
+  check("(4) …and labels the own doc as not existing yet, rather than fabricating a timestamp", /does not exist yet/i.test(staleNotesMissing));
 
   // A sibling only SLIGHTLY fresher (under the material-lag threshold) ⇒ no staleness note.
   const recentMs = Date.now() - 2 * 60 * 60 * 1000; // 2h ago — under the 48h threshold

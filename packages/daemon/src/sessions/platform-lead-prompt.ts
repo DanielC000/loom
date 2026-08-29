@@ -185,11 +185,21 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
  *    codescape disabled/never probed, silently contributes nothing.
  *
  * Returns "" when none of the checks above fire (the common, healthy-state case).
+ *
+ * Card `7f0888b5` — reported by another Loom project, the sibling of `f17c5a76`'s size-warning fix: the
+ * staleness note used to compare two mtimes and render NEITHER, handing the recipient a bare verdict
+ * ("your doc is stale") with no way to check it against an action they themselves took. Worse than the
+ * size note's old defect — that one at least carried the raw measurement — because the recommended action
+ * here is a doc ROTATION (destructive-ish, irreversible-ish): the originating incident was a Lead told to
+ * rotate a doc it had rotated 7 minutes earlier. `now` (default `Date.now()`, injectable like
+ * `resumeDocSizeWarning`'s own param) stamps WHEN this comparison ran, distinct from send/delivery time;
+ * both compared mtimes are rendered as absolute ISO-8601 timestamps and labelled which is which, so the
+ * recipient can diff them directly against their own actions instead of trusting the derived verdict.
  */
-export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string): string {
+export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string, now: number = Date.now()): string {
   const notes: string[] = [];
 
-  const sizeNote = resumeDocSizeWarning(resumeDocPath);
+  const sizeNote = resumeDocSizeWarning(resumeDocPath, now);
   if (sizeNote) notes.push(sizeNote);
 
   const toolDriftNote = readCodescapeToolDriftNote(homePath);
@@ -204,9 +214,17 @@ export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath
 
   const sibling = findFreshestSiblingResumeDoc(homePath, resumeDocPath);
   if (sibling && (resolvedMtimeMs === null || sibling.mtimeMs - resolvedMtimeMs >= SIBLING_STALENESS_MS)) {
+    const measuredAt = new Date(now).toISOString();
+    const siblingModifiedAt = new Date(sibling.mtimeMs).toISOString();
+    const ownModifiedAt = resolvedMtimeMs === null ? "does not exist yet" : new Date(resolvedMtimeMs).toISOString();
     notes.push(
-      `[loom:resume-doc-stale] A sibling resume doc at \`${sibling.path}\` was modified more recently than ` +
-      `your lineage's own doc — it may hold more current state. Check it before trusting your own doc as ` +
+      `[loom:resume-doc-stale] A sibling resume doc at \`${sibling.path}\` (last modified ${siblingModifiedAt}) ` +
+      `was modified more recently than your lineage's own doc at \`${resumeDocPath}\` (last modified ` +
+      `${ownModifiedAt}) — measured-at ${measuredAt} (NOT this message's send time; a delayed or ` +
+      `re-injected delivery can widen the gap between the two, so don't assume the two are close ` +
+      `together). If you rotated, or otherwise changed, your own doc at or after that own-doc timestamp, ` +
+      `this comparison is stale — re-check both files' current mtimes yourself before acting on it. ` +
+      `Otherwise, the sibling may hold more current state — check it before trusting your own doc as ` +
       `fully current.`,
     );
   }
