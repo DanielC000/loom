@@ -51,7 +51,14 @@ const MAX_NEVER_DROP_TEXT_BYTES = 2000;
 
 export interface MemoryWriteInput {
   key: string;
-  text: string;
+  /**
+   * Card 145e8d72 — REQUIRED to create a brand-new key (a note with no body is not a note), but OPTIONAL
+   * to update an EXISTING one: omitting it on an update is a METADATA-ONLY patch — the stored body is left
+   * byte-identical (re-read straight from the row, never retyped by the caller, so there is nothing to
+   * diff against a resend gone wrong). Joins the same omit-preserves convention as `title`/`pinned`/`tags`
+   * below; it does not get its own rule.
+   */
+  text?: string;
   title?: string;
   pinned?: boolean;
   tags?: string[];
@@ -134,6 +141,11 @@ export interface NeverDropSignal {
  * OMITS from `input` are left unchanged on the stored row (only `text` + the version bump apply); passing
  * one explicitly (incl. `pinned:false`/`tags:[]`) still writes it verbatim. See
  * {@link Db.upsertProjectMemory} for the COALESCE mechanics that implement this.
+ *
+ * Card 145e8d72: `text` now joins that same patch model on an UPDATE — omitting it re-reads the existing
+ * row's own stored body and resends THAT (never a caller-retyped copy), so the persisted text is
+ * byte-identical and every cap/floor-tier check below still runs against the note's real effective size.
+ * `text` stays REQUIRED to create a brand-new key (nothing to fall back to) — see the `!existing` check.
  */
 export function writeProjectMemory(
   db: Db,
@@ -147,10 +159,21 @@ export function writeProjectMemory(
   const key = input.key?.trim();
   if (!key) return { error: "key is required" };
   if (!KEY_RE.test(key)) return { error: "key must be a short slug: letters, digits, '-', '_' only, 1-64 chars" };
-  const text = input.text?.trim();
-  if (!text) return { error: "text is required" };
-  const textBytes = Buffer.byteLength(text, "utf8");
   const existing = db.getProjectMemoryByKey(projectId, key);
+  // Card 145e8d72: `text` is REQUIRED to create a brand-new key (nothing to fall back to), but OPTIONAL to
+  // update an EXISTING one — omitting it there is a metadata-only patch that resends the row's OWN stored
+  // body (never a caller-retyped copy), so `textBytes` below always reflects the note's real effective
+  // size whether or not this call actually supplied new text.
+  let text: string;
+  if (input.text !== undefined) {
+    const trimmed = input.text.trim();
+    if (!trimmed) return { error: "text is required" };
+    text = trimmed;
+  } else {
+    if (!existing) return { error: "text is required (only omittable when updating an existing key)" };
+    text = existing.text;
+  }
+  const textBytes = Buffer.byteLength(text, "utf8");
   if (textBytes > MAX_TEXT_BYTES) {
     return {
       error: `text is too long (${textBytes} bytes, max ${MAX_TEXT_BYTES}) — memory notes are short, curated facts, not a dumping ground; trim ${textBytes - MAX_TEXT_BYTES} bytes and retry`,
@@ -168,12 +191,13 @@ export function writeProjectMemory(
   const effectiveTags = input.tags !== undefined ? input.tags : (existing?.tags ?? []);
   const isFloorTierNote = effectivePinned && effectiveTags.includes(NEVER_DROP_TAG);
   // DoD-3: an EXISTING floor note already over this cap (today's 7 notes, all ~1000 est-tok) is REJECTED
-  // on its very next update, never grandfathered — `text` is a required field on every write, so any
-  // future touch of that key (even one only changing `title`/`tags`) must resupply the full body and will
-  // be forced through this same check. Deliberate: grandfathering would make the cap unenforceable exactly
-  // where the problem the investigation measured already lives, and a cap that only bites brand-new notes
-  // never converges the existing floor tier down. §SCOPE forbids touching those 7 notes to demonstrate
-  // this — it takes effect the first time anyone else edits one.
+  // on its very next update, never grandfathered — `textBytes` above always reflects the note's EFFECTIVE
+  // body (the caller's new `text`, or — since card 145e8d72 — the existing row's own stored body when
+  // `text` is omitted), so any future touch of that key (even a metadata-only one only changing
+  // `title`/`tags`) is still forced through this same check. Deliberate: grandfathering would make the cap
+  // unenforceable exactly where the problem the investigation measured already lives, and a cap that only
+  // bites brand-new notes never converges the existing floor tier down. §SCOPE forbids touching those 7
+  // notes to demonstrate this — it takes effect the first time anyone else edits one.
   if (isFloorTierNote && textBytes > MAX_NEVER_DROP_TEXT_BYTES) {
     // Manager review (post-046c721e): "trim N bytes and retry" is the RIGHT remedy for a throwaway note,
     // but today's real floor notes are dense operational/safety prose — for those, "trim" reads as

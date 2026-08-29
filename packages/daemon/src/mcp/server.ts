@@ -402,17 +402,23 @@ export class TaskMcpRouter {
           "kickoff regardless of relevance, so its cost is fixed overhead for every session on the " +
           "project, not just this note's own author. Rejected the same way as the general cap " +
           "(`bytesOver` + `current`). Fires on ANY write that leaves the note pinned+never-drop and over " +
-          "2000 bytes — including an update that only changes `title`/`tags` on an already-oversized floor " +
-          "note, since `text` must be resupplied on every write; there is no grandfather clause. For dense " +
+          "2000 bytes — including a metadata-only update that only changes `title`/`tags` (or resends the " +
+          "SAME body) on an already-oversized floor note; there is no grandfather clause. For dense " +
           "safety/operational prose, PREFER splitting the overflow into a separate cross-linked key over " +
           "trimming (trimming risks silently dropping a load-bearing clause) — the rejection names this. " +
           "Unpinning the note, or dropping the `\"never-drop\"` tag, also exempts it and falls back to the " +
           "general 4000-byte cap, at the cost of the note becoming evictable. " +
-          "UPDATING AN EXISTING KEY IS A TRUE PATCH: `title`/`pinned`/`tags` you OMIT are left UNCHANGED " +
-          "from the stored note, never reset to a default — pass only `key`+`text`+`baseVersion` to edit " +
-          "the body alone. To deliberately CLEAR a field, pass it explicitly (`pinned:false` unpins, " +
-          "`tags:[]` empties the tag list) — that still takes effect; only OMITTING the field preserves it. " +
-          "The response echoes the resulting `pinned`/`tags`/`title` so you can see the outcome. " +
+          "UPDATING AN EXISTING KEY IS A TRUE PATCH: `title`/`pinned`/`tags`/`text` you OMIT are left " +
+          "UNCHANGED from the stored note, never reset to a default — pass only `key`+`baseVersion` to " +
+          "edit the metadata alone and leave the body byte-identical (no re-read, no resend — the stored " +
+          "text is untouched at the row level), or pass only `key`+`text`+`baseVersion` to edit the body " +
+          "alone. To deliberately CLEAR `pinned`/`tags`, pass them explicitly (`pinned:false` unpins, " +
+          "`tags:[]` empties the tag list) — that still takes effect; only OMITTING the field preserves it " +
+          "(there is no equivalent \"clear\" for `text` — omit it to preserve, or pass a new value to " +
+          "replace it; `text` cannot be blanked to empty, see the length checks above). " +
+          "`text` stays REQUIRED when `key` names a BRAND-NEW note — a note with no body is not a note; " +
+          "omitting it is only valid when updating a key that already exists. " +
+          "The response echoes the resulting `pinned`/`tags`/`title`/`text` so you can see the outcome. " +
           "UPDATING A NOTE THAT ALREADY EXISTS REQUIRES `baseVersion` — the `version` you last read for " +
           "this key (from memory_read, memory_list, or a prior memory_write's response; NOT its `updatedAt` " +
           "timestamp). Omitting it, or passing a stale one, is REJECTED with `conflict:true` and `current` " +
@@ -433,7 +439,12 @@ export class TaskMcpRouter {
           "— only a positively-confirmed sub-agent call is rejected.",
         inputSchema: strictShape({
           key: z.string(),
-          text: z.string(),
+          // Card 145e8d72: optional at the SCHEMA level so the SDK doesn't strip/reject an omitted `text`
+          // on a metadata-only update — writeProjectMemory (mcp/memory.ts) is the one that still enforces
+          // "required on create" (a request-shape rule, not a type one; see mcp-sdk-strips-undeclared-args
+          // project memory for why an alias/optionality decision like this belongs in the schema, not a
+          // pre-validation hook that doesn't exist).
+          text: z.string().optional(),
           title: z.string().optional(),
           pinned: z.boolean().optional(),
           tags: z.array(z.string()).optional(),

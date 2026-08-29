@@ -8,12 +8,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // project-memory-migration.mjs (mirrors db-legacy-boot.mjs).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/project-memory.mjs
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Card 145e8d72's DoD-5a asks for the byte-identity check to be BY HASH (mirrors the reporter's worker's
+// own pre/post sha256 defense) rather than a bare `===` — this is that.
+const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 
 // Card b4c4699e DIRECTIVE #2 — parses the ACTUALLY-RENDERED key list out of a log line, rather than
 // trusting its reported COUNT (derived straight from the dropped-keys array length, which stays correct
@@ -413,6 +417,66 @@ try {
       const freshDefault = writeProjectMemory(db, patchProj, { key: "fresh-defaults", text: "brand new note" });
       check("(patch) a brand-new key with pinned omitted still defaults to pinned:false", !("error" in freshDefault) && freshDefault.pinned === false);
       check("(patch) a brand-new key with tags omitted still defaults to tags:[]", freshDefault.tags.length === 0);
+    }
+
+    // ===================== card 145e8d72: `text` is optional on an UPDATE — metadata-only patch =====================
+    {
+      const metaProj = "proj-mcp-metadata-only";
+      db.insertProject({ id: metaProj, name: "Metadata-Only Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+
+      // DoD-3 (still true, unaffected by this card): `text` remains REQUIRED to create a brand-new key —
+      // a note with no body is not a note. Omitting it is only valid on an UPDATE.
+      const createNoText = writeProjectMemory(db, metaProj, { key: "brand-new-no-text", pinned: true });
+      check("(metadata-only) DoD-5b: a create with no `text` is still REFUSED", "error" in createNoText && /text is required/i.test(createNoText.error));
+      check("(metadata-only) DoD-5b: the refused create never actually persisted", db.getProjectMemoryByKey(metaProj, "brand-new-no-text") === undefined);
+
+      // DoD-1/DoD-5a: a note within a FEW BYTES of the general 4000-byte cap (the card's own specimen: 7
+      // bytes of headroom) — a metadata-only write (no `text`) succeeds and leaves the body BYTE-IDENTICAL,
+      // asserted BY HASH, exactly the precision the card's precision-warning insists on: this note COULD
+      // already be re-tagged today by resending its byte-identical body (the escalation title over-claims
+      // "at-cap notes cannot be re-tagged" — false), so what this proves is the NEW, cheaper path: no
+      // re-read, no resend, and the persisted body is provably untouched at the byte level.
+      const nearCapText = "n".repeat(4000 - 7);
+      const nearCapHashBefore = sha256(nearCapText);
+      const created = writeProjectMemory(db, metaProj, { key: "near-cap", text: nearCapText, tags: ["old-tag"] });
+      check("(metadata-only) setup: a note within 7 bytes of the general cap is created", !("error" in created) && created.text === nearCapText);
+
+      const metaOnly = writeProjectMemory(db, metaProj, { key: "near-cap", tags: ["new-tag"], baseVersion: created.version });
+      check("(metadata-only) DoD-1: a metadata-only write (no `text` key at all) on a near-cap note SUCCEEDS",
+        !("error" in metaOnly) && !("conflict" in metaOnly));
+      check("(metadata-only) DoD-5a: the stored body is BYTE-IDENTICAL BY HASH after the metadata-only write",
+        sha256(metaOnly.text) === nearCapHashBefore && metaOnly.text === nearCapText);
+      check("(metadata-only) the metadata change itself actually took effect (tags updated)",
+        metaOnly.tags.length === 1 && metaOnly.tags[0] === "new-tag");
+      check("(metadata-only) version still bumps normally on a metadata-only write", metaOnly.version === created.version + 1);
+
+      // DoD-2/DoD-5c: a STALE baseVersion on a metadata-only write is STILL rejected with `conflict` —
+      // omitting `text` must never become a way to dodge the CAS check.
+      const staleMetaOnly = writeProjectMemory(db, metaProj, { key: "near-cap", tags: ["sneaky-stale-write"], baseVersion: created.version });
+      check("(metadata-only) DoD-5c: a metadata-only write with a STALE baseVersion is REJECTED as a conflict",
+        "conflict" in staleMetaOnly && staleMetaOnly.conflict === true);
+      check("(metadata-only) DoD-5c: the stale metadata-only attempt never actually persisted",
+        db.getProjectMemoryByKey(metaProj, "near-cap").tags[0] === "new-tag");
+
+      // Same guard, the other stale shape: a metadata-only write with NO baseVersion at all on an existing
+      // key is still a blind-clobber attempt and is rejected identically to a content-carrying one.
+      const noBaseMetaOnly = writeProjectMemory(db, metaProj, { key: "near-cap", pinned: true });
+      check("(metadata-only) a metadata-only write with NO baseVersion is rejected as a conflict, same as a content write",
+        "conflict" in noBaseMetaOnly && noBaseMetaOnly.conflict === true);
+
+      // The floor-tier byte cap (card 046c721e) still runs against the note's EFFECTIVE (unchanged) body on
+      // a metadata-only write — flipping an already-over-the-floor-cap note to pinned+never-drop via a
+      // metadata-only call (no `text`) must still be REJECTED, proving the cap isn't bypassed just because
+      // this call carries no new body to check.
+      const overFloorText = "z".repeat(3000); // over the 2000-byte floor cap, under the general 4000-byte cap
+      const plainOverFloor = writeProjectMemory(db, metaProj, { key: "over-floor-plain", text: overFloorText });
+      check("(metadata-only) setup: a plain unpinned note over the floor cap (under the general cap) is created", !("error" in plainOverFloor));
+      const metaOnlyFlipToFloor = writeProjectMemory(db, metaProj, {
+        key: "over-floor-plain", pinned: true, tags: [NEVER_DROP_TAG], baseVersion: plainOverFloor.version,
+      });
+      check("(metadata-only) a metadata-only write that flips an over-floor-cap note to pinned+never-drop is STILL REJECTED",
+        "error" in metaOnlyFlipToFloor && /too long/i.test(metaOnlyFlipToFloor.error));
+      check("(metadata-only) the rejected flip never actually applied", db.getProjectMemoryByKey(metaProj, "over-floor-plain").pinned === false);
     }
 
     // The blind upsert (upsertProjectMemory) — used ONLY by the e2e test-seed route (gateway/server.ts),
