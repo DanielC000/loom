@@ -16,14 +16,25 @@
 export class OrchestrationControl {
   private paused = new Set<string>();
 
+  /**
+   * Best-effort hook fired after every pause()/resume() mutation — wired by `buildServer` (C5 of the WS
+   * delta-push umbrella, 1efde4ba) to broadcast a `status` delta over `/ws/fleet`, the same shape
+   * `Db.sessionChangeListener` wires session mutations to `FleetHub.markSessionDirty` for the session
+   * feed. Optional so a bare `new OrchestrationControl()` (or a test double) needs no wiring, and a
+   * throwing listener never breaks the pause/resume call that triggered it.
+   */
+  statusChangeListener?: () => void;
+
   /** Pause a scope (default the global scope). Idempotent. */
   pause(scope = "global"): void {
     this.paused.add(scope);
+    this.notifyStatusChanged();
   }
 
   /** Resume (un-pause) a scope (default the global scope). Idempotent. */
   resume(scope = "global"): void {
     this.paused.delete(scope);
+    this.notifyStatusChanged();
   }
 
   /** A manager is paused if the global scope is paused or its own scope is paused. */
@@ -34,5 +45,11 @@ export class OrchestrationControl {
   /** The currently-paused scopes (for the /api/orchestration/status surface). */
   pausedScopes(): string[] {
     return [...this.paused];
+  }
+
+  private notifyStatusChanged(): void {
+    if (this.statusChangeListener) {
+      try { this.statusChangeListener(); } catch { /* listener faults never break pause/resume */ }
+    }
   }
 }

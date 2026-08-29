@@ -667,6 +667,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // no fleet socket connected (markSessionDirty's own early-out).
   fleetHub.attach(deps.db, deps.sessions);
   deps.db.sessionChangeListener = (id) => fleetHub.markSessionDirty(id);
+  // C5: wire OrchestrationControl's pause()/resume() mutations to a `status` broadcast, the same shape
+  // as the session feed one line up. No debounce here (contrast markSessionDirty's DIRTY_FLUSH_MS) — a
+  // pause/resume payload (pausedScopes()/schedulerEnabled) is already in-memory with no DB read to
+  // amortize, and pause/resume are rare human/system actions, not a bursty stream, so a synchronous
+  // broadcast per mutation is enough. `broadcast()`'s own per-socket loop is already inert with no fleet
+  // socket connected (nothing to send to), matching the "no work when nobody's listening" discipline.
+  deps.control.statusChangeListener = () => {
+    fleetHub.broadcast({ t: "status", pausedScopes: deps.control.pausedScopes(), schedulerEnabled: deps.schedulerEnabled ?? false });
+  };
 
   // --- Inbound webhook ingress (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public route
   // (POST /hooks/:endpointPath, gateway/trust-tier.ts). Registered UNCONDITIONALLY (ships inert, mirrors
@@ -5635,13 +5644,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Fleet delta-push transport (C2 of umbrella 1efde4ba): ONE socket per client/tab, NOT per session
-  // (contrast /ws/term above). Of the three data feeds, only SESSION is wired: Db.sessionChangeListener
-  // → fleetHub.markSessionDirty → flushDirty → session:upsert/session:remove (fleet-hub.ts) — live, but
-  // INERT until a client attaches (markSessionDirty's `sockets.size === 0` early-out). STATUS has no
-  // producer anywhere in FleetHub — pausedScopes/schedulerEnabled are still REST-only, via
-  // /api/orchestration/status. EVENT is still pending C7 (broadcastEvent has no call sites yet). This
-  // card just registers the socket, sends the hello handshake, and records/clears the caller's
-  // per-manager event subscriptions on the hub for those later cards to read. See gateway/fleet-hub.ts.
+  // (contrast /ws/term above). SESSION and STATUS are both wired: Db.sessionChangeListener →
+  // fleetHub.markSessionDirty → flushDirty → session:upsert/session:remove (C3), and
+  // OrchestrationControl.statusChangeListener → fleetHub.broadcast → status (C5) — both live, but INERT
+  // until a client attaches (no dirty accumulation / no send target with zero sockets connected).
+  // schedulerEnabled never changes after boot (a fixed const — see GatewayDeps' own doc), so only
+  // pausedScopes actually varies post-boot; the `status` message still carries both fields, matching
+  // what the REST endpoint below returns. EVENT is still pending C7 (broadcastEvent has no call sites
+  // yet). The socket handler itself just registers the socket, sends the hello handshake, and
+  // records/clears the caller's per-manager event subscriptions on the hub for that later card to read.
+  // See gateway/fleet-hub.ts.
   app.get("/ws/fleet", { websocket: true }, (socket: WebSocket) => {
     fleetHub.add(socket);
     socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
