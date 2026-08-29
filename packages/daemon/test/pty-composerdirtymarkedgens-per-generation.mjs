@@ -162,11 +162,17 @@ try {
   // delivering a real hook here would confound the two mechanisms: a green run couldn't tell you which one
   // actually resolved anything. That OTHER gate is sound on its own terms (a confirmed Enter for the
   // CURRENT generation proves the composer is genuinely empty NOW, regardless of history) and is not this
-  // card's concern. Neutralize it here — exactly mirroring "no submit() has run since the give-up we're
-  // confirming" (this file's own sibling, pty-giveup-composerdirty-confirmed-clear.mjs scenario 2, does the
-  // same by construction, never dispatching a THIRD message) — and drive `purgeConfirmedGiveUpRequeue`
-  // directly, the same call `deliverHook`'s own Stop/UserPromptSubmit handlers make, isolating exactly the
-  // mechanism this card fixes.
+  // card's concern. Neutralize it here to isolate exactly the mechanism this card fixes — and drive
+  // `purgeConfirmedGiveUpRequeue` directly, the same call `deliverHook`'s own Stop/UserPromptSubmit
+  // handlers make. Card d9d6fc8a: this does NOT mirror "no submit() has run since the give-up we're
+  // confirming" — B's own submit DID run, and is precisely what stamped `composerDirtyLenClearedByGen` to
+  // gen2 in the first place (see the check just above). What this line reproduces instead is a REAL
+  // production shape where that stamp goes stale WITHOUT a re-stamp: `healIfStuck`'s out-of-band
+  // busy-clear (and `stop`'s deliberate one) both bump `live.submitGeneration` directly on their own, with
+  // no call anywhere near `composerDirtyLenClearedByGen` — so a stamp made for an earlier generation is
+  // left mismatched against the now-advanced `submitGeneration`, the same mismatch setting it to `null`
+  // here produces. Setting it to `null` reproduces that "stamp no longer matches the live generation"
+  // condition directly, without needing a real stuck-busy detection cycle in the fixture.
   const live = host.live.get(SID);
   live.composerDirtyLenClearedByGen = null;
 

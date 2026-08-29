@@ -9233,11 +9233,26 @@ export class PtyHost {
     }
     // eslint-disable-next-line no-console
     console.log(`[submit] ${sessionId} composerDirtyLen cleared at CONFIRMED (gen=${gen}, ${decisive ? "decisive" : "positional"}) — ${resolved} chars resolved (this generation's own turn actually started, not stranded)${live.composerDirtyMarkedGens.size > 0 ? `; ${live.composerDirtyMarkedGens.size} OTHER generation(s) still genuinely unresolved` : ""}`);
-    // Clamped, never negative: composerDirtyLenBelieved can already read lower than the sum of marked
-    // entries (its own doc — it's separately zeroed, optimistically, at every clear-prefix ATTEMPT, not
-    // just at a decisive confirm), so subtracting a resolved amount that outpaces its current value would
-    // otherwise drive it negative.
+    // Card d9d6fc8a: `composerDirtyLen` maintains the invariant `composerDirtyLen === Σ
+    // composerDirtyMarkedGens.values()` — every additive write site sets a brand-new map entry of the
+    // same amount it adds to the scalar, and every full-reset site clears the map alongside the scalar
+    // (see the field's own doc + this method's own delete loop above). `resolved` here is always the sum
+    // of a SUBSET of entries actually being deleted from that map, so `resolved <= live.composerDirtyLen`
+    // holds by construction and this subtraction cannot underflow. Unlike `composerDirtyLenBelieved`
+    // below, a negative result here is NOT an expected case — it would mean the invariant broke somewhere
+    // else. Still floor it defensively (composerDirtyLen feeding a downstream comparison or char-count as
+    // a negative number would be its own new bug), but make it LOUD: a silent clamp on the field whose
+    // whole job is being a TRUSTWORTHY conservative bound would manufacture exactly the false "composer
+    // clean" reading card a6c1d413 exists to prevent.
+    if (resolved > live.composerDirtyLen) {
+      // eslint-disable-next-line no-console
+      console.error(`[submit] ${sessionId} INVARIANT VIOLATION: composerDirtyLen (${live.composerDirtyLen}) < resolved (${resolved}) at CONFIRMED (gen=${gen}) — composerDirtyMarkedGens bookkeeping is out of sync with composerDirtyLen; flooring to 0 defensively, but this is a real tracking bug, not an expected condition`);
+    }
     live.composerDirtyLen = Math.max(0, live.composerDirtyLen - resolved);
+    // Clamped, never negative: unlike composerDirtyLen above, composerDirtyLenBelieved CAN legitimately
+    // read lower than the sum of marked entries — it's separately zeroed, optimistically, at every
+    // clear-prefix ATTEMPT (its own doc — not just at a decisive confirm), so subtracting a resolved
+    // amount that outpaces its current value is an EXPECTED case here, not an invariant break.
     live.composerDirtyLenBelieved = Math.max(0, live.composerDirtyLenBelieved - resolved); // card c148f118: mirrors the same resolution onto the optimistic reading
   }
 
