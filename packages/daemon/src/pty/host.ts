@@ -8384,8 +8384,19 @@ export class PtyHost {
       this.writeChunked(sessionId, BACKSPACE.repeat(dirty), writeNewTurn);
     } else {
       // Card b9b8f8db: same reasoning as the branch above — a plain (non-dirty-prefixed) paste also writes
-      // a fresh body this generation.
-      live.composerBodyWrittenForGen = gen;
+      // a fresh body this generation. Card ef78c885: this branch is ALSO reached with `composerDirtyLen >
+      // 0` — whenever `composerLen > 0` (a human mid-draft on the raw terminal), the two dirty branches
+      // above are both gated `composerLen === 0` and fall through here WITHOUT running the defensive
+      // clear-prefix, so an earlier generation's still-stranded contribution is left completely untouched.
+      // Only stamp `composerBodyWrittenForGen` when there is NOTHING outstanding to protect
+      // (`composerDirtyLen === 0`) — this generation's own give-up mark / healIfStuck's backstop are both
+      // gated on this exact stamp (`composerBodyWrittenForGen === gen`), so stamping here would let THIS
+      // generation acquire its own `composerDirtyMarkedGens` entry despite never having attempted to clear
+      // the earlier one — and a later DECISIVE (content-matched) confirmation for this generation would
+      // then wrongly resolve `g <= gen` in one shot, wiping the earlier, genuinely-unresolved mark too
+      // (a FALSE ZERO — composerDirtyLen reads clean while the real terminal still holds the earlier
+      // generation's stray, never-cleared text). See pty-composerlen-else-no-clear-stamp.mjs.
+      if (live.composerDirtyLen === 0) live.composerBodyWrittenForGen = gen;
       writeNewTurn();
     }
     this.setBusy(sessionId, true, reason); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
@@ -9191,10 +9202,13 @@ export class PtyHost {
    *   raw terminal) also skips the clear-prefix even though `composerDirtyLen` can still be `> 0` there.
    *   The Enter-only skip is harmless HERE ONLY because such a `gen` can never reach this branch with its
    *   own entry present in the first place — see the early-return just below for why. The `composerLen >
-   *   0` skip is NOT similarly protected: that branch still stamps `composerBodyWrittenForGen`, so it CAN
-   *   acquire an entry and later be decisively resolved despite never having attempted a clear — a
-   *   genuine false-zero gap, pre-existing (not introduced by this re-shape) and tracked by card
-   *   ef78c885. Setting that gap aside, for every `gen` that DOES reach this branch with an
+   *   0` skip used to NOT be similarly protected: that branch used to stamp `composerBodyWrittenForGen`
+   *   unconditionally, so it COULD acquire an entry and later be decisively resolved despite never having
+   *   attempted a clear — a genuine false-zero gap, pre-existing (not introduced by this re-shape) and
+   *   CLOSED by card ef78c885, which stamps that branch only when `composerDirtyLen === 0` (see its own
+   *   comment there) — so a `gen` that skips the clear-prefix this way now can no longer acquire an entry
+   *   here either, the same protection the Enter-only branch already had. For every `gen` that DOES reach
+   *   this branch with an
    *   entry present, `gen`'s OWN submission already attempted to backspace away every OLDER still-marked
    *   contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text. `gen`'s own
    *   exact-match confirmation is therefore transitive proof of the WHOLE preceding write chain, not just
