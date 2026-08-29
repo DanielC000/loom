@@ -4940,7 +4940,12 @@ export class PtyHost {
           live.bootScan = "";
           // eslint-disable-next-line no-console
           console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
-          setTimeout(() => { if (live.alive) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss"); }, 300);
+          // Card ac20c8e7 (bb3d9005 residual ①): boot-time write timer gated on `alive` alone used to be
+          // reachable in the kill()→'exit' window (`alive` stays true through it — see Live.killed's own
+          // doc) — a kill() landing between the MCP-prompt detection and this 300ms timer would let this
+          // write reach an already-destroyed socket. `!live.killed` closes it, same as every other write
+          // gate bb3d9005 fixed.
+          setTimeout(() => { if (live.alive && !live.killed) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss"); }, 300);
         }
       }
       // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
@@ -9571,7 +9576,11 @@ export class PtyHost {
     // else press one Shift+Tab and wait for the footer to change before the next decision.
     const decide = (cur: LandedMode): void => {
       const live = this.live.get(sessionId);
-      if (!live?.alive) { finish("pty-gone", cur); return; }
+      // Card ac20c8e7 (bb3d9005 residual ①): this boot-time write timer was gated on `alive` alone —
+      // reachable in the kill()→'exit' window (`alive` stays true through it — see Live.killed's own
+      // doc), so a kill() landing while the cycle is mid-poll could still issue this Shift+Tab into an
+      // already-destroyed socket.
+      if (!live?.alive || live.killed) { finish(live?.killed ? "killed" : "pty-gone", cur); return; }
       const action = nextCycleAction({ current: cur, target, presses, maxPresses: RESUME_MODE_MAX_PRESSES });
       if (action === "done") { finish("reached", cur); return; }
       if (action === "giveup") { finish("press-cap", cur); return; }
@@ -9632,7 +9641,11 @@ export class PtyHost {
    */
   private resolveResumeGate(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive || live.resumeGateHandled) return;
+    // Card ac20c8e7 (bb3d9005 residual ①): this boot-time write timer was gated on `alive` alone —
+    // reachable in the kill()→'exit' window (`alive` stays true through it — see Live.killed's own doc),
+    // so a kill() landing between gate-detection and this timer's fire could still issue this Down press
+    // into an already-destroyed socket.
+    if (!live?.alive || live.killed || live.resumeGateHandled) return;
     this.ptyWrite(sessionId, live, DOWN_ARROW, "resume-gate-down");
     this.awaitResumeGateConfirm(sessionId, 0, false);
   }
@@ -9644,7 +9657,11 @@ export class PtyHost {
   private awaitResumeGateConfirm(sessionId: string, polls: number, upCorrected: boolean): void {
     setTimeout(() => {
       const live = this.live.get(sessionId);
-      if (!live?.alive || live.resumeGateHandled) return;
+      // Card ac20c8e7 (bb3d9005 residual ①): this boot-time write timer (guards every write in this
+      // poll — Enter/Up below) was gated on `alive` alone — reachable in the kill()→'exit' window
+      // (`alive` stays true through it — see Live.killed's own doc), so a kill() landing mid-poll could
+      // still issue Enter/Up into an already-destroyed socket.
+      if (!live?.alive || live.killed || live.resumeGateHandled) return;
       const cursor = resumeGateCursorOption(collapseBoot(live.resumeGateScan));
       if (cursor === "2") {
         live.resumeGateHandled = true;
@@ -10157,7 +10174,14 @@ export class PtyHost {
   private escalateGracefulStop(sessionId: string, live: Live): void {
     // Stage 2: the interrupt didn't exit the process → re-send the exit sequence from the idle prompt.
     setTimeout(() => {
-      if (!live.alive) return; // idle session already exited on the first sequence — nothing to escalate
+      // Card ac20c8e7 (bb3d9005 residual ②, found alongside stage 3 below via the same reachability
+      // proof): also check `killed` — within a SINGLE escalateGracefulStop call this timer always fires
+      // before this call's own stage 3 (RETRY_MS < KILL_MS), so `killed` can't yet be true from THIS
+      // call alone; but a hard stop() (or another escalation's own stage 3) landing between the graceful
+      // stop and this timer's fire already leaves `killed` true while `alive` stays true — measured: this
+      // guard's own regression test (pty-boot-timer-kill-race.mjs Trial 5) reproduces the stray write
+      // and its crash without this check.
+      if (!live.alive || live.killed) return; // idle session already exited, or already killed — nothing to escalate
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} graceful stop: still live after interrupt — re-sending exit sequence`);
       this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c");
@@ -10166,7 +10190,13 @@ export class PtyHost {
     }, GRACEFUL_STOP_RETRY_MS);
     // Stage 3: a turn that ignores Ctrl-C entirely must still die — bounded hard-kill escalation.
     setTimeout(() => {
-      if (!live.alive) return;
+      // Card ac20c8e7 (bb3d9005 residual ②): also check `killed` — a hard stop() (or an earlier
+      // escalation's own stage 3) can already have called kill() while this timer was still armed;
+      // `alive` alone stays true through the whole kill()→'exit' window (see Live.killed's own doc), so
+      // without this check stage 3 would call kill() a SECOND time on an already-killed pty. In the
+      // non-DLL branch kill() walks _getConsoleProcessList() — the AttachConsole fork that is a known
+      // crash surface — so a redundant kill doubles that exposure for no benefit.
+      if (!live.alive || live.killed) return;
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
       // Card bb3d9005 (S1): same ordering as the hard-stop branch above — set BEFORE kill().
