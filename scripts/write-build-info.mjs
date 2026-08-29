@@ -13,6 +13,14 @@
 // this as its own uncached task means it re-executes on every build invocation, cache hit or miss, always
 // stamping the sha of the checkout that is actually asking right now.
 //
+// Card 24f53a72 — moving the WRITE out of `build` was necessary but not sufficient: `build`'s own
+// `outputs: ["dist/**"]` glob still swept this file into ITS OWN cache snapshot too (captured the moment
+// `build` finishes, which is always BEFORE `stamp` — dependsOn:["build"] — has run), so a later cache HIT
+// for `build` alone (e.g. an invocation that doesn't also request `stamp`) could still restore an old,
+// frozen value and clobber whatever `stamp` most recently wrote. `turbo.json`'s `build` outputs now
+// explicitly exclude `"!dist/build-info.json"`, so `build`'s cache can never read OR write this file — this
+// script (via `stamp`) is its one and only writer.
+//
 // Degrades to {"sha": null, "dirty": null} — NEVER a stale or fabricated sha — when this isn't a git
 // checkout (e.g. a published npm tarball's own build), git isn't installed, or a call times out. An
 // absent value must read as unknown, never wrong (card f26339d7 DoD #1).

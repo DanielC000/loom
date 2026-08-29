@@ -23,11 +23,22 @@
     },
     "build": {
       "dependsOn": ["^build", "clean"],
-      "outputs": ["dist/**"]
+      // "!dist/build-info.json" (card 24f53a72): build-info.json is written by the SEPARATE, uncached
+      // "stamp" task below, never by "build" itself — but a bare "dist/**" glob doesn't know that; it
+      // captures WHATEVER happens to be sitting in dist/ when "build" finishes, which is ALWAYS before
+      // "stamp" (stamp dependsOn build) — so it was silently sweeping build-info.json's PRE-stamp value
+      // into "build"'s own cache snapshot too. Any LATER cache HIT for "build" (same content hash, e.g. a
+      // non-forced rebuild whose invocation happens not to also request "stamp") then restores that frozen
+      // snapshot, clobbering whatever "stamp" most recently wrote — reproduced live: a correctly-stamped
+      // real HEAD sha was silently reverted to an unrelated earlier sha by nothing more than a same-hash
+      // cache-hit `turbo build` with no source change at all. Excluding the file here means a "build"
+      // cache hit/restore can never touch it, regardless of whether the invoking command also asked for
+      // "stamp" — the ONLY writer left is "stamp" itself, which is unconditional (cache:false).
+      "outputs": ["dist/**", "!dist/build-info.json"]
     },
     "@loom/daemon#build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**"],
+      "outputs": ["dist/**", "!dist/build-info.json"],
       // @loom/daemon's build script runs scripts/sync-claude-skills.mjs (outside this package's own file
       // tree), so it needs its own inputs entry keying the cache on that script too — otherwise a
       // script-only change is invisible to turbo and a bare `pnpm build` can replay a stale cache hit
@@ -37,7 +48,7 @@
     },
     "@loom/web#build": {
       "dependsOn": ["^build", "clean"],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**", "!dist/build-info.json"]
     },
     // Card 3d7dccb9 — writes <package>/dist/build-info.json (scripts/write-build-info.mjs), split OUT of
     // the cached "build" task on purpose. `cache:false` means this task's script runs on EVERY invocation,
@@ -54,6 +65,9 @@
     // be reachable from mainline, into the canonical dist. See deploy-staleness.ts's module doc for the
     // full incident. Only @loom/daemon and @loom/web define a "stamp" script; a package with none (e.g.
     // @loom/shared, which ships no served artifact) is silently skipped by turbo, same as "lint" above.
+    // Card 24f53a72 — "build"'s own OUTPUTS glob now excludes build-info.json (see "!dist/build-info.json"
+    // above), so a "build" cache hit/restore can no longer clobber it either, even on an invocation that
+    // omits "stamp" entirely — "stamp" is the sole writer of this file, full stop.
     "stamp": {
       "cache": false,
       "dependsOn": ["build"]

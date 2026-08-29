@@ -368,9 +368,20 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // dependsOn:["build"], cache:false) — it (re)writes dist/build-info.json fresh from THIS checkout's
     // real HEAD, cache hit or miss, so the deploy build's own artifact identity can never be a stale/
     // foreign sha replayed off turbo's cache (which — see deploy-staleness.ts's module doc — is SHARED
-    // across every git worktree of this repo). `--force` already made "build" itself immune to this by
-    // always recompiling here; "stamp" closes the same gap for every OTHER, non-forced build path
-    // (daemon-supervisor.mjs's boot build, a plain `pnpm build`) that still relies on turbo's cache.
+    // across every git worktree of this repo).
+    // ⚠️ Card 24f53a72 — `--force` on "build" does NOT, by itself, also protect "build"'s own CACHE WRITE:
+    // even a forced "build" still WRITES a fresh cache entry after it finishes (turbo always caches a
+    // successful run unless told not to), and that entry's "dist/**" snapshot used to be taken BEFORE
+    // "stamp" (which dependsOn "build") ever touched build-info.json — so it silently baked in whatever
+    // build-info.json happened to be sitting in dist/ pre-stamp. A LATER, non-forced invocation elsewhere
+    // (daemon-supervisor.mjs's boot build, a plain `pnpm build`) that omitted "stamp" and cache-hit THIS
+    // entry would restore that frozen pre-stamp value, clobbering whatever the real "stamp" step most
+    // recently wrote — reproduced live: a correctly re-stamped real HEAD reverted to an unrelated sha via
+    // nothing more than a same-hash, no-source-change cache hit. `--force` here only bypasses reading
+    // turbo's cache for THIS invocation; it does nothing to stop THIS invocation's own "build" cache write
+    // from poisoning a later one. The actual fix is in turbo.json: "build"'s outputs now explicitly exclude
+    // "!dist/build-info.json", so a "build" cache hit/restore can never touch that file from ANY
+    // invocation, forced or not, "stamp"-included or not — "stamp" (cache:false) is the sole writer.
     { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }

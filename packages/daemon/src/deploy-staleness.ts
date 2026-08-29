@@ -110,12 +110,30 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * running daemon's own boot build (daemon-supervisor.mjs, a non-`--force` turbo build) had cache-hit-served
  * a worker worktree's stamp. The uncached `stamp` task closes this: since a cache hit already proves
  * content-equivalence to compiling THIS checkout right now, re-stamping THIS checkout's own HEAD on every
- * invocation is always correct, and — unlike excluding the file from `build`'s cached `outputs` entirely —
- * never leaves a stale or absent stamp behind on the (common) cache-hit path either. See
- * `builtContentMatchesHead`'s own doc below for the belt-and-suspenders CONTENT-based check this incident
- * also motivated, for the residual case a sha comparison alone can never resolve on its own: two different,
- * non-ancestor commits with byte-identical shipped trees (exactly what a squash merge vs. its own
- * unsquashed worktree form produces).
+ * invocation is always correct.
+ * 🔴 CARD 24f53a72 — 3d7dccb9's fix was INCOMPLETE, and the sentence this replaces was the reason why: it
+ * argued that excluding `build-info.json` from `build`'s own cached `outputs` (rather than just adding the
+ * separate `stamp` task) would "leave a stale or absent stamp behind on the common cache-hit path." That
+ * reasoning was WRONG, and 3d7dccb9's SAME frozen sha reproduced live, unchanged, across multiple rebuilds
+ * of a genuinely-current checkout. The actual mechanism: `build`'s own `outputs: ["dist/**"]` glob doesn't
+ * know `build-info.json` is written by `stamp`, not by `build` — so `build`'s own cache WRITE (which turbo
+ * performs after every successful run, `--force` or not) snapshots WHATEVER value happened to be sitting in
+ * `dist/` at that moment, i.e. `stamp`'s PREVIOUS output, since `stamp` (dependsOn: `build`) hasn't run yet
+ * when `build` finishes and gets cached. Reproduced live: a `--force`'d `build`+`stamp` run correctly
+ * stamped real HEAD, then a LATER, unrelated, non-forced `turbo build` (no `stamp` in its task list, no
+ * source change) cache-HIT that poisoned `build` snapshot and silently reverted `build-info.json` to the
+ * OLDER value `build` had captured — with `stamp` never in the picture at all for that second invocation.
+ * Fix: `turbo.json`'s `build` outputs now carry `"!dist/build-info.json"`, so `build`'s cache can never
+ * read OR write that file — `stamp` (cache:false) is the file's sole writer, full stop. The feared "stale
+ * or absent stamp" never materializes: every real invocation site in this repo (`pnpm build` at the root,
+ * this module's own deploy build, `daemon-supervisor.mjs`'s boot build) already requests `stamp` alongside
+ * `build`, so `stamp` still runs unconditionally on every one of them; the only case actually affected is an
+ * ad-hoc `turbo build` that omits `stamp` entirely, and there the file is now simply left UNTOUCHED (the
+ * last real stamp survives) rather than overwritten with a foreign or frozen one — strictly safer than
+ * before, not worse. See `builtContentMatchesHead`'s own doc below for the belt-and-suspenders CONTENT-based
+ * check this incident also motivated, for the residual case a sha comparison alone can never resolve on its
+ * own: two different, non-ancestor commits with byte-identical shipped trees (exactly what a squash merge
+ * vs. its own unsquashed worktree form produces).
  * ⚠️ TWO FIELDS, ONE PER QUESTION — AMENDMENT 1, the correction that produced this shape: an earlier draft
  * of this card had ONE cached `builtSha` field, read once per dist dir and frozen. That is WRONG for a
  * subtle reason worth stating precisely: a per-process/per-distDir cache is "read once at FIRST USE", not

@@ -59,11 +59,14 @@ try {
     build.args.includes("--force") && build.args.some((a) => /turbo/.test(a)) && build.args.indexOf("--force") > build.args.findIndex((a) => /turbo/.test(a)));
   check("(A) build covers BOTH @loom/daemon and @loom/web (served UI can't go stale)",
     build.args.includes("--filter=@loom/daemon") && build.args.includes("--filter=@loom/web"));
-  // Card 3d7dccb9 — "stamp" (turbo.json: cache:false, dependsOn:["build"]) must ride the SAME turbo
-  // invocation as "build", right after it, so dist/build-info.json is always re-stamped from THIS
-  // checkout's real HEAD even though "build" itself is already --force'd (a different, non-forced build
-  // path — daemon-supervisor.mjs's boot build, a plain `pnpm build` — is what actually needed this fix;
-  // this deploy path just carries the same invocation shape for consistency, see restart.ts's own comment).
+  // Card 3d7dccb9 / 24f53a72 — "stamp" (turbo.json: cache:false, dependsOn:["build"]) must ride the SAME
+  // turbo invocation as "build", right after it, so dist/build-info.json is always re-stamped from THIS
+  // checkout's real HEAD. NOT merely "for consistency" with other build paths — since 24f53a72, "build"'s
+  // own outputs glob EXCLUDES build-info.json ("!dist/build-info.json"), so "stamp" is that file's ONLY
+  // writer, full stop; an invocation that omitted it (even --force'd) would leave build-info.json entirely
+  // untouched rather than reflecting the just-built HEAD. See restart.ts's own comment, and deploy-staleness
+  // .ts's module doc, for why --force alone was never enough (it doesn't stop "build"'s own successful-run
+  // cache WRITE, which could poison a LATER, unrelated non-forced invocation's cache-hit read).
   check("(3d7dccb9) build ALSO runs the \"stamp\" task, positioned right after \"build\" (turbo's own dependsOn ordering, not this array's)",
     build.args.includes("stamp") && build.args.indexOf("stamp") === build.args.indexOf("build") + 1);
   // The aad5fff3 footgun guard: the build must NOT be the `pnpm … build --force` shape (where --force
