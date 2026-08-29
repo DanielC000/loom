@@ -769,10 +769,13 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(identity omitted, backward compat) no verdictIdentity on either call still dedupe-hits — undefined matches undefined", calls === 1 && r2.value.opId === "op-1");
 }
 
-// --- FRESH-MINT REASON ANNOUNCEMENT (card 615967c5 — the cached-verdict-legibility fix): a caller must
-// never read an invisible re-run as a cached verdict. `attach()`'s result now carries `freshMint` on
-// EVERY genuine fresh mint (never on a cache hit), naming WHY: "genuinely-new" (nothing cached yet),
-// "base-advanced" (a cached verdict existed but its identity didn't match this call's), or "forced"
+// --- FRESH-MINT REASON ANNOUNCEMENT (card 615967c5 — the cached-verdict-legibility fix; renamed by card
+// a98f97bd from "base-advanced" to "identity-mismatch" — an OBSERVED field, not an assertion of cause):
+// a caller must never read an invisible re-run as a cached verdict. `attach()`'s result now carries
+// `freshMint` on EVERY genuine fresh mint (never on a cache hit), naming WHY: "genuinely-new" (nothing
+// cached yet), "identity-mismatch" (a cached verdict existed but its identity didn't match this call's —
+// this registry only compares opaque identity strings, so it never distinguishes main advancing under the
+// branch from the worker having pushed a new commit itself; both look identical here), or "forced"
 // (opts.bypassRetained bypassed every cache outright). DoD-1's own wording: "so a caller can never read a
 // re-gate as a cached verdict." ---
 
@@ -797,15 +800,15 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(freshMint cache-hit) a same-identity re-call served from cache carries NO freshMint at all", r2.freshMint === undefined);
 }
 
-// (fm3) BASE-ADVANCED: a cached verdict exists, a later call's identity mismatches — announces
-// base-advanced with the CACHED verdict's identity as `priorIdentity` (the OBSERVED field the card's DoD
-// asks for; this registry never asserts a cause like "main advanced").
+// (fm3) IDENTITY-MISMATCH: a cached verdict exists, a later call's identity mismatches — announces
+// identity-mismatch with the CACHED verdict's identity as `priorIdentity` (the OBSERVED field the card's
+// DoD asks for; this registry never asserts a cause like "main advanced").
 {
   const reg = new PendingOpRegistry();
   await reg.attach("fm3", "merge", "mgr1", 200, async () => ({ merged: false, reason: "build gate failed", opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
   const r2 = await reg.attach("fm3", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-BBB", classifyOutcome: classify });
-  check("(freshMint base-advanced) an identity-mismatched re-call announces base-advanced", r2.freshMint?.reason === "base-advanced");
-  check("(freshMint base-advanced) carries the CACHED verdict's identity as priorIdentity", r2.freshMint?.priorIdentity === "sha-AAA");
+  check("(freshMint identity-mismatch) an identity-mismatched re-call announces identity-mismatch", r2.freshMint?.reason === "identity-mismatch");
+  check("(freshMint identity-mismatch) carries the CACHED verdict's identity as priorIdentity", r2.freshMint?.priorIdentity === "sha-AAA");
 }
 
 // (fm4) FORCED: bypassRetained always mints fresh and announces "forced" — WITH the prior identity when
@@ -866,13 +869,13 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(cacheHit TTL-retained) cacheHit.identity is threaded through from the minting call's verdictIdentity", r2.cacheHit?.identity === "sha-CCC");
 }
 
-// (ch3) a genuinely FRESH re-gate (base-advanced) must carry freshMint and NEVER the cache marker —
+// (ch3) a genuinely FRESH re-gate (identity-mismatch) must carry freshMint and NEVER the cache marker —
 // the other polarity, proving cacheHit isn't just permanently unset by some unrelated bug.
 {
   const reg = new PendingOpRegistry();
   await reg.attach("ch3", "merge", "mgr1", 200, async () => ({ merged: false, reason: "build gate failed", opId: "op-1" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-AAA", classifyOutcome: classify });
   const r2 = await reg.attach("ch3", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-2" }), undefined, { retainMs: 30, retainVerdictUntilSuperseded: true, verdictIdentity: "sha-BBB", classifyOutcome: classify });
-  check("(cacheHit fresh re-gate) a base-advanced re-gate announces freshMint, never cacheHit", r2.freshMint?.reason === "base-advanced" && r2.cacheHit === undefined);
+  check("(cacheHit fresh re-gate) an identity-mismatch re-gate announces freshMint, never cacheHit", r2.freshMint?.reason === "identity-mismatch" && r2.cacheHit === undefined);
 }
 
 // (ch4) DoD-5 — a cache hit can NEVER occur on the `{settled:false}` (pending) path: both cache-read

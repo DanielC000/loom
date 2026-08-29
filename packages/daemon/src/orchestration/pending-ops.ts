@@ -76,17 +76,19 @@ interface Entry<T> {
  *  set for a `key` that opted into `opts.retainVerdictUntilSuperseded` (today: merge); every other kind
  *  leaves this `undefined` (byte-identical to before this existed).
  *  - `"forced"`: `opts.bypassRetained` — the caller explicitly asked to skip every cache and run for real.
- *  - `"base-advanced"`: a cached verdict existed for this `key` but its `identity` did not match this
- *    call's `opts.verdictIdentity` — e.g. for merge, the branch tip moved (often via Loom's OWN pre-gate
- *    union-merge advancing it) between the cached verdict's settle and this call.
+ *  - `"identity-mismatch"`: a cached verdict existed for this `key` but its `identity` did not match this
+ *    call's `opts.verdictIdentity` — e.g. for merge, the branch tip moved. This is an OBSERVATION about
+ *    the identity string, never a claim about WHY it moved: it collapses several distinct causes — main
+ *    advanced under the branch (often via Loom's OWN pre-gate union-merge catching it up), a sibling's
+ *    squash landed, or the worker itself pushed a new commit — that this registry has no way to tell apart.
  *  - `"genuinely-new"`: no cached verdict has ever been recorded for this `key` (in this daemon process —
  *    see the class doc's PROCESS-LOCAL note; a restart also produces this).
  *  `priorIdentity` is the identity recorded on the verdict this mint superseded/bypassed, when one
- *  existed — always present for `"base-advanced"`, present for `"forced"` only if a prior verdict
+ *  existed — always present for `"identity-mismatch"`, present for `"forced"` only if a prior verdict
  *  happened to exist, absent for `"genuinely-new"`. This is an OBSERVED FIELD, not an assertion of cause:
  *  it names what the registry recorded, never why the identity changed. */
 export interface FreshMintInfo {
-  reason: "base-advanced" | "forced" | "genuinely-new";
+  reason: "identity-mismatch" | "forced" | "genuinely-new";
   priorIdentity?: string;
   /** NEVER set by this registry — it only ever knows the identity a PAST settle recorded, not what a
    *  caller can freshly resolve NOW. A caller that also resolves its own "current" identity (e.g.
@@ -713,7 +715,7 @@ export class PendingOpRegistry {
         : opts?.bypassRetained
         ? { reason: "forced", ...(priorVerdict?.identity !== undefined ? { priorIdentity: priorVerdict.identity } : {}) }
         : untilSupersededMiss
-        ? { reason: "base-advanced", priorIdentity: priorVerdict?.identity }
+        ? { reason: "identity-mismatch", priorIdentity: priorVerdict?.identity }
         : { reason: "genuinely-new" };
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),

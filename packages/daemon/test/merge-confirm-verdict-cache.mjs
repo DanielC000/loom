@@ -8,8 +8,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // DoD-4's own framing: "a settled verdict on a branch that was NEVER behind main, re-called with no new
 // commits, must still return the CACHED verdict" — this is the case the original reporter explicitly
 // could NOT manufacture (they refused to fabricate a failed merge) and flagged as UNTESTED behaviorally.
-// This file is that test, plus its (b) counterpart: a behind-main branch re-call announces base-advanced
-// with both identities.
+// This file is that test, plus its (b) counterpart: a behind-main branch re-call announces
+// identity-mismatch (renamed by card a98f97bd from "base-advanced" — an OBSERVED field, not an assertion
+// of cause) with both identities; and its (c) counterpart: the SAME renamed value fires when the mismatch
+// is instead caused by the worker pushing its own new commit, with no main advance at all.
 //
 // Exercises `SessionService.confirmWorkerMergeTracked` directly against a REAL git repo/worktree (no
 // stubbed git — only the gate command itself is stubbed, same seam merge-rest-route-tracked.mjs uses),
@@ -111,11 +113,11 @@ async function setupWorkerProject(sfx, reposDir) {
   check("(same-identity) op 1 (a genuine fresh mint) carries NO cacheHit — DoD-4(ii)", r1.cacheHit === undefined);
 }
 
-// ── (b) BASE-ADVANCED: a branch that WAS behind main gets its tip advanced by THIS call's OWN pre-gate
-//        union-merge (mergeMainIntoWorktree) — so a re-call's freshly-resolved identity no longer matches
-//        the cached verdict's, even though the WORKER pushed no new commits at all. The re-call must
-//        announce base-advanced with BOTH the cached (prior) identity and the current tip — never a silent
-//        re-run indistinguishable from a cache hit.
+// ── (b) IDENTITY-MISMATCH VIA MAIN ADVANCING: a branch that WAS behind main gets its tip advanced by THIS
+//        call's OWN pre-gate union-merge (mergeMainIntoWorktree) — so a re-call's freshly-resolved identity
+//        no longer matches the cached verdict's, even though the WORKER pushed no new commits at all. The
+//        re-call must announce identity-mismatch with BOTH the cached (prior) identity and the current tip
+//        — never a silent re-run indistinguishable from a cache hit.
 {
   const sfx = `adv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-mcvc-adv-${sfx}`);
@@ -129,38 +131,77 @@ async function setupWorkerProject(sfx, reposDir) {
   fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
   execSync(`git add . && git ${GIT_ID} commit -q -m "main advanced"`, { cwd: repo });
   const mainShaAfterAdvance = headSha(repo);
-  check("(base-advanced setup) main genuinely moved past the worker's branch point", mainShaAfterAdvance !== workerSha);
+  check("(identity-mismatch/main-advanced setup) main genuinely moved past the worker's branch point", mainShaAfterAdvance !== workerSha);
 
   const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  check("(base-advanced) op 1 settled", r1.settled === true && r1.ok === true);
-  check("(base-advanced) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
-  check("(base-advanced) op 1 announces genuinely-new — nothing was cached before this call", r1.freshMint?.reason === "genuinely-new");
-  check("(base-advanced) the gate ran exactly once for op 1", gateCalls === 1);
+  check("(identity-mismatch/main-advanced) op 1 settled", r1.settled === true && r1.ok === true);
+  check("(identity-mismatch/main-advanced) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
+  check("(identity-mismatch/main-advanced) op 1 announces genuinely-new — nothing was cached before this call", r1.freshMint?.reason === "genuinely-new");
+  check("(identity-mismatch/main-advanced) the gate ran exactly once for op 1", gateCalls === 1);
 
   // op 1's OWN pre-gate union-merge (mergeMainIntoWorktree) should have advanced the worktree's branch tip
   // to a NEW commit that unions the worker's work with main's advance — never the worker's original sha.
   const shaAfterOp1 = headSha(worktreePath);
-  check("(base-advanced) op 1's own union-merge advanced the branch tip past the worker's original commit", shaAfterOp1 !== workerSha);
+  check("(identity-mismatch/main-advanced) op 1's own union-merge advanced the branch tip past the worker's original commit", shaAfterOp1 !== workerSha);
 
   // The worker pushed NOTHING new — this re-call's only difference from a plain poll is that the branch
   // tip moved underneath the cache, entirely via Loom's own prior confirm.
   const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
-  check("(base-advanced) op 2 settled", r2.settled === true && r2.ok === true);
-  check("(base-advanced) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
-  check("(base-advanced) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
-  check("(base-advanced) op 2 announces base-advanced", r2.freshMint?.reason === "base-advanced");
-  check("(base-advanced) op 2's priorIdentity is the CACHED verdict's identity (the worker's original commit, resolved BEFORE op 1's union-merge ran)", r2.freshMint?.priorIdentity === workerSha);
-  check("(base-advanced) op 2's currentIdentity is the branch's tip AS OF op 2's own call (op 1's union-merge result)", r2.freshMint?.currentIdentity === shaAfterOp1);
+  check("(identity-mismatch/main-advanced) op 2 settled", r2.settled === true && r2.ok === true);
+  check("(identity-mismatch/main-advanced) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
+  check("(identity-mismatch/main-advanced) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
+  check("(identity-mismatch/main-advanced) op 2 announces identity-mismatch", r2.freshMint?.reason === "identity-mismatch");
+  check("(identity-mismatch/main-advanced) op 2's priorIdentity is the CACHED verdict's identity (the worker's original commit, resolved BEFORE op 1's union-merge ran)", r2.freshMint?.priorIdentity === workerSha);
+  check("(identity-mismatch/main-advanced) op 2's currentIdentity is the branch's tip AS OF op 2's own call (op 1's union-merge result)", r2.freshMint?.currentIdentity === shaAfterOp1);
   // DoD-4(ii), card 4aedde84 — the OTHER polarity in this SAME run: a genuinely fresh re-gate (this is a
   // REAL second gate run, asserted above via gateCalls === 2) must NEVER carry the cache marker either —
   // proves cacheHit isn't just "always absent" by some unrelated bug, it's absent specifically because a
   // gate genuinely ran, mirroring the freshMint assertion right above it.
-  check("(base-advanced) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
-  check("(base-advanced) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
+  check("(identity-mismatch/main-advanced) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
+  check("(identity-mismatch/main-advanced) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
+}
+
+// ── (c) IDENTITY-MISMATCH VIA THE WORKER'S OWN NEW COMMIT (card a98f97bd DoD-6): the registry compares an
+//        opaque identity string and has no way to tell WHY it changed — this proves the SAME renamed value
+//        ("identity-mismatch") fires for a mismatch that has NOTHING to do with main moving: main never
+//        advances in this block at all, the worker's branch alone gets a new commit between op 1 and op 2 —
+//        the third cause the card names (main moved / a sibling's squash landed / the worker pushed a new
+//        commit), previously untested here since (b) only exercises the main-advanced cause.
+{
+  const sfx = `own-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mcvc-own-${sfx}`);
+  const { db, mgrId, workerId, worktreePath, workerSha } = await setupWorkerProject(sfx, reposDir);
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    runGate: async () => { gateCalls++; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; },
+  });
+
+  const r1 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(identity-mismatch/own-commit) op 1 settled", r1.settled === true && r1.ok === true);
+  check("(identity-mismatch/own-commit) op 1 was rejected (gate stub always fails)", r1.ok && r1.value.merged === false);
+  check("(identity-mismatch/own-commit) op 1 announces genuinely-new — nothing was cached before this call", r1.freshMint?.reason === "genuinely-new");
+  check("(identity-mismatch/own-commit) the gate ran exactly once for op 1", gateCalls === 1);
+
+  // The WORKER pushes a genuinely new commit onto its own branch — main is untouched, no union-merge ever
+  // runs, so this is the OTHER cause colliding into the same observed label.
+  fs.writeFileSync(path.join(worktreePath, "worker-followup.txt"), "more work\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "worker followup commit"`, { cwd: worktreePath });
+  const shaAfterWorkerCommit = headSha(worktreePath);
+  check("(identity-mismatch/own-commit setup) the worker's own new commit moved the branch tip", shaAfterWorkerCommit !== workerSha);
+
+  const r2 = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  check("(identity-mismatch/own-commit) op 2 settled", r2.settled === true && r2.ok === true);
+  check("(identity-mismatch/own-commit) the gate genuinely ran a SECOND time — this is real re-gating, not a cache replay", gateCalls === 2);
+  check("(identity-mismatch/own-commit) op 2 is a genuinely fresh op (different opId from op 1)", r2.ok && r1.ok && r2.value.opId !== r1.value.opId);
+  check("(identity-mismatch/own-commit) op 2 announces the SAME renamed value as the main-advanced cause (b)", r2.freshMint?.reason === "identity-mismatch");
+  check("(identity-mismatch/own-commit) op 2's priorIdentity is the CACHED verdict's identity (the worker's original commit)", r2.freshMint?.priorIdentity === workerSha);
+  check("(identity-mismatch/own-commit) op 2's currentIdentity is the branch tip AFTER the worker's own new commit", r2.freshMint?.currentIdentity === shaAfterWorkerCommit);
+  check("(identity-mismatch/own-commit) op 1 (genuine fresh mint) carries NO cacheHit", r1.cacheHit === undefined);
+  check("(identity-mismatch/own-commit) op 2 (genuine re-gate, NOT a cache hit) carries NO cacheHit either", r2.cacheHit === undefined);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"base-advanced\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b. CARD 4aedde84: the cache-hit branch above now ALSO carries a POSITIVE `cacheHit` marker (never inferred from freshMint's absence), and BOTH polarities are proven in this one run — a cache hit is positively marked, and a genuinely fresh/re-gated run carries freshMint and NEVER the cache marker."
+  ? "\n✅ ALL PASS — confirmWorkerMergeTracked verdict cache (card 615967c5): a settled verdict on a branch that was NEVER behind main, re-called with no new commits, still returns the CACHED verdict (no second gate run, no freshMint) — DoD-4a, previously unverified behaviorally; and a behind-main branch's own pre-gate union-merge advances the identity the cache is keyed on, so a re-call genuinely re-gates and SELF-ANNOUNCES it via freshMint:{reason:\"identity-mismatch\", priorIdentity, currentIdentity} instead of looking like an invisible re-run — DoD-4b. CARD 4aedde84: the cache-hit branch above now ALSO carries a POSITIVE `cacheHit` marker (never inferred from freshMint's absence), and BOTH polarities are proven in this one run — a cache hit is positively marked, and a genuinely fresh/re-gated run carries freshMint and NEVER the cache marker. CARD a98f97bd: the reason was renamed from \"base-advanced\" to \"identity-mismatch\" (an OBSERVED field, not an assertion of cause), and (c) above proves the renamed value ALSO fires when the mismatch is caused by the worker pushing its own new commit — not just main advancing — since the registry cannot and should not try to tell the two apart."
   : `\n❌ ${failures} FAILURE(S).`);
 
 // Card 82bb198a: this file previously had NO exit-code decision at all — Node's default exit(0)
