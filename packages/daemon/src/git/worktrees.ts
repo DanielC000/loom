@@ -1450,20 +1450,23 @@ export async function precheckWorkerDone(
 }
 
 /**
- * SAFE-TO-DISCARD guard for BOTH boot-reconcile passes (P0 data-loss fix, 2026-06-05). Does this
- * worktree still hold work we'd LOSE by deleting it? "Work" = EITHER the working tree is DIRTY
- * (real uncommitted/untracked changes — see {@link worktreeStatusHasWork}, which ignores daemon-injected
+ * SAFE-TO-DISCARD guard for boot-reconcile Pass B (P0 data-loss fix, 2026-06-05). Does this worktree
+ * still hold work we'd LOSE by deleting it? "Work" = EITHER the working tree is DIRTY (real
+ * uncommitted/untracked changes — see {@link worktreeStatusHasWork}, which ignores daemon-injected
  * `.claude/` noise) OR the branch is AHEAD OF `base` (commits not yet reachable from the canonical
  * HEAD — `git rev-list --count base..branch` > 0).
  *
  * THE BUG IT GUARDS: a `daemon_restart` marks EVERY prior-run session `exited` at boot, so an unrelated
  * manager's LIVE worker is misdetected at boot and its worktree deleted mid-task, pre-commit (confirmed
- * data loss, 2026-06-05). TWO vectors, both gated by this:
- *   - Pass B GC'd any exited+unprotected worktree (the branch-AHEAD case).
- *   - Pass A treats a 0-commit branch as a merged orphan (its tip == HEAD), so a live worker with
- *     UNCOMMITTED work and a not-yet-advanced branch was finalizeMerge'd — worktree removed AND task
- *     marked done AND branch deleted. A genuine orphaned merge is clean AND 0-ahead → this returns
- *     false → it finalizes normally (no merge-recovery regression).
+ * data loss, 2026-06-05). Originally TWO vectors were gated by this single guard: Pass B GC'ing any
+ * exited+unprotected worktree (the branch-AHEAD case), and Pass A treating a 0-commit branch as a merged
+ * orphan (its tip == HEAD). ⚠️ Card 9cb0287a (2026-08-29): the Pass A vector is STALE — under squash
+ * (see {@link findLandedSquashCommit}), Pass A no longer calls this function at all; it now requires
+ * POSITIVE proof of a landed squash via the deterministic `Loom-Worker-Branch` trailer before ever
+ * finalizing, and deliberately does NOT re-apply this guard (see `reconcileOrchestrationOnBoot`'s own
+ * comment on that call). A worker Pass A can't positively confirm landed simply falls through untouched
+ * to Pass B, where THIS guard is the sole remaining line of defense — verified (card 9cb0287a) to be the
+ * function's ONLY call site (`git grep -n "worktreeHasWork(" -- packages/daemon/src`).
  *
  * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
  * reconcile ops, so the check itself can never wedge boot; on ANY timeout/error/parse-failure we return
@@ -1478,7 +1481,17 @@ export async function worktreeHasWork(
   base = "HEAD",
   deps: BoundedGitDeps = {},
 ): Promise<boolean> {
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for an invalid/nonexistent
+  // repoPath (GitConstructError — see findLandedSquashCommit's own doc for the identical class of bug),
+  // so this must be wrapped here too: left bare, that throw escapes every catch below (they only guard
+  // the calls made INSIDE them) and rejects this function instead of honoring its own documented
+  // fail-safe contract.
+  let git: Pick<SimpleGit, "raw">, timeoutMs: number;
+  try {
+    ({ git, timeoutMs } = boundedGit(repoPath, deps));
+  } catch {
+    return true; // bounded failure → fail SAFE (assume work, keep the dir)
+  }
   const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),

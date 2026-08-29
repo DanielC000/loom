@@ -16,8 +16,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (c) a genuinely SQUASH-MERGED worktree of an exited session → trailer present → STILL finalized/GC'd.
 //   (d) a merged worktree that ALSO has an untracked `.claude/skills/foo` file → STILL GC'd (proves the
 //       ignore-untracked-`.claude/` discriminator: injected noise must not block legitimate cleanup).
-//   (e) FAIL-SAFE: a bounded git error/timeout in the check → treated as has-work → KEEP (both the
-//       throwing and the never-resolving cases), proven directly on worktreeHasWork() + its parser.
+//   (e) FAIL-SAFE: a bounded git error/timeout in the check → treated as has-work → KEEP (the throwing
+//       .raw(), the never-resolving .raw(), AND the git-client FACTORY itself throwing synchronously —
+//       card 9cb0287a, the real GitConstructError shape — all three proven directly on worktreeHasWork()),
+//       plus its porcelain parser.
 // Run: 1) build daemon, 2) node test/boot-reconcile-keep-work.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -122,6 +124,21 @@ try {
   const throwGit = { raw: () => { throw new Error("simulated git failure"); } };
   check("(e) worktreeHasWork fails SAFE on a throwing git → has-work (keep)",
     (await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => throwGit })) === true);
+  // Card 9cb0287a: the FACTORY itself (not just the returned client's .raw()) can throw SYNCHRONOUSLY —
+  // this is exactly what simple-git's constructor does for an invalid/nonexistent repoPath
+  // (GitConstructError, the same class of bug findLandedSquashCommit's own doc names). worktreeHasWork
+  // used to call boundedGit(repoPath, deps) OUTSIDE its try block, so this rejected the whole function
+  // instead of resolving true — silently breaking the documented "fails safe on ANY error" contract.
+  const throwingFactory = () => { throw new Error("simulated git-construct failure (e.g. GitConstructError)"); };
+  let constructFailResult;
+  let constructFailThrew = false;
+  try {
+    constructFailResult = await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: throwingFactory });
+  } catch {
+    constructFailThrew = true;
+  }
+  check("(e) worktreeHasWork fails SAFE when the git-client FACTORY itself throws → resolves true, never rejects",
+    !constructFailThrew && constructFailResult === true);
   const neverGit = { raw: () => new Promise(() => {}) }; // hung child: never settles
   const t0 = performance.now(); // MONOTONIC: immune to wall-clock (Date.now) backward steps under load/virtualization
   const hung = await worktreeHasWork(A.repo, A.worktreePath, A.branch, "HEAD", { gitFactory: () => neverGit, timeoutMs: 250 });
