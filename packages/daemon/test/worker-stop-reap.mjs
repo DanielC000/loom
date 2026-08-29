@@ -54,7 +54,10 @@ try {
     });
 
     sessions.stopWorker(P.mgrId, P.workerId, "hard");
-    await sleep(50); // the sweep is fire-and-forget — let its microtask actually run
+    // The sweep is fire-and-forget — poll for the reap call landing instead of a blind sleep.
+    // TIMING-GUARD-SAFE: bounded OBSERVED poll on reapCalls, not a single fixed wait — card c976f009
+    // converted the prior blind sleep(50).
+    { const d = Date.now() + 2_000; while (!reapCalls.some((c) => c.worktreePath === P.worktreePath) && Date.now() < d) await sleep(5); }
     check("(A) stopWorker triggered the worktree-path reap for the worker's OWN worktree",
       reapCalls.some((c) => c.worktreePath === P.worktreePath));
     check("(A) the reap excludes the worker's OWN live pty pid",
@@ -97,7 +100,12 @@ try {
     });
 
     const n = sessions.killAllWorkers();
-    await sleep(50);
+    // Fire-and-forget sweep, same as (A) — poll for both reap calls landing instead of a blind sleep.
+    // TIMING-GUARD-SAFE: poll-observes-prior-step — `n` (checked below) is captured synchronously above,
+    // before this poll even starts, and the two seeded live workers (W1/W2) are the only ones that can
+    // ever produce a reap call in this fixture, so observing both present IS `reapCalls.length === 2`;
+    // see fixed-wait-negative-guard.mjs's own doc on this reason for the source citation.
+    { const d = Date.now() + 2_000; while (!(reapCalls.includes(W1.worktreePath) && reapCalls.includes(W2.worktreePath)) && Date.now() < d) await sleep(5); }
     check("(B) killAllWorkers reports the correct live-worker count (2, not the live manager too)", n === 2);
     check("(B) BOTH live workers' worktrees were swept", reapCalls.includes(W1.worktreePath) && reapCalls.includes(W2.worktreePath));
     check("(B) exactly two reap calls were made (the live manager was never swept)", reapCalls.length === 2);

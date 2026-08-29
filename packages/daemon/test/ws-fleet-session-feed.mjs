@@ -150,7 +150,11 @@ try {
   check("(3) coalesced delta reflects the LATEST mutation's committed state",
     upsert2?.t === "session:upsert" && upsert2.session?.busy === false
       && upsert2.session?.lastError === "boom" && upsert2.session?.ctxInputTokens === 10);
-  const noSecondDelta = await inbox.next(300);
+  // Card c976f009 (Part 2, resolved (b), fixed): was a bare `inbox.next(300)` — a magic number, not tied
+  // to FleetHub's own debounce constant the way (1)'s windowMs above already is. Checked the real value:
+  // gateway/fleet-hub.ts's DIRTY_FLUSH_MS is 200ms, so 300 was only a ~1.5x margin for a NEGATIVE
+  // assertion (no second delta). Matches this file's own established `DIRTY_FLUSH_MS + 100` convention.
+  const noSecondDelta = await inbox.next(DIRTY_FLUSH_MS + 100);
   check("(3) three rapid mutations produced exactly ONE delta (no trailing second one)", noSecondDelta === null);
 
   // --- (4) pendingMerge is folded in via the SAME opId/state/startedAt/outcome shape as REST ----------

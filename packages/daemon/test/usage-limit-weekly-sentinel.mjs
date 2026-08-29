@@ -181,6 +181,16 @@ try {
   // A turn goes out; the manager also queues a follow-up direction behind it.
   const rp = host.enqueueStdin(SID, "keep working on the task");
   check("setup: the turn submitted immediately (busy armed)", rp.delivered === true && lastBusy() === true);
+  // Card c976f009 (Part 2, resolved (a)): this file never overrides LOOM_SUBMIT_ENTER_DELAY_MS (default
+  // 150ms), so this sleep(120) races that submit's own scheduled sendEnterAndVerify retry — but it's
+  // safe regardless of the 120<150 ordering: pty/host.ts's Stop/StopFailure handler sets
+  // `live.enterConfirmed = true` SYNCHRONOUSLY as the first thing it does (host.ts ~line 6680, "Stop is
+  // itself proof the outstanding submit()'s Enter registered"), and every link in the Enter-retry chain
+  // (sendEnterAndVerify/awaitReassertSettle/awaitGiveUpConfirmSettle, host.ts ~8507/8528/8552) bails as a
+  // no-op the instant `enterConfirmed` is true. Each `deliverHook(Stop)` below fires well before its
+  // matching generation's own 150ms retry timer, so `enterConfirmed` is already true by the time that
+  // timer runs — same reasoning applies to all three sleep(120) calls in this block. No structural fix
+  // needed; documented so the next audit doesn't re-derive it.
   await sleep(120);
   const followUp = host.enqueueStdin(SID, "[loom:from-manager]\nANY_UPDATES", "system");
   check("setup: the follow-up QUEUED behind the busy turn", followUp.delivered === false && followUp.position === 1);

@@ -134,6 +134,11 @@ try {
   check("(3b) a broadcastEvent for that now-unsubscribed managerId no longer reaches the client", afterUnsub === null);
 
   // --- unknown t is ignored (forward-compat): no throw, no state change --------------------------------
+  // Card c976f009 (Part 2, resolved (a)): the blind sleep(50) here is the same negative-assertion shape
+  // flagged elsewhere in this audit, but the assertion below (`fleetHub.size === 1`) doesn't actually run
+  // until AFTER the subsequent `inbox.next(200)` resolves — a further ~200ms — so by the time it's
+  // checked, at least ~250ms have already elapsed since the unknown frame was sent, well past any risk
+  // this 50ms sleep alone would have carried. No fix needed.
   ws.send(JSON.stringify({ t: "totally:unknown", foo: "bar" }));
   await new Promise((r) => setTimeout(r, 50)); // let the server-side message handler run (no observable effect to poll on)
   fleetHub.broadcastEvent("mgr-1", evt); // still unsubscribed — proves the unknown message didn't resurrect it
@@ -143,22 +148,39 @@ try {
   // --- (4b) raw non-object frames must not crash the handler (CR blocker: JSON.parse("null") doesn't ----
   // throw, so a bare `.t` read would) — assert the socket + hub survive, then that a broadcast still
   // reaches the client afterward (proves the handler, and the process, are still alive and functioning).
+  // Card c976f009 (Part 2, resolved (b), fixed): a blind sleep(50) here checking for the ABSENCE of a
+  // crash risked a coverage gap (a slow-to-manifest crash could pass vacuously before 50ms elapsed), not
+  // a spurious red — largely mitigated by the broadcast+inbox proof below, but each per-frame checkpoint
+  // wasn't individually backed. Fixed by sending a CANARY message right after each malformed frame and
+  // polling for ITS observable effect: ws messages on one connection process strictly in order, so once
+  // the canary's subscription is observed, the malformed frame is PROVEN already handled — and if the
+  // malformed frame actually crashed the handler/connection, the canary would never take effect and this
+  // poll would time out (a real failure), instead of a stale ws.readyState read.
   for (const [label, raw] of [["bare 'null'", "null"], ["bare number", "42"], ["bare string", "\"x\""]]) {
     ws.send(raw);
-    await new Promise((r) => setTimeout(r, 50));
+    ws.send(JSON.stringify({ t: "sub:events", managerId: "canary-4b", sinceSeq: 0 }));
+    await waitFor(() => fleetHub.subscriptionsFor(serverSocket)?.get("canary-4b") === 0);
     check(`(4b) a raw ${label} frame does not crash the handler (socket stays open, hub unchanged)`,
       ws.readyState === ws.OPEN && fleetHub.size === 1);
+    ws.send(JSON.stringify({ t: "unsub:events", managerId: "canary-4b" }));
+    await waitFor(() => fleetHub.subscriptionsFor(serverSocket)?.has("canary-4b") === false);
   }
   fleetHub.broadcast({ t: "status", pausedScopes: [], schedulerEnabled: true });
   const survivedBroadcast = await inbox.next();
   check("(4b) the socket is still functional after the malformed frames (a broadcast still reaches it)", survivedBroadcast?.t === "status");
 
   // A sub:events with a non-string managerId, or a non-finite sinceSeq, is IGNORED — not just non-crashing.
+  // Card c976f009 (Part 2, resolved (b), fixed): same canary technique as (4b) above — a CANARY sub right
+  // after the two malformed ones, polled via waitFor, proves both malformed sends were already processed
+  // (in-order) by the time the assertion below runs, instead of guessing they'd landed within 50ms.
   ws.send(JSON.stringify({ t: "sub:events", managerId: 123, sinceSeq: 1 }));
   ws.send(JSON.stringify({ t: "sub:events", managerId: "mgr-2", sinceSeq: "not-a-number" }));
-  await new Promise((r) => setTimeout(r, 50));
+  ws.send(JSON.stringify({ t: "sub:events", managerId: "canary-4c", sinceSeq: 0 }));
+  await waitFor(() => fleetHub.subscriptionsFor(serverSocket)?.get("canary-4c") === 0);
   check("(4c) sub:events with a non-string managerId or non-finite sinceSeq is ignored (hub subscription state unchanged)",
-    fleetHub.subscriptionsFor(serverSocket)?.size === 0);
+    fleetHub.subscriptionsFor(serverSocket)?.size === 1 && fleetHub.subscriptionsFor(serverSocket)?.has("canary-4c"));
+  ws.send(JSON.stringify({ t: "unsub:events", managerId: "canary-4c" }));
+  await waitFor(() => fleetHub.subscriptionsFor(serverSocket)?.has("canary-4c") === false);
 
   // broadcast() (used by later cards) fans out to every connected socket regardless of subscriptions.
   fleetHub.broadcast({ t: "status", pausedScopes: [], schedulerEnabled: false });

@@ -268,8 +268,11 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "missed" }, new Date(t0.getTime() - 3_600_000));
   e.wakes.start(t0); // immediate reconcile tick + arms the interval
   e.wakes.stop();    // clear the interval right away
-  // start()'s tick is fire-and-forget (void) — give the microtask a beat to settle.
-  await new Promise((r) => setTimeout(r, 20));
+  // start()'s tick is fire-and-forget (void) — poll for the enqueue landing instead of a blind sleep.
+  // TIMING-GUARD-SAFE: poll-observes-prior-step — wake.ts's tick() deletes the fired wake's row (claim
+  // the slot first) strictly BEFORE the dispatch this poll observes; see fixed-wait-negative-guard.mjs's
+  // own doc on this reason for the source citation.
+  { const d = Date.now() + 2_000; while (e.enqueued.length === 0 && Date.now() < d) await new Promise((r) => setTimeout(r, 5)); }
   check("start-reconcile: a past-due wake fired once on start()", e.enqueued.length === 1);
   check("start-reconcile: it was consumed (no lingering row)", e.db.countPendingWakes(e.sessId) === 0);
   cleanupEnv(e);

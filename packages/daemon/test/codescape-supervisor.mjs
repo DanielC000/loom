@@ -319,9 +319,9 @@ check("(a3) resolveProjectId now resolves it from the cache (no further network 
 // ===================== not delayMs later (proving the trailing sleep guard actually skips) ==================
 {
   const neverListeningSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "never-listening-for-retry") });
-  const t0b = Date.now();
+  const t0b = performance.now(); // MONOTONIC (card c976f009: Date.now() deltas here can be affected by a system clock adjustment)
   const singleAttempt = await neverListeningSup.registerProjectWithRetry("/fake/repo/never-listening", 1, 5_000); // 1 attempt, would-be 5s trailing sleep if not guarded
-  const elapsedB = Date.now() - t0b;
+  const elapsedB = performance.now() - t0b;
   check("(a6b) single-attempt registerProjectWithRetry resolves ok:false (no live port)", singleAttempt.ok === false);
   check(`(a6b) resolves near-instantly (${elapsedB}ms), NOT after the delayMs trailing sleep that would follow a non-final attempt`,
     elapsedB < 2_000);
@@ -341,9 +341,9 @@ check("(a3) resolveProjectId now resolves it from the cache (no further network 
   const hungPort = hungServer.address().port;
   const RETRY_TIMEOUT_MS = 300;
   const retrySup = new CodescapeSupervisor({ port: hungPort, registerTimeoutMs: RETRY_TIMEOUT_MS, ingestTimeoutMs: 30_000 });
-  const t0 = Date.now();
+  const t0 = performance.now(); // MONOTONIC (see the other MONOTONIC notes in this file)
   const result = await retrySup.registerProjectWithRetry("/fake/repo/hung", 2, 50); // 2 attempts, 50ms apart
-  const elapsed = Date.now() - t0;
+  const elapsed = performance.now() - t0;
   check("(a6) registerProjectWithRetry resolves ok:false against a hung server (never throws)", result.ok === false);
   check(`(a6) both attempts bounded at registerTimeoutMs (~${RETRY_TIMEOUT_MS}ms each), NOT ingestTimeoutMs (30s) — elapsed ${elapsed}ms for 2 attempts, well under the 30s a single wrongly-bounded attempt would already take`,
     elapsed < 10_000);
@@ -492,19 +492,19 @@ await new Promise((resolve) => fakeServer.close(resolve));
 
 // Bounded against an unreachable (just-closed) port — never throws, resolves within its own timeout.
 const deadClient = new CodescapeSupervisor({ port: fakePort, registerTimeoutMs: 500, reingestTimeoutMs: 500 });
-const t0 = Date.now();
+const t0 = performance.now(); // MONOTONIC (card c976f009: Date.now() deltas here can be affected by a system clock adjustment)
 const deadReg = await deadClient.registerWorktree("p", { worktreeId: "w", path: "/a", baseRef: "main" });
 check("(d) an unreachable server resolves ok:false (never throws)", deadReg.ok === false);
-check("(d) bounded — resolves quickly, doesn't hang past its own timeout", Date.now() - t0 < 5_000);
+check("(d) bounded — resolves quickly, doesn't hang past its own timeout", performance.now() - t0 < 5_000);
 // Card daaf7fc9: a real connection-refused is NOT a client-side abort — `timedOut` must stay falsy so a
 // caller can't mistake "the server rejected us instantly" for "we gave up waiting".
 check("(d) card daaf7fc9: an ECONNREFUSED-shaped failure is NOT flagged timedOut", deadReg.timedOut !== true);
 
 // No live port at all (never started) ⇒ immediate ok:false, no fetch attempted.
 const noPortSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "never-started") });
-const t1 = Date.now();
+const t1 = performance.now(); // MONOTONIC (see the other MONOTONIC notes in this file)
 const noPortReg = await noPortSup.registerWorktree("p", { worktreeId: "w", path: "/a", baseRef: "main" });
-check("(d) no live port ⇒ ok:false immediately (no fetch attempted)", noPortReg.ok === false && Date.now() - t1 < 200);
+check("(d) no live port ⇒ ok:false immediately (no fetch attempted)", noPortReg.ok === false && performance.now() - t1 < 200);
 check("(d) no live port ⇒ the distinguishable 'codescape not running' error text", noPortReg.error === "codescape not running");
 check("(d) card daaf7fc9: 'codescape not running' is NOT flagged timedOut either (a third, distinct outcome)", noPortReg.timedOut !== true);
 
@@ -517,9 +517,12 @@ await new Promise((resolve) => hungServer.listen(0, "127.0.0.1", resolve));
 const hungPort = hungServer.address().port;
 const HUNG_TIMEOUT_MS = 300;
 const hungClient = new CodescapeSupervisor({ port: hungPort, registerTimeoutMs: HUNG_TIMEOUT_MS });
-const t2 = Date.now();
+// Card c976f009: MONOTONIC — this is a LOWER-bound assertion below (`hungElapsed >= HUNG_TIMEOUT_MS - 50`),
+// the exact shape that flaked on a loaded CI runner elsewhere in this suite when measured with Date.now()
+// (a wall-clock adjustment can move it backward and false-fail a floor check); performance.now() closes it.
+const t2 = performance.now();
 const hungReg = await hungClient.registerWorktree("p", { worktreeId: "w", path: "/a", baseRef: "main" });
-const hungElapsed = Date.now() - t2;
+const hungElapsed = performance.now() - t2;
 check("(d-hang) a connected-but-never-responds server resolves ok:false (the AbortController bound fires)", hungReg.ok === false);
 check(`(d-hang) the abort fires around its OWN timeout (${hungElapsed}ms), not instantly and not way past it`,
   hungElapsed >= HUNG_TIMEOUT_MS - 50 && hungElapsed < HUNG_TIMEOUT_MS + 4_000);

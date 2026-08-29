@@ -5,9 +5,11 @@
 // DB, imports dist/*, NO real daemon/Fastify — wires a bare node:http server around router.handle()
 // directly (mirrors gateway/server.ts's `/mcp-orch/:sessionId` hijack-straight-to-router wiring).
 //
-// The abort case is made DETERMINISTIC, not a timing race: the test buffers every response write/end
-// for the tool call and only flushes them on a delayed timer, so the client's abort always lands well
-// before the server would have finished responding — no reliance on real-world socket-close timing.
+// The abort case is NOT fully deterministic: it's a timing race between two independent real timers —
+// the client's own abort (setTimeout(30), below) and stallResponse's buffered-flush delay (300ms) — the
+// test buffers every response write/end for the tool call and only flushes them on that delayed timer,
+// so the client's abort has a generous ~10x margin to land before the server would have finished
+// responding, but it is margin, not a structural guarantee independent of real-world scheduling.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

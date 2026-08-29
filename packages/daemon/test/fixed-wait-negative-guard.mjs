@@ -27,7 +27,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //
 // EXEMPTIONS: a flagged site clears ONLY by (a) a `// TIMING-GUARD-SAFE: <reason>` comment anywhere in the
 // contiguous `//`-comment block immediately above the wait line (or on the wait line itself), where
-// <reason> is one of the THREE sanctioned clearing patterns below — the enum is CLOSED on purpose, because
+// <reason> is one of the FOUR sanctioned clearing patterns below — the enum is CLOSED on purpose, because
 // an exemption comment is itself a claim, and an open enum would let that claim mean anything — (b) being
 // listed in KNOWN_UNAUDITED_WAITS, or (c) a `// TIMING-GUARD-FALSE-MATCH: <reason>` comment in the same
 // position (card 1c5dda5d). (a)/(b) are both claims about THE WAIT — "this fixed duration is safe despite
@@ -104,10 +104,30 @@ const TEST_DIR = __dirname;
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// CLOSED enum — see the EXEMPTIONS note above. Each corresponds to one of the three clearing patterns
+// CLOSED enum — see the EXEMPTIONS note above. The first three correspond to the clearing patterns
 // source-verified on card 1addef27 (§ CLEARING in the memory note, and companion-voice-*.mjs's own
 // annotations below).
-const SANCTIONED_REASONS = new Set(["sync-early-return", "sync-probe-no-macrotask", "fully-awaited-completion"]);
+//
+// "poll-observes-prior-step": added card c976f009 (the same audit-tail card as `poll-replaces-blind-
+// wait`-shaped fixes elsewhere in this corpus). Distinct from all three above: those are about the WAIT's
+// OWN precondition/completion; this one is about a NEGATIVE-polarity check the window scan pulled in
+// INCIDENTALLY — a genuinely different check(), 2-4 lines later, that this file's own author intends the
+// wait to protect only indirectly. Source-verified per site, not a blanket excuse:
+//   • wake.mjs ("it was consumed (no lingering row)"): the poll waits for `e.enqueued.length` to reflect
+//     a fired wake. orchestration/wake.ts's `tick()` calls `this.deps.db.deleteWake(w.id)` (the row-removal
+//     this check asserts) as the FIRST action per due wake, strictly BEFORE the dispatch/enqueue logic that
+//     the poll actually observes (wake.ts ~line 200, "claim the slot first") — so by the time the poll's
+//     condition is true, the delete has already happened even earlier in the same synchronous iteration.
+//   • worker-stop-reap.mjs ("(B) killAllWorkers reports the correct live-worker count (2, not the live
+//     manager too)"): reads `n`, captured SYNCHRONOUSLY before the poll ever starts
+//     (`const n = sessions.killAllWorkers();` runs to completion, including its own return value, before
+//     the poll's first check) — the poll doesn't race it at all, whatever it's waiting for.
+//   • worker-stop-reap.mjs ("(B) exactly two reap calls were made (the live manager was never swept)"):
+//     killAllWorkers only ever iterates the two seeded live workers (W1/W2) — there is no third live
+//     worker in this fixture for a stray reap call to come from, so `reapCalls.includes(W1.worktreePath)
+//     && reapCalls.includes(W2.worktreePath)` (the poll's own condition) and `reapCalls.length === 2` are
+//     the SAME fact once both are observed present.
+const SANCTIONED_REASONS = new Set(["sync-early-return", "sync-probe-no-macrotask", "fully-awaited-completion", "poll-observes-prior-step"]);
 
 // CLOSED enum for TIMING-GUARD-FALSE-MATCH — see the EXEMPTIONS note above. Unlike SANCTIONED_REASONS
 // (each a claim about why THE WAIT is safe), each entry here is a claim about why NEG_KEYWORDS fired on a

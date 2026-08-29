@@ -164,6 +164,14 @@ try {
   const unrelatedWakeAt = new Date(Date.now() + 3600_000).toISOString(); // far future; must never fire in-test
   db.insertWake({ id: "wake-unrelated", sessionId: workerAId, wakeAt: unrelatedWakeAt, note: "unrelated — check the owner decision", createdAt: new Date(Date.now() - 60_000).toISOString() });
 
+  // Card c976f009 (Part 2, resolved (b)): this ordering — `diagFallbackWakeCreatedAt` stamped after
+  // firing `runWorkerGate` WITHOUT awaiting it — relies on `opStartedAt` being captured synchronously
+  // before any `await` inside `runWorkerGate`, otherwise the fallback wake's createdAt could race ahead
+  // of production's own opStartedAt capture. CHECKED: sessions/service.ts's `runWorkerGate` stamps
+  // `fnEntryInstant = new Date().toISOString()` as its literal first statement (before `requireWorker`
+  // and before any `await`), documented there (card 7dc0cca5) as deliberately closing exactly this race
+  // — so this ordering is guaranteed by construction, not by luck/margin. No fix needed.
+  //
   // Kick off the gate — degrades to pending past this instance's (shrunk) syncAttachBudgetMs.
   diagPreCallInstant = new Date().toISOString();
   const firstPromise = svc.runWorkerGate(workerAId);

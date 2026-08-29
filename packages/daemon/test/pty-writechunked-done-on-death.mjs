@@ -150,6 +150,18 @@ try {
 
   // Give the (now-dead) burst's pending setTimeout chain a chance to fire its next tick and bail, AND
   // give writeChunked's `done` callback (writeNewTurn) a chance to run if it were going to misbehave.
+  // Card c976f009 (Part 1): this is a NEGATIVE assertion (no stray write happened) with no positive
+  // observable to poll — the one pending `writeChunked` step timer (PTY_WRITE_CHUNK_DELAY_MS, default
+  // 8ms here, no override in this file) resolves SYNCHRONOUSLY once it fires: it detects !alive, calls
+  // `done` (writeNewTurn), which re-checks aliveness and returns with no further async work scheduled.
+  // So the only thing worth waiting for is that one timer firing at all — nothing settles afterward.
+  // The card's own suggested fix (`waitUntil(() => busyLog[SID].at(-1) === false)`) was CHECKED against
+  // this file's mock `events.onBusy` and does NOT apply: `busy` is set true synchronously by doSubmit's
+  // own `setBusy(sessionId, true, …)` just before simulateCrash() fires, and nothing on the crash path
+  // (pty.onExit → live.alive=false) ever calls `setBusy(…, false)` — only stop-hook/heal-if-stuck/
+  // give-up-recovery/interrupt-redirect do, none of which run in this scenario — so that predicate
+  // would never resolve and would hang the test. Left as a bounded sleep (200ms is a ~25x margin over
+  // the 8ms timer it's actually waiting on); no structural fix is being forced here.
   await sleep(200);
 
   check("sanity: the burst genuinely never completed (proves this exercised the not-alive bail, not a race that just finished naturally)",

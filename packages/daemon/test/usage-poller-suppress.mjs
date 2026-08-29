@@ -58,8 +58,19 @@ async function bootGate() {
     credentialsPath,
     fetchImpl: async () => { calls++; return { ok: true, status: 200, json: async () => fakePayload }; },
   });
-  if (!isUsagePollerSuppressed()) poller.start();
-  await sleep(100); // start() primes pollOnce() immediately (void call) — give it time to resolve
+  const started = !isUsagePollerSuppressed();
+  if (started) poller.start();
+  // Only wait when start() actually ran — it primes pollOnce() immediately (void call), so poll for
+  // the poll's own completion instead of a blind sleep. When suppressed, start() was never invoked at
+  // all, so there is nothing async to wait for: calls===0 is already the final answer, not a race to
+  // bound. NOTE: poll on `getStatus().available`, not on `calls` — `calls` increments synchronously as
+  // soon as fetchImpl is INVOKED (inside pollOnce, before its own `await res.json()` and before
+  // `this.cache` is actually assigned), so it settles before the poll has genuinely finished; `available`
+  // only flips once pollOnce has fully run and written the cache, which is the state these checks need.
+  if (started) {
+    const deadline = Date.now() + 2_000;
+    while (poller.getStatus().available !== true && Date.now() < deadline) await sleep(5);
+  }
   poller.stop();
   return { poller, calls };
 }

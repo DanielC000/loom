@@ -398,8 +398,13 @@ try {
       perRoundElapsed.every((e) => e >= HANG_TIMEOUT_MS - TIMER_SLACK_MS && e < HANG_TIMEOUT_MS * 4 + 1500));
 
     // The child is FORCE-KILLED, not merely asked nicely — confirm every one of them actually exited
-    // (no orphaned process left running). A short grace wait lets the OS finish tearing it down.
-    await new Promise((r) => setTimeout(r, 500));
+    // (no orphaned process left running). Poll for the OS to finish tearing them down instead of a
+    // blind wait; this is a POSITIVE assertion (exitCode/signalCode landing) so there's a real
+    // observable to wait on — bounded so a genuine leak still fails rather than hanging forever.
+    const reapDeadline = Date.now() + 5_000;
+    while (!spawnedChildren.every((c) => c.exitCode !== null || c.signalCode !== null) && Date.now() < reapDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
     check(`(l2) all ${spawnedChildren.length} hanging children were ACTUALLY terminated (no orphans left running)`,
       spawnedChildren.length === ROUNDS && spawnedChildren.every((c) => c.exitCode !== null || c.signalCode !== null));
 

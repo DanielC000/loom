@@ -251,14 +251,21 @@ try {
     const SID = "sess-stale-output";
     const TEXT = "OUTPUT_WAS_STALE_BY_FINAL_ATTEMPT";
     const { fake, backspaceCount, entryCount } = spawnReady(SID);
-    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(3) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
     // Output happens shortly after attempt 1's write — but well BEFORE the final attempt's own write, so
     // by the time give-up checks lastOutputAt against the FINAL attempt's write time, this output is
     // already in the past relative to that anchor.
-    await sleepUntil(t0, writeAt(1) + 20);
+    // Card c976f009 (Part 2, resolved (b), fixed): the guessed deadline `sleepUntil(t0, writeAt(1) + 20)`
+    // carried only a ~580ms margin to the FINAL write it must stay before (writeAt(3)), and this file's
+    // own header documents up to 1.6s of jitter elsewhere in this suite under host load — genuinely
+    // enough to close that margin. There's nothing anchor-sensitive about exactly WHEN after write 1 the
+    // output lands (only that it's after write 1 and before the final write, and the final write is
+    // ~1.3s away), so — matching this file's own "observe, don't guess" doctrine (see waitForCount's own
+    // doc above) — wait for the OBSERVED write-1 landing instead of a computed deadline; removes the
+    // guessed margin entirely rather than widening it.
+    await waitForCount(entryCount, 1);
     fake.emitOutput("stale-output-from-an-earlier-attempt-only");
 
     await waitUntil(() => busyLog[SID].at(-1) === false); // observe the transition — see waitUntil's doc

@@ -151,6 +151,14 @@ try {
   const list3 = await call("worker_list");
   const live3 = list3.find((w) => w.workerSessionId === "w-live");
   check("(3) with no further engine output, lastEngineOutputAt FREEZES (does not advance) — the wedge signal", live3.lastEngineOutputAt === staleBaseline);
+  // Card c976f009 (Part 2, resolved (a)): a bare Date.now() lower-bound delta, the same SHAPE flagged
+  // elsewhere in this audit — but NOT the same fix. `live3.lastEngineOutputAt` is production's own
+  // `live.lastOutputAt = Date.now()` (pty/host.ts), an epoch wall-clock stamp — converting this side to
+  // performance.now() (monotonic-since-process-start) would compare two different clocks and break the
+  // check, not fix it. Direction is also floor-guaranteed safe: `setTimeout` never fires early, so by
+  // construction real time has moved at least 60ms by the time this reads — the only way to false-fail
+  // is a mid-test wall-clock adjustment, astronomically unlikely in a hermetic test this short. Style-
+  // only; left as Date.now() deliberately, not an oversight.
   check("(3) meanwhile real time has clearly moved past it", Date.now() - live3.lastEngineOutputAt >= 60);
 
   // ===================== (4) a session this PtyHost never spawned reads null, not a throw =====================

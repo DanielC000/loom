@@ -80,9 +80,19 @@ try {
   // --- /ws/term ---------------------------------------------------------------------------------------
   {
     const ws = await app.injectWS("/ws/term/sess-term", { headers: { host: "127.0.0.1" } });
-    for (const [label, raw] of MALFORMED) {
+    // Card c976f009 (Part 2, resolved (b), fixed): a blind sleep(50) checking for the ABSENCE of a crash
+    // risks a coverage gap (a slow-to-manifest crash passes vacuously before 50ms elapses), not a
+    // spurious red — mitigated but not individually proven by the single canary after the loop below.
+    // Fixed by sending a UNIQUE canary stdin frame right after each malformed one and polling for ITS
+    // landing: ws messages on one connection process in order, so once the canary is observed, the
+    // malformed frame is PROVEN already handled — and a real crash would make the canary poll time out
+    // (a real failure) instead of a stale readyState read.
+    for (let i = 0; i < MALFORMED.length; i++) {
+      const [label, raw] = MALFORMED[i];
+      const canaryData = `canary-term-${i}\n`;
       ws.send(raw);
-      await new Promise((r) => setTimeout(r, 50));
+      ws.send(JSON.stringify({ type: "stdin", data: canaryData }));
+      await waitFor(() => ptyCalls.stdin.some((c) => c.sessionId === "sess-term" && c.data === canaryData));
       check(`(term) a raw ${label} frame does not crash the handler (socket stays open)`, ws.readyState === ws.OPEN);
     }
     ws.send(JSON.stringify({ type: "stdin", data: "echo hi\n" }));
@@ -94,9 +104,15 @@ try {
   // --- /ws/companion ------------------------------------------------------------------------------------
   {
     const ws = await app.injectWS("/ws/companion/sess-companion", { headers: { host: "127.0.0.1" } });
-    for (const [label, raw] of MALFORMED) {
+    // Card c976f009 (Part 2, resolved (b), fixed): same canary technique as /ws/term above — a UNIQUE
+    // canary chat frame right after each malformed one, polled for its landing, proves in-order handling
+    // instead of guessing a 50ms sleep was enough.
+    for (let i = 0; i < MALFORMED.length; i++) {
+      const [label, raw] = MALFORMED[i];
+      const canaryText = `canary-companion-${i}`;
       ws.send(raw);
-      await new Promise((r) => setTimeout(r, 50));
+      ws.send(JSON.stringify({ type: "chat", text: canaryText }));
+      await waitFor(() => chatCalls.some((c) => c.sessionId === "sess-companion" && c.text === canaryText));
       check(`(companion) a raw ${label} frame does not crash the handler (socket stays open)`, ws.readyState === ws.OPEN);
     }
     ws.send(JSON.stringify({ type: "chat", text: "hello" }));

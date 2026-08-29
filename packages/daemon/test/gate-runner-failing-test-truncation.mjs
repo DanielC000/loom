@@ -234,6 +234,13 @@ const dir = mkdtempManaged("loom-gr-trunc-");
 
       const buf = Buffer.from(blob, "utf-8");
       const CHUNK = 4096;
+      // Card c976f009 (Part 2, resolved (a)): a synchronous, no-I/O, no-timer CPU loop over ~2MB — an
+      // O(n) `feed` should take low-single-digit ms, so the 2s ceiling is a ~100-1000x margin meant to
+      // catch a quadratic/unbounded regression, not to prove a real-time bound. Extreme host contention
+      // (this whole process starved of CPU by other load) could in principle still push it over, but that
+      // margin makes it low-risk; nothing here races a clock adjustment the way a LOWER-bound check would
+      // (see codescape-supervisor.mjs's MONOTONIC notes for that different, genuinely-fixed risk), so
+      // Date.now() is fine as-is.
       const started = Date.now();
       for (let off = 0; off < buf.length; off += CHUNK) tracker.feed(buf.subarray(off, off + CHUNK));
       const elapsedMs = Date.now() - started;

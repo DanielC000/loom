@@ -229,6 +229,10 @@ try {
 
   // The watcher re-submits the held turn → busy re-arms. Catch the busy=true window (the resumed
   // "READY and stop" turn runs for ~1s).
+  // Card c976f009 (Part 1, flagged no-easy-fix): this polls a transient ~1s busy window on a REAL
+  // live-claude turn over polled REST (100ms interval) with no push signal — a genuinely narrow window
+  // could in principle land between polls and be missed entirely. This is inherent to e2e-testing
+  // transient state this way, not a blind sleep; no structural fix is being forced here.
   const rearmed = await waitForSession(session.id, (s) => s.busy === true && s.rateLimitedUntil === null, 15_000, 100);
   check("live: watcher resumed — held turn re-submitted (busy re-armed, park cleared)", rearmed?.busy === true && rearmed?.rateLimitedUntil === null);
 
