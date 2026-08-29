@@ -168,12 +168,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * Card c6e7ebe7 — investigated the `GIT_TIMEOUT_MS` margin above and considered, then REJECTED, two
  * further changes. (b) Distinguishing a TIMEOUT specifically from every other `unavailable()` cause (no
  * `.git`, no HEAD commit, git not installed) was considered because a timed-out call degrades to the same
- * `{available:false, reason}` shape as any other unreadable-repo case. But the one consumer that treats
- * `available:false` as silent — `composeManagerStartupPrompt` in `manager-prompt.ts` — already does so
- * DELIBERATELY and UNIFORMLY for every `available:false` reason, not just a timeout (see that call site's
- * own doc: this is the DoD #2 cry-wolf precedent, not an oversight). Singling out timeouts there would be
- * inconsistent with that existing, considered policy, not a fix to it; anyone who wants "unavailable"
- * itself surfaced already can — `served_status` returns the raw `available`/`reason` fields uncollapsed.
+ * `{available:false, reason}` shape as any other unreadable-repo case. At the time, the one consumer that
+ * treats `available:false` as silent — `composeManagerStartupPrompt` in `manager-prompt.ts` — did so
+ * DELIBERATELY and UNIFORMLY for every `available:false` reason, not just a timeout, so singling out
+ * timeouts there would have been inconsistent with that policy, not a fix to it. ⚠️ CARD d3d4d432 REPLACED
+ * that uniform policy with a two-class split (`reasonKind: "not-applicable" | "could-not-measure"`,
+ * classified at each `unavailable()` call site below) — but a TIMEOUT is still not singled out beyond that:
+ * it classifies as `"could-not-measure"`, the same as every other reachable-but-failed cause, exactly as
+ * this rejection intended. Anyone who wants the raw, uncollapsed reason can already read it —
+ * `served_status` returns `available`/`reason`/`reasonKind` uncollapsed.
  * (c) Raising or retrying the timeout was rejected for lack of evidence: no observed git call, idle or at
  * up to 9× CPU oversubscription, has ever approached this budget (see the card for the full measurement).
  * Widening a timeout with no observed stall to justify it is exactly the kind of change this project has
@@ -190,11 +193,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * trigger. This is a pre-existing, deliberately accepted tradeoff (card c1072385) — not something this
  * card changes.
  */
+/** Card d3d4d432 — discriminates WHY `available` is false, classified at THE SOURCE (each `unavailable()`
+ * call site below), never by string-matching the human-readable `reason` prose downstream (that would be
+ * the same defect class this card exists to fix). `"not-applicable"` means the signal is NEVER meaningful
+ * here (today: no `.git` — a packaged install) and staying silent is correct forever. `"could-not-measure"`
+ * means the instrument was reachable in principle but a step failed (a race, a git error, a timeout) — this
+ * is NOT the same as "verified current", and a consumer that collapses the two produces a false all-clear. */
+export type DeployUnavailableReasonKind = "not-applicable" | "could-not-measure";
+
 export interface DeployStalenessResult {
   /** false when this daemon isn't running from a real Loom source checkout, or the check failed. */
   available: boolean;
   /** Present only when available is false — why the signal could not be computed. */
   reason?: string;
+  /** Present only when available is false — see `DeployUnavailableReasonKind`'s own doc. */
+  reasonKind?: DeployUnavailableReasonKind;
   /** ISO mtime of the NEWEST file across this daemon's built output (`packages/daemon/dist`) and
    * `packages/shared/dist`, recursively — see the module doc for why a single file's mtime (e.g.
    * `dist/index.js`) is unusable as a build clock under an incremental `tsc` build. An ON-DISK ARTIFACT
@@ -351,13 +364,14 @@ function runGit(repoRoot: string, args: string[]): string {
  * particular call unavailable — see `computeDeployStaleness`'s own call sites for what's known at each
  * bail point. `distBuiltShaDiffersFromProcess` is recomputed from the SAME two values here (not hardcoded
  * false) since it needs no git at all either. */
-function unavailable(reason: string, baked?: Partial<Pick<DeployStalenessResult,
+function unavailable(reason: string, reasonKind: DeployUnavailableReasonKind, baked?: Partial<Pick<DeployStalenessResult,
   "distBuiltSha" | "distBuiltDirty" | "processBuiltSha" | "processBuiltDirty" | "webBuiltSha" | "webBuiltDirty">>): DeployStalenessResult {
   const distBuiltSha = baked?.distBuiltSha ?? null;
   const processBuiltSha = baked?.processBuiltSha ?? null;
   return {
     available: false,
     reason,
+    reasonKind,
     distBuiltAt: null,
     processStartedAt: null,
     runningCodeBuiltAt: null,
@@ -574,7 +588,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   try {
     fs.statSync(distIndex);
   } catch {
-    return unavailable("this daemon's own built entry (dist/index.js) was not found — cannot derive a build time", { processBuiltSha, processBuiltDirty });
+    return unavailable("this daemon's own built entry (dist/index.js) was not found — cannot derive a build time", "could-not-measure", { processBuiltSha, processBuiltDirty });
   }
   const distDir = path.dirname(distIndex);
   const { sha: distBuiltSha, dirty: distBuiltDirty } = readBuildInfo(distDir);
@@ -587,7 +601,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   const baked = { distBuiltSha, distBuiltDirty, processBuiltSha, processBuiltDirty, webBuiltSha, webBuiltDirty };
 
   if (!fs.existsSync(path.join(repoRoot, ".git"))) {
-    return unavailable("this daemon is not running from a Loom source checkout (no .git at the resolved repo root) — not applicable to a packaged install", baked);
+    return unavailable("this daemon is not running from a Loom source checkout (no .git at the resolved repo root) — not applicable to a packaged install", "not-applicable", baked);
   }
 
   const sharedDistDir = sharedDistOverride ?? path.join(repoRoot, "packages", "shared", "dist");
@@ -602,7 +616,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   // it as unavailable instead of guessing.
   const distMaxMs = newestMtimeMs(distDir);
   if (distMaxMs === null) {
-    return unavailable("this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time", baked);
+    return unavailable("this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time", "could-not-measure", baked);
   }
   // sharedDistDir may legitimately be absent (newestMtimeMs ⇒ null) without making the signal unavailable —
   // distDir above already guarantees a real contribution, so a missing shared dist safely defaults to 0 in
@@ -635,16 +649,16 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   try {
     headLine = runGit(repoRoot, ["log", "-1", `--pretty=%H${UNIT_SEP}%cI`]).trim();
   } catch (err) {
-    return unavailable(`could not read mainline HEAD: ${err instanceof Error ? err.message : String(err)}`, baked);
+    return unavailable(`could not read mainline HEAD: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
   }
   const [mainlineHeadSha, mainlineHeadDate] = headLine.split(UNIT_SEP);
-  if (!mainlineHeadSha) return unavailable("git log returned no HEAD commit (a commitless repo?)", baked);
+  if (!mainlineHeadSha) return unavailable("git log returned no HEAD commit (a commitless repo?)", "could-not-measure", baked);
 
   let relevantLog: string;
   try {
     relevantLog = runGit(repoRoot, ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...RESTART_RELEVANT_PATHSPECS]);
   } catch (err) {
-    return unavailable(`could not read daemon-src/shared commit history: ${err instanceof Error ? err.message : String(err)}`, baked);
+    return unavailable(`could not read daemon-src/shared commit history: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
   }
   // Card 8ff7ccde: computed against `runningCodeBuiltAtMs`, NOT the raw dist clock `buildMaxMs` — a
   // rebuild-without-restart must not UNDERSTATE staleness (see the module doc).
@@ -654,7 +668,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   try {
     webRelevantLog = runGit(repoRoot, ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...REBUILD_ONLY_PATHSPECS]);
   } catch (err) {
-    return unavailable(`could not read web-src commit history: ${err instanceof Error ? err.message : String(err)}`, baked);
+    return unavailable(`could not read web-src commit history: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
   }
   const webCommitsBehind = countCommitsAfter(webRelevantLog, webBuildMaxMs);
   const stale = commitsBehind > 0;

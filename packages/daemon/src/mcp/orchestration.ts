@@ -4054,8 +4054,12 @@ export class OrchestrationMcpRouter {
           "so a rebuilt file is served on the very next request — do not advise a `daemon_restart` for a " +
           "web-only staleness reading; that drops every live session across ALL projects for no reason. " +
           "`available:false` (with `reason`) means this daemon isn't running from a Loom source checkout " +
-          "(e.g. a packaged `loomctl` install) or the check failed — not a claim of freshness either way, " +
-          "and it applies to BOTH deployStaleness signals together (never one without the other; " +
+          "(e.g. a packaged `loomctl` install) or the check failed — not a claim of freshness either way. " +
+          "Card d3d4d432: `reasonKind` discriminates WHICH of those two — `\"not-applicable\"` (no `.git`, " +
+          "e.g. a packaged install — this signal is never meaningful here) vs `\"could-not-measure\"` (the " +
+          "check was reachable in principle but a step failed, e.g. a build race or a git error); the two " +
+          "are NOT interchangeable — only the first means staying silent is forever correct. " +
+          "It applies to BOTH deployStaleness signals together (never one without the other; " +
           "`skillStoreStaleness` is unaffected — it never touches git or dist, so it degrades independently). " +
           "`skillStoreStaleness` (card e8697dd3) is the THIRD, INDEPENDENT signal `deployStaleness` cannot " +
           "give you: {stale, pendingRestart, pendingAdopt}. A bundled skill is delivered to sessions from " +

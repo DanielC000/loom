@@ -68,8 +68,10 @@ export function composeManagerStartupPrompt(
   // discovered only because a manager happened to call `served_status` by hand). DERIVED fresh on every
   // manager spawn/resume/recycle (never cached/persisted — see computeDeployStaleness's own doc), scoped
   // to ONLY daemon-src/shared commits so an assets/docs/vault-only merge (no restart needed) never cries
-  // wolf. `available:false` (a packaged loomctl install, or the check itself failing) emits nothing —
-  // byte-identical to before this card for every non-self-hosting deployment.
+  // wolf. `available:false` for a packaged loomctl install (`reasonKind: "not-applicable"`) emits nothing —
+  // byte-identical to before this card for every non-self-hosting deployment. Card d3d4d432: `available:false`
+  // because the check itself failed (`reasonKind: "could-not-measure"`) is NO LONGER silent — see the
+  // `deployStaleNote` derivation below for why collapsing the two was a false all-clear.
   //
   // SYNCHRONOUS by design, not an oversight: `computeDeployStaleness()` runs a bounded `execFileSync` git
   // read directly on this call. That is NOT the `createPty`/`buildSpawnArgs` hot path CLAUDE.md's
@@ -94,12 +96,24 @@ export function composeManagerStartupPrompt(
   const divergenceNote = staleness.distAheadOfProcess
     ? ` (a newer build ALSO exists on disk, dated ${staleness.distBuiltAt}, that this process has not picked up — restarting would additionally pick that up)`
     : "";
+  // Card d3d4d432: `available:false` used to emit nothing UNIFORMLY, byte-identical to a verified-clean
+  // result — collapsing "not applicable" (a packaged install, where silence is correct forever) together
+  // with "the instrument was reachable but a step failed" (a false ALL-CLEAR: a manager booting during a
+  // genuine outage saw exactly what a manager on a verified-current daemon sees). `reasonKind` (classified
+  // at the SOURCE in deploy-staleness.ts, never string-matched here) now splits those two: NOT-APPLICABLE
+  // stays silent (byte-identical to before, for every packaged/end-user install — DoD #4); COULD-NOT-MEASURE
+  // gets a short, honestly-worded notice. This is NOT the `[loom:deploy-stale]` alarm above — it asserts
+  // staleness has NOT been established, only that it could not be checked.
   const deployStaleNote = staleness.available && staleness.stale
     ? `[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE CODE. Mainline HEAD \`${shortSha(staleness.mainlineHeadSha!)}\` ` +
       `(committed ${staleness.mainlineHeadDate}) carries ${staleness.commitsBehind} \`packages/daemon/src\`/\`packages/shared/src\` ` +
       `commit(s) this running process was NOT built with (its own EXECUTING code dates to ${staleness.runningCodeBuiltAt}${divergenceNote}). ` +
       `Those changes are MERGED but NOT LIVE — for EVERY project this shared daemon serves, not just this one. Do not assume a ` +
       `recently-merged daemon fix or feature is actually in effect; a manager holding it can bring it live via \`daemon_restart\`.`
+    : !staleness.available && staleness.reasonKind === "could-not-measure"
+    ? `[loom:deploy-staleness-unknown] Could not determine whether this daemon is current, because ${staleness.reason}. ` +
+      `This is NOT a claim that the daemon is stale — only that the check itself failed. See ` +
+      `\`served_status\`'s \`deployStaleness\` for detail, or re-check later.`
     : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +

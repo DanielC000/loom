@@ -125,7 +125,11 @@ try {
   // this test can prove the banner reports the EXECUTING clock, not the on-disk artifact clock.
   const staleResult = { available: true, stale: true, commitsBehind: 2, distBuiltAt: "2026-06-01T00:00:00.000Z", processStartedAt: "2026-06-01T00:00:00.000Z", runningCodeBuiltAt: "2026-06-01T00:00:00.000Z", distAheadOfProcess: false, mainlineHeadSha: "abc123def4567890abc123def4567890abc123d", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
   const cleanResult = { available: true, stale: false, commitsBehind: 0, distBuiltAt: "2026-06-03T00:00:00.000Z", processStartedAt: "2026-06-03T00:00:00.000Z", runningCodeBuiltAt: "2026-06-03T00:00:00.000Z", distAheadOfProcess: false, mainlineHeadSha: "1112223334445556667778889990001112223334", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
-  const unavailableResult = { available: false, reason: "not a Loom source checkout", distBuiltAt: null, processStartedAt: null, runningCodeBuiltAt: null, distAheadOfProcess: false, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
+  const unavailableResult = { available: false, reason: "not a Loom source checkout", reasonKind: "not-applicable", distBuiltAt: null, processStartedAt: null, runningCodeBuiltAt: null, distAheadOfProcess: false, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
+  // Card d3d4d432: the OTHER available:false class — the instrument was reachable in principle but a step
+  // failed. This must NOT render byte-identically to clean/not-applicable (that collapse IS the bug this
+  // card fixes) — it gets a short, honestly-worded notice instead of the full [loom:deploy-stale] alarm.
+  const couldNotMeasureResult = { available: false, reason: "this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time", reasonKind: "could-not-measure", distBuiltAt: null, processStartedAt: null, runningCodeBuiltAt: null, distAheadOfProcess: false, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
 
   const staleComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, staleResult);
   check("(3j-stale) fires the [loom:deploy-stale] note", staleComposed.includes("[loom:deploy-stale]"));
@@ -154,7 +158,19 @@ try {
   const unavailableComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, unavailableResult);
   check("(3j-unavailable) neither the stale note nor any 'Deploy status' text renders", !unavailableComposed.includes("[loom:deploy-stale]") && !unavailableComposed.includes("Deploy status"));
   check("(3j-unavailable) still carries the 'Where things live' header + the agent's own doctrine", unavailableComposed.includes("## Where things live") && unavailableComposed.includes("DOCTRINE_BODY"));
-  check("(3j) CLEAN and UNAVAILABLE render BYTE-IDENTICALLY (neither adds any text — this IS the additive guarantee multi-repo-prompt.mjs pins for real projects)", cleanComposed === unavailableComposed);
+  check("(3j) CLEAN and NOT-APPLICABLE render BYTE-IDENTICALLY (neither adds any text — this IS the additive guarantee multi-repo-prompt.mjs pins for real projects, and the DoD #4 packaged-install byte-identity this card must preserve)", cleanComposed === unavailableComposed);
+
+  // ===================== (3j-could-not-measure) card d3d4d432: RED-PROVE the new arm — a
+  // COULD-NOT-MEASURE unavailable result must fire a SHORT, honestly-worded notice, distinct from BOTH
+  // the full [loom:deploy-stale] alarm AND the byte-identical silence a NOT-APPLICABLE/clean result gets.
+  const couldNotMeasureComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, couldNotMeasureResult);
+  check("(3j-could-not-measure) fires a distinct notice tag, NOT the full [loom:deploy-stale] alarm", couldNotMeasureComposed.includes("[loom:deploy-staleness-unknown]") && !couldNotMeasureComposed.includes("[loom:deploy-stale]"));
+  check("(3j-could-not-measure) the notice names the underlying reason", couldNotMeasureComposed.includes("a build likely raced this read"));
+  check("(3j-could-not-measure) the notice does NOT assert staleness (\"THIS DAEMON PROCESS IS RUNNING STALE CODE\" never appears)", !couldNotMeasureComposed.includes("RUNNING STALE CODE"));
+  check("(3j-could-not-measure) the notice explicitly disclaims being a staleness claim", /not a claim/i.test(couldNotMeasureComposed));
+  check("(3j-could-not-measure) still carries the 'Where things live' header + the agent's own doctrine", couldNotMeasureComposed.includes("## Where things live") && couldNotMeasureComposed.includes("DOCTRINE_BODY"));
+  check("(3j-could-not-measure) THE BUG THIS CARD FIXES, RED-PROVEN: this does NOT render byte-identically to CLEAN (a manager can now tell 'checked, verified current' apart from 'the check failed')", couldNotMeasureComposed !== cleanComposed);
+  check("(3j-could-not-measure) also does not render byte-identically to the NOT-APPLICABLE case (the two-class split is real, not a relabeling)", couldNotMeasureComposed !== unavailableComposed);
 
   // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
   const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });

@@ -174,10 +174,16 @@ try {
   const rNoRepo = computeDeployStaleness({ distEntry, repoRoot: noRepo });
   check("(4) no .git at repoRoot ⇒ available:false, never throws", rNoRepo.available === false && typeof rNoRepo.reason === "string");
   check("(4) unavailable ⇒ stale:false (never a false-positive claim)", rNoRepo.stale === false);
+  // Card d3d4d432: no .git is the ONE genuinely NOT-APPLICABLE cause (a packaged install) — classified at
+  // the SOURCE (the unavailable() call site), not string-matched from `reason` downstream.
+  check("(4) no .git ⇒ reasonKind:\"not-applicable\" (classified at source, not string-matched from reason)", rNoRepo.reasonKind === "not-applicable");
   fs.rmSync(noRepo, { recursive: true, force: true });
 
   const rNoDist = computeDeployStaleness({ distEntry: path.join(distDir, "does-not-exist.js"), repoRoot: repo });
   check("(4) missing dist entry ⇒ available:false, never throws", rNoDist.available === false && typeof rNoDist.reason === "string");
+  // Card d3d4d432: EVERY other unavailable() cause is COULD-NOT-MEASURE — the instrument was reachable in
+  // principle but a step failed — never silently equivalent to the one true not-applicable case above.
+  check("(4) missing dist entry ⇒ reasonKind:\"could-not-measure\" (the instrument was reachable, a step failed — NOT the same as \"not applicable\")", rNoDist.reasonKind === "could-not-measure");
 
   // ===================== (1) STALE positive control =====================
   buildDistAt("2026-06-01T00:00:00Z"); // dist "built" June 1
@@ -531,6 +537,7 @@ try {
   check("(12b self-check) the readdirSync patch actually fired (positive control — a never-fired patch proves nothing)", racePatchFired === true);
   check("(12-after) THE FIX: distIndex exists but its dist dir is unreadable ⇒ available:false, never a false epoch-0 answer" + reasonSuffix(rDistUnreadable), rDistUnreadable.available === false && typeof rDistUnreadable.reason === "string");
   check("(12-after) the unavailable reason names the dist directory specifically, not a generic message", /dist directory/.test(rDistUnreadable.reason ?? ""));
+  check("(12-after) card d3d4d432: a build-race dist-dir failure classifies as could-not-measure, not not-applicable", rDistUnreadable.reasonKind === "could-not-measure");
   check("(12-after) unavailable ⇒ stale:false, commitsBehind:0 (never a false-positive OR false-negative claim)", rDistUnreadable.stale === false && rDistUnreadable.commitsBehind === 0);
   check("(12-after) unavailable ⇒ distBuiltAt/runningCodeBuiltAt are null, never an epoch/invalid-date string", rDistUnreadable.distBuiltAt === null && rDistUnreadable.runningCodeBuiltAt === null);
 
@@ -739,6 +746,7 @@ try {
   fs.writeFileSync(path.join(packagedDistDir, "build-info.json"), JSON.stringify({ sha: commitOldSha, dirty: false })); // baked at RELEASE build time, ships in the tarball
   const r22 = computeDeployStaleness({ distEntry: packagedDistEntry, repoRoot: noGitRepo, processBuiltSha: commitOldSha, processBuiltDirty: false });
   check("(22) no .git at all ⇒ available:false (unchanged behavior)" + reasonSuffix(r22), r22.available === false);
+  check("(22) card d3d4d432: no .git ⇒ reasonKind:\"not-applicable\" even alongside a fully-baked processBuiltSha/distBuiltSha (a packaged install genuinely has no git, this is not a git-derived-field-failure case)", r22.reasonKind === "not-applicable");
   check("(22) THE FIX: distBuiltSha/distBuiltDirty are STILL populated from the real, already-shipped dist/build-info.json — not thrown away just because git is unavailable",
     r22.distBuiltSha === commitOldSha && r22.distBuiltDirty === false);
   check("(22) processBuiltSha/processBuiltDirty are STILL populated too — they never depended on git at all",
