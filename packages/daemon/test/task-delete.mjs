@@ -14,11 +14,12 @@ import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-taskdel-${Date.now()}-${process.pid}`);
 fs.mkdirSync(tmpHome, { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-process.env.LOOM_PORT = "45419";
+process.env.LOOM_PORT = String(hermeticPort());
 requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 
 const { Db } = await import("../dist/db.js");

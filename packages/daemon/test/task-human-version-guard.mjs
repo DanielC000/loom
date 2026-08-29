@@ -36,6 +36,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -54,7 +55,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const now = new Date().toISOString();
 const file = path.join(tmpHome, "task-human-version-guard.db");
 const db = new Db(file);
-process.env.LOOM_PORT = "45421";
+process.env.LOOM_PORT = String(hermeticPort());
 const app = await buildServer({ db, pty: {}, sessions: {}, mcp: {}, orchMcp: {}, platformMcp: {}, auditMcp: {}, runMcp: {}, control: {}, usageStatus: {} });
 
 try {

@@ -24,10 +24,11 @@ import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const TMP = mkdtempManaged("loom-ws-fleet-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45343"; // distinct from trust-tier.mjs's 45342 — no port collision if run concurrently
+process.env.LOOM_PORT = String(hermeticPort());
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE

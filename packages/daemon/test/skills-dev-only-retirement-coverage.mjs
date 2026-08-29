@@ -19,6 +19,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,7 +30,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // and store.js's module load are all fs-inert; ensureDirs() is only ever called from index.ts's real boot
 // path), so nothing is ever created on disk to leak.
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-skills-devonly-coverage-${Date.now()}-${process.pid}`);
-process.env.LOOM_PORT = "45425";
+process.env.LOOM_PORT = String(hermeticPort());
 
 const { DEV_ONLY_SKILLS } = await import("../../../scripts/curate-release-skills.mjs");
 const { RETIRED_BUNDLED_SKILL_NAMES } = await import("../dist/skills/store.js");

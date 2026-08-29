@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -24,7 +25,7 @@ fs.mkdirSync(skillsDir, { recursive: true });
 delete process.env.LOOM_DEV;
 delete process.env.LOOM_ASSET_SKILLS; // explicitly UNSET — this is the assertion under test
 process.env.LOOM_HOME = home;         // BEFORE import — paths.ts computes SKILLS_DIR at load
-process.env.LOOM_PORT = "45425";
+process.env.LOOM_PORT = String(hermeticPort());
 const sandboxHome = path.join(root, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows

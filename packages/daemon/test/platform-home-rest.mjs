@@ -17,10 +17,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const TMP = mkdtempManaged("loom-platform-home-rest-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45318";
+process.env.LOOM_PORT = String(hermeticPort());
 process.env.LOOM_DEV = "1"; // the Platform layer is dev-gated; this test seeds + reaches the home, so enable it
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });

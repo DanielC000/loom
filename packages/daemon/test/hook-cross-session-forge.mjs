@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -26,7 +27,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-hookforge-${RUN_SUFFIX}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_TEST = "1";
-process.env.LOOM_PORT = "45333";
+process.env.LOOM_PORT = String(hermeticPort());
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");

@@ -37,7 +37,7 @@ const rejects = (label, fn, re) => {
 const tmpHome = path.join(os.tmpdir(), `loom-mgrscope-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-process.env.LOOM_PORT = "45418";
+process.env.LOOM_PORT = String(hermeticPort());
 const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
@@ -45,6 +45,7 @@ process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");

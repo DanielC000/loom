@@ -12,12 +12,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const TMP = mkdtempManaged("loom-shutdown-ep-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45331";
+process.env.LOOM_PORT = String(hermeticPort());
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE

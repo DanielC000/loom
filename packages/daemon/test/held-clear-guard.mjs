@@ -52,6 +52,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -216,7 +217,7 @@ try {
 }
 
 // ════════════════════════════ Part C — the human-only REST route ════════════════════════════
-process.env.LOOM_PORT = "45420";
+process.env.LOOM_PORT = String(hermeticPort());
 const stub = {};
 const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
 

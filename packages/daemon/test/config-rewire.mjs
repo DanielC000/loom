@@ -10,11 +10,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (C) usage-awareness recency window is parameterized: the SAME state reads near/not-near by window.
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 // Isolated LOOM_HOME (usage-awareness reads/writes a state file under it at module-eval / call time).
 const TMP = mkdtempManaged("loom-config-rewire-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45318";
+process.env.LOOM_PORT = String(hermeticPort());
 requireHermeticEnv();
 
 const { resolveConfig } = await import("@loom/shared");

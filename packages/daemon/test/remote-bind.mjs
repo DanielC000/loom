@@ -25,12 +25,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const TMP = mkdtempManaged("loom-remote-bind-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45343";
+process.env.LOOM_PORT = String(hermeticPort());
 const PORT = process.env.LOOM_PORT;
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });

@@ -13,13 +13,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { hermeticPort } from "./_hermetic-port.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_VERSION = path.join(__dirname, "..", "dist", "version.js");
 
 const TMP = mkdtempManaged("loom-update-check-");
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45332";
+process.env.LOOM_PORT = String(hermeticPort());
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
