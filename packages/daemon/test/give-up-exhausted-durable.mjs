@@ -465,6 +465,12 @@ try {
     check("(7f47991e) the notice names all THREE candidate causes it cannot distinguish between (Loom's own retry, a human, or the sender's own re-drive)",
       !!confirmedNote && /Loom's own retry may have landed/.test(confirmedNote) && /human may/i.test(confirmedNote) &&
       /worker_message\/worker_redirect YOU\s+sent afterward/.test(confirmedNote));
+    // Card c2f8695a: worker_flush is a FOURTH, named candidate — not folded into the "human pressed Enter"
+    // clause, since the reader is a manager and the distinguishing fact is that it's THEIR OWN tool call.
+    check("(c2f8695a) the notice names worker_flush as its own candidate, distinct from the 'human pressed Enter' clause",
+      !!confirmedNote && /YOU may have called worker_flush on this\s+session/.test(confirmedNote));
+    check("(c2f8695a) the notice now says it cannot tell FOUR candidates apart, not three",
+      !!confirmedNote && /cannot tell any\s+of the four apart/.test(confirmedNote));
     console.log(`\n--- (9) [loom:redelivery-confirmed] notice — POSITIVE CONTROL ---\n${confirmedNote}\n`);
 
     // ===== NEGATIVE CONTROL: a confirmation for a chain that was only RE-MINTED, never PARKED, must be a =====

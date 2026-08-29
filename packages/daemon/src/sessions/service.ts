@@ -8525,6 +8525,29 @@ export class SessionService {
    * notice's "cause unknown" must include the sender's own later action, not only "Loom automatically" vs.
    * "a human" — a sender who just re-drove the session is the one reader most tempted to credit their own
    * intervention for a turn their intervention may not have caused.
+   *
+   * ⚠️ CARD c2f8695a — A FOURTH CANDIDATE, and the one this notice's original candidate list omitted
+   * entirely: `worker_flush` (`PtyHost.flushComposer`, wired via `flushWorkerComposer` above). It is a
+   * MANAGER MCP TOOL CALL, not a human at a terminal — `flushComposer`'s doc frames it as "the daemon-driven
+   * analogue of what a human does at the raw terminal," which is exactly why a manager who just called it
+   * doesn't recognise its own action in a clause worded for a human pressing Enter, and gets steered toward
+   * filing an `f91c8634` specimen against its own correct remedy. It reuses the SAME `fireEnterAndVerify`
+   * verify-and-retry ladder `submit()`'s own give-up redelivery uses (see `flushComposer`'s doc), so its
+   * Enter press produces the identical content-match signal this notice is built on — structurally
+   * indistinguishable from Loom's own automatic retry by that signal alone, same as the third candidate above.
+   *
+   * DoD-2 (does the daemon correlate rather than list?): NO, and not for lack of trying — checked whether
+   * `flushWorkerComposer`'s own durable `flush_worker_composer` event (sessions/service.ts, above) could be
+   * looked up here and used to NAME the cause instead of listing it. It cannot, structurally: that event is
+   * appended only AFTER `pty.flushComposer`'s promise resolves, which itself waits on `awaitFlushConfirmSettle`
+   * polling `live.enterConfirmed` — and `live.enterConfirmed` is set true, and `purgeConfirmedGiveUpRequeue`
+   * (which fires `onGiveUpConfirmed` → this method, synchronously, in the SAME hook-handling call) runs,
+   * BEFORE that poll ever observes the flip (see `deliverHook`'s `UserPromptSubmit` case, pty/host.ts: `live.
+   * enterConfirmed = true` precedes the `purgeConfirmedGiveUpRequeue` call by several lines in the same
+   * function). So by the time THIS method runs and sends the notice, a causally-responsible flush's own audit
+   * event does not exist in the DB yet — there is nothing to query. An accurate menu beats a confident wrong
+   * attribution (this card's own bound); do not add a lookup here that would always return empty and read as
+   * "checked, ruled out" when it never actually ran early enough to see the event that would prove it.
    */
   handleGiveUpConfirmed(sessionId: string, logicalId: string, latencyMs: number): void {
     const events = this.db.listEventsForWorker(sessionId);
@@ -8544,9 +8567,11 @@ export class SessionService {
       `~${Math.round(latencyMs / 1000)}s after Loom wrote it. ⚠️ This confirms the TURN RAN — it does NOT establish WHY. ` +
       `The only evidence behind this notice is a content match on what the engine reports it received, which proves ` +
       `WHAT text landed and WHEN, not WHO or WHAT submitted it. Loom's own retry may have landed late, a human may ` +
-      `have submitted it manually (e.g. pressed Enter on a stuck composer), OR a worker_message/worker_redirect YOU ` +
-      `sent afterward may be what actually freed it — this notice cannot tell any of the three apart, including ` +
-      `your own subsequent action. If none of these match what you expect, treat it as a possible f91c8634 specimen.`;
+      `have submitted it manually (e.g. pressed Enter on a stuck composer), YOU may have called worker_flush on this ` +
+      `session (its own submit-only Enter press goes through the exact same content-match signal), OR a ` +
+      `worker_message/worker_redirect YOU sent afterward may be what actually freed it — this notice cannot tell any ` +
+      `of the four apart, including your own subsequent action. If none of these match what you expect, treat it as ` +
+      `a possible f91c8634 specimen.`;
     try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId: gaveUpTaskId, kind: "warning" }); } catch { /* best-effort — the confirmed-after-park audit event above still stands regardless */ }
   }
 
