@@ -3421,7 +3421,8 @@ export class SessionService {
         // doc for the full rationale. Either way (interrupted or not), the REST caller is never blocked
         // longer than this bound and an upgrade can never be permanently refused. Bounded on a MONOTONIC
         // clock, not an iteration count — under event-loop load (e.g. the Stop hook's own synchronous
-        // multi-MB JSONL tail-read) a 100ms `setTimeout` can run long, and counting iterations as if each
+        // multi-MB JSONL whole-file read — see readContextStats' own doc, card 21a77e85) a 100ms
+        // `setTimeout` can run long, and counting iterations as if each
         // were exactly 100ms would silently overshoot the intended wall-clock bound.
         const waitDeadline = performance.now() + UPGRADE_BUSY_WAIT_MS;
         while (this.pty.isBusy(sessionId) && performance.now() < waitDeadline) {
@@ -10361,7 +10362,8 @@ export class SessionService {
    * for the still-in-flight turn, so without this explicit capture its ctx metrics would stay null.
    *
    * Either way, the capture is keyed off the DURABLE `cwd`/`engineSessionId` on the session row (the
-   * SAME transcript-tail read the Stop hook itself does — `readContextStats` + `setContextCounters`),
+   * SAME whole-file transcript read the Stop hook itself does — `readContextStats` + `setContextCounters`,
+   * see readContextStats' own doc / card 21a77e85 for why this is NOT a tail-read),
    * never the live pty state the interrupt below is about to disturb — so it's identical on both paths,
    * no divergence in WHAT gets captured. Best-effort throughout: a dead/gone session, or any read/write
    * hiccup, never blocks the stop itself.

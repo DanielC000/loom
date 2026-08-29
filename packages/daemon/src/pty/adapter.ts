@@ -35,7 +35,7 @@ export interface TranscriptTurn {
  * | File (call site) | What it needed | Method below |
  * |---|---|---|
  * | `sessions/transcript.ts` | the JSONL path/parse mechanism itself | `locateTranscript`/`readTranscript`/`transcriptExists`/`snapshotTranscript` (this file now RE-EXPORTS `pty/claude-transcript.ts`, which owns the mechanism) |
- * | `sessions/context.ts` | transcript-tail token/context-window parse | `readContextStats` (delegates to the unchanged `sessions/context.ts#readContextStats` — see "Known allowlisted exceptions" below) |
+ * | `sessions/context.ts` | whole-transcript token/context-window parse (NOT tail-bounded — card 21a77e85) | `readContextStats` (delegates to the unchanged `sessions/context.ts#readContextStats` — see "Known allowlisted exceptions" below) |
  * | `sessions/usage-sampler.ts` | incremental cumulative-usage parse | `readCumulativeUsage` (delegates to `sessions/context.ts#readRunUsage`/`IncrementalRunUsageReader` — same allowlisted-exception reasoning) |
  * | `mcp/orchestration.ts`, `mcp/transcript-read.ts`, `mcp/platform.ts`, `companion/capabilities.ts` | read a session's transcript, walk-capped | `readTranscript` (unchanged call sites — they already import from `sessions/transcript.ts`'s re-export barrel) |
  * | `gateway/server.ts` | `--resume <id>` respawn (comment only) + transcript-route fallback | `readTranscript`/`transcriptExists` (unchanged call sites) |
@@ -83,7 +83,7 @@ export interface TranscriptTurn {
  * interface's shape (below) is right rather than merely plausible.
  */
 export interface HarnessCapabilities {
-  /** `readContextStats` is meaningful (a transcript-tail token/context-window read exists). */
+  /** `readContextStats` is meaningful (a whole-transcript token/context-window read exists — NOT tail-bounded, card 21a77e85). */
   contextTelemetry: boolean;
   /** `readCumulativeUsage` is meaningful (a per-run billed-token accounting exists). */
   usageTelemetry: boolean;
@@ -120,8 +120,9 @@ export interface HarnessAdapter {
   /** Best-effort copy of a conversation's transcript into Loom's own archive store. Never throws. */
   snapshotTranscript(cwd: string, conversationId: string, projectId: string, sessionId: string): boolean;
 
-  /** Tail-scan a conversation's transcript for its current context-window occupancy. Capability-gated
-   *  by {@link HarnessCapabilities.contextTelemetry}; null when unsupported or nothing found. */
+  /** Read a conversation's ENTIRE transcript (whole-file, not tail-bounded — card 21a77e85; see
+   *  `sessions/context.ts#readContextStats`'s own doc for why) for its current context-window occupancy.
+   *  Capability-gated by {@link HarnessCapabilities.contextTelemetry}; null when unsupported or nothing found. */
   readContextStats?(cwd: string, conversationId: string): ContextStats | null;
   /** Cumulative billed-token usage for a conversation. Capability-gated by
    *  {@link HarnessCapabilities.usageTelemetry}; null when unsupported or nothing found. */

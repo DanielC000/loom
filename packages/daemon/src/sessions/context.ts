@@ -66,10 +66,25 @@ function userTurnText(content: unknown): string | null {
 }
 
 /**
- * Measure a session's current engine-context occupancy by tail-scanning its transcript JSONL — ONE
- * single-pass read (card b16320bc review folded the last-assistant-text scan into this SAME loop rather
- * than a second full-file parse, since a long session's JSONL can be multi-MB and this runs on the
- * M2-sensitive synchronous Stop-hook chokepoint).
+ * Measure a session's current engine-context occupancy by reading its ENTIRE transcript JSONL — ONE
+ * single-pass whole-file read + per-line `JSON.parse`, O(file size) in both (card b16320bc review folded
+ * the last-assistant-text scan into this SAME loop rather than a second full-file parse, since a long
+ * session's JSONL can be multi-MB and this runs on the M2-sensitive synchronous Stop-hook chokepoint —
+ * that review halved the CONSTANT, it did not change the ORDER).
+ *
+ * ⚠️ NOT a tail-scan, despite the name this once had (card 21a77e85 — filed after the earlier "cheap
+ * tail-read" framing here and at the call site turned out false; `:91`/`:98` read + parse every line).
+ * A genuine BOUNDED tail-scan is not implementable for this function's contract: `turns` is a count of
+ * assistant lines across the WHOLE session (a windowed read would silently undercount every turn outside
+ * the window, not approximate it), and `lastUserTurnText` skips every tool-result-only "user" line to
+ * find the last REAL human-submitted turn — which a long single agentic exchange (many tool calls, no new
+ * human input) can push arbitrarily far from EOF. Measured on a real 8.4 MB / 688-line transcript on this
+ * host: the last real user turn sat at line 21 — 97% of the file (666 lines) was tool traffic emitted
+ * AFTER it, well past any plausible fixed-size tail window. Re-measured whole-file cost on 7 real
+ * transcripts on this host (20 KB → 0.5 ms … 8.4 MB → 44 ms, ~linear) — comparable order of magnitude to
+ * the original 25.8 KB → 0.5 ms / 6.6 MB → 103 ms finding; both are ~two orders of magnitude below the
+ * ~40s give-up/park budget, so this cost is real but not what drives a park (see card 21a77e85's own
+ * §BOUND).
  * The LAST assistant turn's `usage` approximates how much the model is now carrying as input:
  * input_tokens + cache_read + cache_creation (the cache fields hold the bulk of a warm context).
  * `turns` counts assistant lines (with a message) as a coarse secondary signal.

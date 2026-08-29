@@ -6709,13 +6709,17 @@ export class PtyHost {
           // same "never survive past the turn it attests" rationale. lastPromptSenderId (set in submit())
           // still carries it for a rate-limited replay.
           live.activeTurnSenderId = null;
-          // Refresh context occupancy at the turn boundary — ONE single-pass tail-read of the transcript
-          // (card b16320bc review: this used to be read TWICE — once here, once again below for the
-          // weekly-cap text sentinel — doubling synchronous parse work of a potentially multi-MB JSONL on
-          // this M2-sensitive Stop-hook chokepoint; `stats.lastAssistantText` now comes from this SAME
-          // read). Cheap SYNCHRONOUS tail-read; done for EVERY session (the host doesn't know role — a
-          // manager's own occupancy matters too, "who recycles the manager"). Keep it sync — see the M2
-          // box above before making this (or anything here) async.
+          // Refresh context occupancy at the turn boundary — ONE single-pass WHOLE-FILE read + parse of the
+          // transcript (card b16320bc review: this used to be read TWICE — once here, once again below for
+          // the weekly-cap text sentinel — doubling synchronous parse work of a potentially multi-MB JSONL
+          // on this M2-sensitive Stop-hook chokepoint; `stats.lastAssistantText` now comes from this SAME
+          // read; that review halved the constant, not the order). ⚠️ NOT a tail-read — card 21a77e85: a
+          // bounded tail-scan isn't implementable here (readContextStats' own doc has the evidence: `turns`
+          // needs a whole-session total, and `lastUserTurnText` can sit arbitrarily far from EOF behind a
+          // long tool-only stretch). O(file size), ~44 ms measured at 8.4 MB on this host — real but ~2
+          // orders of magnitude below the ~40s give-up/park budget (see 21a77e85's §BOUND) — done for EVERY
+          // session (the host doesn't know role — a manager's own occupancy matters too, "who recycles the
+          // manager"). Keep it sync — see the M2 box above before making this (or anything here) async.
           const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
           if (stats) {
             this.events.onContextStats(sessionId, stats);
