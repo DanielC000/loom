@@ -14,15 +14,40 @@
 // WHAT IT GATES: the ACTIVE doc a rotation is about to PROMOTE (i.e. the new/trimmed doc that will
 // become the live resume doc after rotation) — not the resume doc's general content. The resume doc
 // stays free to rewrite/trim anything else about itself; this only refuses if rotation would silently
-// drop one of the durable markers below, or shrink the LIVE COMMITMENTS list below its required count.
+// drop one of the durable markers below, or shrink the LIVE COMMITMENTS list below its required floor.
 //
 // SOURCE OF THE MARKER LIST AND COUNT: `Projects/Loom/Operations/Orchestrator Rules.md` §ROTATION-GATE
 // — a VAULT file, unreachable from this repo/worktree at the time this script was authored. The list
 // below was copied verbatim from that section (relayed through card 8e2a4252's kickoff, itself already
 // a copy) and MUST be re-checked against the live vault section by whoever next edits this file —
 // this local copy can drift silently, same as any other copied-not-pointed-at value.
-// Re-verified against the live vault section 2026-08-28 (card d78a6d5d): the 14-item marker list and
-// REQUIRED_LIVE_COMMITMENTS_COUNT=14 below still match §ROTATION-GATE verbatim — no drift found.
+// Re-verified against the live vault section 2026-08-28 (card d78a6d5d): the 14-item marker list still
+// matches §ROTATION-GATE verbatim — no drift found.
+//
+// ⭐ LIVE_COMMITMENTS_FLOOR IS A FLOOR, NOT AN EXACT COUNT (card 34a6f07e, 2026-08-28). It used to be
+// `REQUIRED_LIVE_COMMITMENTS_COUNT`, checked with EQUALITY (`!==`). That was a bug, not a feature: a
+// fixed arity doesn't merely fail to catch overflow — it CREATES it. The cheapest way to add a 15th
+// legitimate commitment and keep an equality check green is to leave it OUT of the counted section
+// (unprotected prose instead) — measured live on this seat's own rotation: 6 new binding terms were
+// pushed into prose above the list specifically to dodge this check, and a doc that dropped that prose
+// block entirely still passed, because the equality check never looked at it either way. This script's
+// own name and `--help` already promised the right semantics ("refuse to promote a rotation that …
+// SHRINKS the LIVE COMMITMENTS list") — equality was never that. The fix: assert a FLOOR (`>=`) instead.
+// Growing the list can never fail this check again; only shrinking below the floor can.
+//
+// A floor only protects what it counts. `LIVE_COMMITMENTS_FLOOR` is bumped here from 14 to 20 — the 14
+// re-verified 2026-08-28 (card d78a6d5d) plus 6 new terms card 34a6f07e names as newly agreed and
+// currently sitting, unprotected, in prose in the live vault doc (the card's own prose FIRST miscounted
+// this as 5, omitting "DISCLOSE A LIVE-WORKER-COUNT CHANGE ON THE CHANGE, not at the next natural letter"
+// — corrected 2026-08-28 after the filer recounted the real doc; named here so the arithmetic is
+// auditable, not just trusted). This is DELIBERATE and lands ahead of the matching vault edit: it makes
+// `--lint`/rotation REFUSE the live doc (14 numbered items) until those 6 terms are moved from prose into
+// the numbered LIVE COMMITMENTS list as items 15–20 — the "fail loudly and get updated" behavior the
+// fixed-arity bug was denying. See card 34a6f07e's worker report for the exact hand-off. Whoever performs
+// that vault edit must bump this constant to match the new true count IN
+// THE SAME EDIT — never lower it, and never let it silently drift behind the vault content the way the
+// prior count itself drifted (see the header note above): this remains the ONE place the number lives,
+// mirroring the vault the same way the marker list already does.
 //
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
@@ -114,7 +139,7 @@ const MARKERS = [
   { token: "QUIET-LANE", caseSensitive: false },
 ];
 
-const REQUIRED_LIVE_COMMITMENTS_COUNT = 14;
+const LIVE_COMMITMENTS_FLOOR = 20;
 
 const HELP = `rotation-gate.mjs — refuse to promote a resume-doc rotation that silently drops a durable marker or shrinks the LIVE COMMITMENTS list.
 
@@ -153,7 +178,8 @@ Checks run against --active (unioned with --rules when supplied):
   1. All ${MARKERS.length} markers below are present as exact substrings (see the case-sensitivity note in each).
   2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next MY-PEER-SEND-LEDGER
      heading LINE — a prose mention of either token that is not itself a heading line is ignored) still
-     contains ${REQUIRED_LIVE_COMMITMENTS_COUNT} numbered items, matched by /^\\d+\\. /gm. (This section is
+     contains AT LEAST ${LIVE_COMMITMENTS_FLOOR} numbered items, matched by /^\\d+\\. /gm — a FLOOR, never an
+     exact count: the list may grow without limit, it may never shrink below this floor. (This section is
      only ever measured in --active — it is not a candidate for the --rules union.)
 
 Checks run against --archive (skipped entirely under --lint):
@@ -169,7 +195,7 @@ ${MARKERS.map((m) => `  - ${m.token}${m.caseSensitive ? " (case-SENSITIVE)" : ""
 it cannot see a rule that was reworded, summarized, or split across lines during rotation. A green is a
 candidate set ("nothing was blatantly deleted"), never a verdict that nothing was lost.
 
-Marker list and the required LIVE COMMITMENTS count are sourced from \`Operations/Orchestrator Rules.md\`
+Marker list and the LIVE COMMITMENTS floor are sourced from \`Operations/Orchestrator Rules.md\`
 §ROTATION-GATE (a vault file outside this repo) — re-verify this script's copy against that section
 before trusting it long-term; see the file header for why.
 `;
@@ -217,7 +243,7 @@ function parseArgs(argv) {
 // ⭐ EXPLICIT CALL (card c7c0a493's third question): --was 0 is rejected, not accepted as a degenerate-but-
 // legal "the previous doc was empty." `^\d+$` alone would let 0 through, and 0 passes as a NUMBER but can
 // never be a genuine caller measurement here: every gate-passing --active must already carry all
-// MARKERS.length markers plus a REQUIRED_LIVE_COMMITMENTS_COUNT-item section, so its real pre-edit size
+// MARKERS.length markers plus at least a LIVE_COMMITMENTS_FLOOR-item section, so its real pre-edit size
 // was never 0 bytes for anything this script would ever be asked to check. Any real --was 0 is therefore
 // always a bug in the CALLER (an uncomputed value, an integer default slipping through) dressed up as a
 // legal input that would then silently refuse EVERY doc forever (byteLength >= 0 is always true) — the
@@ -238,7 +264,7 @@ function parseWasBytes(raw) {
     process.exit(2);
   }
   if (n === 0) {
-    console.error(`[rotation-gate] invalid --was value 0: a real --active document is never genuinely 0 bytes pre-edit (it must already carry ${MARKERS.length} markers plus a ${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section) — --was 0 would silently refuse every doc forever, so it is rejected as a usage error rather than accepted as a degenerate check`);
+    console.error(`[rotation-gate] invalid --was value 0: a real --active document is never genuinely 0 bytes pre-edit (it must already carry ${MARKERS.length} markers plus at least a ${LIVE_COMMITMENTS_FLOOR}-item LIVE COMMITMENTS section) — --was 0 would silently refuse every doc forever, so it is rejected as a usage error rather than accepted as a degenerate check`);
     process.exit(2);
   }
   return n;
@@ -405,9 +431,9 @@ function main() {
   }
   if (live.count === null) {
     failures.push(`could not locate the LIVE COMMITMENTS section (heading missing) — cannot verify its item count (${live.diagnostic})`);
-  } else if (live.count !== REQUIRED_LIVE_COMMITMENTS_COUNT) {
+  } else if (live.count < LIVE_COMMITMENTS_FLOOR) {
     failures.push(
-      `LIVE COMMITMENTS section in --active holds ${live.count} numbered item(s), expected ${REQUIRED_LIVE_COMMITMENTS_COUNT} (${live.diagnostic})`
+      `LIVE COMMITMENTS section in --active holds ${live.count} numbered item(s), fewer than the required floor of ${LIVE_COMMITMENTS_FLOOR} (${live.diagnostic})`
     );
   }
 
@@ -421,13 +447,13 @@ function main() {
 
   if (args.lint) {
     console.log(
-      `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and a ` +
-        `${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section. (lint mode: --archive not checked — this is not a rotation.)`
+      `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +
+        `LIVE COMMITMENTS item(s) (>= floor of ${LIVE_COMMITMENTS_FLOOR}). (lint mode: --archive not checked — this is not a rotation.)`
     );
   } else {
     console.log(
-      `[rotation-gate] OK — ${args.active} carries all ${MARKERS.length} markers and a ` +
-        `${REQUIRED_LIVE_COMMITMENTS_COUNT}-item LIVE COMMITMENTS section; --archive ${args.archive} exists ` +
+      `[rotation-gate] OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +
+        `LIVE COMMITMENTS item(s) (>= floor of ${LIVE_COMMITMENTS_FLOOR}); --archive ${args.archive} exists ` +
         `(${archiveStat.size} bytes). Rotation may proceed.`
     );
   }

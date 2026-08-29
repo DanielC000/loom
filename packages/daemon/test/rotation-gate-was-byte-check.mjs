@@ -53,7 +53,9 @@ function commitmentsList(n) {
   return lines.join("\n");
 }
 
-function docWith({ items = 14, titleSuffix = "" } = {}) {
+// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
+// rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 20 items.
+function docWith({ items = 20, titleSuffix = "" } = {}) {
   return [
     `# Loom — Orchestrator Log (fixture)${titleSuffix}`,
     "",
@@ -71,7 +73,7 @@ function docWith({ items = 14, titleSuffix = "" } = {}) {
 // Reproduces the gen 181/183 shape: FEWER lines (one blank line spliced out) but MORE bytes overall
 // (multi-byte emoji padding added to the title line more than offsets the single removed newline byte).
 function bloatedCutClaim() {
-  const lines = docWith({ items: 14 }).split("\n");
+  const lines = docWith({ items: 20 }).split("\n");
   lines.splice(1, 1); // remove the blank line right after the title -> fewer total lines
   lines[0] = lines[0] + " 🔴🔴🔴🔴🔴"; // 5 emoji × 4 bytes (UTF-8) = 20 bytes of padding
   return lines.join("\n");
@@ -90,7 +92,7 @@ function runGate(argsArr) {
 }
 
 const archive = writeFixture("archive.md", "archive contents\n");
-const good = writeFixture("good-active.md", docWith({ items: 14 }));
+const good = writeFixture("good-active.md", docWith({ items: 20 }));
 
 // ── DoD-2: absence is visible, not silent. A --lint run with no --was still exits 0, but SAYS the byte
 // check did not run. ───────────────────────────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ const good = writeFixture("good-active.md", docWith({ items: 14 }));
   const bloated = writeFixture("bloated-cut-claim.md", bloatedCutClaim());
   check(
     "fixture sanity: bloated doc genuinely has fewer lines than the baseline",
-    bloatedCutClaim().split("\n").length < docWith({ items: 14 }).split("\n").length
+    bloatedCutClaim().split("\n").length < docWith({ items: 20 }).split("\n").length
   );
   check("fixture sanity: bloated doc genuinely has MORE bytes than the baseline", bloated.bytes > good.bytes);
 

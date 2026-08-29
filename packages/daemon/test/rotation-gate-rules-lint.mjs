@@ -53,7 +53,9 @@ function commitmentsList(n) {
 
 // `markers` are the non-heading tokens present as prose (LIVE COMMITMENTS / MY-PEER-SEND-LEDGER are
 // always present via the real section headings below, independent of this list).
-function docWith({ markers = ALL_MARKER_TOKENS, items = 14 } = {}) {
+// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
+// rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 20 items.
+function docWith({ markers = ALL_MARKER_TOKENS, items = 20 } = {}) {
   return [
     "# Loom — Orchestrator Log (fixture)",
     "",
@@ -81,7 +83,7 @@ function runGate(argsArr) {
 }
 
 const archivePath = writeFixture("archive.md", "archive contents\n");
-const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
+const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
 
 // ── Baseline: no --rules, no --lint — must remain byte-shape-identical to pre-9a5837b2 behavior. ───────
 {
@@ -95,19 +97,19 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
 // (Card DoD-5a: "sed the Orchestrator Rules pointer to nonsense in a COPY ⇒ expect exit 1".)
 {
   const markers = ALL_MARKER_TOKENS.filter((t) => t !== "Orchestrator Rules");
-  const p = writeFixture("no-pointer.md", docWith({ markers, items: 14 }));
+  const p = writeFixture("no-pointer.md", docWith({ markers, items: 20 }));
   const r = runGate(["--active", p, "--archive", archivePath]);
   check("control (a) missing pointer marker: exits 1", r.status === 1);
   check("control (a): names 'Orchestrator Rules' as missing", /Orchestrator Rules/.test(r.stderr));
 }
 
-// ── Positive control (b): one numbered commitment deleted (13 instead of 14). ───────────────────────────
+// ── Positive control (b): one numbered commitment deleted (18 instead of the 20-item floor). ────────────
 // (Card DoD-5b: "delete one numbered commitment from another COPY ⇒ expect exit 1".)
 {
-  const p = writeFixture("short-commitments.md", docWith({ items: 13 }));
+  const p = writeFixture("short-commitments.md", docWith({ items: 18 }));
   const r = runGate(["--active", p, "--archive", archivePath]);
-  check("control (b) 13/14 commitments: exits 1", r.status === 1);
-  check("control (b): reports the real count", /holds 13 numbered item\(s\), expected 14/.test(r.stderr));
+  check("control (b) 18/20 commitments: exits 1", r.status === 1);
+  check("control (b): reports the real count", /holds 18 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
 }
 
 // ── Positive control (c): the archive leg — nonexistent path, then an empty file. ───────────────────────
@@ -126,7 +128,7 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
 // ── --rules UNION: a marker present ONLY in --rules must FAIL without --rules and PASS with it. ────────
 {
   const markersMinusQuietLane = ALL_MARKER_TOKENS.filter((t) => t !== "QUIET-LANE");
-  const activeMissingOne = writeFixture("active-missing-quiet-lane.md", docWith({ markers: markersMinusQuietLane, items: 14 }));
+  const activeMissingOne = writeFixture("active-missing-quiet-lane.md", docWith({ markers: markersMinusQuietLane, items: 20 }));
   const rulesWithQuietLane = writeFixture("rules-with-quiet-lane.md", "# Orchestrator Rules (fixture)\n\nThis durable rule is tagged QUIET-LANE.\n");
 
   const withoutRules = runGate(["--active", activeMissingOne, "--archive", archivePath]);
@@ -142,7 +144,7 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
 // ── --rules UNION, negative: a marker in NEITHER file still fails, even with --rules supplied. ─────────
 {
   const markersMinusQuietLane = ALL_MARKER_TOKENS.filter((t) => t !== "QUIET-LANE");
-  const activeMissingOne = writeFixture("active-missing-quiet-lane-2.md", docWith({ markers: markersMinusQuietLane, items: 14 }));
+  const activeMissingOne = writeFixture("active-missing-quiet-lane-2.md", docWith({ markers: markersMinusQuietLane, items: 20 }));
   const rulesWithoutIt = writeFixture("rules-without-quiet-lane.md", "# Orchestrator Rules (fixture)\n\nNothing relevant here.\n");
   const r = runGate(["--active", activeMissingOne, "--archive", archivePath, "--rules", rulesWithoutIt]);
   check("union: marker absent from BOTH --active and --rules: exits 1", r.status === 1);
@@ -167,7 +169,7 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
 // ── --lint still enforces the marker check — a doc missing a marker fails lint the same as rotation. ───
 {
   const markers = ALL_MARKER_TOKENS.filter((t) => t !== "MGR122-FLOOR");
-  const p = writeFixture("lint-missing-marker.md", docWith({ markers, items: 14 }));
+  const p = writeFixture("lint-missing-marker.md", docWith({ markers, items: 20 }));
   const r = runGate(["--active", p, "--lint"]);
   check("lint: missing marker still refused: exits 1", r.status === 1);
   check("lint: names the missing marker", /MGR122-FLOOR/.test(r.stderr));
@@ -178,13 +180,13 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 14 }));
   const p = writeFixture("lint-short-commitments.md", docWith({ items: 5 }));
   const r = runGate(["--active", p, "--lint"]);
   check("lint: short commitments section still refused: exits 1", r.status === 1);
-  check("lint: reports the real count", /holds 5 numbered item\(s\), expected 14/.test(r.stderr));
+  check("lint: reports the real count", /holds 5 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
 }
 
 // ── --lint combined with --rules: the union still applies under lint mode. ──────────────────────────────
 {
   const markersMinusQuietLane = ALL_MARKER_TOKENS.filter((t) => t !== "QUIET-LANE");
-  const activeMissingOne = writeFixture("lint-active-missing-quiet-lane.md", docWith({ markers: markersMinusQuietLane, items: 14 }));
+  const activeMissingOne = writeFixture("lint-active-missing-quiet-lane.md", docWith({ markers: markersMinusQuietLane, items: 20 }));
   const rulesWithQuietLane = writeFixture("lint-rules-with-quiet-lane.md", "This durable rule is tagged QUIET-LANE.\n");
   const r = runGate(["--active", activeMissingOne, "--lint", "--rules", rulesWithQuietLane]);
   check("lint + --rules union: exits 0", r.status === 0);

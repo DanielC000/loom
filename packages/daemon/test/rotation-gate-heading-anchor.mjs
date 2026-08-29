@@ -54,7 +54,9 @@ function commitmentsList(n) {
   return lines.join("\n");
 }
 
-function docWith({ preface = "", items = 14 } = {}) {
+// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
+// rotation-gate.mjs's own header). A "clean"/well-formed doc in this file must carry >= 20 items.
+function docWith({ preface = "", items = 20 } = {}) {
   return [
     "# Loom — Orchestrator Log (fixture)",
     "",
@@ -86,22 +88,22 @@ const archivePath = writeFixture("archive.md", "archive contents\n");
 
 // ── Case 1: a clean, correct doc — no prose mentions of either boundary token at all. Must PASS. ──────
 {
-  const p = writeFixture("clean.md", docWith({ items: 14 }));
+  const p = writeFixture("clean.md", docWith({ items: 20 }));
   const r = runGate(p, archivePath);
-  check("clean 14-item doc with no prose boundary mentions: exits 0", r.status === 0);
-  check("clean 14-item doc: reports OK", /\[rotation-gate\] OK/.test(r.stdout));
+  check("clean 20-item doc with no prose boundary mentions: exits 0", r.status === 0);
+  check("clean 20-item doc: reports OK", /\[rotation-gate\] OK/.test(r.stdout));
 }
 
 // ── Case 2: THE INCIDENT ITSELF — both boundary tokens named in prose ABOVE their real headings, with a
-// full, correctly-formatted 14-item section below. Card d78a6d5d DoD-2's second (load-bearing) polarity:
+// full, correctly-formatted 20-item section below. Card d78a6d5d DoD-2's second (load-bearing) polarity:
 // this MUST pass on the fixed script (and is proven, manually, to fail on the pre-fix script — see header).
 {
   const preface =
     "> This rotation is gated by rotation-gate.mjs, which checks the LIVE COMMITMENTS section boundary\n" +
     "> and the MY-PEER-SEND-LEDGER section boundary before promoting a new doc.";
-  const p = writeFixture("incident-repro.md", docWith({ preface, items: 14 }));
+  const p = writeFixture("incident-repro.md", docWith({ preface, items: 20 }));
   const r = runGate(p, archivePath);
-  check("incident repro (boundary tokens named in prose above real headings, real 14-item section): exits 0", r.status === 0);
+  check("incident repro (boundary tokens named in prose above real headings, real 20-item section): exits 0", r.status === 0);
   check("incident repro: reports OK, not a false '0 numbered items' refusal", /\[rotation-gate\] OK/.test(r.stdout) && !/0 numbered item/.test(r.stdout));
 }
 
@@ -111,7 +113,7 @@ const archivePath = writeFixture("archive.md", "archive contents\n");
   const p = writeFixture("short-section.md", docWith({ items: 3 }));
   const r = runGate(p, archivePath);
   check("genuinely short (3-item) commitments section: exits 1", r.status === 1);
-  check("genuinely short section: reports the real count (3, not 0)", /holds 3 numbered item\(s\), expected 14/.test(r.stderr));
+  check("genuinely short section: reports the real count (3, not 0)", /holds 3 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
 }
 
 // ── Case 4: self-diagnosing failure message (card d78a6d5d DoD-3) — a count mismatch must name WHERE the
