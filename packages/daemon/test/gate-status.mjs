@@ -747,6 +747,87 @@ try {
     check("(e2e merge proximity POS) gate_status ALSO reports nearBudget:true for the settled merge record", status.proximity?.nearBudget === true && status.proximity?.fraction === 0.9);
   }
 
+  // ── (e2e merge, card a228dfb5 — INERT-DIFF SKIP, THE DIVERGENCE THIS CARD FIXES) a branch whose ENTIRE
+  // changed-path set is under `docs/` (card db9b0130) never spawns a gate at all, yet still MERGES
+  // (`merged:true`, a real new squash commit). BEFORE this card, `gate_status(opId)` collapsed that into
+  // `outcome:"pass"`/`passed:true` — disagreeing with `gate_history`'s own `outcome:"skipped"`/
+  // `passed:false` for the IDENTICAL settled event (merge-gate-inert-diff.mjs's scenario (A) already
+  // proved the `gate_history` half; this proves `gate_status` now agrees, through the REAL
+  // `confirmWorkerMergeTracked` → `deriveMergeGateVerdict` → `pending_gate_ops` path — not the raw DB
+  // layer directly). Asserts ALL THREE surfaces named in the card's DoD-4 agree on the SAME opId: the
+  // sync/tracked `confirmWorkerMergeTracked` result, `db.listGateEvents` (`gate_history`'s own read), and
+  // `gate_status(opId)` — a test that only exercised a gate that RAN could never see this divergence. ────
+  {
+    const P = `gst-mskip-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-MSKIP", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`, mgrId = `${P}-mgr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-MSKIP-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    // A docs-only diff — provably inert (isInertMergeDiff), same fixture shape as
+    // merge-gate-inert-diff.mjs's own scenario (A).
+    fs.mkdirSync(path.join(worktreePath, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "findings\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    // A call COUNTER, not just a return value — proves the gate command genuinely never spawned, mirroring
+    // merge-gate-inert-diff.mjs's own discipline.
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const { opId, value, viaAsync } = await settleMergeEitherPath(sessions, r, "e2e merge inert-diff skip");
+    check("(e2e merge inert-diff skip) the gate command was NEVER called — the diff is provably inert", calls === 0);
+    if (!viaAsync) {
+      check("(e2e merge inert-diff skip) settled INLINE this run, merged:true", r.ok === true && value.merged === true);
+      check("(e2e merge inert-diff skip — precondition) sync result carries gateRan:false, no reusedOpId — a SKIP, not a reuse", value.gateRan === false && value.reusedOpId === undefined);
+      check("(e2e merge inert-diff skip — precondition) sync result carries skipped:true (card a228dfb5's new field, threading `inertSkip` onto ConfirmMergeResult)", value.skipped === true);
+    }
+
+    // ── SURFACE 1: gate_history (db.listGateEvents), the ALREADY-correct reader — the control this test
+    // pins so a future regression to EITHER surface is caught, not just gate_status's own fix. ───────────
+    const history = db.listGateEvents({ projectId: P, limit: 10, offset: 0 });
+    const historyRow = history.items.find((it) => it.opId === opId);
+    check("(e2e merge inert-diff skip — SURFACE 1: gate_history) row found by this op's own opId", historyRow !== undefined);
+    check("(e2e merge inert-diff skip — SURFACE 1: gate_history) outcome is \"skipped\", never \"pass\"", historyRow?.outcome === "skipped");
+    check("(e2e merge inert-diff skip — SURFACE 1: gate_history) passed:false — no gate verdict was ever reached", historyRow?.passed === false);
+    check("(e2e merge inert-diff skip — SURFACE 1: gate_history) gateRan:false", historyRow?.gateRan === false);
+
+    // Wait for the op to genuinely LEAVE the live retained view — same discipline as every other merge
+    // block in this file (DoD item 5: a record read while still running/retained proves nothing).
+    await waitUntil(() => (sessions.peekPendingMerge(workerId) === undefined ? true : undefined), { timeoutMs: 10_000, label: "merge op to leave PendingOpRegistry's retained view" });
+
+    // ── SURFACE 2: gate_status(opId) — THE FIX ITSELF. Before card a228dfb5 this read back
+    // outcome:"pass"/passed:true — the exact divergence from SURFACE 1 above that this card exists to
+    // close. ─────────────────────────────────────────────────────────────────────────────────────────────
+    const status = sessions.gateStatus(opId);
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status, THE FIX) state:\"settled\"", status.state === "settled");
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status, THE FIX) outcome:\"skipped\", NEVER \"pass\" — the central defect this card fixes", status.outcome === "skipped");
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status, THE FIX) passed:false — must NOT read true for an op where no gate spawned (the card's own DoD-1 requirement)", status.passed === false);
+    // commitSubject still lands — the code DID merge, only the gate was skipped (card a228dfb5's own
+    // correction to the tool-description claim "commitSubject is present ONLY on outcome:\"pass\"").
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status) commitSubject is still present — a skip still lands a real new commit", typeof status.commitSubject === "string" && status.commitSubject.length > 0);
+    // Fields that only ever populate when a gate GENUINELY spawned must stay absent here — same
+    // "undefined means no gate spawned" discipline a gateless project / a REUSED self-check already follow.
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status) extended is absent — no gate ever spawned to extend anything", status.extended === undefined);
+    check("(e2e merge inert-diff skip — SURFACE 2: gate_status) steps/outputTail/gateCap are all absent — nothing ran to produce them", status.steps === undefined && status.outputTail === undefined && status.gateCap === undefined);
+
+    // ── SURFACE 3 (implicit): worker_merge_confirm's own sync/tracked response, already asserted above
+    // (gateRan:false, no reusedOpId, skipped:true, merged:true) — the card's own table names this surface
+    // as ALREADY correct pre-fix; re-asserted here on the SAME opId as surfaces 1/2 so all three are proven
+    // to agree on ONE settled event, not three separately-constructed ones. ───────────────────────────────
+    check("(e2e merge inert-diff skip — ALL THREE SURFACES AGREE) gate_history.outcome, gate_status.outcome, and the tracked confirm's own merged:true all describe the SAME opId's SAME settled event", historyRow?.opId === opId && status.gateType === "merge");
+  }
+
   // ── (e2e merge, card 9f6598dd — SETTLED VERDICT, FAIL) the rejection side: outcome:"fail" + gateDetail
   // (the SAME rich diagnosis the [loom:merge-rejected] nudge carries) are ALSO readable via gate_status
   // alone, past eviction — AND `extended` stays `false` (not `undefined`) here: the gate DID spawn, it

@@ -613,7 +613,8 @@ CREATE TABLE IF NOT EXISTS pending_gate_ops (
                                                      -- meant "surfaced pending", so a leftover legacy row
                                                      -- must still be swept by reconcileOrphanedGateOps
   verdict TEXT,                                     -- added by migratePendingGateOps; 'pass'|'fail'|'error'|
-                                                     -- 'cancelled', NULL until a "gate" op settles with one
+                                                     -- 'cancelled'|'skipped' (card a228dfb5, "merge" rows
+                                                     -- only), NULL until a "gate" op settles with one
   verdict_payload_json TEXT                         -- added by migratePendingGateOps; see PendingGateOpVerdict
 );
 -- Local poll-job triggers (agent-tooling epic P3): the daemon PollService periodically fetches 'path' on
@@ -1892,8 +1893,18 @@ export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | 
  *  only, a merge is never itself cancelled this way); `"error"` means the run() closure itself threw (an
  *  unexpected exception, not an ordinary gate failure). A `null` `verdict` column value is the ONLY thing
  *  meaning "no verdict recorded" — every legacy row (from before 4c5bf820), or either kind's row that
- *  hasn't settled yet. */
-export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
+ *  hasn't settled yet.
+ *  Card a228dfb5: `"skipped"` — "merge" rows ONLY — is a DISTINCT non-verdict for a merge that landed
+ *  (`merged:true`) without ever spawning a gate because its entire changed-path set was proven inert (card
+ *  db9b0130's `isInertMergeDiff`; mirrors {@link GateOutcome}'s own `"skipped"` member in shared/types.ts,
+ *  which `gate_history` already derived correctly from the raw event detail — this is the SAME fact, now
+ *  ALSO recorded on the `pending_gate_ops.verdict` column so `gate_status(opId)` stops collapsing it into
+ *  `"pass"`, card a228dfb5). Checked in `deriveMergeGateVerdict` BEFORE the plain `merged` branch, exactly
+ *  like `gateOutcomeFromDetail` checks `detail.skipped` before `detail.passed` — a skip stamps `merged:true`
+ *  too (the code did land), but must never be read as an ordinary gate PASS: no gate ever validated it.
+ *  Distinct from a REUSED self-check (`reusedOpId` present, `gateRan:false` too) — a reuse is a REAL prior
+ *  verdict and stays `"pass"`, only a genuine skip reads `"skipped"`. */
+export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled" | "skipped";
 
 /**
  * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd,

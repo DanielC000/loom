@@ -341,8 +341,13 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge as your PRIMARY, unprompted way to learn the outcome, but a settled op " +
       "now ALSO retains a durable, queryable RECORD you can pull on demand: `outcome` " +
-      "(`\"pass\"`|`\"fail\"`|`\"error\"`|`\"cancelled\"` — `\"pass\"` means merged, `\"fail\"` means a " +
-      "resolved rejection, `\"error\"` means a thrown exception mid-confirm), `steps` (card 720bb7ad — " +
+      "(`\"pass\"`|`\"fail\"`|`\"error\"`|`\"cancelled\"`|`\"skipped\"` — `\"pass\"` means merged AND a real " +
+      "gate spawned and passed, `\"fail\"` means a resolved rejection, `\"error\"` means a thrown exception " +
+      "mid-confirm; `\"skipped\"` (card a228dfb5) means merged — the code DID land — but NO gate ever " +
+      "spawned because the branch's entire changed-path set was proven inert, docs-only, card db9b0130: " +
+      "`passed` reads `false` for it, same as `\"cancelled\"`, since no verdict was ever reached — check " +
+      "`outcome`, never `passed` alone, to tell a genuine merge-with-no-gate apart from an ordinary pass; " +
+      "`commitSubject` (below) is still present, since the merge itself did land), `steps` (card 720bb7ad — " +
       "per-step `{step,durationMs,status}` at sub-ms precision, present on BOTH a pass and a fail, the same " +
       "shape the completion nudge's own steps line renders from — DIAGNOSTIC ONLY: a step's `status` is NOT " +
       "the verdict for this op and must never be read as one (see `outcome`/`passed` for the real verdict) " +
@@ -384,8 +389,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "union-merge + gate + squash, not just the gate step itself; strictly ≥ `Σ(steps)`, which is only " +
       "ever a FLOOR on the real total). `extended` here means something different from the LIVE `extended` below: once settled, it " +
       "reports whether ANY step of the gate this op actually ran ever consumed its one-time auto-extend — " +
-      "`undefined` (not `false`) when no gate spawned for this op at all (gateless project, or a REUSED " +
-      "self-check), so `extended:true` paired with `outcome:\"fail\"` is the specific \"this run was over " +
+      "`undefined` (not `false`) when no gate spawned for this op at all (gateless project, a REUSED " +
+      "self-check, or an inert-diff `outcome:\"skipped\"` merge), so `extended:true` paired with `outcome:\"fail\"` is the specific \"this run was over " +
       "budget AND it failed\" signal worth flagging, distinct from either fact alone. `proximity` " +
       "({nearBudget, step, fraction}, card 3407caad) is a WARN-BEFORE-BREACH companion to `extended` — " +
       "unlike `extended` (which only ever fires AFTER a breach), `proximity.nearBudget:true` fires while " +
@@ -403,7 +408,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "op and ran REDUCED (card 2154b6ad — `pnpm build` + the static guards + any changed test file, instead " +
       "of the full suite, because every changed compiled file was proven transpile-identical); `false` means " +
       "a real gate spawned and was PROVEN NOT reduced — never confuse this with `undefined`, which means " +
-      "no gate spawned for this op at all (gateless project, a REUSED self-check), this settled row " +
+      "no gate spawned for this op at all (gateless project, a REUSED self-check, or an inert-diff " +
+      "`outcome:\"skipped\"` merge), this settled row " +
       "predates card 725dc89a, OR (card 2db8a3dd) a real gate DID spawn and ran the FULL suite on a repo " +
       "whose layout this predicate can never evaluate in the first place — its hardcoded " +
       "`packages/daemon/src|test/` path scope and `scripts/test-daemon.mjs`/`typescript`-dev-dependency " +
@@ -423,7 +429,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`commitSubject` (card 7a1a76e9) is the landed squash subject (card b88704bb's `commitSubject`, the " +
       "SAME value the sync `worker_merge_confirm` return and the `[loom:merge-done]` nudge carry) — the " +
       "documented \"if you need the answer sooner\" poll for a QUEUED merge, which previously could not " +
-      "answer this at all. Present ONLY on `outcome:\"pass\"` (a rejection/error never lands a new commit); " +
+      "answer this at all. Present on `outcome:\"pass\"` OR `\"skipped\"` (card a228dfb5 — a skip still " +
+      "lands a real new commit, just with no gate behind it; a rejection/error never lands one); " +
       "`undefined` for every other outcome, the ALREADY_MERGED case (no new commit lands there either), or " +
       "a settled row that predates this card — never fabricated. These settled- " +
       "record fields are OMITTED, never fabricated, for a settled op that predates this capability. " +
@@ -3768,7 +3775,8 @@ export class OrchestrationMcpRouter {
           "settled history). Use this to recover a real gate-duration trend (e.g. \"is the floor climbing\") " +
           "instead of hand-maintaining a readings table from nudge text. Returns {items: GateHistoryRow[], " +
           "total, limit, offset, nextOffset} — `items` is newest-first; each row is {id, gateType " +
-          "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"), " +
+          "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|" +
+          "\"skipped\"), " +
           "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName, retriedFile, retryPassed, emitCompareReduced, " +
@@ -3850,8 +3858,22 @@ export class OrchestrationMcpRouter {
           "`\"cancelled\"` retroactively, not just going forward. A trend spanning the boundary is still " +
           "SAFE to compare on `outcome` for this reason — unlike `concurrentGatesMax` below, there is no " +
           "old-encoding-vs-new-encoding mix to account for here. " +
+          "⚠️ CARD db9b0130 — `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
+          "\"merge\"` row whose branch's ENTIRE changed-path set was proven inert (docs-only) never spawns a " +
+          "gate at all — the row still stamps `detail.passed:true` (so the merge could proceed to squash), " +
+          "but `outcome` reads `\"skipped\"` here (checked BEFORE `passed`), never `\"pass\"`, and `passed` " +
+          "(the plain boolean below) reads `false` for it too, for the identical reason a `\"cancelled\"` row " +
+          "does: no gate verdict was ever reached, so it must never be counted as a pass OR a rejection when " +
+          "computing a rate — filter on `outcome`, never on `passed` alone, same rule as `\"cancelled\"` " +
+          "above. Always paired with `gateRan:false` (see just below) — but distinct from a REUSED self-check " +
+          "(also `gateRan:false`): a reuse is a REAL prior verdict and stays `outcome:\"pass\"`; only a " +
+          "genuine skip reads `\"skipped\"`. This is the SAME fact `gate_status(opId)` now ALSO reports for " +
+          "this exact row's `opId` (card a228dfb5 — before that card `gate_status` collapsed this into " +
+          "`outcome:\"pass\"`/`passed:true`, disagreeing with THIS tool's own `\"skipped\"` for the identical " +
+          "settled op). " +
           "`gateRan` (card 3a6f04cc) answers \"did a gate PROCESS actually spawn for this row\" — `false` " +
-          "for a merge that REUSED an already-green worker self-check (no process spawned at merge time) or " +
+          "for a merge that REUSED an already-green worker self-check (no process spawned at merge time), a " +
+          "merge whose gate was SKIPPED as inert (card db9b0130, just above), or " +
           "a worker self-check cancelled BEFORE it was ever admitted past the queue; `true` for every other " +
           "row, INCLUDING one cancelled WHILE running that DID spawn a step. Use this to exclude non-runs " +
           "from a duration series without a per-row pivot to `gate_status(opId)` — a non-run's `durationMs` " +

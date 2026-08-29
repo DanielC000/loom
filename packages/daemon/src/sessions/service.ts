@@ -397,6 +397,17 @@ type ConfirmMergeResult = {
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
+  /** Card a228dfb5: `true` only on a `merged:true` result whose gate was skipped because the branch's
+   *  ENTIRE changed-path set was proven inert (card db9b0130's `isInertMergeDiff`) — i.e. this merge's own
+   *  `inertSkip` local was `true` at the point of the plain-green return. Distinct from `gateRan:false`
+   *  alone, which is ALSO `true` for a REUSED self-check (`reusedOpId` set, a real prior verdict) — only a
+   *  genuine skip sets THIS field. `undefined` (never a fabricated `false`) on every other path, including
+   *  a real gate run, a reuse, and every rejection. Mirrors the `skipped:true` stamp the durable `build_gate`
+   *  audit event already carries for the identical branch (see the event write in `mergeBranchLocked`) —
+   *  this is the SAME fact, now also threaded onto the sync/tracked result so `deriveMergeGateVerdict` can
+   *  persist it as `"skipped"` (not `"pass"`) and `gate_status(opId)` stops disagreeing with `gate_history`
+   *  for the identical settled op (card a228dfb5). */
+  skipped?: boolean;
   /** Card a1a8c5c4: the merge gate's own last-step tail (the SAME value `gate-runner.ts` already computes
    *  on every outcome, pass or fail) — bounded to `OUTPUT_TAIL_BYTES` (~4KB) on a PASS, but CONTENT-
    *  SELECTED since card 6ffee3e2 on a FAIL, where it can run up to `FAILURE_BLOCK_CAP_BYTES` (~16KB) when
@@ -670,7 +681,15 @@ function deriveWorkerGateVerdict(
  *     too, but the cancellation is the fact that matters).
  *   - `outcome.value.merged` → `"pass"`, carrying `gateExtended` (renamed `extended` in the payload, same
  *     field every other kind uses) when a gate actually ran for this merge — `undefined` for a gateless
- *     project or a REUSED self-check, never a fabricated `false`.
+ *     project or a REUSED self-check, never a fabricated `false`. Card a228dfb5: EXCEPT when
+ *     `outcome.value.skipped` is also set — a merge whose ENTIRE changed-path set was proven inert (card
+ *     db9b0130) never spawned a gate at all, so this maps to `"skipped"` instead, never `"pass"`: the
+ *     `pending_gate_ops.verdict` column this feeds is what `gate_status(opId)` reads back verbatim, and
+ *     before this correction it collapsed a genuinely-skipped merge into the SAME `"pass"`/`passed:true`
+ *     a real gate pass gets — disagreeing with `gate_history`'s own `gateOutcomeFromDetail` (db.ts), which
+ *     already checks `detail.skipped` before `detail.passed` for the identical underlying fact. Checked
+ *     BEFORE the plain `merged` mapping, mirroring that exact ordering. A REUSED self-check (`reusedOpId`
+ *     set, `skipped` absent) is NOT this case — it's a real prior verdict and stays `"pass"`.
  *   - otherwise (a RESOLVED rejection — gate failure, merge conflict, stranded work, etc. — never a
  *     throw) → `"fail"`, the same `extended` field PLUS `gateDetail` when this rejection was gate-caused
  *     (every other rejection reason has none to report — `gateDetail` stays `undefined`, not fabricated).
@@ -718,7 +737,7 @@ function deriveMergeGateVerdict(
     return { kind: "cancelled", payload: { reason: v.reason, settledAt, totalDurationMs } };
   }
   return {
-    kind: v.merged ? "pass" : "fail",
+    kind: v.merged ? (v.skipped ? "skipped" : "pass") : "fail",
     payload: {
       reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended, proximity: v.gateProximity,
       // Card a1a8c5c4: the SAME last-step tail a "gate" row's own deriveWorkerGateVerdict has persisted
@@ -3953,7 +3972,14 @@ export class SessionService {
      *  analogous timing lives in `totalDurationMs`/`settledAt` below instead); `passed`/`cancelled`/
      *  `reason`/`outputTail`/`steps` (the last widened to "merge" rows by card 720bb7ad — see
      *  `PendingGateOpVerdict`'s own doc) and `gateDetail` (fail-only either way) are populated for BOTH
-     *  "gate" and "merge" rows. */
+     *  "gate" and "merge" rows.
+     *  ⚠️ Card a228dfb5: `passed` reads `false` for a "merge" row whose `outcome` (below) is `"skipped"` —
+     *  an inert-diff merge (card db9b0130) that landed (`merged:true`) without ever spawning a gate — the
+     *  SAME "no verdict was ever reached" discipline `passed:false` already carries on a `"cancelled"` row.
+     *  Before this card a skipped merge's `verdict` column never held anything OTHER than `"pass"`/`"fail"`,
+     *  so this branch (and `passed`) read `true` for it — disagreeing with `gate_history`'s own
+     *  `outcome:"skipped"`/`passed:false` for the identical settled op; see `outcome`'s own doc below for
+     *  the full fix. */
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     gateDetail?: PendingGateOpVerdict["gateDetail"];
@@ -4021,9 +4047,17 @@ export class SessionService {
      *  above already encode as two separate booleans — surfaced ALSO as one literal string so a caller
      *  doesn't have to reconstruct it (`extended:true` paired with `outcome:"fail"` is the specific
      *  "over-budget AND it failed" signal the card's DoD calls out as the whole point of pairing the two).
-     *  Present whenever a verdict was recorded at all (any of the four kinds, either gate/merge row) —
+     *  Present whenever a verdict was recorded at all (any of the five kinds, either gate/merge row) —
      *  `undefined` only when nothing was ever recorded (a legacy row, a not-yet-settled row). Purely
-     *  additive: does not replace `passed`/`cancelled`, which stay exactly as before this card. */
+     *  additive: does not replace `passed`/`cancelled`, which stay exactly as before this card.
+     *  ⚠️ Card a228dfb5: `"skipped"` (a FIFTH kind, "merge" rows only) means this merge LANDED
+     *  (`merged:true` — a real new commit; see `commitSubject` above, still present) but NO gate ever
+     *  spawned, because the branch's entire changed-path set was proven inert (docs-only, card db9b0130).
+     *  `passed` reads `false` for it, exactly like `"cancelled"` — no gate verdict was ever reached, so
+     *  never read `merged`/a landed `commitSubject` as implying `outcome:"pass"`; check `outcome` itself.
+     *  This mirrors `gate_history`'s own `outcome:"skipped"` for the identical event (see `GateOutcome`'s
+     *  doc, shared/types.ts) — before this card `gate_status` had no way to express this and silently
+     *  collapsed it into `"pass"`/`passed:true`, disagreeing with `gate_history` for the SAME settled op. */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
      *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
@@ -4100,7 +4134,16 @@ export class SessionService {
         ...(payload?.totalDurationMs !== undefined ? { totalDurationMs: payload.totalDurationMs } : {}),
         ...(payload?.extended !== undefined ? { extended: payload.extended } : {}),
       };
-      const verdictFields = t.record.verdict === "pass" || t.record.verdict === "fail"
+      // Card a228dfb5: `"skipped"` joins this branch (never its own separate branch below) — a skipped
+      // inert-diff merge carries the exact same payload shape a pass/fail does (settledAt/totalDurationMs/
+      // commitSubject/retriedFile:null/etc.; most of the gate-specific fields below simply stay `undefined`
+      // since no gate ever spawned, same "nothing to report" discipline every other field here already
+      // follows). `passed` stays `t.record.verdict === "pass"` unchanged — this is the fix itself: it now
+      // correctly reads `false` for `"skipped"` instead of never reaching this branch at all (which used to
+      // mean the OUTER `t.record.verdict != null ? { outcome: t.record.verdict } : {}` below was the only
+      // thing surfacing anything, and `deriveMergeGateVerdict` never even WROTE `"skipped"` before this
+      // card — so this widening and that write land together, not independently).
+      const verdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
         ? {
           passed: t.record.verdict === "pass",
           ...(payload?.reason !== undefined ? { reason: payload.reason } : {}),
@@ -14586,8 +14629,8 @@ export class SessionService {
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       : {};
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
