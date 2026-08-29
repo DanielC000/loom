@@ -10146,7 +10146,20 @@ export class PtyHost {
     // the whole story (it exits here; the escalation below is a no-op). A BUSY/mid-turn session instead
     // has its turn INTERRUPTED by the two Ctrl-Cs and stays alive at an idle prompt (no Stop hook fires,
     // so busy stays stale) — escalateGracefulStop is what then drives it deterministically to exit.
-    this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c");
+    // Card 5683c2e3: this is stop()'s OWN first graceful write — the one write/kill call in this method
+    // family ac20c8e7 left unguarded (the delayed resend just below, escalateGracefulStop's own stage-2
+    // resend, and its stage-3 kill all already check `killed`). A SECOND stop() call (either mode)
+    // landing here after an earlier kill was already issued — a prior hard stop(), or this same
+    // session's own escalateGracefulStop stage-3 — sails past the top-of-method `!live?.alive` guard
+    // (alive stays true until the async 'exit' event) and would otherwise write Ctrl-C into an
+    // already-destroyed socket. Guard on `killed`, matching every sibling site — do NOT hoist this to
+    // the top of stop() (that would also skip the `stopping`/`pending`/`submitGeneration` bookkeeping
+    // above, which a second stop legitimately still needs), and do NOT extend a `killed` guard to the
+    // HARD branch's kill() call above: `killed` is set BEFORE kill() runs (bb3d9005 S1) specifically to
+    // close the write race, so it records "a kill was issued," never "the kill succeeded" — gating
+    // kill() itself on it could leave a session that failed to die on its first kill attempt permanently
+    // unkillable through this API, which is strictly worse than a redundant write.
+    if (!live.killed) this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c");
     // Card bb3d9005 (S1): also check `killed` here — this delayed resend runs concurrently with
     // escalateGracefulStop's own timers below, and ordinary setTimeout jitter can let it fire AFTER
     // stage 3's kill() has already flipped `killed` true while `alive` is still true (measured: caught by

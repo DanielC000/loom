@@ -1,6 +1,14 @@
 // Regression test for card bb3d9005 S1 (pty/host.ts): a write reaching the pty in the kill()→'exit'
 // window crashes the WHOLE daemon.
 //
+// EXTENDED for card 5683c2e3: the one write/kill site in this same method family bb3d9005/ac20c8e7 left
+// unguarded — stop()'s OWN first graceful Ctrl-C write (the immediate one, not either delayed resend) —
+// reachable whenever a SECOND stop() call (either mode) lands after an earlier kill was already issued
+// (a prior hard stop(), or this session's own escalateGracefulStop stage-3). Trials 5-6 below reproduce
+// both of those "already killed" entry paths and assert the second call's own write never reaches the
+// fake pty. Trials 7-8 are the DoD-4 exercise: a genuine FIRST stop (idle and busy/mid-turn) must still
+// write its Ctrl-C exactly as before — `killed` is false on a first call, so the new guard is a no-op.
+//
 // THE BUG: node-pty's useConptyDll kill() path (windowsPtyAgent.js, verified independently at source
 // against the installed node-pty@1.1.0) destroys `_inSocket` SYNCHRONOUSLY inside `kill()` — but the
 // underlying pty process can take tens of ms to actually exit, and `live.alive` doesn't flip to false
@@ -227,11 +235,92 @@ try {
 
     fake.fireExit(0);
   }
+
+  // ===== Trial 5 (card 5683c2e3): a SECOND stop() call — graceful, after an EARLIER HARD stop already
+  // killed — must not let its own immediate Ctrl-C write reach the already-killed pty. This is the exact
+  // reachable shape: `alive` stays true through the kill()→exit window, so stop()'s only top-of-method
+  // guard (`!live?.alive`) does not stop a second call from reaching the graceful branch's write.
+  {
+    const SID = "sess-second-stop-after-hard";
+    const fake = spawnReady(SID);
+
+    host.stop(SID, "hard"); // sets killed=true, calls kill() — no exit fired yet
+    check("[second-stop/after-hard] sanity: killed but not yet exited (window is open)", fake.isKilled === true && host.isAlive(SID) === true);
+
+    const writesAtKill = fake.writes.length;
+    let threw = null;
+    try { host.stop(SID, "graceful"); } catch (e) { threw = e; }
+    check("[second-stop/after-hard] THE FIX: the second stop()'s own Ctrl-C write did not reach the pty", fake.writes.length === writesAtKill);
+    check("[second-stop/after-hard] THE FIX: the second stop() did not throw", threw === null);
+
+    fake.fireExit(0);
+  }
+
+  // ===== Trial 6 (card 5683c2e3): a SECOND stop() call — graceful, after THIS SESSION'S OWN
+  // escalateGracefulStop stage-3 already killed it (no external hard stop involved at all) — same
+  // unguarded write, reached via the OTHER kill() call site.
+  {
+    const SID = "sess-second-stop-after-escalation";
+    const fake = spawnReady(SID);
+
+    host.stop(SID, "graceful"); // first call: writes Ctrl-C, starts the escalation chain
+    const firstWriteCount = fake.writes.length;
+    check("[second-stop/after-escalation] positive control: the FIRST call's own write reached the pty", firstWriteCount > 0);
+
+    const killDeadline = Date.now() + 5_000;
+    // TIMING-GUARD-SAFE: fully-awaited-completion — polls for the POSITIVE, observable `fake.isKilled`
+    // flip (stage 3's real kill()); the check right after runs the instant that poll observes it, with
+    // no further await before it. `host.isAlive(SID)` holds by construction — `fake.fireExit` is not
+    // called until after this trial's own checks.
+    while (!fake.isKilled && Date.now() < killDeadline) await sleep(5);
+    check("[second-stop/after-escalation] sanity: stage-3 escalation killed it (still not exited)", fake.isKilled === true && host.isAlive(SID) === true);
+
+    const writesAtKill = fake.writes.length;
+    let threw = null;
+    try { host.stop(SID, "graceful"); } catch (e) { threw = e; } // SECOND call, same session, same mode
+    check("[second-stop/after-escalation] THE FIX: the second stop()'s own Ctrl-C write did not reach the pty", fake.writes.length === writesAtKill);
+    check("[second-stop/after-escalation] THE FIX: the second stop() did not throw", threw === null);
+
+    fake.fireExit(0);
+  }
+
+  // ===== Trial 7 (card 5683c2e3, DoD-4): a genuine FIRST graceful stop of an IDLE session must still
+  // write its Ctrl-C exactly as before the fix — `killed` is false on a first call, so the new guard at
+  // host.ts:10149 is a no-op here. =====
+  {
+    const SID = "sess-first-stop-idle";
+    const fake = spawnReady(SID); // idle: nothing enqueued, busy is false
+
+    const before = fake.writes.length;
+    host.stop(SID, "graceful");
+    check("[first-stop/idle] a real first stop still writes its Ctrl-C (not suppressed)", fake.writes.length > before && fake.writes.some((w) => w.data === "\x03"));
+
+    fake.fireExit(0);
+    check("[first-stop/idle] session reads dead once exit lands", host.isAlive(SID) === false);
+  }
+
+  // ===== Trial 8 (card 5683c2e3, DoD-4): a genuine FIRST graceful stop of a BUSY/mid-turn session must
+  // also still write its Ctrl-C interrupt — mirrors pty-stop-queue.mjs's busy-stop scenario, but here
+  // specifically to prove the new `!live.killed` guard doesn't regress the busy path (killed is false on
+  // a first call regardless of busy state). =====
+  {
+    const SID = "sess-first-stop-busy";
+    const fake = spawnReady(SID);
+    host.enqueueStdin(SID, "IN_FLIGHT_TURN"); // arms busy — a real turn in flight
+    check("[first-stop/busy] setup: turn armed busy", host.isBusy(SID) === true);
+
+    const before = fake.writes.length;
+    host.stop(SID, "graceful");
+    check("[first-stop/busy] a real first stop on a BUSY session still writes its Ctrl-C interrupt (not suppressed)", fake.writes.length > before && fake.writes.some((w) => w.data === "\x03"));
+    check("[first-stop/busy] the interrupted turn stays alive (only the Stop hook / escalation ends it — unchanged)", host.isAlive(SID) === true);
+
+    fake.fireExit(0);
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a write landing in the kill()→'exit' window (both the hard-stop and the graceful-escalation kill() call sites; both a viewer repaint and a raw human keystroke via writeStdin/writeChunked) no longer reaches the pty and no longer throws — Live.killed closes the race that used to crash the whole daemon on a destroyed-socket write."
+  ? "\n✅ ALL PASS — a write landing in the kill()→'exit' window (both the hard-stop and the graceful-escalation kill() call sites; both a viewer repaint and a raw human keystroke via writeStdin/writeChunked; and now a SECOND stop() call's own immediate Ctrl-C write, after either an earlier hard stop or this session's own escalation already killed it) no longer reaches the pty and no longer throws — Live.killed closes the race that used to crash the whole daemon on a destroyed-socket write, and a genuine FIRST stop (idle or busy) is unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
