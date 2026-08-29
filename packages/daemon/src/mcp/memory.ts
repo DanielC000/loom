@@ -4,7 +4,7 @@ import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
 import { annotateBacklinks } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
-import { computeFloorTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
+import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
 // resolved SERVER-SIDE from the session id — the agent never passes a projectId, mirroring tasks.ts.
@@ -122,6 +122,24 @@ export interface NeverDropSignal {
 }
 
 /**
+ * Card 3b2aa339 (DoD-2 option b) — an informational signal returned alongside a successful write for an
+ * ORDINARY pinned note (`pinned:true`, no `NEVER_DROP_TAG`) — the sub-tier `NeverDropSignal` never covers,
+ * and the one measured to actually starve (mean ~1.6% per-note delivery at this project's real corpus/
+ * budget; most REST notes never delivered across 30 rounds — see {@link computeRestTierStatus}'s own doc
+ * comment for the full measurement). The cost of adding to this tier was previously invisible at the exact
+ * moment of the pin; this surfaces it there instead, purely advisory — it can never turn a write that
+ * would otherwise succeed into a rejection, mirroring {@link NeverDropSignal}'s own posture.
+ */
+export interface RestTierSignal {
+  message: string;
+  restCount: number;
+  floorTokens: number;
+  restCapEstimate: number;
+  roughFitCount: number;
+  roughCycleKickoffs: number | null;
+}
+
+/**
  * UPSERT by `key` (owner decision #2: always-update in place) — a second write to the same key updates
  * the note rather than piling a contradictory duplicate. Enforces the per-project bounded-store cap
  * (`memory.maxNotes`, resolveConfig) on every write; pinned notes are exempt (see
@@ -152,7 +170,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -241,7 +259,12 @@ export function writeProjectMemory(
     };
   }
   const neverDropStatus = computeNeverDropStatus(db, projectId, result.entry, memoryConfig.budgetTokens);
-  return neverDropStatus ? { ...result.entry, neverDropStatus } : result.entry;
+  const restTierStatus = computeRestTierSignal(db, projectId, result.entry, memoryConfig.budgetTokens);
+  return {
+    ...result.entry,
+    ...(neverDropStatus ? { neverDropStatus } : {}),
+    ...(restTierStatus ? { restTierStatus } : {}),
+  };
 }
 
 /** Card 835a8d67 DoD-1/2/3 — computed AFTER the write above already succeeded (never blocks/rejects it).
@@ -282,6 +305,42 @@ function computeNeverDropStatus(
         `every note in this tier; roughly ${status.roughFitCount} of ${status.floorCount} such notes fit.`
       : `floor tier (pinned + "${NEVER_DROP_TAG}") is ≈${status.floorTokens} tok of a ` +
         `${status.budgetTokens} tok budget (${status.floorCount} note(s)) — fits.`,
+  };
+}
+
+/** Card 3b2aa339 (DoD-2 option b) — computed AFTER the write above already succeeded (never blocks it),
+ *  same posture as {@link computeNeverDropStatus}. `undefined` when the note's (post-write) EFFECTIVE
+ *  state isn't an ORDINARY pin — unpinned, or pinned-and-`NEVER_DROP_TAG`-tagged (that sub-tier already
+ *  gets {@link computeNeverDropStatus}'s own signal; this one is deliberately its REST-tier sibling, not a
+ *  duplicate for the same note). Reuses {@link computeRestTierStatus} — one function computes the numbers,
+ *  this one only phrases them, so the estimate here can never silently diverge from the doc-commented
+ *  measurement that motivated it. */
+function computeRestTierSignal(
+  db: Db,
+  projectId: string,
+  entry: ProjectMemoryEntry,
+  budgetTokens: number,
+): RestTierSignal | undefined {
+  if (!entry.pinned || entry.tags.includes(NEVER_DROP_TAG)) return undefined;
+  const pinnedNow = db.listPinnedProjectMemory(projectId);
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
+  const status = computeRestTierStatus(pinnedNow, budgetTokens, annotate);
+  const cycle = status.roughCycleKickoffs;
+  return {
+    restCount: status.restCount,
+    floorTokens: status.floorTokens,
+    restCapEstimate: status.restCapEstimate,
+    roughFitCount: status.roughFitCount,
+    roughCycleKickoffs: cycle,
+    message: cycle == null
+      ? `this project's ordinary-pinned ("REST") tier now has ${status.restCount} note(s), and none of them ` +
+        `are expected to fit this budget at all (a rotating LRU tier with roughly 0 slots) — "pinned" does NOT ` +
+        `mean delivered here; consider "never-drop" only if this note must always ride, or leave it unpinned ` +
+        `so it can compete on relevance via FTS instead.`
+      : `this project's ordinary-pinned ("REST") tier now has ${status.restCount} note(s) competing for ` +
+        `roughly ${status.roughFitCount} slot(s) per kickoff under a fair rotation — expect this note ` +
+        `(and every other REST note) to be delivered on the order of once every ~${cycle} kickoffs, not every ` +
+        `kickoff; "pinned" guarantees full-text inclusion only for the separate "never-drop" floor tier.`,
   };
 }
 

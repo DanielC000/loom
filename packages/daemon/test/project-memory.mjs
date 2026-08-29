@@ -551,6 +551,61 @@ try {
     const alarmFloorTokens = Number(/floor tier ≈ (\d+) tok/.exec(framedKickoff ?? "")?.[1]);
     check("(never-drop) DoD-6: memory_write's reported floorTokens EXACTLY MATCHES the packer's own ALARM total",
       Number.isFinite(alarmFloorTokens) && alarmFloorTokens === noteB.neverDropStatus.floorTokens);
+
+    check("(never-drop) a pinned+never-drop note carries NO restTierStatus (mutually exclusive sub-tier signals)",
+      !("restTierStatus" in noteB));
+
+    // ===================== card 3b2aa339: writeProjectMemory's restTierStatus signal (REST sub-tier) =====================
+    // Reuses this SAME ndProj (budgetTokens:100, floor tier already over budget from nd-a/nd-b above) so
+    // the floorTokens cross-check below has real, independently-established ground truth (noteB's own
+    // neverDropStatus.floorTokens) rather than a hand-recomputed number.
+    const restOnFloorProj = writeProjectMemory(db, ndProj, { key: "rest-note-1", text: "an ordinary pinned note", pinned: true });
+    check("(rest-tier) an ordinary pinned write in this project carries restTierStatus", !!restOnFloorProj.restTierStatus);
+    check("(rest-tier) it does NOT also carry neverDropStatus (mutually exclusive sub-tier signals)",
+      !("neverDropStatus" in restOnFloorProj));
+    check("(rest-tier) restCount is 1 — only this note; nd-a/nd-b are floor-tier, nd-unpinned is unpinned",
+      restOnFloorProj.restTierStatus.restCount === 1);
+    check("(rest-tier) DoD-6-style cross-check: floorTokens EXACTLY MATCHES the never-drop signal's own floorTokens for the SAME floor tier",
+      restOnFloorProj.restTierStatus.floorTokens === noteB.neverDropStatus.floorTokens);
+    check("(rest-tier) floor tier alone already exceeds the 100-token budget, so REST's estimated capacity is ZERO",
+      restOnFloorProj.restTierStatus.restCapEstimate === 0 && restOnFloorProj.restTierStatus.roughFitCount === 0);
+    check("(rest-tier) roughCycleKickoffs is null when nothing is expected to fit",
+      restOnFloorProj.restTierStatus.roughCycleKickoffs === null);
+    check("(rest-tier) the starved message names ~0 slots, never a fabricated cycle count",
+      /roughly 0 slot/i.test(restOnFloorProj.restTierStatus.message));
+
+    // A plain (unpinned) write carries neither signal — byte-identical to before this card.
+    const restPlain = writeProjectMemory(db, ndProj, { key: "rest-plain", text: "unpinned, no tags" });
+    check("(rest-tier) an unpinned write carries NO restTierStatus key at all", !("restTierStatus" in restPlain));
+
+    // A fresh project with ONLY ordinary pinned notes (no never-drop tier at all) — floorTokens is 0, so
+    // restCapEstimate is the full 70% (RELATED_RESERVE_FRACTION-adjusted) of budgetTokens, and the
+    // fit-count arithmetic is easy to reason about directly.
+    const restProj = "proj-rest-tier-status";
+    db.insertProject({
+      id: restProj, name: "Rest Tier Status Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: { memory: { budgetTokens: 200 } }, createdAt: now, archivedAt: null,
+    });
+    const r1 = writeProjectMemory(db, restProj, { key: "r1", text: "y".repeat(200), pinned: true });
+    check("(rest-tier) first ordinary pinned note: healthy — restCount 1 fits within roughFitCount",
+      r1.restTierStatus.restCount === 1 && r1.restTierStatus.roughFitCount >= 1 && r1.restTierStatus.roughCycleKickoffs === 1);
+    check("(rest-tier) healthy message talks about competing for slots, not a starved 0-slot warning",
+      !/roughly 0 slot/i.test(r1.restTierStatus.message));
+
+    // Add ordinary pinned notes until the REST tier's own count outgrows its estimated fit count — the
+    // "pinned no longer means every kickoff" case this signal exists to surface.
+    let lastWrite = r1;
+    for (let i = 2; i <= 6 && lastWrite.restTierStatus.roughCycleKickoffs === 1; i++) {
+      lastWrite = writeProjectMemory(db, restProj, { key: `r${i}`, text: "y".repeat(200), pinned: true });
+    }
+    check("(rest-tier) enough ordinary pinned notes eventually push roughCycleKickoffs above 1",
+      lastWrite.restTierStatus.roughCycleKickoffs > 1);
+    check("(rest-tier) restCount now exceeds roughFitCount (the condition driving the cycle estimate)",
+      lastWrite.restTierStatus.restCount > lastWrite.restTierStatus.roughFitCount);
+    check("(rest-tier) the degraded message states the estimated cycle length in kickoffs",
+      new RegExp(`~${lastWrite.restTierStatus.roughCycleKickoffs} kickoffs`).test(lastWrite.restTierStatus.message));
+    check("(rest-tier) the degraded message is explicit that 'pinned' isn't 'every kickoff' for this tier",
+      /not every kickoff/i.test(lastWrite.restTierStatus.message));
   }
 
   // ===================== card 046c721e: floor-tier (pinned+never-drop) byte cap is a REJECTING precondition =====================

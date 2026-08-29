@@ -242,6 +242,54 @@ function packRelatedPrefix(
 }
 
 /**
+ * Card 3b2aa339 — the REST sub-tier's (ordinary pinned, non-`never-drop`) write-time capacity estimate:
+ * the write-time-visible sibling of {@link computeFloorTierStatus} for the tier that actually starves
+ * under a shared budget. Measured live on this project (30 rotation-aware rounds against the real corpus,
+ * card 3b2aa339): the floor tier is fixed overhead (≈66% of an 8000-token budget before a single REST note
+ * is considered) and REST rotates through the leftover at a mean ~1.6% per-note delivery rate, with most
+ * REST notes never delivered across 30 kickoffs. "Pinned" was never the guarantee for this sub-tier the
+ * way it is for `never-drop` — but that cost was invisible at the moment of the pin, which is the actual
+ * defect this function targets (see writeProjectMemory's `restTierStatus`, mcp/memory.ts).
+ *
+ * Unlike the floor tier (an exact fits-or-doesn't-fit pack against the FULL budget), REST competes with
+ * the RELATED tier's reserve (see {@link RELATED_RESERVE_FRACTION}) and only ever gets a rotating slot
+ * under fair LRU packing ({@link sortPinnedByRecency}) — "will THIS note ever be delivered" isn't
+ * answerable exactly without simulating real kickoffs (there is no `kickoffText` yet at write time, so
+ * the actual per-round RELATED reserve consumption is unknowable here). This instead returns a CHEAP,
+ * deterministic, write-time estimate: REST's capacity under the WORST-CASE nominal RELATED reserve (the
+ * full {@link RELATED_RESERVE_FRACTION}, since a real kickoff could claim all of it), and the resulting
+ * expected full-rotation cycle length in kickoffs, so an author sees roughly "1 in every N kickoffs" for
+ * the REST tier as it stands the moment they're about to add to it. Advisory only — this never blocks a
+ * write, mirroring {@link computeFloorTierStatus}'s own posture.
+ */
+export function computeRestTierStatus(
+  pinnedNotes: ProjectMemoryEntry[],
+  budgetTokens: number,
+  annotate: (m: ProjectMemoryEntry) => string[] = () => [],
+): {
+  restCount: number;
+  floorTokens: number;
+  restCapEstimate: number;
+  avgRestNoteTokens: number;
+  roughFitCount: number;
+  roughCycleKickoffs: number | null;
+} {
+  const floorBlocks = sortPinnedByRecency(pinnedNotes.filter(isNeverDrop)).map((m) => noteBlock(m, annotate(m)));
+  const floorTokens = floorSectionTokens(floorBlocks);
+  const restBlocks = sortPinnedByRecency(pinnedNotes.filter((m) => !isNeverDrop(m))).map((m) => noteBlock(m, annotate(m)));
+  const restCount = restBlocks.length;
+  const reserveTokens = Math.floor(budgetTokens * RELATED_RESERVE_FRACTION);
+  const restCapEstimate = Math.max(0, budgetTokens - floorTokens - reserveTokens);
+  if (restCount === 0) {
+    return { restCount: 0, floorTokens, restCapEstimate, avgRestNoteTokens: 0, roughFitCount: 0, roughCycleKickoffs: null };
+  }
+  const avgRestNoteTokens = restBlocks.reduce((sum, b) => sum + estimateTokens(b), 0) / restCount;
+  const roughFitCount = Math.max(0, Math.floor(restCapEstimate / avgRestNoteTokens));
+  const roughCycleKickoffs = roughFitCount > 0 ? Math.ceil(restCount / roughFitCount) : null;
+  return { restCount, floorTokens, restCapEstimate, avgRestNoteTokens, roughFitCount, roughCycleKickoffs };
+}
+
+/**
  * Compose the two-tier digest body (no framing tag) — deterministic, side-effect-free, hermetically
  * testable with fixture entries (no DB). Mirrors companion/memory-recall.ts's composeMemoryRecallDigest
  * shape: PINNED first, then RELATED (caller-ranked — FTS5 `rank` order — against whatever budget
