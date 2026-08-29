@@ -239,7 +239,10 @@ export class TaskMcpRouter {
           "question_pull, reading this never flips the request's state — re-readable across turns/agents. " +
           "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +
           "(full id or an unambiguous 8-char id-prefix) further scopes the lookup — if given, the request " +
-          "must be connected to THAT task or this errors.",
+          "must be connected to THAT task or this errors. An optional `projectId` is tolerated but ignored " +
+          "— this tool is already scoped to the caller's own project (mirrors tasks_get). A request that " +
+          "exists but belongs to a DIFFERENT project's board reads as not-found-here, distinctly worded " +
+          "from a request that doesn't exist anywhere.",
         inputSchema: strictShape({ id: z.string(), taskId: z.string().optional(), projectId: z.string().optional() }),
       },
       async ({ id, taskId }) => ok(getProjectTaskRequest(db, projectId, id, taskId)),

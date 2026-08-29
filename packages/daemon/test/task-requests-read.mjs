@@ -195,6 +195,22 @@ try {
   const otherAsk = askParse(await otherServer._registeredTools["question_ask"].handler({ title: "Other project ask", body: "b" }));
   const crossProjectRead = await tCall("task_request_get", { id: otherAsk.questionId });
   check("(F) a request from ANOTHER project resolves to not-found (cross-project scoping)", typeof crossProjectRead.error === "string");
+  // Card 3588e74e: the error must DISAMBIGUATE "exists on another project's board" from "no such request
+  // anywhere" — collapsing the two previously read a genuine, answered request as pure non-existence to a
+  // caller verifying it by id (the incident this card fixes). Mirrors resolveProjectTaskId's identical
+  // task-lookup wording ("... it exists on another project's board (out of scope for this session)").
+  check(
+    "(F) the cross-project error DISTINGUISHES 'exists elsewhere' from a genuine not-found, mirroring the task-lookup wording",
+    crossProjectRead.error.includes("exists on another project's board") && crossProjectRead.error.includes("out of scope for this session"),
+  );
+  const genuinelyMissing = await tCall("task_request_get", { id: "ffffffff-0000-4000-8000-000000000099" });
+  check("(F) a request id that exists NOWHERE reads a plain not-found, never the 'exists elsewhere' wording", typeof genuinelyMissing.error === "string" && !genuinelyMissing.error.includes("exists on another project's board"));
+  check("(F) the two error messages are DIFFERENT strings (the actual disambiguation, not just two error:true's)", crossProjectRead.error !== genuinelyMissing.error);
+
+  // Card 3588e74e DoD-2: `projectId` is documented tolerated-but-ignored (mirrors tasks_get) — passing a
+  // WRONG projectId must not change the outcome; the tool stays scoped to the session's own project only.
+  const withBogusProjectId = await tCall("task_request_get", { id: askResult.questionId, projectId: "not-a-real-project-id" });
+  check("(F) an arbitrary/wrong `projectId` argument is tolerated but ignored — the real, own-project read still succeeds", withBogusProjectId.id === askResult.questionId && !withBogusProjectId.error);
 
   const unknownTaskList = await tCallList("task_requests_list", { taskId: "not-a-real-task-id" });
   check("(F) task_requests_list on an unknown taskId errors (task not found), not an empty list", typeof unknownTaskList.error === "string");

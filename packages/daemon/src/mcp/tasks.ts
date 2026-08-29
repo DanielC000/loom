@@ -689,7 +689,13 @@ export function getProjectTaskRequest(
   db: Db, projectId: string, id: string, taskId?: string,
 ): Record<string, unknown> | { error: string } {
   const q = db.getQuestion(id);
-  if (!q || q.projectId !== projectId) return { error: "request not found in this project" };
+  if (!q) return { error: "request not found in this project" };
+  // Disambiguate "no such request anywhere" from "exists on another project's board" (mirrors
+  // resolveProjectTaskId's identical split above, card 3588e74e part ②) — collapsing the two into one
+  // message reads a genuine, answered request as pure non-existence to a caller verifying it by id.
+  if (q.projectId !== projectId) {
+    return { error: `request '${id}' not found in this project — it exists on another project's board (out of scope for this session)` };
+  }
   if (taskId) {
     const owned = resolveProjectTaskId(db, projectId, taskId);
     if ("error" in owned) return owned;
