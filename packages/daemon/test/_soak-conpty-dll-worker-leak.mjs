@@ -130,15 +130,26 @@ async function runCycle(host, id) {
   // Sample WHILE the pty is still alive, before kill — the positive control proving the query can see
   // OpenConsole.exe at all (only relevant/expected non-zero on the DLL arm; see soakArm's self-check).
   const openConsoleWhileAlive = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
+  const killedAt = Date.now();
   host.stop(id, "hard"); // TerminateProcess — the DLL arm's kill() defers worker dispose to a 'data' event that (Start-Sleep) should never come
-  const deadline = Date.now() + 15000;
+  const deadline = killedAt + 15000;
   while (await psAlive(pid) && Date.now() < deadline) await sleep(50);
-  // FLUSH_DATA_INTERVAL (windowsConoutConnection.js, hardcoded, not env-configurable) is a REAL 1000ms
-  // timer even on the non-DLL/baseline arm's OWN (immediate-call, but still async) dispose() path — measuring
-  // right after psAlive-gone would misclassify "hasn't drained yet" as "leaked" on the baseline arm too.
-  // Wait comfortably past that known constant so only a GENUINE (never-draining) leak still shows live.
-  await sleep(1500);
-  const openConsoleAfterSettle = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
+  // Card 579c88a9's dedicated multi-checkpoint curve soak (_soak-conpty-dll-teardown-curve.mjs) found the
+  // DLL arm's OpenConsole.exe consistently clears between 2000-2500ms after kill (N=30: 30/30 still
+  // present at 1500ms, 0/30 by 2500ms). A FIXED sleep here — however long — is a fixed wait guarding a
+  // negative assertion ("0 ⇒ no leak"): it can't distinguish "did not leak" from "has not cleared yet",
+  // and any margin it picks is only as good as this run's host load. So poll-until-clear instead, the
+  // same shape the curve soak already uses (stop as soon as the observable event — count reaching 0 —
+  // actually happens), bounded by the curve soak's own last checkpoint as a hard cap: a genuine
+  // never-draining leak still fails this check at 25s; a slow-but-draining teardown no longer misreads as
+  // a straggler just because it took longer than some arbitrarily chosen fixed sleep.
+  const SETTLE_POLL_INTERVAL_MS = 250;
+  const SETTLE_HARD_CAP_MS = 25000;
+  let openConsoleAfterSettle = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
+  while (openConsoleAfterSettle > 0 && Date.now() - killedAt < SETTLE_HARD_CAP_MS) {
+    await sleep(SETTLE_POLL_INTERVAL_MS);
+    openConsoleAfterSettle = await psChildProcessCountByName(process.pid, "OpenConsole.exe");
+  }
   return { openConsoleWhileAlive, openConsoleAfterSettle };
 }
 
