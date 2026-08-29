@@ -62,6 +62,31 @@ const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false,
 const PRIORITY_RANK: Record<TaskPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.red, p1: color.red, p2: color.amber, p3: color.textMuted };
 
+// ── non-run rows (card 04cef8d7) ────────────────────────────────────────────────
+// `gateRan:false` (card 3a6f04cc) means no gate PROCESS ever spawned for this op. Such a row still
+// carries a `durationMs`, and that number is REAL — it just measures the wrong thing: op overhead
+// (the reuse-proof git calls, queue/admission bookkeeping), never gate execution. Rendered plain
+// beside a real run's duration it silently contaminates the one question this table exists to answer
+// ("is the gate floor climbing?") — the exact contamination the agent-facing `gate_history` tool
+// description already warns agents against, leaving an agent and a human to read the same rows and
+// reach different conclusions with nothing on screen to explain why. So the row STAYS (it is a real
+// event; hiding it would only create a different blindness) and only its DURATION is de-emphasised:
+// parenthesised + muted, with a cyan "no gate ran" marker (cyan is this page's established
+// non-verdict/info tone, so the marker never reads as a failure) and a per-row reason on hover.
+const NON_RUN_LABEL = "no gate ran";
+const NON_RUN_NOTE =
+  "This duration is a real number, but it measures op overhead (reuse checks, queue and git bookkeeping), not gate execution. Leave this row out of a gate-duration trend.";
+// Derived from `outcome`, which is the only signal this row carries about WHY nothing spawned:
+// "skipped" is inert-diff by construction (card db9b0130), "cancelled" is a withdrawal before a
+// process started (card 3a6f04cc), and a "pass" that never ran is a reused worker self-check — the
+// only remaining producer. Anything else falls back to the reason-free note rather than guessing.
+function nonRunReason(outcome: GateOutcome): string {
+  if (outcome === "skipped") return "The merge diff was proven inert, so the gate was never attempted.";
+  if (outcome === "cancelled") return "This run was withdrawn before a gate process spawned.";
+  if (outcome === "pass") return "This merge reused an already-green worker self-check.";
+  return "No gate process spawned for this run.";
+}
+
 // A long-running lane cue mirroring the mockup: warn (amber) once a running gate passes this, since the
 // default gateCommandTimeoutMs is minutes and a lane held this long is worth the eye.
 const LONG_RUN_WARN_SECONDS = 420;
@@ -467,6 +492,16 @@ function HistoryTable({
           ))}
         </tbody>
       </table>
+      {/* The always-visible half of the non-run affordance (card 04cef8d7): the per-row marker says
+          WHICH rows, this says WHAT it means — a hover tooltip alone would leave the distinction
+          invisible to anyone who never hovers. Shown only while a non-run row is actually loaded, so
+          it never becomes permanent chrome on a table that has none. */}
+      {rows.some((r) => !r.gateRan) && (
+        <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.border}`, fontSize: 11, lineHeight: 1.55, color: color.textDim, maxWidth: "78ch", whiteSpace: "normal" }}>
+          <span style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: color.cyan }}>{NON_RUN_LABEL}</span>
+          {" marks a run where no gate process ever spawned: a merge that reused a green worker self-check, a run withdrawn before it was admitted, or a diff proven inert. Its duration is parenthesised because it is a real number measuring op overhead, not gate execution. Leave those rows out of a gate-duration trend."}
+        </div>
+      )}
     </div>
   );
 }
@@ -490,10 +525,23 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
         {row.workerLabel ?? "—"}
         {row.failingTest && <span style={{ color: color.red }}> · {row.failingTest}</span>}
       </td>
-      <td style={tdStyle}>
-        <span style={{ fontVariantNumeric: "tabular-nums", color: killed ? color.red : color.text }}>
-          {fmtDurationMs(row.durationMs)}
-        </span>
+      <td style={tdStyle} title={row.gateRan ? undefined : `${nonRunReason(row.outcome)} ${NON_RUN_NOTE}`}>
+        {row.gateRan ? (
+          <span style={{ fontVariantNumeric: "tabular-nums", color: killed ? color.red : color.text }}>
+            {fmtDurationMs(row.durationMs)}
+          </span>
+        ) : (
+          <span style={{ display: "inline-flex", alignItems: "baseline", gap: 7 }}>
+            {/* Parenthesised so the number reads as an aside, not a measurement to compare. A null
+                duration keeps the table's plain "—" — wrapping that in parens would say nothing. */}
+            <span style={{ fontVariantNumeric: "tabular-nums", color: color.textMuted }}>
+              {row.durationMs == null ? fmtDurationMs(null) : `(${fmtDurationMs(row.durationMs)})`}
+            </span>
+            <span style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: color.cyan }}>
+              {NON_RUN_LABEL}
+            </span>
+          </span>
+        )}
       </td>
       <td style={{ ...tdStyle, color: color.textMuted, fontFamily: font.mono }}>{relTime(row.endedAt, now)}</td>
     </tr>

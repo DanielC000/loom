@@ -71,4 +71,66 @@ test.describe("Gates page (card a1c86452)", () => {
     await page.getByRole("button", { name: "All", exact: true }).click();
     await expect(page.getByText("loom/other-proj")).toBeVisible();
   });
+
+  // Card 04cef8d7 — the human surface consumes `gateRan` (card 3a6f04cc). A row where no gate PROCESS
+  // spawned still carries a real durationMs, but it measures op overhead, not gate execution; rendered
+  // plain it contaminates a duration trend. The acceptance evidence is the CONTRAST: the two row types
+  // must LOOK DIFFERENT. Each absence assertion below is paired with the same locator returning a hit on
+  // the non-run row in the same test, so a silently-broken locator can't pass as a clean absence.
+  test("a non-run row's duration is de-emphasised and labelled; a real run's is not", async ({ page, loomDaemon }) => {
+    // A REUSED merge gate: detail.reused → gateRan:false, outcome "pass" (db.ts's gateRanFromDetail).
+    const reused = await loomDaemon.seedLiveSession({
+      role: "worker", agentName: "Dev", branch: "loom/gate-reused", task: { title: `reused-${Date.now()}` },
+    });
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: reused.sessionId, workerSessionId: reused.sessionId, taskId: reused.taskId,
+      kind: "build_gate", detail: { passed: true, reused: true, durationMs: 2034 },
+    });
+    // An INERT-DIFF skip (card db9b0130): outcome "skipped" + an explicit gateSpawned:false stamp.
+    const skipped = await loomDaemon.seedLiveSession({
+      project: reused.project, agentId: reused.agentId, role: "worker",
+      branch: "loom/gate-inert", task: { title: `inert-${Date.now()}` },
+    });
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: skipped.sessionId, workerSessionId: skipped.sessionId, taskId: skipped.taskId,
+      kind: "build_gate", detail: { skipped: true, gateSpawned: false, durationMs: 4100 },
+    });
+    // A REAL merge gate on the same project: no reuse/skip signal → gateRan:true, a plain duration.
+    const real = await loomDaemon.seedLiveSession({
+      project: reused.project, agentId: reused.agentId, role: "worker",
+      branch: "loom/gate-real-run", task: { title: `real-${Date.now()}` },
+    });
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: real.sessionId, workerSessionId: real.sessionId, taskId: real.taskId,
+      kind: "build_gate", detail: { passed: true, durationMs: 872000 },
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/gates`);
+    await page.getByRole("button", { name: reused.projectName, exact: true }).click();
+
+    // The reused row: the duration is PARENTHESISED (2034ms → "(2s)") and carries the marker.
+    const reusedRow = page.locator("tr", { hasText: "loom/gate-reused" });
+    await expect(reusedRow.getByText("(2s)", { exact: true })).toBeVisible();
+    await expect(reusedRow.getByText("no gate ran", { exact: true })).toBeVisible();
+    // …and it is still a PASS, not a failure — the row is not dropped or recoloured as an error.
+    await expect(reusedRow.getByText("pass", { exact: true })).toBeVisible();
+
+    // The inert-diff row: same treatment, and its outcome reads "skipped" (a non-verdict), not a reject.
+    const skippedRow = page.locator("tr", { hasText: "loom/gate-inert" });
+    await expect(skippedRow.getByText("(4s)", { exact: true })).toBeVisible();
+    await expect(skippedRow.getByText("no gate ran", { exact: true })).toBeVisible();
+    await expect(skippedRow.getByText("skipped", { exact: true })).toBeVisible();
+
+    // The REAL run: a bare, unparenthesised duration (872000ms → "14m 32s") and NO marker. The two
+    // getByText patterns here are the SAME ones that just matched above, so a zero here is a real
+    // absence rather than a broken locator.
+    const realRow = page.locator("tr", { hasText: "loom/gate-real-run" });
+    await expect(realRow.getByText("14m 32s", { exact: true })).toBeVisible();
+    await expect(realRow.getByText("no gate ran", { exact: true })).toHaveCount(0);
+    await expect(realRow.getByText("(14m 32s)", { exact: true })).toHaveCount(0);
+
+    // The always-visible legend explains the convention without a hover, and says the duration is a
+    // real number measuring the wrong thing — never that it is missing or broken.
+    await expect(page.getByText(/real number measuring op overhead, not gate execution/)).toBeVisible();
+  });
 });
