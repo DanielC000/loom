@@ -1917,6 +1917,23 @@ const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
  * subject on this project, so an un-retitled `fix(…)` merging over a retracted premise stamps a fix for a
  * bug that never existed into permanent mainline history.
  *
+ * KNOWN BLIND SPOT (card `a29ee2a6`, measured 2026-08-29 against the live `loom.db`, read-only, positive-
+ * controlled against the origin incident `c7bf65aa`): this reads the card's CURRENT title+body only — a
+ * retraction stated solely in a session transcript, never written into the card, is invisible here. The
+ * one confirmed real specimen of that exact shape (`c7bf65aa` itself) never actually merged, so it caused
+ * no harm. But transcript-only silence turned out to be the RARE case, not the common one: of 314 tasks
+ * (all projects on this daemon) whose title or body mentions "retract", 87 had a title currently starting
+ * `fix(`; of THOSE, only 9 (~10%) matched this exact regex and 78 (~90%) did not. Manually reading ~20 of
+ * those 78 found the large majority ARE genuine premise-retraction narratives written into the body — just
+ * phrased as free-form prose or a decorated heading ("PREMISE RETRACTED", "RETRACTED BY THE AUTHOR/
+ * MANAGER", an emoji-prefixed heading, or "retraction" rather than "retracted") that this deliberately
+ * narrow regex does not match. Of that same ~20-specimen sample, every one that had actually merged either
+ * matched this regex anyway or had its title corrected before merge by human discipline (the
+ * retitle-before-merge doctrine, `0fa32321`/`514da7cf`) — no false `fix(...)` subject was observed to have
+ * landed on mainline history in that sample, despite the regex missing most of it. Widening this function
+ * to read transcripts is NOT supported by that measurement; loosening the regex to catch more of the
+ * body's own existing free-form phrasing is the more promising, still-unexplored lever.
+ *
  * Returns the matched marker label when the TITLE still starts with the literal `fix(` (lowercase, this
  * project's Conventional Commits type casing) AND the BODY carries one of {@link RETRACTION_MARKER_RES}
  * as its OWN standalone line — else `null`. PURE (no I/O), so trivially unit-tested; mirrors
