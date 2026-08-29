@@ -61,6 +61,27 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 check("(0) dev-server helper exists", fs.existsSync(HELPER));
 
+// FAILURE-PATH CLEANUP REGISTRY (card 075bc1cf): a section's own try/finally only runs cleanup while this
+// FILE keeps executing JS normally. Two real orphans found live on a real host (13.5h old, across
+// multiple daemon restarts) proved that path isn't enough: BOTH had a CONFIRMED-DEAD parent yet a still-
+// running child — exactly the signature of a bare, non-tree `process.kill(trackedPid, ...)` (every
+// section's existing `finally`-block fallback below) killing only the tracked SUPERVISOR pid (see the
+// SUPERVISOR note atop the real helper, imported as HELPER above) while its own real-command child
+// survives as a fresh orphan. Only the helper's OWN `stop` does a tree-aware kill (`taskkill /T` on
+// win32) that reaches that child too — so this registers every <dir> this file hands to `HELPER start`
+// and sweeps `HELPER stop` over all of them from a single, synchronous `exit` handler, mirroring
+// _tmp-fixture.mjs's own exit-hook pattern (directories there; processes here) so cleanup survives an
+// uncaught exception or this file's own terminal `process.exit()` — not just the happy path. `stop` is
+// idempotent (a proven safe no-op once a dir is already stopped — see check (d) below), so re-sweeping a
+// dir a section already stopped costs nothing.
+const trackedServerDirs = new Set();
+const trackServerDir = (absDir) => trackedServerDirs.add(absDir);
+process.on("exit", () => {
+  for (const d of trackedServerDirs) {
+    try { spawnSync(process.execPath, [HELPER, "stop", d], { stdio: "ignore", timeout: 10_000 }); } catch { /* best-effort backstop */ }
+  }
+});
+
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same timeoutMs/stepMs budget, still
 // returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
@@ -76,12 +97,14 @@ const waitUntil = async (predicate, timeoutMs = 5000, stepMs = 50) => {
 // A tiny heartbeat fixture: writes the current time to `outFile` on an interval, forever, until killed.
 // Its liveness is externally observable via both process.kill(pid,0) and the heartbeat file's mtime
 // advancing — two independent signals a mis-scoped or no-op kill would fail to reproduce.
+const HEARTBEAT_WRITE_INTERVAL_MS = 100; // the fixture's own write cadence, baked into heartbeatSrc below
 const heartbeatSrc = "const f=process.argv[2];setInterval(()=>{try{require('fs').writeFileSync(f,String(Date.now()))}catch{}},100);";
 const fixtureDir = mkdtempManaged("loom-dev-server-fixture-");
 const heartbeatScript = path.join(fixtureDir, "heartbeat.cjs");
 fs.writeFileSync(heartbeatScript, heartbeatSrc);
 
 const workDir = mkdtempManaged("loom-dev-server-work-");
+trackServerDir(path.resolve(workDir));
 const otherWorkDir = mkdtempManaged("loom-dev-server-other-");
 const heartbeatOut = path.join(workDir, "heartbeat.txt");
 const controlOut = path.join(otherWorkDir, "control.txt");
@@ -141,20 +164,19 @@ try {
 
   const trackedGone = trackedPid != null && await waitUntil(() => !isAlive(trackedPid), 5000);
   check("(b) tracked pid is gone after stop()", trackedGone);
-  const HEARTBEAT_INTERVAL_MS = 100; // the fixture's own write cadence (heartbeatSrc's setInterval, above)
   const mtimeOf = (f) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0);
   const heartbeatMtimeAfterKill = mtimeOf(heartbeatOut);
   const heartbeatStillFrozen = await assertNeverWithControl({
     label: "(b) fixture's heartbeat file stops advancing after stop()",
     check: () => mtimeOf(heartbeatOut) !== heartbeatMtimeAfterKill,
-    windowMs: HEARTBEAT_INTERVAL_MS * 5, // several write intervals' worth — derived, not guessed
+    windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5, // several write intervals' worth — derived, not guessed
     positiveControl: async () => {
       // Prove the SAME sampling mechanism CAN observe advancement: the control process (never stopped)
       // is still writing its own heartbeat on the identical cadence — sample IT and confirm "advanced".
       const controlBaseline = mtimeOf(controlOut);
       return observeOnce({
         check: () => mtimeOf(controlOut) !== controlBaseline,
-        windowMs: HEARTBEAT_INTERVAL_MS * 5,
+        windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
       });
     },
   });
@@ -255,6 +277,7 @@ function canConnectHost(host, port, timeoutMs = 2000) {
 }
 
 const portWorkDir = mkdtempManaged("loom-dev-server-port-");
+trackServerDir(path.resolve(portWorkDir));
 let portTrackedPid = null;
 let decoyServer = null;
 
@@ -356,6 +379,7 @@ const anyIfaceFixtureSrc = [
 const anyIfaceScript = path.join(fixtureDir, "any-iface-server.cjs");
 fs.writeFileSync(anyIfaceScript, anyIfaceFixtureSrc);
 const anyIfaceWorkDir = mkdtempManaged("loom-dev-server-anyiface-");
+trackServerDir(path.resolve(anyIfaceWorkDir));
 let anyIfaceTrackedPid = null;
 
 try {
@@ -411,6 +435,7 @@ const ipv6OnlyFixtureSrc = [
 const ipv6OnlyScript = path.join(fixtureDir, "ipv6-only-server.cjs");
 fs.writeFileSync(ipv6OnlyScript, ipv6OnlyFixtureSrc);
 const ipv6WorkDir = mkdtempManaged("loom-dev-server-ipv6only-");
+trackServerDir(path.resolve(ipv6WorkDir));
 let ipv6TrackedPid = null;
 
 try {
@@ -539,6 +564,7 @@ function pathHashForTest(absDir) {
 }
 const STALE_PORT = 22222;
 const staleRaceWorkDir = mkdtempManaged("loom-dev-server-stalerace-");
+trackServerDir(path.resolve(staleRaceWorkDir));
 const staleRaceAbsDir = path.resolve(staleRaceWorkDir);
 const staleRaceLogPath = path.join(os.tmpdir(), `loom-dev-server-${pathHashForTest(staleRaceAbsDir)}.log`);
 let staleRaceTrackedPid = null;
@@ -616,6 +642,7 @@ try {
 //      process is left alive.
 //   4. git apply /tmp/eb503d1f.patch (restores the fix) → section (k) PASSES again.
 const cwdBugWorktree = mkdtempManaged("loom-dev-server-cwdbug-");
+trackServerDir(path.resolve(cwdBugWorktree));
 const cwdBugSubdir = path.join(cwdBugWorktree, "subdir");
 fs.mkdirSync(cwdBugSubdir);
 const cwdBugHeartbeatOut = path.join(cwdBugWorktree, "hb.txt");
@@ -689,6 +716,7 @@ const errorLineFixtureSrc = "console.error('Error: listen EACCES: permission den
 const errorLineScript = path.join(fixtureDir, "error-line.cjs");
 fs.writeFileSync(errorLineScript, errorLineFixtureSrc);
 const errorLineWorkDir = mkdtempManaged("loom-dev-server-errorline-");
+trackServerDir(path.resolve(errorLineWorkDir));
 const ERROR_LINE_DECOY_PORT = 49685; // the exact value baked into the printed error text, above
 let errorLineTrackedPid = null;
 
@@ -751,6 +779,7 @@ const allCapsFixtureSrc = [
 const allCapsScript = path.join(fixtureDir, "allcaps-banner.cjs");
 fs.writeFileSync(allCapsScript, allCapsFixtureSrc);
 const allCapsWorkDir = mkdtempManaged("loom-dev-server-allcaps-");
+trackServerDir(path.resolve(allCapsWorkDir));
 let allCapsTrackedPid = null;
 
 try {
@@ -831,6 +860,7 @@ if (process.platform !== "win32") {
     fs.writeFileSync(eaccesStepScript, eaccesStepFixtureSrc);
     const eaccesStepSentinelFile = path.join(fixtureDir, "eacces-step-actual.txt");
     const eaccesStepWorkDir = mkdtempManaged("loom-dev-server-eaccesstep-");
+    trackServerDir(path.resolve(eaccesStepWorkDir));
     let eaccesStepTrackedPid = null;
 
     try {
@@ -877,7 +907,124 @@ if (process.platform !== "win32") {
   }
 }
 
+// (n) card 075bc1cf — THE FAILURE-PATH CONTROL, the whole point of this card. A section that throws
+// mid-test (an uncaught exception, or a hard stop of this file's own process) must not leave its tracked
+// dev-server child running. Pre-fix, the ONLY cleanup on that path was each section's own `finally`-block
+// fallback — a bare, non-tree `process.kill(trackedPid, "SIGKILL")`. That pid is the SUPERVISOR (see the
+// SUPERVISOR note atop the real helper, HELPER), not the real bound-server command it spawns — killing
+// only the supervisor leaves the real command orphaned and alive, exactly the shape of the two real,
+// live-for-13.5h orphans this card was filed against (a CONFIRMED-DEAD parent, a still-running child).
+// This section reproduces that failure path FOR REAL — no mocking, per this project's "mocking the exec
+// impl never exercises the actual cross-platform spawn/kill" rule — with a genuinely separate node
+// process that starts a tracked dev-server via the SAME helper, registers that dir with the SAME
+// register-then-sweep-on-exit mechanism this file itself now uses (trackServerDir + the `exit` handler
+// above), then throws an uncaught exception and NEVER calls `stop()` itself. If the mechanism works, the
+// REAL command dies anyway, purely from that crashing process's own exit hook firing.
+//
+// WHY THIS CHECKS THE HEARTBEAT FILE, NOT JUST THE TRACKED (SUPERVISOR) PID: the supervisor pid is what
+// `killTracked`/taskkill AND the old buggy bare-kill BOTH always signal directly — so a check that only
+// asks "is the supervisor pid dead" cannot tell a correct tree-kill apart from the old bug, and would
+// pass either way. The discriminating fact is whether the REAL command (the supervisor's own child) also
+// died — externally observable only via its heartbeat file (same technique as check (b) above), never via
+// a pid this crash-fixture never even learns.
+//
+// NEGATIVE-CONTROL POLARITY (this project's own doctrine): "the heartbeat stopped" is satisfied by a
+// broken probe too (a file that was never advancing to begin with reads identically to one that stopped),
+// so this proves the SAME mtime-sampling mechanism observes the heartbeat ADVANCING (the known-present
+// state) while the crash-fixture is still mid-run, BEFORE trusting a later "stopped" as evidence the real
+// command actually died.
+const crashFixtureSrc = [
+  "const { spawnSync } = require('child_process');",
+  "const fs = require('fs');",
+  "const dir = process.argv[2];",
+  "const helper = process.argv[3];",
+  "const heartbeatScriptPath = process.argv[4];",
+  "const outFile = process.argv[5];",
+  "const trackedDirs = [];",
+  "process.on('exit', () => { for (const d of trackedDirs) { try { spawnSync(process.execPath, [helper, 'stop', d], { stdio: 'ignore' }); } catch {} } });",
+  "const startResult = spawnSync(process.execPath, [helper, 'start', dir, '--', process.execPath, heartbeatScriptPath, outFile], { encoding: 'utf8' });",
+  "trackedDirs.push(dir);",
+  "const m = /\\(pid (\\d+)\\)/.exec(startResult.stdout || '');",
+  "console.log('SUPERVISOR_PID=' + (m ? m[1] : 'none'));",
+  // Confirm the REAL command is genuinely alive+writing BEFORE crashing — checked from INSIDE this
+  // process so the parent never has to race this fixture's own short lifetime with an external poll.
+  "const deadline = Date.now() + 5000;",
+  "let up = false;",
+  "while (Date.now() < deadline) {",
+  "  try { const st = fs.statSync(outFile); if (Date.now() - st.mtimeMs < 2000) { up = true; break; } } catch {}",
+  "  const spinUntil = Date.now() + 20; while (Date.now() < spinUntil) {}",
+  "}",
+  "console.log('HEARTBEAT_UP=' + (up ? '1' : '0'));",
+  "throw new Error('simulated mid-test crash \\u2014 exit-hook cleanup must still fire');",
+].join("\n");
+const crashFixtureScript = path.join(fixtureDir, "crash-fixture.cjs");
+fs.writeFileSync(crashFixtureScript, crashFixtureSrc);
+const crashWorkDir = mkdtempManaged("loom-dev-server-crashpath-");
+trackServerDir(path.resolve(crashWorkDir)); // belt-and-suspenders: this file's own backstop covers the crash-fixture's target too
+const crashHeartbeatOut = path.join(crashWorkDir, "hb.txt");
+const crashControlWorkDir = mkdtempManaged("loom-dev-server-crashcontrol-");
+const crashControlOut = path.join(crashControlWorkDir, "control.txt");
+let crashControlChild = null;
+
+try {
+  // A sibling, never-stopped control heartbeat — the positive-control instance `assertNeverWithControl`
+  // needs to prove the SAME mtime-sampling mechanism can observe genuine advancement, independent of the
+  // crash-fixture's own target (mirrors check (b)'s controlChild/controlOut).
+  crashControlChild = spawn(process.execPath, [heartbeatScript, crashControlOut], { stdio: "ignore" });
+  const controlUp = await waitUntil(() => fs.existsSync(crashControlOut) && Date.now() - fs.statSync(crashControlOut).mtimeMs < 2000);
+  check("(n) sibling control heartbeat is running before the crash (positive-control precondition)", controlUp);
+
+  let crashStdout = "";
+  const crashChild = spawn(
+    process.execPath,
+    [crashFixtureScript, crashWorkDir, HELPER, heartbeatScript, crashHeartbeatOut],
+    { stdio: ["ignore", "pipe", "pipe"], env: FAST_PORT_TIMEOUT_ENV },
+  );
+  crashChild.stdout.on("data", (d) => { crashStdout += d.toString(); });
+  crashChild.stderr.resume(); // drain the simulated crash's own stack trace — expected, not a failure
+
+  const gotSupervisorPid = await waitUntil(() => /SUPERVISOR_PID=(\d+)/.test(crashStdout), 10_000);
+  check("(n) crash-fixture reports the supervisor pid it tracked (start succeeded)", gotSupervisorPid);
+
+  // POSITIVE CONTROL, checked FROM INSIDE the crash-fixture itself (see its source above) rather than by
+  // an external poll racing this fixture's own sub-second lifetime: it confirms its own heartbeat file is
+  // fresh (< 2000ms old) BEFORE it crashes, and reports that confirmation over stdout — the SAME
+  // externally-observable liveness signal checks (a)/(b) use, just sampled from the one process actually
+  // positioned to catch it without a race.
+  const gotHeartbeatReport = await waitUntil(() => /HEARTBEAT_UP=[01]/.test(crashStdout), 10_000);
+  check("(n) crash-fixture reports whether its heartbeat was observed fresh before crashing", gotHeartbeatReport);
+  const heartbeatWasUp = gotHeartbeatReport && /HEARTBEAT_UP=1/.test(crashStdout);
+  check("(n) POSITIVE CONTROL: the dev-server's real command was alive (heartbeat fresh) immediately before the crash-fixture crashed", heartbeatWasUp);
+
+  const crashExitCode = await new Promise((resolve) => crashChild.on("exit", (code) => resolve(code)));
+  check("(n) crash-fixture process actually crashed (nonzero exit) — a genuine uncaught exception, not a clean exit", crashExitCode !== 0);
+
+  // THE ASSERTION: even though the crash-fixture never called `stop()` itself, its own exit hook — the
+  // SAME register+sweep-on-exit mechanism this file's own sections now use — must have killed the REAL
+  // command too, not merely the tracked supervisor pid (which the old buggy fallback also always killed).
+  const mtimeOf = (f) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0);
+  const heartbeatMtimeAfterCrash = mtimeOf(crashHeartbeatOut);
+  const heartbeatStillFrozen = await assertNeverWithControl({
+    label: "(n) dev-server's heartbeat file stops advancing after the crash-fixture's exit hook ran",
+    check: () => mtimeOf(crashHeartbeatOut) !== heartbeatMtimeAfterCrash,
+    windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
+    positiveControl: async () => {
+      const controlBaseline = mtimeOf(crashControlOut);
+      return observeOnce({
+        check: () => mtimeOf(crashControlOut) !== controlBaseline,
+        windowMs: HEARTBEAT_WRITE_INTERVAL_MS * 5,
+      });
+    },
+  });
+  check("(n) dev-server's real command is dead after the crash-fixture's exit hook ran, despite the mid-test throw", heartbeatStillFrozen);
+} catch (e) {
+  console.log(`FAIL  unexpected error (failure-path cleanup control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (crashControlChild) { try { crashControlChild.kill("SIGKILL"); } catch { /* best effort */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd, refuses an ERROR line's host:port rather than recording it as a confident (wrong) bind, and steps around a genuinely EACCES-reserved port the same way it already stepped around EADDRINUSE."
+  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd, refuses an ERROR line's host:port rather than recording it as a confident (wrong) bind, steps around a genuinely EACCES-reserved port the same way it already stepped around EADDRINUSE, and still kills a tracked dev-server child even when a section crashes mid-test without ever calling stop() itself."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
