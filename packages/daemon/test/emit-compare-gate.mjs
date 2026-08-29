@@ -46,7 +46,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the reverse order — order-independence is NOT proven by this test. It instead rests on a structural
 //       argument: the skip is an unconditional per-line `continue` that reads no state accumulated from
 //       prior iterations (`changedTsFiles`/`changedTestFiles` are never consulted before the skip decision),
-//       so its outcome for a given path cannot depend on where that path sits in the diff.
+//       so its outcome for a given path cannot depend on where that path sits in the diff. Card 8ee4f11e
+//       (Code Review follow-up on b97f643d): the skipped docs/ path must also be NAMED in the reduced-gate
+//       warning, same discipline as `notHermeticExcluded` — (N) now asserts the path appears by name, not
+//       just that some "reduced" warning fired.
 // See `emit-compare-gate-scope.mjs` for (H)-(L): the shell-metacharacter defence-in-depth case, the two
 // fixtures/-scope cases, and the branch-blind-at-cap-queue-admission case.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
@@ -336,7 +339,15 @@ try {
     check("(N) captured command is NOT the full gate — the docs/ line does not defeat the reduction", capturedGate !== FULL_GATE);
     check("(N) captured command does NOT run the full test:daemon suite", !capturedGate.includes("test:daemon"));
     check("(N) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
-    check("(N) a distinguishing reduced-gate warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
+    // Card 8ee4f11e: RED-PROOF for the reported gap — pre-fix, this warning names the transpile-identical
+    // count but says NOTHING about the skipped docs/ path, making "silently dropped" and "provably inert,
+    // correctly skipped" indistinguishable to a reader. Assert the path is NAMED, not merely that some
+    // "reduced" warning fired — a warning that fires but omits the path would pass the old, weaker
+    // assertion identically, which is exactly the defect this card fixes.
+    check("(N) the reduced-gate warning names the transpile-identical count",
+      typeof confirm.warning === "string" && /1 compiled file\(s\) proven transpile-identical/.test(confirm.warning));
+    check("(N) ⭐ THE 8ee4f11e FIX: the skipped inert docs/ path is NAMED in the warning, not silently dropped",
+      typeof confirm.warning === "string" && confirm.warning.includes("docs/investigations/findings.md"));
   }
 
   // ── (N2) card b97f643d — NARROWING GUARD: a docs/ line riding alongside a REAL behavioral .ts edit must

@@ -12637,6 +12637,11 @@ export class SessionService {
     // emitCompareTestFiles/emitCompareIdenticalCount — surfaced below via emitCompareWarning so a reduced
     // gate never silently drops coverage reporting for these files.
     let emitCompareNotHermeticExcluded: string[] = [];
+    // Card 8ee4f11e: mirrors `emitCompareNotHermeticExcluded` immediately above, but for changed paths the
+    // predicate skipped entirely because they're already certified inert (see
+    // EmitCompareGateResult.inertPathsSkipped's own doc, git/worktrees.ts). Diagnostic only, surfaced below
+    // via emitCompareWarning so a reduced gate never silently drops accounting for these paths either.
+    let emitCompareInertPathsSkipped: string[] = [];
     // Card 2db8a3dd: `true` only when `computeEmitCompareGate` itself said the predicate could not have
     // been eligible for THIS repo's layout at all (see `EmitCompareGateResult.notApplicable`'s own doc,
     // git/worktrees.ts) — NOT re-derived here, just carried. Gates the two `emitCompareReduced` record
@@ -13315,6 +13320,7 @@ export class SessionService {
           emitCompareSkip = true;
           emitCompareTestFiles = emitCompare.changedTestFiles;
           emitCompareNotHermeticExcluded = emitCompare.notHermeticExcluded;
+          emitCompareInertPathsSkipped = emitCompare.inertPathsSkipped;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
           // Card 4def0708: the predicate DID run and decided this diff IS applicable (it's eligible for
           // the reduced gate) — an explicit `false` here, not left to fall through on the new
@@ -13530,6 +13536,7 @@ export class SessionService {
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
               emitCompareNotHermeticExcluded = reclassified.notHermeticExcluded;
+              emitCompareInertPathsSkipped = reclassified.inertPathsSkipped;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
               effectiveGate = buildReducedGateCommand(emitCompareTestFiles);
               // Card 4def0708: mirrors the pre-wait classification's own explicit `false` on its
@@ -14454,8 +14461,12 @@ export class SessionService {
     // coverage introduced by the reduction: the full gate never runs a NOT_HERMETIC file either (see
     // EmitCompareGateResult.notHermeticExcluded's own doc), so this is declaring an existing gap, not a
     // new one — but it must never read as a silent, ordinary green.
+    // Card 8ee4f11e: a skipped-as-inert path (e.g. `docs/**`) must be NAMED here too, same reasoning as the
+    // NOT_HERMETIC clause just above — before this card, a mixed diff (a transpile-identical compiled file
+    // PLUS an inert path) reported only the compiled-file count, leaving the inert path unaccounted for and
+    // indistinguishable from a silently dropped one (see EmitCompareGateResult.inertPathsSkipped's own doc).
     const emitCompareWarning = emitCompareSkip
-      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}`
+      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}`
       : undefined;
     // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the

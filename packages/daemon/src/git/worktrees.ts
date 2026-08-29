@@ -2527,6 +2527,19 @@ export interface EmitCompareGateResult {
    *  for these files, indistinguishable from a clean run. See {@link buildReducedGateCommand}'s caller in
    *  sessions/service.ts for where this is declared (`emitCompareWarning`). */
   notHermeticExcluded: string[];
+  /** Card 8ee4f11e: repo-relative paths of changed paths that were EXCLUDED from classification entirely
+   *  because {@link isInertMergePath} (backed by {@link INERT_MERGE_PATH_PREFIXES}, e.g. `docs/**`) already
+   *  proved them inert — see the classification loop's own `if (isInertMergePath(p)) continue;` (card
+   *  b97f643d). Same shape and same "populated only when `eligible`" discipline as
+   *  {@link notHermeticExcluded} above, and the same surfacing obligation applies with MORE force, not
+   *  less: `notHermeticExcluded`'s own doc already mandates "The caller MUST surface this list by name
+   *  wherever it reports the reduced gate's result — a silent drop would … [be] indistinguishable from a
+   *  clean run", and a `NOT_HERMETIC` exclusion is the WEAKER case (the full gate skips those files too,
+   *  exactly like an inert path does). The full gate would have skipped these paths too — that's exactly
+   *  what "inert" certifies — so this is not a coverage gap the reduction introduces, but it must still
+   *  never read as a silent, unaccounted-for drop. See {@link buildReducedGateCommand}'s caller in
+   *  sessions/service.ts for where this is declared (`emitCompareWarning`). */
+  inertPathsSkipped: string[];
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
@@ -2667,8 +2680,8 @@ export async function computeEmitCompareGate(
   // and an unparseable line, none of which are verdicts about reducibility). Two explicitly-named
   // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
-  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable: false });
-  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], identicalFileCount: 0, reason, notApplicable: true });
+  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], identicalFileCount: 0, reason, notApplicable: false });
+  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], identicalFileCount: 0, reason, notApplicable: true });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -2696,6 +2709,9 @@ export async function computeEmitCompareGate(
   // Card 17cd1f30: paths classified as NOT_HERMETIC (see EmitCompareGateResult.notHermeticExcluded's own
   // doc) — filtered OUT of changedTestFiles rather than blocking eligibility.
   const notHermeticExcluded: string[] = [];
+  // Card 8ee4f11e: paths short-circuited by the `isInertMergePath(p)` skip just below — see
+  // EmitCompareGateResult.inertPathsSkipped's own doc for why this must be surfaced, not just dropped.
+  const inertPathsSkipped: string[] = [];
   // Lazily loaded (only if a test/*.mjs path with a subdirectory actually shows up below) and cached for
   // the rest of this call. `undefined` = not attempted yet; `null` = attempted and failed (fail closed);
   // a `Set` = the real names, loaded straight from THIS diff's own worktree copy of test-daemon.mjs.
@@ -2732,7 +2748,7 @@ export async function computeEmitCompareGate(
     // `path outside emit-compare scope` catch-all further down. Traced at card b97f643d; judged acceptable
     // as-is (narrow window, fails toward the safe full-gate outcome either way) rather than widened to
     // re-consult `isInertMergeDiff` a second time.
-    if (isInertMergePath(p)) continue;
+    if (isInertMergePath(p)) { inertPathsSkipped.push(p); continue; }
     if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
       if (status !== "M") return notReducible(`non-modify status "${status}" on compiled file ${p}`);
       changedTsFiles.push(p);
@@ -2868,7 +2884,7 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, notHermeticExcluded, identicalFileCount: changedTsFiles.length, notApplicable: false };
+  return { eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, identicalFileCount: changedTsFiles.length, notApplicable: false };
 }
 
 /**
