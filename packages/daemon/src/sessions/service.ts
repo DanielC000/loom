@@ -16688,8 +16688,17 @@ export class SessionService {
     for (const s of all) {
       if (s.role !== "worker" || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed — leave its lifecycle intact
+      // Card 1d10aea9: `terminalKey` is checked for `undefined` BEFORE the comparison, not folded into
+      // one `!==` — same shape as Pass A's `isTerminalTask` guard above (card 6f73da1a), mirrored here
+      // with the opposite polarity (this site SKIPS on mismatch rather than requiring a match).
+      // `columnKeyForProjectRole` returns `undefined` for a project whose resolved `kanbanColumns` is
+      // empty, and `getTask(s.taskId)?.columnKey` is ALSO `undefined` for a session whose task row has
+      // since been deleted (task_id is a deliberately soft link). Comparing the two directly would make
+      // `undefined !== undefined` read `false` — "not a mismatch" — and wrongly treat a deleted task on
+      // an empty-board project as a demonstrably-landed merge, fabricating a merge_done for a session
+      // nothing actually confirms landed.
       const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
-      if (this.db.getTask(s.taskId)?.columnKey !== terminalKey) continue; // not a demonstrably-landed merge
+      if (terminalKey === undefined || this.db.getTask(s.taskId)?.columnKey !== terminalKey) continue; // not a demonstrably-landed merge
       const evts = this.db.listEventsForWorker(s.id);
       const hasMergeRequest = evts.some((e) => e.kind === "merge_request");
       const hasTerminal = evts.some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");

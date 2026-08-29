@@ -141,6 +141,32 @@ db.insertSession({
 });
 // (no merge_request event for E — mirrors D's "never attempted" shape)
 
+// --- (f) card 1d10aea9: Pass A2's OWN terminal check (`getTask(...)?.columnKey !== terminalKey`, the
+//     SECOND loop, independent of Pass A's `isTerminalTask` fixed by scenario E above) has the identical
+//     undefined===undefined shape. Same double-degenerate setup as E (empty-board project, deleted task)
+//     but WITH a merge_request on record and no terminal event — Pass A2's OWN criteria for "resolve a
+//     dangling merge via the event trail". Pre-fix, the bare `!==` reads undefined!==undefined as false
+//     and does NOT `continue`, so Pass A2 fabricates a merge_done for a session that (as far as anything
+//     can actually tell — the task is gone, the project has no terminal column at all) was never
+//     confirmed landed. Post-fix it must fall through and stay genuinely wedged, like E. ---
+const F = {
+  taskId: `mrw-f-task-${sfx}`, mgrId: `mrw-f-mgr-${sfx}`, workerId: `mrw-f-wkr-${sfx}`,
+  worktreePath: path.join(os.tmpdir(), `loom-mrw-f-worktree-${sfx}`), // deliberately never created on disk
+  branch: `loom/mrw-f-${sfx}`, repoKey: "ghost-repo",
+};
+// NO db.insertTask(F.taskId, ...) — the task row is deliberately absent (simulated delete).
+db.insertSession({
+  id: F.mgrId, projectId: projId2, agentId: `mrw-agent2-${sfx}`, engineSessionId: null, title: null, cwd: repo,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager",
+});
+db.insertSession({
+  id: F.workerId, projectId: projId2, agentId: `mrw-agent2-${sfx}`, engineSessionId: null, title: null,
+  cwd: F.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "worker", parentSessionId: F.mgrId, taskId: F.taskId, worktreePath: F.worktreePath, branch: F.branch,
+  repoKey: F.repoKey,
+});
+db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: F.mgrId, workerSessionId: F.workerId, taskId: F.taskId, kind: "merge_request", detail: { branch: F.branch } });
+
 const hasTerminal = (workerId) => db.listEventsForWorker(workerId).some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");
 
 try {
@@ -154,6 +180,10 @@ try {
   check("(pre) scenario E worktree absent from disk", !fs.existsSync(E.worktreePath));
   check("(pre) scenario E's task row is genuinely absent (simulated delete)", db.getTask(E.taskId) === undefined);
   check("(pre) scenario E has NO merge_request on record", !db.listEventsForWorker(E.workerId).some((e) => e.kind === "merge_request"));
+  check("(pre) scenario F worktree absent from disk", !fs.existsSync(F.worktreePath));
+  check("(pre) scenario F's task row is genuinely absent (simulated delete)", db.getTask(F.taskId) === undefined);
+  check("(pre) scenario F HAS a dangling merge_request (no terminal event)",
+    db.listEventsForWorker(F.workerId).some((e) => e.kind === "merge_request") && !hasTerminal(F.workerId));
 
   // ═══════════════ BOOT 1 ═══════════════
   const r1 = await sessions.reconcileOrchestrationOnBoot();
@@ -161,7 +191,7 @@ try {
   // (a) tracked as a WEDGE, not a generic failure — mergesFailed still counts it (nothing is silently
   // dropped from the aggregate), but mergeReconcileWedged distinguishes it, and mergeFailureDetails names it.
   check("(1a) reconcile counted the wedge in mergesFailed", r1.mergesFailed >= 1);
-  check("(1a) reconcile counted exactly the wedge(s) expected this boot in mergeReconcileWedged", r1.mergeReconcileWedged === 3); // A, C, and E all wedge on boot 1
+  check("(1a) reconcile counted exactly the wedge(s) expected this boot in mergeReconcileWedged", r1.mergeReconcileWedged === 4); // A, C, E, and F all wedge on boot 1
   const detailA1 = r1.mergeFailureDetails.find((d) => d.sessionId === A.workerId);
   check("(1a) mergeFailureDetails names scenario A as wedged", detailA1?.wedged === true);
   check("(1a) mergeFailureDetails carries a wedgedSince timestamp", typeof detailA1?.wedgedSince === "string" && detailA1.wedgedSince.length > 0);
@@ -178,13 +208,16 @@ try {
   check("(1c) scenario C ALSO wedged on boot 1 (not yet finalized, so repoKey resolution still runs)", detailC1?.wedged === true);
   // ...but Pass A2 (same boot, no repoKey dependency at all) independently resolves it via the event trail.
   check("(1c) Pass A2 emitted the branch-gone merge_done for scenario C in the SAME boot", r1.staleMergesResolved === 1 && hasTerminal(C.workerId));
+  // Exactly ONE stale-merge resolution this boot (scenario C) — if scenario F below also got fabricated
+  // a merge_done, this count would be 2, silently masking the bug behind an otherwise-correct-looking number.
+  check("(1c) staleMergesResolved counts ONLY scenario C, not a fabricated resolution for F too", r1.staleMergesResolved === 1);
 
   // (d) THE FIX UNDER TEST: scenario D never requested a merge at all, so it must NEVER be tracked as a
   // wedge — not even a single "attempt" — despite its repoKey being just as unresolvable as A's/C's.
   const detailD1 = r1.mergeFailureDetails.find((d) => d.sessionId === D.workerId);
   check("(1d) scenario D is NOT in mergeFailureDetails on boot 1 (never even attempted)", detailD1 === undefined);
   check("(1d) scenario D never accumulated a wedge entry", db.getMergeReconcileWedge(D.workerId) === undefined);
-  check("(1d) mergeReconcileWedged counted A, C, and E, not D", r1.mergeReconcileWedged === 3);
+  check("(1d) mergeReconcileWedged counted A, C, E, and F, not D", r1.mergeReconcileWedged === 4);
   check("(1d) a named info log explains the skip (worker + branch, not silent)",
     infosMatching(D.workerId).some((w) => w.includes(D.branch) && w.includes("never requested a merge")));
   check("(1d) scenario D got NO merge_done event (this was never a merge, real or reconstructed)",
@@ -202,6 +235,18 @@ try {
   check("(1e) NO 'never requested a merge' skip log fired for scenario E (it did NOT take the no-op path)",
     infosMatching(E.workerId).length === 0);
   check("(1e) scenario E got NO merge_done event", !db.listEventsForWorker(E.workerId).some((e) => e.kind === "merge_done"));
+
+  // (f) card 1d10aea9 — THE FIX UNDER TEST: scenario F has a REAL dangling merge_request and no terminal
+  // event, exactly Pass A2's own resolution criteria — but its task row is absent AND its project resolves
+  // no terminal column at all, so `getTask(...)?.columnKey !== terminalKey` compares undefined !== undefined
+  // pre-fix. That reads `false` (they "match"), so the bare `!==` guard does NOT `continue` and Pass A2
+  // fabricates a merge_done for a session nothing actually confirms landed. Post-fix it must fall through
+  // and stay genuinely wedged — like E, never silently "resolved".
+  const detailF1 = r1.mergeFailureDetails.find((d) => d.sessionId === F.workerId);
+  check("(1f) scenario F IS wedged on boot 1 (Pass A's own repoKey wedge, unaffected by Pass A2)", detailF1?.wedged === true);
+  check("(1f) scenario F got NO fabricated merge_done from Pass A2 (the undefined===undefined trap)", !hasTerminal(F.workerId));
+  check("(1f) scenario F's merge_request is still the only event on record (no merge_done appended)",
+    db.listEventsForWorker(F.workerId).filter((e) => e.kind === "merge_done").length === 0);
 
   // ═══════════════ BOOT 2 — the crux ═══════════════
   const r2 = await sessions.reconcileOrchestrationOnBoot();
@@ -224,6 +269,12 @@ try {
   const detailE2 = r2.mergeFailureDetails.find((d) => d.sessionId === E.workerId);
   check("(2e) scenario E still wedged on boot 2", detailE2?.wedged === true);
   check("(2e) scenario E's attempts bumped to 2 (not reset, not cleared)", db.getMergeReconcileWedge(E.workerId)?.attempts === 2);
+
+  // (f) scenario F still genuinely wedged on boot 2 too — never silently cleared by a fabricated resolution.
+  const detailF2 = r2.mergeFailureDetails.find((d) => d.sessionId === F.workerId);
+  check("(2f) scenario F still wedged on boot 2", detailF2?.wedged === true);
+  check("(2f) scenario F's attempts bumped to 2 (not reset, not cleared)", db.getMergeReconcileWedge(F.workerId)?.attempts === 2);
+  check("(2f) scenario F STILL has no merge_done event", !hasTerminal(F.workerId));
 
   // (a) scenario A is STILL genuinely wedged (never finalized by anything) — attempts bump, firstWedgedAt
   // is preserved (distinguishing "deferred once" from "wedged since <the original date>"), and past the
@@ -250,6 +301,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a Pass-A session with an unresolvable repoKey is tracked as a distinct, named, escalating wedge (never a bare 'retry next boot' count); a genuine branch-gone record still resolves via Pass A2 unaffected; a session that is BOTH (Pass A2-resolvable AND repoKey-wedged) is no longer re-thrown on every subsequent boot once Pass A2 clears it; (card 6f73da1a) a session that never requested a merge at all, with its task already terminal, is never tracked as a wedge in the first place — a deliberate, named, idempotent skip instead of an unresolvable-repoKey throw retried forever; and the terminal-task check stays fail-closed even when a deleted task's absent columnKey and an empty-board project's absent terminal key would otherwise both read undefined and accidentally compare equal."
+  ? "\n✅ ALL PASS — a Pass-A session with an unresolvable repoKey is tracked as a distinct, named, escalating wedge (never a bare 'retry next boot' count); a genuine branch-gone record still resolves via Pass A2 unaffected; a session that is BOTH (Pass A2-resolvable AND repoKey-wedged) is no longer re-thrown on every subsequent boot once Pass A2 clears it; (card 6f73da1a) a session that never requested a merge at all, with its task already terminal, is never tracked as a wedge in the first place — a deliberate, named, idempotent skip instead of an unresolvable-repoKey throw retried forever; Pass A's own terminal-task check stays fail-closed even when a deleted task's absent columnKey and an empty-board project's absent terminal key would otherwise both read undefined and accidentally compare equal; and (card 1d10aea9) Pass A2's OWN terminal check, ten lines below, stays fail-closed on that same double-undefined combination too — a REAL dangling merge_request on a deleted-task/empty-board session is never fabricated into a false merge_done."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
