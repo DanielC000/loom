@@ -10514,10 +10514,17 @@ export class SessionService {
    *   SAME point past which the gate's OWN machinery would also stop rescuing it. `minutesSinceStart >=
    *   BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL, necessary-but-not-sufficient precondition (an
    *   idle blip seconds into a run — e.g. a slow install step with no output yet — shouldn't alone read as
-   *   a wedge either); both must hold. `lastOutputAt` is null for the brief window between admission and
-   *   the runner's first liveness event (see {@link GateSnapshotEntry.lastOutputAt}'s own doc) — that
-   *   reads as "not yet evidence of a wedge" (idleMs stays null, this branch doesn't fire), never a
-   *   fabricated 0. **`minutesSinceStart` measured from GateSemaphore ADMISSION, never from
+   *   a wedge either); both must hold. `lastOutputAt` is null for a window between admission and the
+   *   runner's first liveness event that is PROVEN BOUNDED, not merely assumed brief (card 166ba5d9 closed
+   *   the open question this comment used to carry as an unproven assumption — see
+   *   {@link GateSnapshotEntry.lastOutputAt}'s own doc for the full proof: every git op in that window is
+   *   timeout-raced to a hard ≤120s ceiling, orders of magnitude under both `GATE_EXTEND_IDLE_MS` and
+   *   `BACKGROUND_PARK_STALE_MINUTES` below, and `runGateStep` stamps `lastOutputAt` as its first
+   *   synchronous statement before the gate's child even spawns — so a genuinely wedged gate can never
+   *   reproduce this null window past that bound). That means this branch correctly reads a null `idleMs`
+   *   here as "not yet evidence of a wedge" (never a fabricated 0) WITHOUT risking a false negative: by the
+   *   time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` could ever hold, `lastOutputAt` is
+   *   guaranteed already non-null. **`minutesSinceStart` measured from GateSemaphore ADMISSION, never from
    *   `PendingOpRegistry`'s own `startedAt`** (card 865c528e): the registry stamps `startedAt` the moment
    *   `run_gate` is CALLED, which for a queued gate (the daemon-global `maxConcurrentGates` cap already
    *   saturated) can be arbitrarily long before the gate is actually admitted and starts running —
@@ -10578,9 +10585,16 @@ export class SessionService {
         // lastOutputAt`, the SAME liveness clock gate_status/gate_queue already expose, mirroring
         // gate-runner.ts's own internal decision) is the actual discriminator — only suspect a wedge once
         // idleMs has crossed GATE_EXTEND_IDLE_MS, the SAME point past which the gate's own machinery would
-        // also stop rescuing it. `lastOutputAt` (and so idleMs) is null for the brief window between
-        // admission and the runner's first liveness event (see GateSnapshotEntry.lastOutputAt's own doc) —
-        // that's "not yet evidence of a wedge", not a fabricated 0, so this branch doesn't fire on it.
+        // also stop rescuing it. `lastOutputAt` (and so idleMs) is null for a window between admission and
+        // the runner's first liveness event that is PROVEN BOUNDED — not merely assumed brief (card
+        // 166ba5d9; see GateSnapshotEntry.lastOutputAt's own doc for the full proof: every git op in that
+        // window is timeout-raced to a hard ≤120s ceiling, orders of magnitude under GATE_EXTEND_IDLE_MS
+        // and BACKGROUND_PARK_STALE_MINUTES below, and runGateStep stamps lastOutputAt as its first
+        // synchronous statement before the gate's child even spawns — so a genuinely wedged gate can never
+        // reproduce this null window past that bound). That's "not yet evidence of a wedge", not a
+        // fabricated 0 — and, because the window is bounded well under both thresholds below, this can
+        // never mask a real 20+-minute wedge: by the time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES`
+        // could hold, lastOutputAt is guaranteed already non-null.
         // `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL precondition (an idle
         // blip seconds into a run — e.g. a slow install step with nothing printed yet — shouldn't alone
         // read as a wedge either); both must hold.

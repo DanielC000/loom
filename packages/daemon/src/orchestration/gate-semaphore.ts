@@ -223,10 +223,28 @@ export interface GateSnapshotEntry {
    *  step that hasn't printed anything is legitimately "idle since it started", which is real information,
    *  not an absence). Null while `queued` (no step has started at all) AND, for a caller with real async
    *  work between admission and its OWN `runGateSequential` call (e.g. `run_gate`'s pre-flight git-stamp
-   *  read in `runWorkerGate` — `confirmWorkerMerge`/`deployOwnProject` have no such gap, they invoke the
-   *  runner synchronously on admission), for the brief window between admission and that call — this
-   *  entry is genuinely `phase:"running"` during that window with NOTHING yet to report, which is exactly
-   *  why `null` (not a fabricated `0`) is correct there too. A caller computes idle time as
+   *  read in `runWorkerGate`, or a merge gate's `reunionAtAdmission` — `deployOwnProject` has no such gap,
+   *  it invokes the runner synchronously on admission), for that window — this entry is genuinely
+   *  `phase:"running"` with NOTHING yet to report, which is exactly why `null` (not a fabricated `0`) is
+   *  correct there too. **PROVEN BOUNDED, not merely assumed brief (card 166ba5d9):** every git op inside
+   *  that pre-flight window (`computeWorktreeGateStamp`/`resolveGitRef`/`mergeMainIntoWorktree`, all in
+   *  `git/worktrees.ts`) is raced against a real `setTimeout` via that file's own `withTimeout` — "the
+   *  FUNCTION returns within the window regardless" per its own doc — bounded by `gitOpMs`
+   *  (`GIT_OP_TIMEOUT_MS = 15_000` default, human-configurable up to a hard `max(120_000)` in
+   *  `mcp/platform.ts`'s `gitOpMs` schema). `computeWorktreeGateStamp`'s own outer try/catch means the
+   *  FIRST git call to hit that bound ends the function immediately (never sums indefinitely across
+   *  retries) — so this window is capped at roughly one `gitOpMs` budget, ≤120s even under a maximally
+   *  raised config and 15s by default, ORDERS OF MAGNITUDE under `GATE_EXTEND_IDLE_MS` (60s) and
+   *  `BACKGROUND_PARK_STALE_MINUTES` (20min, `sessions/service.ts`) — the two preconditions
+   *  `classifyIdleWorker`'s `parked-gate-stale` branch needs before it would ever read this field. By the
+   *  time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` could ever hold, `lastOutputAt` is
+   *  GUARANTEED already non-null — `runGateStep` (`gate-runner.ts`) stamps it as its very FIRST synchronous
+   *  statement, before the gate's child process is even spawned, so a hung/never-spawning child can never
+   *  reproduce this null window either. Directly measured too, not just bounded in theory:
+   *  `gate-idle-liveness.mjs`'s card 33aa0291 note instrumented a real `runWorkerGate` run and clocked this
+   *  exact gap at max 209ms (quiet host, n=15) / max 1717ms (host under 15 concurrent CPU-saturating
+   *  children, n=12), 27/27 trials ≥140ms — sub-2-second in practice, nowhere near the theoretical ceiling
+   *  above. A caller computes idle time as
    *  `Date.now() - lastOutputAt` when non-null, matching how `since`/`elapsedMs` are derived elsewhere in
    *  this codebase (raw epoch-ms here, `now - stamp` at the read site). A LARGE elapsed time (`since`) is
    *  frequently HEALTHY (see `GATE_EXTEND_IDLE_MS`'s doc: a gate still producing output gets its timeout
