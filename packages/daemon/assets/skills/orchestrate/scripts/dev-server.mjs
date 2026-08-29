@@ -185,6 +185,30 @@ const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 // would eyeball the wrong process while believing the check passed). Excluded regardless of whether it
 // also matches PORT_BANNER_RE.
 const DECOY_CONTEXT_RE = /\b(?:proxy|proxying|forward(?:ing)?|target|upstream)\b/i;
+// A LINE reporting a FAILED bind — e.g. Node's own `Error: listen EACCES: permission denied
+// 127.0.0.1:49685` — carries a host:port that matches PORT_BANNER_RE exactly like a real bound-server
+// banner, but describes a failure, not a success (card f3e7dcc2: a Windows WinNAT/Hyper-V reserved-port
+// EACCES was scraped as a confident, wrong "Bound:" line — with no portDetectionFailed key at all, from
+// a process that bound nothing). BOUND_AFFIRMATION_RE's `\blistening\b` does NOT catch this: Node's
+// message says "listen EACCES", and "listen" != "listening" under a word boundary — so the line fell
+// through non-excluded AND non-affirmed into the "first non-excluded candidate" fallback. The fix
+// belongs HERE, in exclusion — never by adding `listen` to BOUND_AFFIRMATION_RE, which would instead
+// AFFIRM the error line and promote a scraped-from-failure port from a fallback guess to a confident
+// match. ERRNO_CODE_RE is an EXPLICIT allowlist of Node's own POSIX errno-style failure codes, not a
+// generic "E + 3 caps" shape — a shape-based version was tried and measurably false-positived on a real,
+// arbitrary user framework printing its OWN name in caps (a dev-server banner is free to say anything):
+// "EXPRESS server listening on ...", "ESBUILD serving at ...", "EMBER Serving on ..." all matched
+// `\bE[A-Z]{3,}\b` and were wrongly excluded even though each is a genuine bound-server banner. The
+// allowlist below is what actually needs to be present for a Node bind failure and nothing else, so it
+// doesn't collide with an ordinary capitalized product name (this is what makes "Established" AND
+// "EXPRESS" both safe, not case alone). ERROR_WORD_RE requires "error" to be followed by ":" — Node's own
+// uncaught-error toString() is always "Error: <message>" — so a banner merely mentioning the word (e.g. a
+// Vite error-overlay line "Error overlay ready at ...") isn't excluded just for containing it.
+const ERRNO_CODE_RE = /\b(?:EACCES|EADDRINUSE|EADDRNOTAVAIL|EPERM|EMFILE|ENFILE|ENOTFOUND|ECONNREFUSED|ENOENT|EISDIR|EAI_AGAIN)\b/;
+const ERROR_WORD_RE = /\berror\b\s*:/i;
+function isErrorLine(line) {
+  return ERRNO_CODE_RE.test(line) || ERROR_WORD_RE.test(line);
+}
 // A LINE that additionally affirms "this is where I'm bound" rather than merely mentioning a port in
 // passing — preferred over a non-excluded-but-unaffirmed match when both exist on the same poll.
 const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
@@ -195,11 +219,12 @@ const BOUND_AFFIRMATION_RE = /\b(?:local|loopback|listening|ready|serving)\b/i;
 // non-excluded candidate, else null — never a decoy line, even if it's the only match in the log.
 // KNOWN LIMIT (stated, not silently assumed): this is a heuristic, not a proof — a framework whose
 // banner happens to use none of BOUND_AFFIRMATION_RE's words falls back to "first non-excluded", which
-// is wrong if THAT line is itself an undetected decoy this list doesn't yet know to exclude, or if a
-// legitimate non-banner port mention (an HMR port, a "press h for help" hint) appears before the real
-// banner. Generalizing further (e.g. verifying the candidate is actually listening) doesn't strictly
-// dominate this: the observed real case (a reverse-proxy target) is genuinely alive too — it's the
-// daemon — so a liveness check alone cannot tell it apart from the real bind.
+// is wrong if a legitimate non-banner port mention (an HMR port, a "press h for help" hint) appears
+// before the real banner — an error line is now excluded (isErrorLine, above; card f3e7dcc2), so it can
+// no longer be that undetected decoy. Generalizing further (e.g. verifying the candidate is actually
+// listening) doesn't strictly dominate this: the observed real decoy case (a reverse-proxy target) is
+// genuinely alive too — it's the daemon — so a liveness check alone cannot tell it apart from the real
+// bind.
 // Returns `{host, port, affirmed}` for the first candidate found (affirmed preferred over non-affirmed —
 // see below), or null if none. `affirmed` lets waitForBinding tell "this IS the bind" from "this merely
 // mentions a port", so it can keep polling for a later, better line instead of locking onto the first
@@ -214,7 +239,7 @@ function extractBinding(logPath) {
   let firstNonDecoy = null;
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.replace(ANSI_ESCAPE_RE, "");
-    if (DECOY_CONTEXT_RE.test(line)) continue;
+    if (DECOY_CONTEXT_RE.test(line) || isErrorLine(line)) continue;
     const m = PORT_BANNER_RE.exec(line);
     if (!m) continue;
     const candidate = { host: m[1], port: Number(m[2]) };

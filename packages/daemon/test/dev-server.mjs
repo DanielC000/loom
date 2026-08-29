@@ -33,6 +33,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       dual-stack fixture would prove nothing here — either guess would connect.
 //   (i) card 1494d3d9 DoD-5 — backward compatibility: `stop` tolerates a hand-authored OLD-shape tracking
 //       file (port only, no host/url) without crashing.
+//   (l) card f3e7dcc2 — an ERROR line (e.g. Node's own `Error: listen EACCES: ...`) that carries a
+//       host:port must never be scraped as a confident bind; the scanner must refuse it and mark
+//       portDetectionFailed:true instead.
+//   (m) card f3e7dcc2 — the (f) fixture's own port-stepping must also handle a genuinely EACCES-reserved
+//       port, not just EADDRINUSE (Windows-only; forces a real WinNAT/Hyper-V reserved port via a live
+//       `netsh` read).
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -174,7 +180,8 @@ try {
 
 // (f) card 177b9e7f — contended-port positive control. A fixture that mimics a dev server stepping to
 // the next free port under contention (e.g. Vite): it tries to bind its DESIRED port, and on EADDRINUSE
-// retries the next one up, printing a Vite-shaped banner once it actually binds. It ALSO writes its own
+// or EACCES (card f3e7dcc2 defect (b) — a Windows WinNAT/Hyper-V reserved port yields EACCES, not
+// EADDRINUSE) retries the next one up, printing a Vite-shaped banner once it actually binds. It ALSO writes its own
 // actual bound port to a sentinel file (argv[3]) — a GROUND TRUTH independent of both the helper's own
 // extraction and of network probing, so this test's own verification can't be fooled by a coincidental
 // listener elsewhere on a busy host answering on the wrong port (a live risk: this box runs plenty of
@@ -202,7 +209,11 @@ const portFixtureSrc = [
   "function tryListen(port) {",
   "  const srv = net.createServer(() => {});",
   "  srv.once('error', (e) => {",
-  "    if (e && e.code === 'EADDRINUSE') { tryListen(port + 1); }",
+  // card f3e7dcc2 defect (b): a Windows WinNAT/Hyper-V reserved port yields EACCES, not EADDRINUSE —
+  // stepping only on EADDRINUSE let a random step onto a reserved port kill this fixture instead of
+  // continuing past it, hiding the real production scenario from this section's own random OS-assigned
+  // decoyPort+1 (see section (m) below for the dedicated, deterministic regression for this).
+  "    if (e && (e.code === 'EADDRINUSE' || e.code === 'EACCES')) { tryListen(port + 1); }",
   "    else { console.error(String(e)); process.exit(1); }",
   "  });",
   "  srv.listen(port, '127.0.0.1', () => {",
@@ -657,7 +668,216 @@ try {
   if (cwdBugAbsTrackedPid != null && isAlive(cwdBugAbsTrackedPid)) { try { process.kill(cwdBugAbsTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
 }
 
+// (l) card f3e7dcc2 — THE PRIMARY DEFECT'S OWN REGRESSION. A bind-FAILURE line — e.g. Node's own
+// `Error: listen EACCES: permission denied 127.0.0.1:49685` (produced for real on this host by binding
+// a WinNAT/Hyper-V-reserved port; see card f3e7dcc2) — carries a host:port that matches PORT_BANNER_RE
+// exactly like a genuine bound-server banner, but describes a FAILURE, not a success. Pre-fix, the
+// scanner recorded it with NO portDetectionFailed key at all, from a child that bound nothing. Per the
+// card's own close-out note, this needs no reserved-port trigger and no race at all — feeding the
+// scanner the literal error text is deterministic: "feed `start` ANY child that prints that one error
+// string, and it will record the port with portDetectionFailed UNSET" (pre-fix).
+//
+// RED-PROOF (run manually to confirm this section fails against the pre-fix scanner; same convention as
+// section (k)'s own manual positive control):
+//   1. git diff -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs > /tmp/f3e7dcc2.patch
+//   2. git checkout HEAD -- packages/daemon/assets/skills/orchestrate/scripts/dev-server.mjs
+//   3. node packages/daemon/test/dev-server.mjs → section (l)'s checks FAIL: `start` prints
+//      `Bound: http://127.0.0.1:49685/` and the tracking file records port:49685/host:127.0.0.1/url,
+//      with NO portDetectionFailed key at all — from a child that bound nothing.
+//   4. git apply /tmp/f3e7dcc2.patch (restores the fix) → section (l) PASSES again.
+const errorLineFixtureSrc = "console.error('Error: listen EACCES: permission denied 127.0.0.1:49685');process.exit(1);";
+const errorLineScript = path.join(fixtureDir, "error-line.cjs");
+fs.writeFileSync(errorLineScript, errorLineFixtureSrc);
+const errorLineWorkDir = mkdtempManaged("loom-dev-server-errorline-");
+const ERROR_LINE_DECOY_PORT = 49685; // the exact value baked into the printed error text, above
+let errorLineTrackedPid = null;
+
+try {
+  const startResult = spawnSync(
+    process.execPath,
+    [HELPER, "start", errorLineWorkDir, "--", process.execPath, errorLineScript],
+    { encoding: "utf8", timeout: 10_000, env: FAST_PORT_TIMEOUT_ENV },
+  );
+  check("(l) start (error-line scanner control) exits 0", startResult.status === 0);
+  const errorLineStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+  errorLineTrackedPid = errorLineStartMatch ? Number(errorLineStartMatch[1]) : null;
+
+  check(
+    "(l) start does NOT print a Bound: line for an ERROR line's host:port",
+    !/^Bound: /m.test(startResult.stdout || ""),
+  );
+  check(
+    "(l) start reports the binding as not detected, not a confident (wrong) match",
+    /Bound host:port not detected/.test(startResult.stdout || ""),
+  );
+
+  const errorLineAbsDir = path.resolve(errorLineWorkDir);
+  const errorLineTrackFile = path.join(os.tmpdir(), `loom-dev-server-${pathHashForTest(errorLineAbsDir)}.json`);
+  const errorLineTracked = JSON.parse(fs.readFileSync(errorLineTrackFile, "utf8"));
+  check(
+    "(l) tracking file marks portDetectionFailed:true rather than recording the scraped port",
+    errorLineTracked.portDetectionFailed === true,
+  );
+  check(
+    "(l) tracking file's port/host/url stay null — the error line's own port never lands there",
+    errorLineTracked.port === null && errorLineTracked.host === null && errorLineTracked.url === null,
+  );
+  check(
+    "(l) NEGATIVE CONTROL corollary: the tracked port is specifically not the error line's own decoy value",
+    errorLineTracked.port !== ERROR_LINE_DECOY_PORT,
+  );
+} catch (e) {
+  console.log(`FAIL  unexpected error (error-line scanner control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (errorLineTrackedPid != null && isAlive(errorLineTrackedPid)) { try { process.kill(errorLineTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
+// (l) FALSE-POSITIVE-DIRECTION CONTROL — manager review of this same card: an EARLIER shape-based
+// version of ERRNO_CODE_RE (`\bE[A-Z]{3,}\b`) matched not just Node's own errno codes but ANY all-caps
+// word starting with "E" — and a dev-server banner is free to print its OWN framework name in caps
+// ("EXPRESS server listening on ...", "ESBUILD serving at ...", "EMBER Serving on ..." all measured false
+// positives). The section above only proves the scanner REJECTS what it should; a one-directional
+// exclusion test can't fail when exclusion goes too far — this proves it still ACCEPTS a genuine binding
+// whose own banner happens to carry an all-caps "E..." token, using EXPRESS as the specimen.
+const allCapsFixtureSrc = [
+  "const net = require('net');",
+  "const srv = net.createServer(() => {});",
+  "srv.listen(0, '127.0.0.1', () => {",
+  "  const actual = srv.address().port;",
+  "  console.log('EXPRESS server listening on http://127.0.0.1:' + actual);",
+  "});",
+].join("\n");
+const allCapsScript = path.join(fixtureDir, "allcaps-banner.cjs");
+fs.writeFileSync(allCapsScript, allCapsFixtureSrc);
+const allCapsWorkDir = mkdtempManaged("loom-dev-server-allcaps-");
+let allCapsTrackedPid = null;
+
+try {
+  const startResult = spawnSync(
+    process.execPath,
+    [HELPER, "start", allCapsWorkDir, "--", process.execPath, allCapsScript],
+    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+  );
+  check("(l) start (all-caps-framework-name banner) exits 0", startResult.status === 0);
+  const allCapsStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+  allCapsTrackedPid = allCapsStartMatch ? Number(allCapsStartMatch[1]) : null;
+
+  check(
+    "(l) FALSE-POSITIVE-DIRECTION CONTROL: an all-caps 'EXPRESS...' banner is still detected as a real bind, not excluded as an error line",
+    /^Bound: /m.test(startResult.stdout || ""),
+  );
+  const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+  const boundUrl = boundMatch ? boundMatch[1] : null;
+  let boundParsed = null;
+  try { boundParsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+  const recordedPort = boundParsed ? Number(boundParsed.port) : null;
+  const reallyBound = recordedPort != null && await canConnect(recordedPort);
+  check("(l) the recorded port from the all-caps banner is genuinely accepting connections", reallyBound);
+
+  // Tear down via the helper's OWN `stop` (taskkill /T on win32) — same rationale as sections (g)/(h)/(m):
+  // the tracked pid is the SUPERVISOR, and a bare SIGKILL on just that pid leaves its real child (the net
+  // server holding this section's cwd) alive as an orphan, blocking this temp dir's own cleanup.
+  spawnSync(process.execPath, [HELPER, "stop", allCapsWorkDir], { encoding: "utf8", timeout: 10_000 });
+} catch (e) {
+  console.log(`FAIL  unexpected error (all-caps-framework-name banner control): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (allCapsTrackedPid != null && isAlive(allCapsTrackedPid)) { try { process.kill(allCapsTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+}
+
+// (m) card f3e7dcc2 SECONDARY DEFECT — the `(f)` fixture above only stepped on EADDRINUSE, so a fixture
+// forced onto a genuinely EACCES-reserved port (a WinNAT/Hyper-V exclusion range on Windows) died instead
+// of stepping around it, hiding the real production scenario from the test suite. This section forces
+// that exact case using the LIVE reserved-port list (`netsh int ipv4 show excludedportrange
+// protocol=tcp`) — never a pinned port number, since the card itself warns those ranges move on a
+// WinNAT/Hyper-V/Docker restart. Windows-only (the mechanism this defect is about); SKIPS elsewhere or if
+// this host currently has no excluded ranges, logged explicitly rather than silently passing.
+if (process.platform !== "win32") {
+  console.log("SKIP  (m) EACCES-stepping fixture control — Windows-only (WinNAT/Hyper-V reserved-port exclusion is a Windows mechanism)");
+} else {
+  const netshResult = spawnSync("netsh", ["int", "ipv4", "show", "excludedportrange", "protocol=tcp"], { encoding: "utf8", timeout: 10_000 });
+  const reservedPorts = [];
+  for (const line of (netshResult.stdout || "").split(/\r?\n/)) {
+    const m = /^\s*(\d{2,5})\s+(\d{2,5})\b/.exec(line);
+    if (m) reservedPorts.push(Number(m[1]));
+  }
+  if (reservedPorts.length === 0) {
+    console.log("SKIP  (m) EACCES-stepping fixture control — this host currently has no excluded TCP port ranges to force the case with");
+  } else {
+    const reservedPort = reservedPorts[0];
+    check(`(m) chosen port ${reservedPort} is genuinely reserved (live netsh read, precondition)`, Number.isInteger(reservedPort));
+
+    const eaccesStepFixtureSrc = [
+      "const net = require('net');",
+      "const fs = require('fs');",
+      "const desired = Number(process.argv[2]);",
+      "const sentinelFile = process.argv[3];",
+      "function tryListen(port) {",
+      "  const srv = net.createServer(() => {});",
+      "  srv.once('error', (e) => {",
+      "    if (e && (e.code === 'EADDRINUSE' || e.code === 'EACCES')) { tryListen(port + 1); }",
+      "    else { console.error(String(e)); process.exit(1); }",
+      "  });",
+      "  srv.listen(port, '127.0.0.1', () => {",
+      "    const actual = srv.address().port;",
+      "    fs.writeFileSync(sentinelFile, String(actual));",
+      "    console.log('  \\u001b[32m\\u2192\\u001b[39m  \\u001b[1mLocal\\u001b[22m:   \\u001b[36mhttp://localhost:\\u001b[1m' + actual + '\\u001b[22m/\\u001b[39m');",
+      "  });",
+      "}",
+      "tryListen(desired);",
+    ].join("\n");
+    const eaccesStepScript = path.join(fixtureDir, "eacces-step-server.cjs");
+    fs.writeFileSync(eaccesStepScript, eaccesStepFixtureSrc);
+    const eaccesStepSentinelFile = path.join(fixtureDir, "eacces-step-actual.txt");
+    const eaccesStepWorkDir = mkdtempManaged("loom-dev-server-eaccesstep-");
+    let eaccesStepTrackedPid = null;
+
+    try {
+      const startResult = spawnSync(
+        process.execPath,
+        [HELPER, "start", eaccesStepWorkDir, "--", process.execPath, eaccesStepScript, String(reservedPort), eaccesStepSentinelFile],
+        { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+      );
+      check("(m) start (forced onto a genuinely EACCES-reserved port) exits 0", startResult.status === 0);
+      const eaccesStepMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
+      eaccesStepTrackedPid = eaccesStepMatch ? Number(eaccesStepMatch[1]) : null;
+
+      check(
+        "(m) the fixture steps past the EACCES-reserved port and still binds — does NOT die",
+        /^Bound: /m.test(startResult.stdout || ""),
+      );
+
+      const actualPort = fs.existsSync(eaccesStepSentinelFile) ? Number(fs.readFileSync(eaccesStepSentinelFile, "utf8")) : null;
+      check("(m) fixture wrote its own ground-truth actual-port sentinel (it survived the EACCES)", actualPort != null && !Number.isNaN(actualPort));
+      check("(m) the actually-bound port is past the reserved one, not the reserved port itself", actualPort != null && actualPort > reservedPort);
+
+      const boundMatch = /Bound: (\S+) \(recorded/.exec(startResult.stdout || "");
+      const boundUrl = boundMatch ? boundMatch[1] : null;
+      let boundParsed = null;
+      try { boundParsed = boundUrl ? new URL(boundUrl) : null; } catch { /* leave null — checked below */ }
+      const recordedPort = boundParsed ? Number(boundParsed.port) : null;
+      check(
+        "(m) helper's recorded port matches the fixture's own ground-truth actual port",
+        recordedPort != null && actualPort != null && recordedPort === actualPort,
+      );
+      const reallyBound = recordedPort != null && await canConnect(recordedPort);
+      check("(m) the recorded port is genuinely accepting connections", reallyBound);
+
+      // Tear down via the helper's OWN `stop` (taskkill /T on win32) — same rationale as sections (g)/(h):
+      // the tracked pid is the SUPERVISOR, and a bare SIGKILL on just that pid leaves its real child (the
+      // net server holding this section's cwd) alive as an orphan, blocking this temp dir's own cleanup.
+      spawnSync(process.execPath, [HELPER, "stop", eaccesStepWorkDir], { encoding: "utf8", timeout: 10_000 });
+    } catch (e) {
+      console.log(`FAIL  unexpected error (EACCES-stepping fixture control): ${(e && e.stack) || e}`);
+      failures++;
+    } finally {
+      if (eaccesStepTrackedPid != null && isAlive(eaccesStepTrackedPid)) { try { process.kill(eaccesStepTrackedPid, "SIGKILL"); } catch { /* best effort */ } }
+    }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, and requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd."
+  ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched, records the ACTUAL bound port (not the configured one) even under port contention, records a directly-usable url alongside the port (mapping 0.0.0.0 to a concrete loopback host), that recorded url connects on a real single-stack server where a naively-rebuilt one refuses, requires an absolute <dir> — refusing a relative one loudly rather than silently keying off the invoking process's own cwd, refuses an ERROR line's host:port rather than recording it as a confident (wrong) bind, and steps around a genuinely EACCES-reserved port the same way it already stepped around EADDRINUSE."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
