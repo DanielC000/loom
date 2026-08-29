@@ -58,6 +58,58 @@ const WINDOWMS_KW = "window" + "Ms";
     setEq(added.get("packages/daemon/test/sample.mjs"), new Set([2, 3, 5])));
 }
 
+// ── parseAddedLineNumbers: a "Binary files ... differ" header (card 71231839) ──────────────────────
+// Card 71231839's own fix commit (removing resume-mode-detect.mjs's content-sniffed-binary NUL byte)
+// produces EXACTLY this diff shape: its old side is still NUL-bearing (binary), so git emits no
+// `+++`/`@@` lines at all for it, just the one-line "Binary files ... differ" header. Before this guard
+// recognized that shape, it degraded identically to a genuinely-unrecognized header — a 0-entry map —
+// which main()'s own diffResult.files-vs-addedByFile cross-check (correctly, by design) treats as a
+// parser bug and fails loudly on. This is the RED/GREEN pair proving the fix: recognized (GREEN, file
+// registered with zero addable lines — a binary diff is honestly uninformative, not a guess) vs. a
+// genuinely unknown header shape (RED, still size 0 — the fail-loud path for a real parser gap is
+// unaffected).
+{
+  const binaryDiff = [
+    "diff --git a/packages/daemon/test/resume-mode-detect.mjs b/packages/daemon/test/resume-mode-detect.mjs",
+    "index d211ed25..24efcaad 100644",
+    "Binary files a/packages/daemon/test/resume-mode-detect.mjs and b/packages/daemon/test/resume-mode-detect.mjs differ",
+  ].join("\n");
+  const added = parseAddedLineNumbers(binaryDiff);
+  check("parseAddedLineNumbers GREEN: a real 'Binary files ... differ' header registers the (new-side) file with zero addable lines, not a 0-entry map",
+    added.size === 1 && added.has("packages/daemon/test/resume-mode-detect.mjs") && added.get("packages/daemon/test/resume-mode-detect.mjs").size === 0);
+}
+{
+  // RED control: the fail-loud path for a header shape this parser genuinely does not recognize is
+  // untouched by the binary-diff fix above — still degrades to a 0-entry map, exactly as before.
+  const unrecognizedDiff = [
+    "diff --git a/packages/daemon/test/sample.mjs b/packages/daemon/test/sample.mjs",
+    "some future git diff header shape this parser has never seen",
+  ].join("\n");
+  const added = parseAddedLineNumbers(unrecognizedDiff);
+  check("parseAddedLineNumbers RED: a genuinely unrecognized header shape still degrades to a 0-entry map (main()'s cross-check still catches it)",
+    added.size === 0);
+}
+{
+  // A mixed patch — one ordinary text file, one binary-diffed file — both must be discovered, matching
+  // what diffBranch's own `files` diffstat would report for the same two-file change.
+  const mixedDiff = [
+    "diff --git a/packages/daemon/test/other.mjs b/packages/daemon/test/other.mjs",
+    "index 1111111..2222222 100644",
+    "--- a/packages/daemon/test/other.mjs",
+    "+++ b/packages/daemon/test/other.mjs",
+    "@@ -1,1 +1,2 @@",
+    " line1 unchanged",
+    "+line2 new",
+    "diff --git a/packages/daemon/test/resume-mode-detect.mjs b/packages/daemon/test/resume-mode-detect.mjs",
+    "index d211ed25..24efcaad 100644",
+    "Binary files a/packages/daemon/test/resume-mode-detect.mjs and b/packages/daemon/test/resume-mode-detect.mjs differ",
+  ].join("\n");
+  const added = parseAddedLineNumbers(mixedDiff);
+  check("parseAddedLineNumbers: a mixed patch (one text file, one binary-diffed file) discovers BOTH files",
+    added.size === 2 && setEq(added.get("packages/daemon/test/other.mjs"), new Set([2])) &&
+    added.get("packages/daemon/test/resume-mode-detect.mjs").size === 0);
+}
+
 // ── DoD-6 RED: an unwitnessed raw sleep + single check() on added lines is a HIT ────────────────────
 {
   const source = [

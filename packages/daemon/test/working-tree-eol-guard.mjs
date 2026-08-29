@@ -42,20 +42,28 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // `git check-attr eol` per path — never a hand-copied list of pinned globs, which would silently drift
 // from `.gitattributes` the moment either changed (card f645b481's shadow-list defect, one level up).
 //
-// THE TWO GENUINE ALWAYS-LF FILES (`packages/daemon/test/resume-mode-detect.mjs`,
-// `packages/web/src/pages/Companion.tsx`) — NOT flips, and NOT hardcoded as an exception here either.
-// Both carry a single literal NUL (0x00) byte in their own source (a garbage-input test fixture, and a
-// sentinel map-key respectively — grep `\x00` in either file to see it). A NUL byte anywhere in a
-// blob is exactly the heuristic git's OWN `text=auto` content-sniffing uses to decide a path is BINARY —
-// confirmed empirically on this card by running `git checkout --` against both files directly: neither
-// one's working-tree bytes change, in this worktree or a fresh one, regardless of `core.autocrlf`. A
+// THE ONE REMAINING GENUINE ALWAYS-LF FILE (`packages/web/src/pages/Companion.tsx`) — NOT a flip, and
+// NOT hardcoded as an exception here either. It carries a single literal NUL (0x00) byte in its own
+// source (a sentinel map-key — grep `\x00` in the file to see it). A NUL byte anywhere in a blob is
+// exactly the heuristic git's OWN `text=auto` content-sniffing uses to decide a path is BINARY —
+// confirmed empirically on this card by running `git checkout --` against the file directly: its
+// working-tree bytes don't change, in this worktree or a fresh one, regardless of `core.autocrlf`. A
 // binary-by-content file is never subject to LF/CRLF conversion by git at all — commit or checkout — so
 // there is no line-ending policy to enforce on it, and this guard SKIPS any working-tree file containing
 // a raw NUL byte for exactly that reason. This generalises to any FUTURE file with the same shape
-// (nothing here needs updating if a third such file is ever added), and it means a real flip can never
+// (nothing here needs updating if another such file is ever added), and it means a real flip can never
 // hide behind this exemption: a genuinely flipped source file (a config, a doc, an ordinary source file)
 // has no reason to carry an embedded NUL, and one that legitimately does is — by construction — a file
 // git itself was never going to touch either.
+//
+// `packages/daemon/test/resume-mode-detect.mjs` used to be a second such file (its own garbage-input
+// test fixture carried a literal NUL). Card 71231839 found that same NUL — sitting inside git's ~8000-
+// byte diff-binary sniff window, unlike Companion.tsx's (past that window) — also silenced `git log
+// --numstat`/diff rendering for the file, and rewrote it as the `\x00` escape (an identical runtime
+// string value, per the ECMAScript spec, so the test's own assertions are unaffected). That took the
+// file out of this guard's NUL-exemption entirely — it is now an ordinary unpinned text=auto file,
+// checked against the same CRLF-on-this-host policy as everything else, like any other file that never
+// carried a NUL.
 //
 // CROSS-HOST CORRECTNESS: `core.autocrlf` is read LIVE (`git config --get core.autocrlf`), not assumed
 // true. On this Windows dev host it is `true`, so an unpinned text=auto file is expected to be CRLF on
@@ -258,8 +266,8 @@ function checkAttrsBatch(root, files) {
   check(`sanity: .gitattributes' real eol=crlf pin (install.ps1) resolves to ≥1 tracked file (found ${crlfPinnedCount})`, crlfPinnedCount > 0);
 
   check(
-    `positive control: the two known genuinely-binary-by-content files are exempted via their own embedded NUL byte, not a hardcoded filename (found ${skippedBinary.length} exempt file(s): ${skippedBinary.join(", ") || "none"})`,
-    skippedBinary.includes("packages/daemon/test/resume-mode-detect.mjs") && skippedBinary.includes("packages/web/src/pages/Companion.tsx"),
+    `positive control: the one known genuinely-binary-by-content file is exempted via its own embedded NUL byte, not a hardcoded filename (found ${skippedBinary.length} exempt file(s): ${skippedBinary.join(", ") || "none"})`,
+    skippedBinary.includes("packages/web/src/pages/Companion.tsx"),
   );
 
   if (violations.length) {

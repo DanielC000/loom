@@ -202,6 +202,18 @@ function markerReasonFor(lines, waitLineIdx, markerRe) {
  * the 1-indexed line numbers, IN THE NEW FILE, that this diff ADDS. A deleted file contributes no entry
  * (nothing to scan; the file itself may be gone). Pure and exported so the self-test can drive it against
  * a hand-written diff string, with no real git/repo involved.
+ *
+ * Card 71231839: a file whose CONTENT git content-sniffs as binary (a raw NUL byte anywhere in it — see
+ * `working-tree-eol-guard.mjs`'s own header on this) produces NO `+++`/`@@` lines at all — git emits a
+ * single `Binary files a/<path> and b/<path> differ` line instead. Recognizing that shape explicitly (and
+ * registering the file with an EMPTY added-line set — a binary diff genuinely conveys zero line-level
+ * information, which is the honest, correct answer, not a guess) is what lets `main()`'s own
+ * diffResult.files-vs-addedByFile cross-check (below) tell "this file's diff is legitimately uninformative"
+ * apart from "the parser hit a header shape it has never seen before" — the ONLY thing that check exists to
+ * catch. Before this, EITHER shape degraded identically to a 0-entry map, which the cross-check (correctly,
+ * by design) treats as a parser bug and fails loudly on — this is what happened the day this card's own
+ * fix removed the NUL from `resume-mode-detect.mjs`'s test fixture: the FIX COMMIT's own diff (old side
+ * still NUL-bearing, new side not) is itself a binary transition, so it hit exactly this shape.
  */
 export function parseAddedLineNumbers(patchText) {
   const result = new Map();
@@ -209,6 +221,14 @@ export function parseAddedLineNumbers(patchText) {
   let currentFile = null;
   let newLineNo = null;
   for (const line of lines) {
+    const binaryMatch = /^Binary files (?:a\/)?(.+) and (?:b\/)?(.+) differ$/.exec(line);
+    if (binaryMatch) {
+      const newPath = binaryMatch[2];
+      if (!result.has(newPath)) result.set(newPath, new Set());
+      currentFile = null;
+      newLineNo = null;
+      continue;
+    }
     // Code review finding (blocking): a host with `diff.noprefix` set produces `+++ path` with NO `b/`
     // prefix at all — the old `b/`-only regex then extracted ZERO files from a real, non-empty patch,
     // silently indistinguishable from a genuinely clean branch. `+++ /dev/null` (a deleted file) is
