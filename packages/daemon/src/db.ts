@@ -1441,6 +1441,13 @@ export interface MergeReconcileWedgeEntry {
   taskId: string | null;
   projectId: string;
   repoKey: string | null;
+  /** ⚠️ When this daemon's TRACKING of the wedge began (this entry's first upsert), NOT necessarily
+   *  when the record actually first became wedged — a record can have been silently stuck on a
+   *  pre-existing bug for a long time before the tracking that reports `firstWedgedAt` was ever
+   *  deployed (card 6f73da1a: two records here read "wedged since" the deploy date, understating a
+   *  true origin 26+ days earlier). Correct-by-construction for anything that wedges AFTER tracking
+   *  exists; misleading only for records already wedged before it did. Don't read this as "recently
+   *  regressed" without checking whether the record predates this field's own introduction. */
   firstWedgedAt: string;
   lastAttemptAt: string;
   attempts: number;

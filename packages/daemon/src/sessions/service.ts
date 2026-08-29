@@ -16418,7 +16418,7 @@ export class SessionService {
   private escalateWedgedMergeReconcile(s: Session, project: Project, entry: MergeReconcileWedgeEntry): void {
     const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
     const ageDays = Math.max(0, Math.round((Date.now() - new Date(entry.firstWedgedAt).getTime()) / 86_400_000));
-    const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries). This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`;
+    const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries) — NOTE: "wedged since" is when this daemon started TRACKING the wedge, not necessarily when it first began; a record can predate this tracking and be older than it reports. This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`;
     try {
       this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" });
     } catch {
@@ -16544,7 +16544,8 @@ export class SessionService {
         // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
         // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
         // the finalizeMerge guard above) forcing the column back to terminal each time.
-        const alreadyFinalized = this.db.listEventsForWorker(s.id).some((e) => e.kind === "merge_done");
+        const workerEvents = this.db.listEventsForWorker(s.id);
+        const alreadyFinalized = workerEvents.some((e) => e.kind === "merge_done");
         // CHEAP, REPO-FREE EARLY-OUT (card c33f94b2: moved ahead of repoKey resolution too, not just the
         // squash lookup below) — "already fully reconciled" is knowable from the DB + fs alone, so a
         // session finalized by some other means (e.g. Pass A2 just below) never needs its repo resolved at
@@ -16552,6 +16553,38 @@ export class SessionService {
         if (alreadyFinalized && !worktreeOnDisk) {
           this.db.clearMergeReconcileWedge(s.id); // no longer wedged, whatever its repoKey now says
           continue; // already fully reconciled — nothing to finish
+        }
+        // Card 6f73da1a: a worker that NEVER requested a merge at all (no `merge_request` event on
+        // record — e.g. a declared no-commit `noChanges:true` done report, auto-retired without ever
+        // touching a repo) has nothing for Pass A to reconcile, no matter what its stamped repoKey
+        // currently resolves to. This is DIFFERENT from `alreadyFinalized` above (a landed-merge
+        // signal) — it's a "there was never anything to land" signal, and it must be checked BEFORE
+        // repoKey resolution, not folded into it: a stale/deregistered repoKey on a no-op session
+        // would otherwise throw UnknownRepoKeyError and wedge FOREVER for a repo it was never going to
+        // touch. Root cause of the incident that named this card: two archived no-commit probe
+        // sessions (`f9feeccc`, `1bf634de`) stamped `repoKey:"api"` from a since-deregistered
+        // multi-repo live-test repo (`project.repos` went from naming "api" to `[]`) — neither ever
+        // called worker_merge, so there was no merge to lose, yet Pass A retried repoKey resolution
+        // for them every boot for 26+ days. `!worktreeOnDisk` guards against firing on a still-live
+        // worker whose task a human moved to the terminal column early (the worktree only disappears
+        // once the session has actually stopped); `isTerminalTask` guards against a worker still
+        // mid-task that simply hasn't requested its merge yet. `terminalKey` is checked for `undefined`
+        // BEFORE the comparison, not folded into one `===` — `columnKeyForProjectRole` returns
+        // `undefined` for a project whose resolved `kanbanColumns` is empty (columnKeyForRole's own
+        // "empty board" case), and `getTask(s.taskId)?.columnKey` is ALSO `undefined` for a session
+        // whose task row has since been deleted (task_id is a deliberately soft link — see the
+        // `sessions` table's own doc). Comparing the two directly would make `undefined === undefined`
+        // read as "terminal" for the wrong reason on that (rare, but real) double-degenerate
+        // combination; the explicit guard keeps this fail-closed on its own terms rather than on the
+        // accident of both sides going missing together.
+        const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
+        const isTerminalTask = terminalKey !== undefined && this.db.getTask(s.taskId)?.columnKey === terminalKey;
+        const neverRequestedMerge = !workerEvents.some((e) => e.kind === "merge_request");
+        if (neverRequestedMerge && !worktreeOnDisk && isTerminalTask) {
+          this.db.clearMergeReconcileWedge(s.id); // no longer wedged (or never was), whatever its repoKey now says
+          // eslint-disable-next-line no-console
+          console.info(`[reconcile] worker ${s.id} (branch ${s.branch}) never requested a merge and its task is already terminal — nothing to reconcile, skipping repoKey resolution`);
+          continue; // no-op completion — nothing to finish, nothing pending on any repo
         }
         // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo — anchored to its
         // stamped `repoKey` (see Session.repoKey's doc), not `project.repoPath`.

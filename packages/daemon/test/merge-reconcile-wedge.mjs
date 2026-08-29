@@ -36,6 +36,11 @@ const realWarn = console.warn;
 console.warn = (...a) => { warns.push(a.join(" ")); realWarn(...a); };
 const warnsMatching = (needle) => warns.filter((w) => w.includes(needle));
 
+const infos = [];
+const realInfo = console.info;
+console.info = (...a) => { infos.push(a.join(" ")); realInfo(...a); };
+const infosMatching = (needle) => infos.filter((w) => w.includes(needle));
+
 const GIT_ID = "-c user.email=mrw@loom -c user.name=mrw";
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -73,6 +78,17 @@ function seedSession(p, { taskColumn, withMergeRequest }) {
   }
 }
 
+// --- second project, DELIBERATELY configured with zero kanban columns — the one way
+//     columnKeyForProjectRole(..., "terminal") returns undefined (columnKeyForRole's own "empty board"
+//     case; kanbanColumns:[] is an explicit override, not an absent one, so resolveConfig's `??` does
+//     NOT fall back to the platform default). Needed for scenario E below: a session's task_id is a
+//     deliberately SOFT link (no FK — see the `sessions` table's own doc), so a deleted task also makes
+//     `getTask(...)?.columnKey` undefined — pairing the two `undefined`s is the only way to actually
+//     exercise the `undefined === undefined` trap the fix below guards against. ---
+const projId2 = `mrw-proj2-${sfx}`;
+db.insertProject({ id: projId2, name: "MRW2-EMPTY-BOARD", repoPath: repo, vaultPath: repo, config: { kanbanColumns: [] }, createdAt: now, archivedAt: null, repos: [] });
+db.insertAgent({ id: `mrw-agent2-${sfx}`, projectId: projId2, name: "t2", startupPrompt: "", position: 0 });
+
 // --- (a) wedge-only: repoKey unresolvable, task NEVER done, no merge_request — Pass A2 can never touch
 //     it either, so this session is genuinely, permanently stuck until a human intervenes. ---
 const A = {
@@ -91,6 +107,40 @@ const C = {
 };
 seedSession(C, { taskColumn: "done", withMergeRequest: true });
 
+// --- (d) card 6f73da1a: repoKey unresolvable AND task is done AND no merge_request was EVER filed —
+//     a declared no-commit completion (e.g. worker_report done noChanges:true, auto-retired) that never
+//     touched any repo. Distinct from (c): there is no dangling merge for Pass A2 to resolve either —
+//     nothing was ever pending. This must never even become a tracked wedge, on the FIRST boot. ---
+const D = {
+  taskId: `mrw-d-task-${sfx}`, mgrId: `mrw-d-mgr-${sfx}`, workerId: `mrw-d-wkr-${sfx}`,
+  worktreePath: path.join(os.tmpdir(), `loom-mrw-d-worktree-${sfx}`), // deliberately never created on disk
+  branch: `loom/mrw-d-${sfx}`, repoKey: "ghost-repo",
+};
+seedSession(D, { taskColumn: "done", withMergeRequest: false });
+
+// --- (e) the manager's post-review ask: same shape as D (no merge_request, no worktree) BUT on the
+//     empty-board project AND with taskId pointing at a task row that was NEVER inserted (simulates a
+//     deleted task — task_id is a soft link, so this is a legitimate, reachable state). Both sides of
+//     the old bare `===` would read undefined here — this must NOT be treated as terminal; it must stay
+//     on the genuinely-wedged path (like scenario A), never silently skipped. ---
+const E = {
+  taskId: `mrw-e-task-${sfx}`, mgrId: `mrw-e-mgr-${sfx}`, workerId: `mrw-e-wkr-${sfx}`,
+  worktreePath: path.join(os.tmpdir(), `loom-mrw-e-worktree-${sfx}`), // deliberately never created on disk
+  branch: `loom/mrw-e-${sfx}`, repoKey: "ghost-repo",
+};
+// NO db.insertTask(E.taskId, ...) — the task row is deliberately absent.
+db.insertSession({
+  id: E.mgrId, projectId: projId2, agentId: `mrw-agent2-${sfx}`, engineSessionId: null, title: null, cwd: repo,
+  processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager",
+});
+db.insertSession({
+  id: E.workerId, projectId: projId2, agentId: `mrw-agent2-${sfx}`, engineSessionId: null, title: null,
+  cwd: E.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
+  role: "worker", parentSessionId: E.mgrId, taskId: E.taskId, worktreePath: E.worktreePath, branch: E.branch,
+  repoKey: E.repoKey,
+});
+// (no merge_request event for E — mirrors D's "never attempted" shape)
+
 const hasTerminal = (workerId) => db.listEventsForWorker(workerId).some((e) => e.kind === "merge_done" || e.kind === "merge_rejected");
 
 try {
@@ -98,6 +148,12 @@ try {
   check("(pre) scenario C worktree absent from disk", !fs.existsSync(C.worktreePath));
   check("(pre) scenario C task starts done", db.getTask(C.taskId).columnKey === "done");
   check("(pre) scenario C has a dangling merge_request (no terminal event)", !hasTerminal(C.workerId));
+  check("(pre) scenario D worktree absent from disk", !fs.existsSync(D.worktreePath));
+  check("(pre) scenario D task starts done", db.getTask(D.taskId).columnKey === "done");
+  check("(pre) scenario D has NO merge_request on record", !db.listEventsForWorker(D.workerId).some((e) => e.kind === "merge_request"));
+  check("(pre) scenario E worktree absent from disk", !fs.existsSync(E.worktreePath));
+  check("(pre) scenario E's task row is genuinely absent (simulated delete)", db.getTask(E.taskId) === undefined);
+  check("(pre) scenario E has NO merge_request on record", !db.listEventsForWorker(E.workerId).some((e) => e.kind === "merge_request"));
 
   // ═══════════════ BOOT 1 ═══════════════
   const r1 = await sessions.reconcileOrchestrationOnBoot();
@@ -105,7 +161,7 @@ try {
   // (a) tracked as a WEDGE, not a generic failure — mergesFailed still counts it (nothing is silently
   // dropped from the aggregate), but mergeReconcileWedged distinguishes it, and mergeFailureDetails names it.
   check("(1a) reconcile counted the wedge in mergesFailed", r1.mergesFailed >= 1);
-  check("(1a) reconcile counted exactly the wedge(s) expected this boot in mergeReconcileWedged", r1.mergeReconcileWedged === 2); // A and C both wedge on boot 1
+  check("(1a) reconcile counted exactly the wedge(s) expected this boot in mergeReconcileWedged", r1.mergeReconcileWedged === 3); // A, C, and E all wedge on boot 1
   const detailA1 = r1.mergeFailureDetails.find((d) => d.sessionId === A.workerId);
   check("(1a) mergeFailureDetails names scenario A as wedged", detailA1?.wedged === true);
   check("(1a) mergeFailureDetails carries a wedgedSince timestamp", typeof detailA1?.wedgedSince === "string" && detailA1.wedgedSince.length > 0);
@@ -123,6 +179,30 @@ try {
   // ...but Pass A2 (same boot, no repoKey dependency at all) independently resolves it via the event trail.
   check("(1c) Pass A2 emitted the branch-gone merge_done for scenario C in the SAME boot", r1.staleMergesResolved === 1 && hasTerminal(C.workerId));
 
+  // (d) THE FIX UNDER TEST: scenario D never requested a merge at all, so it must NEVER be tracked as a
+  // wedge — not even a single "attempt" — despite its repoKey being just as unresolvable as A's/C's.
+  const detailD1 = r1.mergeFailureDetails.find((d) => d.sessionId === D.workerId);
+  check("(1d) scenario D is NOT in mergeFailureDetails on boot 1 (never even attempted)", detailD1 === undefined);
+  check("(1d) scenario D never accumulated a wedge entry", db.getMergeReconcileWedge(D.workerId) === undefined);
+  check("(1d) mergeReconcileWedged counted A, C, and E, not D", r1.mergeReconcileWedged === 3);
+  check("(1d) a named info log explains the skip (worker + branch, not silent)",
+    infosMatching(D.workerId).some((w) => w.includes(D.branch) && w.includes("never requested a merge")));
+  check("(1d) scenario D got NO merge_done event (this was never a merge, real or reconstructed)",
+    !db.listEventsForWorker(D.workerId).some((e) => e.kind === "merge_done"));
+
+  // (e) THE HARDENING UNDER TEST (post-review ask): scenario E has NO merge_request and NO worktree —
+  // identical shape to D — but its task row is absent AND its project resolves no terminal column at
+  // all. The bare `getTask(...)?.columnKey === columnKeyForProjectRole(...)` comparison would read
+  // undefined === undefined here and wrongly treat it as terminal, silently skipping a session that (as
+  // far as Pass A can actually tell) might still have real work. It must instead fall through exactly
+  // like scenario A: genuinely wedged, not silently cleared.
+  const detailE1 = r1.mergeFailureDetails.find((d) => d.sessionId === E.workerId);
+  check("(1e) scenario E IS wedged on boot 1 (the undefined===undefined trap must NOT read as terminal)", detailE1?.wedged === true);
+  check("(1e) scenario E's wedge entry was recorded (not silently skipped)", db.getMergeReconcileWedge(E.workerId)?.attempts === 1);
+  check("(1e) NO 'never requested a merge' skip log fired for scenario E (it did NOT take the no-op path)",
+    infosMatching(E.workerId).length === 0);
+  check("(1e) scenario E got NO merge_done event", !db.listEventsForWorker(E.workerId).some((e) => e.kind === "merge_done"));
+
   // ═══════════════ BOOT 2 — the crux ═══════════════
   const r2 = await sessions.reconcileOrchestrationOnBoot();
 
@@ -134,6 +214,16 @@ try {
   check("(2c) scenario C's wedge entry was cleared from tracking", db.getMergeReconcileWedge(C.workerId) === undefined);
   check("(2c) scenario C's merge_done is still exactly one (Pass A2 idempotent, no duplicate)",
     db.listEventsForWorker(C.workerId).filter((e) => e.kind === "merge_done").length === 1);
+
+  // (d) stays clean on a second boot too — no wedge entry ever accumulates, idempotent.
+  const detailD2 = r2.mergeFailureDetails.find((d) => d.sessionId === D.workerId);
+  check("(2d) scenario D still not wedged on boot 2", detailD2 === undefined);
+  check("(2d) scenario D still has no wedge entry", db.getMergeReconcileWedge(D.workerId) === undefined);
+
+  // (e) still genuinely wedged on boot 2 too — attempts bump like A, never silently cleared.
+  const detailE2 = r2.mergeFailureDetails.find((d) => d.sessionId === E.workerId);
+  check("(2e) scenario E still wedged on boot 2", detailE2?.wedged === true);
+  check("(2e) scenario E's attempts bumped to 2 (not reset, not cleared)", db.getMergeReconcileWedge(E.workerId)?.attempts === 2);
 
   // (a) scenario A is STILL genuinely wedged (never finalized by anything) — attempts bump, firstWedgedAt
   // is preserved (distinguishing "deferred once" from "wedged since <the original date>"), and past the
@@ -153,12 +243,13 @@ try {
     warnsMatching(`escalated [loom:merge-orphaned]`).filter((w) => w.includes(A.workerId)).length === 1);
 } finally {
   console.warn = realWarn;
+  console.info = realInfo;
   db.close();
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a Pass-A session with an unresolvable repoKey is tracked as a distinct, named, escalating wedge (never a bare 'retry next boot' count); a genuine branch-gone record still resolves via Pass A2 unaffected; and a session that is BOTH (Pass A2-resolvable AND repoKey-wedged) is no longer re-thrown on every subsequent boot once Pass A2 clears it — confirming the reorder fix for the addendum's short-circuit hypothesis."
+  ? "\n✅ ALL PASS — a Pass-A session with an unresolvable repoKey is tracked as a distinct, named, escalating wedge (never a bare 'retry next boot' count); a genuine branch-gone record still resolves via Pass A2 unaffected; a session that is BOTH (Pass A2-resolvable AND repoKey-wedged) is no longer re-thrown on every subsequent boot once Pass A2 clears it; (card 6f73da1a) a session that never requested a merge at all, with its task already terminal, is never tracked as a wedge in the first place — a deliberate, named, idempotent skip instead of an unresolvable-repoKey throw retried forever; and the terminal-task check stays fail-closed even when a deleted task's absent columnKey and an empty-board project's absent terminal key would otherwise both read undefined and accidentally compare equal."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
