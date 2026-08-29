@@ -13626,20 +13626,39 @@ export class SessionService {
         // for the union-re-merge, an unrelated concern; `computeEmitCompareGate` does no worktree write and
         // has no such hazard, and the card's own reachable sequence — "the confirming worker's pty is not
         // stopped until after the merge method returns" — applies to a preLanded re-confirm exactly as it
-        // does to an ordinary union-producer merge).
+        // does to an ordinary union-producer merge). **This "exactly as" claim is genuinely true for BOTH
+        // legs below (card 66b3112a)** — the branch-tip leg (`postWaitBranchHead`) always re-read its own
+        // fresh value here, but the main-tip leg used to piggyback on `gateBaseMainHead`'s in-place advance,
+        // which only ever happens inside the `!preLanded` guard above — making that leg structurally inert
+        // on the preLanded producer (its safety there relied on a THREE-STEP invariant living entirely in
+        // `git/worktrees.ts`'s `gateBaseBranchHead`/`branchStableSinceGateBase` handling, not on anything
+        // visible from this file). It now takes its own admission-time HEAD read below, unconditionally,
+        // exactly like the branch-tip leg — so both legs are local to this function on both producers.
         //
         // A no-op whenever `emitCompareSkip` is false (the overwhelmingly common case: nothing was ever
         // classified eligible, so there is nothing here to invalidate) — costs nothing beyond the boolean
         // check on that path.
         if (emitCompareSkip) {
           const postWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
-          // FAIL CLOSED ON ANY DOUBT (card 7183540f DoD-3): a failed resolve (`!postWaitBranchHead`)
-          // counts as "moved" — never as "unchanged" — mirroring `postWaitHead`'s own `!postWaitHead ||`
-          // fail-closed leg for the inert-skip path above. `gateBaseMainHead` is compared against the
-          // PRE-WAIT snapshot taken at classification time (`emitComparePreWaitMainHead`), not re-read via
-          // a second HEAD resolve — the `!preLanded` branch above already advanced `gateBaseMainHead` in
-          // place the instant main moved, so a plain inequality here is sufficient and free.
-          const moved = !postWaitBranchHead || postWaitBranchHead !== emitComparePreWaitBranchHead || gateBaseMainHead !== emitComparePreWaitMainHead;
+          // OWN ADMISSION-TIME HEAD READ FOR THE MAIN LEG (card 66b3112a): a dedicated, bounded
+          // `resolveGitRef(..., "HEAD", ...)` — deliberately NOT `gateBaseMainHead`, whose in-place advance
+          // only happens inside the `!preLanded` guard above and was therefore structurally inert on the
+          // preLanded producer (see this function's own doc, above). Read UNCONDITIONALLY here, on both
+          // producers — not branched on `preLanded` — so there is exactly one code path for "did main move
+          // since pre-wait classification", not two paths that differ in where they get their answer. On
+          // the `!preLanded` producer this is the same value `gateBaseMainHead` was just advanced to,
+          // moments earlier, in the overwhelming case, and strictly MORE correct on the residual race where
+          // main moves again in the brief window between that advance and this read.
+          const emitCompareAdmissionMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+          // FAIL CLOSED ON ANY DOUBT (card 7183540f DoD-3, extended by card 66b3112a DoD-2 to the main
+          // leg): a failed resolve counts as "moved" — never as "unchanged" — mirroring `postWaitHead`'s own
+          // `!postWaitHead ||` fail-closed leg for the inert-skip path above. `!emitCompareAdmissionMainHead`
+          // must come BEFORE the inequality: `undefined !== emitComparePreWaitMainHead` already reads as
+          // "moved" whenever the pre-wait snapshot was itself resolved, but if THAT was also ever
+          // `undefined` a bare `!==` would compare `undefined !== undefined` → `false` → "unchanged", the
+          // exact fail-OPEN this leg exists to prevent.
+          const moved = !postWaitBranchHead || postWaitBranchHead !== emitComparePreWaitBranchHead
+            || !emitCompareAdmissionMainHead || emitCompareAdmissionMainHead !== emitComparePreWaitMainHead;
           if (moved) {
             // RE-RUN THE WHOLE CALL, NOT JUST THE ELIGIBILITY CHECK (card 7183540f DoD-4): re-checking
             // eligibility alone while keeping the stale `emitCompareTestFiles` would close only the
@@ -13647,9 +13666,11 @@ export class SessionService {
             // list would still run the wrong (or an incomplete) reduced command even if the boolean
             // verdict itself were freshly re-proven. `computeEmitCompareGate` is one bounded git-diff read
             // (the same cost class as the pre-wait call it mirrors), so re-running it whole is negligible
-            // next to what's downstream either way.
-            const reclassified = (postWaitBranchHead && gateBaseMainHead)
-              ? await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs })
+            // next to what's downstream either way. Based against `emitCompareAdmissionMainHead` (card
+            // 66b3112a), not `gateBaseMainHead` — the freshly re-read value is what main's tip actually IS
+            // right now, on both producers, uniformly.
+            const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead)
+              ? await computeEmitCompareGate(repoPath, worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs })
               : undefined;
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
@@ -13663,11 +13684,18 @@ export class SessionService {
               emitCompareNotApplicable = false;
             } else {
               // No longer provably reducible (or the re-derivation itself was ambiguous — an unresolvable
-              // branch ref, or `gateBaseMainHead` itself unset) — this MUST take the full gate, never a
-              // stale reduced one: the `1055f5e3` asymmetry governs (a wrong reduction is a bad merge; a
-              // wrong full run is minutes). `emitCompareSkip:false` here also keeps the eventual
-              // `emitCompareWarning`/`build_gate` event from claiming a reduction that no longer happened.
+              // branch ref, or `emitCompareAdmissionMainHead` itself unresolved) — this MUST take the full
+              // gate, never a stale reduced one: the `1055f5e3` asymmetry governs (a wrong reduction is a
+              // bad merge; a wrong full run is minutes). `emitCompareSkip:false` here also keeps the
+              // eventual `emitCompareWarning`/`build_gate` event from claiming a reduction that no longer
+              // happened.
               emitCompareSkip = false;
+              // CLEAR THE STALE PRE-WAIT VALUES TOO (card 66b3112a DoD-4): every real consumer already
+              // gates on `emitCompareSkip` first (see its call sites), so leaving these at their stale
+              // pre-wait values was harmless today — but it left a reduction that never happened one
+              // ungated read away from surfacing. Two lines, no behavior change for any current reader.
+              emitCompareTestFiles = [];
+              emitCompareIdenticalCount = 0;
               // Card 2db8a3dd (DEFAULT CORRECTED, card 4def0708): carry the re-derivation's own
               // applicability verdict when it ran one (`reclassified` defined but not eligible). An
               // unresolvable ref — `reclassified` itself `undefined` — means the re-derivation carries NO

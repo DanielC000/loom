@@ -20,6 +20,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       admitted. A branch that gains a further BEHAVIORAL edit while genuinely queued on the semaphore's
 //       CAP (not a per-repo guard) must be caught at admission too, never ride through on a stale pre-wait
 //       REDUCED verdict.
+//   (M) card 66b3112a — PRELANDED MAIN-MOVE AT CAP-QUEUE ADMISSION: (L)'s own `moved` check has a main-tip
+//       leg that only ever fires because it piggybacked on `gateBaseMainHead`'s in-place advance — which
+//       only happens on the `!preLanded` (union) producer, making that leg structurally inert on a
+//       PRELANDED branch. This is NOT a merge-safety gap (a byte-stable preLanded branch's squash is a
+//       provable no-op regardless — see `branchStableSinceGateBase` in git/worktrees.ts), but it IS a real
+//       detection gap: a PRELANDED branch whose main gains a genuinely behavioral edit during the cap-queue
+//       wait, with the branch itself staying completely stable, must still be caught by its OWN
+//       admission-time HEAD read and trigger a real reclassification — never silently keep running the
+//       stale pre-wait REDUCED verdict.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate-scope.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -297,6 +306,134 @@ try {
     check("(L) L2's late behavioral edit actually landed on main",
       fs.readFileSync(path.join(L2.repo, "packages", "daemon", "src", "example.ts"), "utf8").includes("x === 1"));
   }
+
+  // ── (M) card 66b3112a — PRELANDED MAIN-MOVE AT CAP-QUEUE ADMISSION — see this file's own header for the
+  //        summary. M1 occupies the daemon's only cap slot exactly like L1 above. M2 is a PRELANDED branch
+  //        (its own prior work already squashed onto main via a direct `mergeBranch` call, mirroring
+  //        merge-gate-reuse.mjs scenarios (M)/(N)'s own preLanded construction) whose pre-wait classification
+  //        is ALSO genuinely emit-compare-eligible: an UNRELATED comment-only edit lands on M2's own MAIN —
+  //        never touching the branch — so `computeEmitCompareGate` has a real comment-only `.ts` diff to
+  //        classify against BEFORE M2 ever reaches the semaphore. Once M2 is genuinely queued behind M1, a
+  //        FURTHER commit lands on M2's main — a REAL behavioral edit this time, not comment-only — while
+  //        M2's own branch stays completely untouched throughout (the discriminating shape
+  //        merge-gate-reuse.mjs's (N) uses: branch stable, main moves).
+  //
+  //        ⚠️ WHAT THIS DOES NOT PROVE (repeated in the commit body — a comment is a claim nobody
+  //        re-checks): this is NOT a merge-safety regression test. `branchStableSinceGateBase`
+  //        (git/worktrees.ts) independently guarantees a byte-stable preLanded branch's squash is a provable
+  //        no-op regardless of which gate command ran — so M2's merge lands as a safe ALREADY_MERGED no-op
+  //        either way, RED or GREEN. What differs is whether the admission-time re-derivation actually RUNS
+  //        (a real detection gap, not an outcome gap), observed indirectly through WHICH gate command gets
+  //        spawned: pre-fix, the stale pre-wait REDUCED command survives untouched despite main's later,
+  //        unaccounted-for behavioral edit (RED — the bug this scenario exists to catch); post-fix, the main
+  //        leg's own admission HEAD read notices the movement, forces a real reclassification, and the
+  //        now-behavioral diff correctly falls back to the FULL gate (GREEN). ───────────────────────────────
+  {
+    const M1 = mk("m1"), M2 = mk("m2");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+
+    fs.mkdirSync(M1.repo, { recursive: true });
+    registerForCleanup(M1.repo);
+    fs.writeFileSync(path.join(M1.repo, "README.md"), "# ecg\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: M1.repo });
+
+    makeRepoWithBaseSrcFile(M2, BASE_SRC);
+
+    let gate1Calls = 0, gate2Calls = 0;
+    let capturedGate2;
+    let gate1AdmittedResolve;
+    const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+    let releaseGate1;
+    const fakeGate = async (gateCmd, cwd) => {
+      if (cwd === M1.worktreePath) {
+        gate1Calls++;
+        gate1AdmittedResolve();
+        await new Promise((res) => { releaseGate1 = res; });
+        return { passed: true };
+      }
+      gate2Calls++;
+      capturedGate2 = gateCmd;
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const wt1 = await createWorktree(M1.repo, M1.projId, M1.taskId);
+    M1.worktreePath = wt1.worktreePath; M1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
+    mkdirp(path.join(M1.worktreePath, "packages", "other"));
+    fs.writeFileSync(path.join(M1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: unrelated cap-slot occupant"`, { cwd: M1.worktreePath });
+    seed(db, M1);
+
+    const wt2 = await createWorktree(M2.repo, M2.projId, M2.taskId);
+    M2.worktreePath = wt2.worktreePath; M2.branch = wt2.branch; worktrees.push(wt2.worktreePath);
+    // M2's OWN work — an unrelated file, deliberately outside emit-compare's scope so it can never itself
+    // affect eligibility once squashed onto main (its content becomes byte-identical on both sides).
+    fs.writeFileSync(path.join(M2.worktreePath, "feature-m2.txt"), "work for M2\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: M2's own work"`, { cwd: M2.worktreePath });
+
+    // Land it NOW, directly (mirrors merge-gate-reuse.mjs (M)/(N)) — M2 is a PURE preLanded re-confirm from
+    // here on; its own branch never changes again in this scenario.
+    const landed = await mergeBranch(M2.repo, M2.branch, "ECG-M2 initial land");
+    check("(M) precondition: M2's branch already landed on main (preLanded)", landed.ok === true);
+
+    // An UNRELATED comment-only edit lands on M2's MAIN — never touching the branch — giving the pre-wait
+    // classification a real, genuinely eligible diff to find (M2's branch still has the untouched BASE_SRC).
+    fs.writeFileSync(path.join(M2.repo, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed on main)"));
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo on main"`, { cwd: M2.repo });
+    seed(db, M2);
+
+    const p1 = sessions.confirmWorkerMerge(M1.mgrId, M1.workerId);
+    await gate1Admitted;
+    check("(M) M1 genuinely admitted and holds the cap's only slot", sessions.gateSemaphore.snapshot().active === 1);
+
+    let confirm2Settled = false;
+    const p2 = sessions.confirmWorkerMerge(M2.mgrId, M2.workerId).then((r) => { confirm2Settled = true; return r; });
+
+    const queued = await pollUntil(
+      () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === M2.projId),
+      { timeoutMs: 10000 },
+    );
+    check("(M) M2 genuinely reached the semaphore's CAP-queue wait before M1 released", queued);
+
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(M) M2's confirm does NOT settle while M1's held-open gate still occupies the cap's only slot",
+      check: () => confirm2Settled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(M) M2's confirm PROVABLY waited on the cap, not a fluke of scheduling", neverSettled);
+
+    // NOW, while M2 is genuinely queued behind the cap, a FURTHER commit lands on M2's MAIN — a REAL
+    // behavioral edit this time (not comment-only), still never touching M2's own branch, which stays
+    // byte-stable throughout.
+    fs.writeFileSync(path.join(M2.repo, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed on main)").replace("x === 0", "x === 1"));
+    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold on main during the cap-queue wait"`, { cwd: M2.repo });
+
+    releaseGate1("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(M) M1 merged successfully, ran its own gate exactly once", confirm1.merged === true && gate1Calls === 1);
+    check("(M) M2's gate command was called exactly once", gate2Calls === 1);
+    check("(M) ⭐ the main leg's own admission HEAD read fired a real re-derivation — M2's captured command IS the FULL gate, not the stale pre-wait REDUCED one, once main gained a genuinely behavioral edit during the cap-queue wait",
+      capturedGate2 === FULL_GATE);
+    // NOT a merge-safety assertion (see this scenario's own header doc): a byte-stable preLanded branch's
+    // squash is a provable no-op regardless of which gate command ran — this only confirms that expected,
+    // already-safe outcome held, which is unaffected by whether detection fired.
+    check("(M) M2's merge still lands as a safe no-op — ALREADY_MERGED, not a real squash of unverified content",
+      confirm2.merged === true && confirm2.emptyKind === "ALREADY_MERGED");
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -304,6 +441,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict. See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
+  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict; and — card 66b3112a — a PRELANDED branch whose main gains a genuinely behavioral edit during that same cap-queue wait, with the branch itself staying byte-stable, is ALSO caught by the main leg's own admission-time HEAD read, never riding through on a stale pre-wait REDUCED verdict either (a detection fix, not a merge-safety one — the squash there is a provable no-op regardless). See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
