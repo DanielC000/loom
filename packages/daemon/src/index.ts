@@ -1418,6 +1418,24 @@ async function main(): Promise<void> {
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
+    // codescapeSupervisor.stop() (card 8c13a023): this was ABSENT from the list below for a long time
+    // with no observed orphan — repro'd empirically (Windows) why: a non-`detached` child_process.spawn()
+    // child (exactly how spawnServe() launches `codescape serve`) is implicitly bound by Node/libuv to a
+    // Windows job object with kill-on-close tied to THIS process's own lifetime, so any death of this
+    // process — a clean exit here or an external hard-kill — already tears the serve child down with it.
+    // Verified by isolating the ONE variable that flips the outcome: an identical spawn with `detached:true`
+    // survives the parent's death; without it, the child dies every time, including when killed via
+    // TerminateProcess (an API with no console-signalling path at all — ruling out a console/`CTRL_CLOSE`
+    // explanation, which would also have taken the still-alive grandparent process with it). So the prior
+    // silence was real but PLATFORM-SPECIFIC, not incidental and not something this code ever guaranteed —
+    // calling stop() explicitly here makes the cleanup ours rather than an undocumented Windows default.
+    // This supervisor is `isCodescapeSupervisorEnabled()`-gated to `LOOM_DEV=1` (paths.ts) and never starts
+    // for a regular loomctl end user, so this is a dev/self-host hygiene + portability fix, NOT something
+    // protecting any shipped `loom service install` deployment — POSIX has no equivalent implicit reaper
+    // (a non-detached child there is simply reparented on exit and keeps running), which matters only for a
+    // POSIX host running `LOOM_DEV=1` self-hosted, unverified/predicted, not measured here (Windows-only repro).
+    // This is NOT a leak fix — no leak has ever been observed on this host.
+    codescapeSupervisor.stop();
     scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     // Gate-aware exit (board card 5a7692a4): this path used to `process.exit(0)` unconditionally, with
