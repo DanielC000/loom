@@ -82,8 +82,12 @@ function gateWorkerLabel(agentName?: string, taskTitle?: string): string | null 
 /** One entry in {@link SessionService.gateQueueForManager}'s result — `taskId`/`branch`/`workerLabel` are
  *  present ONLY for an entry belonging to the CALLING manager's own project; a cross-project entry omits
  *  them entirely (never redacted-to-null, so "field absent" always means "not your project", never "this
- *  gate genuinely has no task"). `opId` is the SAME correlating id `gate_status(opId)` accepts (full or an
- *  unambiguous 8-char prefix), so a manager can chain from this snapshot into a live per-op status read. */
+ *  gate genuinely has no task") and instead carries `redacted: true` (card 80d54122) so the omission is
+ *  SELF-EVIDENT — before this, a caller reading a bare entry with none of those three keys had no way to
+ *  tell "this is a foreign entry, redacted by design" from "a bug dropped these fields", the same
+ *  null-vs-absent ambiguity `composerDirtyLen` already solves elsewhere on this daemon (see its own doc).
+ *  `opId` is the SAME correlating id `gate_status(opId)` accepts (full or an unambiguous 8-char prefix), so
+ *  a manager can chain from this snapshot into a live per-op status read. */
 export interface GateQueueEntry {
   opId: string | null;
   gateType: GateType;
@@ -150,6 +154,13 @@ export interface GateQueueEntry {
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
+  /** Card 80d54122: present on EVERY entry from a DIFFERENT project (never present, let alone `false`, on
+   *  the caller's own — checking `"redacted" in entry` is how a caller tells the two shapes apart without
+   *  inferring it from which OTHER keys happen to be missing). A bare boolean by design: it says "this
+   *  entry belongs to another project and its identity fields are withheld" and nothing more — it must
+   *  never itself carry any per-project value (a count, a name fragment) that would leak what it's
+   *  announcing the absence of. */
+  redacted?: true;
   /** Escalation 4f151331 — a SECOND, INDEPENDENTLY-derived signal, not the semaphore's own live phase above:
    *  how many CONSECUTIVE `timedOut` gate results this entry's `branch` has recorded (see
    *  {@link SessionService.gateTimeoutStreakCount}). `phase`/`queuePosition` reflect only what the
@@ -158,7 +169,22 @@ export interface GateQueueEntry {
    *  circuit breaker's own trip threshold — means treat "queued"/"running" with suspicion: verify no
    *  orphaned process survives from a prior attempt before assuming this worktree is otherwise idle. `0`
    *  means no recent timeout on this branch (the common case); omitted entirely when there's no `branch` to
-   *  key it by (a deploy gate, or a cross-project entry that doesn't carry `branch` at all). */
+   *  key it by at all (a deploy gate has none).
+   *
+   *  Card 80d54122 (RESOLVED — was previously own-project-only): this used to live INSIDE the
+   *  `callerProjectId` conditional below, alongside `taskId`/`branch`/`workerLabel`, so a cross-project
+   *  entry omitted it too. Read at source (`gateQueueForManager`'s own history — see that function's doc)
+   *  that placement was never a deliberate call that the STREAK ITSELF needed redacting: it landed there
+   *  because computing it needs the raw branch string (`gateTimeoutStreakCount(e.branch)`), which at the
+   *  time was only ever read inside that same block (to populate the ALSO-redacted `entry.branch`). No
+   *  comment anywhere ever argued the integer itself discloses anything — contrast `taskId`/`branch`/
+   *  `workerLabel`, each with an explicit stated reason (task/branch identity, a trust boundary
+   *  `project_links` doesn't grant). A bare non-negative integer with no title, no identifier, and nothing
+   *  about what the peer is doing carries none of that, while the hazard it exists to catch (an orphaned
+   *  gate process still consuming the shared host) is cross-project BY NATURE — so it is now computed the
+   *  same way as `idleMs`/`extended`/`repoContended` above: unconditionally, from the raw (never-exposed)
+   *  `branch`, identically for an own- and a foreign-project entry. `taskId`/`branch`/`workerLabel`
+   *  themselves are UNCHANGED — still own-project only; only this one bare integer moved. */
   recentTimeoutStreak?: number;
 }
 
@@ -4163,11 +4189,26 @@ export class SessionService {
    * the slot) without its process TREE actually dying, so a NEW op can be legitimately admitted (or shown
    * "queued", correctly, since it hasn't started) while an ORPHANED process from an earlier, already-evicted
    * attempt on the SAME worktree is still alive and consuming the box — invisible to this registry, since
-   * that earlier op's entry is long gone. Rather than have this tool silently repeat that blind spot, each
-   * OWN-project entry with a `branch` also carries `recentTimeoutStreak` — {@link gateTimeoutStreakCount},
-   * an INDEPENDENTLY-tracked signal (the existing gate-timeout circuit breaker's own counter) that survives
+   * that earlier op's entry is long gone. Rather than have this tool silently repeat that blind spot, every
+   * entry WITH a `branch` also carries `recentTimeoutStreak` — {@link gateTimeoutStreakCount}, an
+   * INDEPENDENTLY-tracked signal (the existing gate-timeout circuit breaker's own counter) that survives
    * exactly the eviction this registry doesn't. The two signals are surfaced SIDE BY SIDE, never merged into
    * one verdict — a nonzero streak doesn't change `phase`, it's a second data point for the caller to weigh.
+   *
+   * CARD 80d54122 (was: "each OWN-project entry with a branch"): `recentTimeoutStreak` originally lived
+   * inside the `callerProjectId === e.projectId` branch below, alongside `taskId`/`branch`/`workerLabel`,
+   * so a cross-project entry never carried it either. Re-examined: that was never a deliberate decision
+   * that the STREAK ITSELF is sensitive — it landed there only because `gateTimeoutStreakCount` needs the
+   * raw branch string, which this function otherwise only ever reads inside that block (to populate the
+   * ALSO-redacted `entry.branch`). Unlike `taskId`/`branch`/`workerLabel` — each redacted for an explicit,
+   * stated reason (identity, a trust boundary `project_links` doesn't grant) — nothing here or on the
+   * `recentTimeoutStreak` field's own doc ever argued the bare integer discloses anything, and the hazard
+   * it exists to catch (an orphaned gate process consuming the shared host) is cross-project BY NATURE, so
+   * it is now read from the raw (never-exposed) `e.branch` and populated UNCONDITIONALLY, the same tier as
+   * `idleMs`/`extended`/`repoContended` above — never gated on `callerProjectId`. `taskId`/`branch`/
+   * `workerLabel` remain own-project only, per card 33aa0291's design for the fields that DO carry
+   * identity. A foreign entry also now carries `redacted: true` (see {@link GateQueueEntry.redacted}) so
+   * the three-field omission reads as a deliberate, self-explaining redaction rather than an ambiguous gap.
    */
   gateQueueForManager(callerProjectId: string): GateQueueSnapshot {
     const snap = this.gateSemaphore.snapshot();
@@ -4175,6 +4216,7 @@ export class SessionService {
     const toEntry = (e: GateSnapshotEntry): GateQueueEntry => {
       const project = this.db.getProject(e.projectId);
       const liveness: "pending" | "observed" = e.lastOutputAt != null ? "observed" : "pending";
+      const isOwnProject = e.projectId === callerProjectId;
       const entry: GateQueueEntry = {
         opId: e.opId,
         gateType: e.gateType,
@@ -4191,15 +4233,19 @@ export class SessionService {
         // (card 33aa0291: a foreign read must fail this exact same way an own read would at the same
         // instant, never because it was omitted for being foreign).
         ...(e.phase === "running" ? { liveness } : {}),
+        // Card 80d54122: keyed off the RAW e.branch, never entry.branch (which stays own-project-only
+        // below) — a bare integer carries no task/branch identity, so it belongs in this unconditional
+        // tier, not gated behind isOwnProject the way it landed originally. See this field's own doc.
+        ...(e.branch ? { recentTimeoutStreak: this.gateTimeoutStreakCount(e.branch) } : {}),
+        ...(isOwnProject ? {} : { redacted: true }),
       };
-      if (e.projectId === callerProjectId) {
+      if (isOwnProject) {
         const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
         const session = this.db.getSession(e.sessionId);
         const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
         entry.taskId = e.taskId;
         entry.branch = e.branch;
         entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
-        if (e.branch) entry.recentTimeoutStreak = this.gateTimeoutStreakCount(e.branch);
       }
       return entry;
     };

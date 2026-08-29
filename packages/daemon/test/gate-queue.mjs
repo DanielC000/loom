@@ -3,9 +3,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // gate queued, who holds the slot, how deep am I" that `gate_status(opId)` can't give (it only ever answers
 // "what is MY op doing"). Proves:
 //   (unit)  SessionService.gateQueueForManager redacts taskId/branch/workerLabel for a DIFFERENT project's
-//           entry (never redacted-to-null — the fields are OMITTED), while a CALLER-OWN-project entry
-//           carries full detail; running/queued split with correct queuePosition; cap/activeCount/
-//           queuedCount reflect the live GateSemaphore registry.
+//           entry (never redacted-to-null — the fields are OMITTED, and the omission is now flagged with an
+//           explicit `redacted: true`, card 80d54122 DoD-3), while a CALLER-OWN-project entry carries full
+//           detail (and no `redacted` marker at all); running/queued split with correct queuePosition;
+//           cap/activeCount/queuedCount reflect the live GateSemaphore registry. `recentTimeoutStreak`
+//           (see the (unit, streak) block below) is CROSS-PROJECT — card 80d54122 DoD-1/2 determined its
+//           prior own-project-only scoping was incidental, not deliberate, so this ONE bare integer now
+//           crosses the redaction boundary while taskId/branch/workerLabel do not.
 //   (e2e)   the REAL MCP tool `gate_queue`, registered on BOTH the manager AND worker surfaces (card
 //           d04f9c76 added the worker exposure), driven against two REAL runWorkerGate ops in TWO
 //           DIFFERENT projects — the exact shape of the manager's escalation (a foreign project's gate
@@ -145,11 +149,20 @@ function makeRepo(repo) {
     check("(unit) an OWN-project entry carries taskId/branch/workerLabel", ownRunning.taskId === t1 && ownRunning.branch === wt1.branch && ownRunning.workerLabel === "dev-1 · Own project task title");
     check("(unit) a running entry has queuePosition:null", ownRunning.queuePosition === null);
     check("(unit) opId is present on the running entry (chainable into gate_status)", typeof ownRunning.opId === "string" && ownRunning.opId.length > 0);
+    // Card 80d54122: an own-project entry carries no `redacted` marker at all (not even `false`) — its
+    // absence is itself the "this is your own project, nothing here is withheld" signal.
+    check("(unit) an OWN-project entry carries NO `redacted` marker", !("redacted" in ownRunning));
+    check("(unit) an OWN-project entry carries recentTimeoutStreak:0 (a real measured zero, not an omission)", ownRunning.recentTimeoutStreak === 0);
 
     const foreignQueued = own.queued[0];
     check("(unit) the FOREIGN-project (P2) entry is the one queued", foreignQueued.projectId === P2 && foreignQueued.projectName === "Foreign Project");
     check("(unit) a FOREIGN-project entry OMITS taskId/branch/workerLabel entirely (never redacted-to-null)",
       !("taskId" in foreignQueued) && !("branch" in foreignQueued) && !("workerLabel" in foreignQueued));
+    // Card 80d54122 DoD-3: the omission above is now self-evident via an explicit boolean, and DoD-1/2
+    // (recentTimeoutStreak's redaction was INCIDENTAL, not deliberate — see the card) moved this ONE bare
+    // integer into the unconditional tier, so a foreign entry now carries it same as an own entry would.
+    check("(unit) a FOREIGN-project entry carries an explicit redacted:true marker", foreignQueued.redacted === true);
+    check("(unit) a FOREIGN-project entry NOW carries recentTimeoutStreak:0 (bare integer, no identity)", foreignQueued.recentTimeoutStreak === 0);
     check("(unit) the foreign task's title never appears anywhere in the snapshot",
       !JSON.stringify(own).includes("Foreign project task title"));
     check("(unit) a queued entry reports queuePosition:1", foreignQueued.queuePosition === 1);
@@ -158,7 +171,10 @@ function makeRepo(repo) {
     // (queued) with full detail, and P1's entry (running) redacted.
     const foreign = sessions.gateQueueForManager(P2);
     check("(unit) from P2's own view, its queued entry carries full detail", foreign.queued[0].taskId === t2 && foreign.queued[0].workerLabel === "dev-2 · Foreign project task title — must never leak");
+    check("(unit) from P2's own view, its OWN entry carries no `redacted` marker", !("redacted" in foreign.queued[0]));
     check("(unit) from P2's own view, P1's running entry is redacted", !("taskId" in foreign.running[0]) && !("branch" in foreign.running[0]));
+    check("(unit) from P2's own view, P1's running entry carries redacted:true", foreign.running[0].redacted === true);
+    check("(unit) from P2's own view, P1's running entry STILL carries recentTimeoutStreak:0", foreign.running[0].recentTimeoutStreak === 0);
 
     await waitUntilInvoked(() => release1, "(unit) w1's fakeGate");
     release1({ passed: true });
@@ -304,7 +320,10 @@ function makeRepo(repo) {
 // that eviction: the gate-timeout circuit breaker's own per-branch streak. Proves a REAL timedOut result
 // (via runWorkerGate, not a synthetic field poke) increments the streak, and a SUBSEQUENT fresh op on that
 // SAME branch carries it in gate_queue — a nonzero streak on an otherwise-unremarkable "queued"/"running"
-// entry is exactly the anomaly signal that was missing from the incident.
+// entry is exactly the anomaly signal that was missing from the incident. ALSO proves card 80d54122's fix:
+// a caller from a THIRD, unrelated project reads the SAME real nonzero streak (1, not 0, not omitted) off
+// this entry, while taskId/branch/workerLabel stay redacted (with an explicit redacted:true) on that same
+// cross-project read — the bare integer crosses the boundary, nothing else does.
 {
   const dbs = [];
   const worktrees = [];
@@ -350,6 +369,20 @@ function makeRepo(repo) {
     const snap = sessions.gateQueueForManager(P);
     check("(unit, streak) a fresh op on the SAME branch is live (running, since nothing else contends for the slot)", snap.running.length === 1 && snap.running[0].branch === wt.branch);
     check("(unit, streak) that entry carries recentTimeoutStreak:1 — the second, independent signal", snap.running[0].recentTimeoutStreak === 1);
+
+    // Card 80d54122: negative control first — a caller from a project that owns NOTHING in this registry
+    // (never touched `P`) sees P's entry as fully foreign, proving the redaction itself still applies to
+    // taskId/branch/workerLabel...
+    const foreignView = sessions.gateQueueForManager(`${P}-not-the-owner`);
+    check("(unit, streak) cross-project caller sees exactly 1 running entry (P's)", foreignView.running.length === 1);
+    check("(unit, streak) cross-project caller still gets taskId/branch/workerLabel REDACTED",
+      !("taskId" in foreignView.running[0]) && !("branch" in foreignView.running[0]) && !("workerLabel" in foreignView.running[0]));
+    check("(unit, streak) cross-project caller sees an explicit redacted:true marker", foreignView.running[0].redacted === true);
+    // ...positive proof: the SAME entry's recentTimeoutStreak is now a REAL nonzero value (1, not 0 and not
+    // omitted) from that same cross-project read — this is the actual answer to the card's DoD, not just a
+    // structural assertion: the bare integer crosses the project boundary, nothing else does.
+    check("(unit, streak) cross-project caller ALSO sees the REAL nonzero recentTimeoutStreak:1 (now unconditional, not own-project-gated)",
+      foreignView.running[0].recentTimeoutStreak === 1);
 
     // Same latent-fragile shape as the two blocks above (card 39196378 CR follow-up): admission (what
     // `snap` just checked) is synchronous and doesn't wait on the post-admission admitStamp read, but

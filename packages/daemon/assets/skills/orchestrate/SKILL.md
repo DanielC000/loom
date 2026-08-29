@@ -637,22 +637,22 @@ what you checked. Found none? Treat it as live.
      the queue, is this normal" is answered directly instead of inferred from how long you've waited. A
      cross-project entry is deliberately named only by project + gate kind + age (never its task title or
      branch) — enough to see "a different project legitimately holds this" without leaking that project's
-     internals.
+     internals; it also carries an explicit `redacted: true` (card 80d54122) so that omission reads as
+     deliberate, not as a gap you should chase.
    - **Treat "queued"/"running" as a belief, not a fact — a real incident showed the two can diverge.** A
      gate timeout can settle (freeing the slot) without its process tree actually dying, so a fresh op can be
      legitimately admitted (or correctly reported "queued") while an ORPHANED process from an earlier,
      already-evicted attempt on the SAME worktree is still alive and consuming the box — invisible to
-     `gate_status`/`gate_queue`'s own live registry. **`recentTimeoutStreak` carries on an entry only
-     when it is BOTH your own project's AND has a `branch`** — a cross-project entry omits it (along
-     with task/branch identity) regardless of value, so `0` on your own entry is a real, measured zero,
-     never an omission standing in for zero — the same `null`-vs-`0` contract as `composerDirtyLen`
-     above, one field over. ⚠️ **The consequence, not just the rule: you can read this signal for your
-     OWN worktrees and never for a peer's** — an orphaned process consumes the shared host no matter
-     which project spawned it, but the signal that would catch it is scoped per-project, so a clean read
-     on your own entries never lets you conclude the host itself is clean. And it's **prospective
-     only** — `gate_queue` lists live entries, so it cannot be read retroactively for an op that has
-     already died. A nonzero count on an otherwise-unremarkable entry is a second, independent signal
-     worth checking before trusting that a "queued"/quiet-looking worktree is actually idle.
+     `gate_status`/`gate_queue`'s own live registry. **`recentTimeoutStreak` carries on ANY entry that has a
+     `branch` — your own project's AND a peer's alike** (card 80d54122: unlike task/branch identity, a bare
+     non-negative integer discloses nothing about what the peer is doing, and the orphan hazard it flags
+     consumes the shared host regardless of which project spawned it), so `0` on an entry is a real, measured
+     zero, never an omission standing in for zero — the same `null`-vs-`0` contract as `composerDirtyLen`
+     above, one field over; it's simply absent where there's no `branch` at all (a deploy gate). It's
+     **prospective only** — `gate_queue` lists live entries, so it cannot be read retroactively for an op
+     that has already died. A nonzero count on an otherwise-unremarkable entry, own-project or foreign, is a
+     second, independent signal worth checking before trusting that a "queued"/quiet-looking worktree is
+     actually idle.
    - **The gate is a shared, capped, daemon-global resource — not just this project's.** Every project on
      the daemon queues on the same cap. Directing a worker to hand-run the full suite outside the gate —
      even for a legitimate need, like getting a trustworthy wall-clock number — is the same opt-out a

@@ -575,7 +575,10 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
 // incident: two concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while
 // its op still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own
 // belief — see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never
-// merged. Card cffa71e6 (docs-only): the description below now spells out that `since`/`elapsedMs` change
+// merged. Card 80d54122: `recentTimeoutStreak` is now CROSS-PROJECT (unlike taskId/branch/workerLabel,
+// which stay own-project only) — it's a bare integer with no task/branch identity, and the orphan hazard
+// it flags is cross-project by nature; a foreign entry also now carries `redacted: true` so the omission
+// of the other three fields is self-evident rather than an ambiguous gap. Card cffa71e6 (docs-only): the description below now spells out that `since`/`elapsedMs` change
 // MEANING (not just clock) across the queued->running transition, that a queued row's `since` is NOT
 // `gate_status`'s `admittedAt`, and cross-references the three duration tiers (run-summary / gate_history /
 // gate_status) so a caller doesn't difference a command-span field against itself expecting a queue-wait
@@ -653,7 +656,9 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
         "belonging to YOUR OWN project ALSO " +
         "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
-        "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
+        "DIFFERENT project omits those three fields entirely (never redacted-to-null) and instead carries " +
+        "`redacted: true` (card 80d54122) so the omission reads as deliberate rather than an ambiguous " +
+        "gap — named only by " +
         "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
         "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
         "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`-kind entry whose target " +
@@ -667,7 +672,9 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "flip on a still-queued entry as sibling ops settle. " +
         "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
         "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
-        "dying, leaving an orphan the registry no longer tracks. So an OWN-project entry with a `branch` " +
+        "dying, leaving an orphan the registry no longer tracks. So EVERY entry with a `branch` — OWN- " +
+        "project AND cross-project alike (card 80d54122: unlike taskId/branch/workerLabel, this bare " +
+        "integer carries no task/branch identity, and the orphan hazard is cross-project by nature) — " +
         "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
         "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
         "doesn't. A nonzero streak on a 'queued' or 'running' entry is a reason to verify no orphaned " +
