@@ -6,6 +6,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME } from "../paths.js";
+import { validateVaultPath } from "../projects/vault-path.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -1435,6 +1436,19 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
     if (project.archivedAt) continue;
     const vaultPath = project.vaultPath?.trim();
     if (!vaultPath) continue;
+    // A non-absolute vaultPath (card 78dc99e3) can only be a LEGACY row that predates the write-time
+    // guard (`validateVaultPath`, card 96c4b245 — every create/rebind path has rejected a relative value
+    // since 2026-07-22). It resolves against whatever the daemon PROCESS's cwd happens to be — unstable
+    // across restart mechanisms (tsx watch vs. the supervisor vs. the packaged CLI) — so letting it fall
+    // through to `resolveVaultRepoContext`/`git init` produces an opaque, cwd-dependent failure (or worse,
+    // a silent write into the wrong place via `resolveInVault`'s `path.resolve`, which happily treats a
+    // missing root as "not yet scaffolded" rather than "misconfigured"). Name the real cause loudly here,
+    // once, instead of leaving it to surface as an unexplained "failed to start" below.
+    const check = validateVaultPath(vaultPath);
+    if (!check.ok) {
+      console.warn(`[vault-versioner] project ${project.id} (${project.name}) vaultPath is not absolute: "${vaultPath}" — it will never reliably resolve (depends on the daemon process's own cwd) and is skipped here; rebind it via PATCH /api/projects/:id or the web UI.`);
+      continue;
+    }
     // Per-project isolation: resolve+construct+start() can THROW on a bad/inaccessible vaultPath
     // (simpleGit construction or start()'s git calls). Guard each project so ONE bad vaultPath is
     // logged + skipped and the rest still start — best-effort, mirroring the boot-watcher /

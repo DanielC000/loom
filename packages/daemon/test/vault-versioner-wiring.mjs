@@ -121,16 +121,36 @@ initVault(vaultD);
 const badPath = path.join(root, "does-not-exist-throws-on-resolve");
 db.insertProject({ id: "pBad", name: "ZZbad", repoPath: root, vaultPath: badPath, config: {}, createdAt: now, archivedAt: null });
 db.insertProject({ id: "pGood", name: "ZZgood", repoPath: vaultD, vaultPath: vaultD, config: {}, createdAt: now, archivedAt: null });
+// card 78dc99e3: a RELATIVE vaultPath (a legacy row from before the write-time absolute-path guard,
+// validateVaultPath/card 96c4b245, existed) must be diagnosed loudly and SKIPPED — never handed to
+// resolveVaultRepoContext/git init, where it would resolve against the daemon PROCESS's own cwd and
+// either throw an opaque error or (worse) silently succeed against the wrong directory.
+const pRel = path.join(root, "ZZrel"); // a real, distinct project so a caught bug can't hide as "no watcher anyway"
+fs.mkdirSync(pRel, { recursive: true });
+db.insertProject({ id: "pRel", name: "ZZrel", repoPath: pRel, vaultPath: "relative/not-a-real-path", config: {}, archivedAt: null, createdAt: now });
 
 const versioners = [];
 try {
   // Short debounce so the live chokidar path commits quickly for (b).
-  versioners.push(...await startVaultVersioners(db, { debounceMs: 150 }));
+  const warningsBoot = [];
+  const origWarnBoot = console.warn;
+  console.warn = (...args) => { warningsBoot.push(args.join(" ")); origWarnBoot(...args); };
+  let booted;
+  try {
+    booted = await startVaultVersioners(db, { debounceMs: 150 });
+  } finally {
+    console.warn = origWarnBoot;
+  }
+  versioners.push(...booted);
+  check(
+    "a relative vaultPath is named loudly and specifically (not left to an opaque downstream throw)",
+    warningsBoot.some((w) => w.includes("[vault-versioner]") && w.includes("pRel") && w.includes("vaultPath is not absolute") && w.includes("relative/not-a-real-path")),
+  );
 
   // (a)+(c)+(e): exactly 4 watchers — vaultA (deduped p1+p2) + vaultB + plainRepo ROOT (deduped p6+p7
   // subfolders) + vaultD (pGood, started DESPITE the earlier-iterating pBad throwing). Empty (p4),
   // archived (p5), Obsidian-Git-managed (p8), the operational/daemon-home vaults (op1 loom.db / op2
-  // worktrees/ / op3 == LOOM_HOME), and the throwing pBad are all skipped.
+  // worktrees/ / op3 == LOOM_HOME), the throwing pBad, and the relative-vaultPath pRel are all skipped.
   check("one watcher per UNIQUE repo root (dedupe + skip empty/archived/obsidian-git/operational)", versioners.length === 4);
   check("each started handle is a VaultVersioner", versioners.every((v) => v instanceof VaultVersioner));
 
