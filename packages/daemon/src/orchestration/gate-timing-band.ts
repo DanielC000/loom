@@ -68,6 +68,24 @@ interface RunSummaryRow {
   executedCount?: number;
   failedCount?: number;
   durationMs?: number;
+  /** Card c8df9663: 0f0816e2's scheduling-shape signal — count of files run in an isolated sequential
+   *  phase (pool size 1) ahead of the main pool, before the remainder run concurrently. Absent on every
+   *  row written before 0f0816e2 (there was no other shape possible yet) and explicitly `0` on every row
+   *  since while the phase stays default-OFF (`LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE` unset) — both read as
+   *  "flat" via `shapeKey` below; only a genuinely-enabled isolated-phase run ever carries a positive
+   *  value. Measured against the real on-disk corpus (17,775 lines / 713 run-summary rows) at fix time:
+   *  every single row is flat by this normalization (0 or absent) — the flag has never been enabled in
+   *  production, so this key is a structural no-op TODAY and only starts discriminating once someone
+   *  opts in. */
+  isolatedPhaseFileCount?: number;
+}
+
+/** Card c8df9663: normalizes a row's scheduling-shape signal — `isolatedPhaseFileCount` missing (any row
+ *  predating 0f0816e2) and explicitly `0` (every row since, while the isolated phase stays default-OFF)
+ *  both mean "flat pooled run"; only a positive value means "isolated-phase run" (0f0816e2's own doc: the
+ *  field is the honest flat-run signal, not a second detector to invent). */
+function shapeKey(r: RunSummaryRow): number {
+  return r.isolatedPhaseFileCount ?? 0;
 }
 
 export interface GateTimingBand {
@@ -85,7 +103,18 @@ export interface GateTimingBand {
    *  the match was widened — see `MIN_BAND_N`'s own doc for why and when. Always present so a reader can
    *  never mistake a widened band for an exact one. */
   testFileCountSpan: [number, number];
-  /** Count of runs across `testFileCountSpan` (same `poolSize`, excluding this op's own row(s)) that were
+  /** Card c8df9663: this op's own SCHEDULING SHAPE — `0` for a flat pooled run, a positive file count for
+   *  a run where an isolated sequential phase (0f0816e2) ran ahead of the pool. Read off the self row's
+   *  own `isolatedPhaseFileCount` via `shapeKey` (missing normalizes to `0` — see `RunSummaryRow`'s own
+   *  doc). EXACT match, NEVER widened, same posture as `poolSize`: a flat run and an isolated-phase run
+   *  measure a structurally different thing — 0f0816e2's own worker measured one 10-file subset at 426.0s
+   *  serial (isolated) vs. 196.7s pooled (flat) on this host; NOT a measured full-gate delta, and not
+   *  re-verified here — so mixing them into one band would be a category error exactly like mixing
+   *  `poolSize` would be, independent of the exact magnitude. Every row `n`/`nUnfiltered`/`nExact`/`minSec`/`medianSec`/
+   *  `maxSec` draw from shares this exact value — a band can never silently mix scheduling shapes, so
+   *  there is no separate "this band is mixed" flag to check: the absence of one IS the guarantee. */
+  isolatedPhaseFileCount: number;
+  /** Count of runs across `testFileCountSpan` (same `poolSize`+`isolatedPhaseFileCount`, excluding this op's own row(s)) that were
    *  BOTH complete (`executedCount === testCount` on the underlying row) AND zero-failure
    *  (`failedCount === 0`) — the population `minSec`/`medianSec`/`maxSec` are computed over. Card
    *  19c0ef1e's own correction: an unfiltered median is silently skewed slow by failing runs, so a
@@ -238,9 +267,11 @@ function selectStratum(candidates: RunSummaryRow[], testCount: number, minCleanN
 
 /**
  * The band for `opId`'s own gate/merge run, stratified against every OTHER `run-summary` row with the
- * same `poolSize` found within the read window (see `selectStratum` for the test-file-count-widening
- * rule — its own params/locals keep the on-disk `testCount` name; only the returned `GateTimingBand`
- * renames it to `testFileCount`, see that interface's own doc).
+ * same `poolSize` AND `isolatedPhaseFileCount` (card c8df9663 — see `shapeKey` and
+ * `GateTimingBand.isolatedPhaseFileCount`'s own doc for why scheduling shape is a second exact,
+ * never-widened key dimension alongside `poolSize`) found within the read window (see `selectStratum`
+ * for the test-file-count-widening rule — its own params/locals keep the on-disk `testCount` name; only
+ * the returned `GateTimingBand` renames it to `testFileCount`, see that interface's own doc).
  * Returns `undefined` (never a fabricated empty band) when the NDJSON doesn't exist, the read window
  * doesn't contain a `run-summary` row for this `opId` (a non-Loom gate command, a run older than the read
  * window, or a run whose gate command never shells out to `test-daemon.mjs` at all), or that row is
@@ -255,7 +286,11 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
   // Every row sharing this op's opId is excluded from its own baseline — not just the one `pickSelfRow`
   // selected (see that function's own doc: a retried op can leave more than one row under one opId, and
   // NONE of them belong in the historical population).
-  const candidates = rows.filter((r) => r.opId !== opId && r.poolSize === self.poolSize && typeof r.testCount === "number");
+  // Card c8df9663: `isolatedPhaseFileCount` (via `shapeKey`) is matched EXACTLY and NEVER widened, same as
+  // `poolSize` — see `GateTimingBand.isolatedPhaseFileCount`'s own doc for why mixing scheduling shapes
+  // would be a category error, not a convenience.
+  const selfShape = shapeKey(self);
+  const candidates = rows.filter((r) => r.opId !== opId && r.poolSize === self.poolSize && shapeKey(r) === selfShape && typeof r.testCount === "number");
 
   const exactPopulation = candidates.filter((r) => r.testCount === self.testCount);
   const nExact = exactPopulation.filter(isClean).length;
@@ -269,6 +304,7 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
     poolSize: self.poolSize,
     testFileCount: self.testCount,
     testFileCountSpan: testCountSpan,
+    isolatedPhaseFileCount: selfShape,
     n: durationsSec.length,
     nUnfiltered,
     nExact,
@@ -277,8 +313,8 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
       : {}),
     instrument: "run-summary.durationMs (runEndTs−runStartTs, the test-step wall clock — excludes gate queue wait, and is not a sum of per-file lane durations)",
     filter: widened
-      ? `same poolSize (exact), testFileCount widened to span [${testCountSpan[0]}, ${testCountSpan[1]}] because the exact testFileCount=${self.testCount} match alone had only nExact=${nExact} clean samples (< ${MIN_BAND_N}); excluding this run itself, restricted to executedCount===testCount and failedCount===0 runs`
-      : `same poolSize+testFileCount stratum (exact — the match already had >= ${MIN_BAND_N} clean samples, no widening needed), excluding this run itself; restricted to executedCount===testCount and failedCount===0 runs`,
+      ? `same poolSize+isolatedPhaseFileCount (both exact, never widened — isolatedPhaseFileCount=${selfShape}), testFileCount widened to span [${testCountSpan[0]}, ${testCountSpan[1]}] because the exact testFileCount=${self.testCount} match alone had only nExact=${nExact} clean samples (< ${MIN_BAND_N}); excluding this run itself, restricted to executedCount===testCount and failedCount===0 runs`
+      : `same poolSize+isolatedPhaseFileCount+testFileCount stratum (all exact, isolatedPhaseFileCount=${selfShape} — the match already had >= ${MIN_BAND_N} clean samples, no widening needed), excluding this run itself; restricted to executedCount===testCount and failedCount===0 runs`,
     readWindowBytes: readBytes,
     readWindowTruncated: truncated,
   };

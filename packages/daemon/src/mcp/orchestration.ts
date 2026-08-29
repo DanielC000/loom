@@ -296,11 +296,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, " +
       "testFileCount (a FILE count — one per hermetic test FILE, never per individual test/assertion; " +
       "the on-disk NDJSON key stays `testCount` for compatibility with existing history, card 1ec2e353), " +
-      "testFileCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
-      "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
-      "dominates run duration more than population size does — a smaller pool at a bigger testFileCount " +
-      "can run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a " +
-      "category error, not a convenience). `testFileCount` starts as an EXACT match but widens outward to " +
+      "testFileCountSpan, isolatedPhaseFileCount, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, " +
+      "instrument, filter, readWindowBytes, readWindowTruncated}. `poolSize` AND `isolatedPhaseFileCount` " +
+      "(card c8df9663 — 0 for a flat pooled run, positive when an isolated sequential phase, 0f0816e2, " +
+      "ran ahead of the pool) are BOTH matched EXACTLY and NEVER widened: pool size dominates run duration " +
+      "more than population size does (a smaller pool at a bigger testFileCount can run FASTER than a " +
+      "bigger pool at a smaller one), and a flat run vs. an isolated-phase run measure a structurally " +
+      "different thing (a run's scheduling shape, not just its pool size or file count, drives its " +
+      "duration) — pooling across either would be a category error, not a convenience, so a band can " +
+      "never silently mix scheduling shapes. " +
+      "`testFileCount` starts as an EXACT match but widens outward to " +
       "the nearest neighbouring testFileCount values when the exact match alone has fewer than a named " +
       "floor (8) of clean samples — measured live: it increments on every single test file added or " +
       "removed, so an exact-only match is statistically empty (n<5) for the large majority of real strata, " +
@@ -493,11 +498,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "absence means \"nothing to compare against\", not \"this run was slow\"): {poolSize, " +
       "testFileCount (a FILE count — one per hermetic test FILE, never per individual test/assertion; " +
       "the on-disk NDJSON key stays `testCount` for compatibility with existing history, card 1ec2e353), " +
-      "testFileCountSpan, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, instrument, filter, " +
-      "readWindowBytes, readWindowTruncated}. `poolSize` is matched EXACTLY and NEVER widened (pool size " +
-      "dominates run duration more than population size does — a smaller pool at a bigger testFileCount " +
-      "can run FASTER than a bigger pool at a smaller one, so pooling across pool sizes would be a " +
-      "category error, not a convenience). `testFileCount` starts as an EXACT match but widens outward to " +
+      "testFileCountSpan, isolatedPhaseFileCount, n, nUnfiltered, nExact, minSec?, medianSec?, maxSec?, " +
+      "instrument, filter, readWindowBytes, readWindowTruncated}. `poolSize` AND `isolatedPhaseFileCount` " +
+      "(card c8df9663 — 0 for a flat pooled run, positive when an isolated sequential phase, 0f0816e2, " +
+      "ran ahead of the pool) are BOTH matched EXACTLY and NEVER widened: pool size dominates run duration " +
+      "more than population size does (a smaller pool at a bigger testFileCount can run FASTER than a " +
+      "bigger pool at a smaller one), and a flat run vs. an isolated-phase run measure a structurally " +
+      "different thing (a run's scheduling shape, not just its pool size or file count, drives its " +
+      "duration) — pooling across either would be a category error, not a convenience, so a band can " +
+      "never silently mix scheduling shapes. " +
+      "`testFileCount` starts as an EXACT match but widens outward to " +
       "the nearest neighbouring testFileCount values when the exact match alone has fewer than a named " +
       "floor (8) of clean samples — measured live: it increments on every single test file added or " +
       "removed, so an exact-only match is statistically empty (n<5) for the large majority of real strata, " +

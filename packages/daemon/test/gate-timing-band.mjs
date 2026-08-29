@@ -213,7 +213,65 @@ const ndjsonPath = `${dir}/daemon-per-file-timing.ndjson`;
   check("(7) n is 8 — all 8 historical rows are clean", band.n === 8);
 }
 
+// ── (8) SCHEDULING SHAPE (card c8df9663) — isolatedPhaseFileCount is a SECOND exact, never-widened key
+// dimension alongside poolSize. Same (poolSize, testCount) stratum holds BOTH a flat population (shape 0,
+// one row's field OMITTED entirely to prove undefined normalizes the same as 0) and an isolated-phase
+// population (shape 5) at wildly different durations. RED-PROVEN: pre-fix code ignored shape entirely, so
+// the exact testCount=300 stratum would see 8 flat + 3 isolated = 11 clean samples (>= MIN_BAND_N), never
+// widen, and report n=11/nExact=11 with a median pulled toward the isolated durations for EITHER self run
+// — this fixture is exactly the confound the card's own body describes. ────────────────────────────────────
+{
+  const SELF_FLAT = "op-self-flat";
+  const SELF_ISO = "op-self-iso";
+  let text = "";
+  // Group A — FLAT (shape 0), poolSize:6, testCount:300, 8 clean rows (>= MIN_BAND_N alone, no widening
+  // needed for the flat self). One row OMITS isolatedPhaseFileCount entirely (pre-0f0816e2 shape); the
+  // rest set it explicitly to 0 — both must normalize identically.
+  const flatSecs = [300, 310, 320, 330, 340, 350, 360, 370];
+  flatSecs.forEach((s, i) => {
+    const row = { kind: "run-summary", opId: `op-flat-${i}`, poolSize: 6, testCount: 300, executedCount: 300, failedCount: 0, durationMs: s * 1000 };
+    if (i > 0) row.isolatedPhaseFileCount = 0; // row 0 deliberately omits the field
+    text += ndjsonRow(row);
+  });
+  // Group B — ISOLATED-PHASE (shape 5), SAME poolSize:6, SAME testCount:300, 3 clean rows at durations far
+  // outside the flat group's range — must be COMPLETELY invisible to the flat self's band.
+  [700, 710, 720].forEach((s, i) => {
+    text += ndjsonRow({ kind: "run-summary", opId: `op-iso-300-${i}`, poolSize: 6, testCount: 300, isolatedPhaseFileCount: 5, executedCount: 300, failedCount: 0, durationMs: s * 1000 });
+  });
+  // Group B neighbour — ISOLATED-PHASE (shape 5), testCount:299 (distance 1), 5 clean rows. 3 (exact) + 5
+  // (neighbour) = 8, reaching MIN_BAND_N — proves widening for the isolated self stays WITHIN shape 5 and
+  // never reaches into the abundant flat testCount:300 population sitting right at distance 0.
+  [670, 680, 690, 695, 705].forEach((s, i) => {
+    text += ndjsonRow({ kind: "run-summary", opId: `op-iso-299-${i}`, poolSize: 6, testCount: 299, isolatedPhaseFileCount: 5, executedCount: 299, failedCount: 0, durationMs: s * 1000 });
+  });
+  // Self rows — one flat (field omitted, same as a legacy pre-card opId), one isolated-phase.
+  text += ndjsonRow({ kind: "run-summary", opId: SELF_FLAT, poolSize: 6, testCount: 300, executedCount: 300, failedCount: 0, durationMs: 305_000 });
+  text += ndjsonRow({ kind: "run-summary", opId: SELF_ISO, poolSize: 6, testCount: 300, isolatedPhaseFileCount: 5, executedCount: 300, failedCount: 0, durationMs: 715_000 });
+  const shapePath = `${dir}/shape.ndjson`;
+  fs.writeFileSync(shapePath, text);
+
+  const flatBand = await computeGateTimingBand(SELF_FLAT, shapePath);
+  check("(8 flat self) band found", flatBand !== undefined);
+  check("(8 flat self) isolatedPhaseFileCount echoes 0 (self's own field was OMITTED, normalized)", flatBand?.isolatedPhaseFileCount === 0);
+  check("(8 flat self) testFileCountSpan stays [300,300] — the 8 flat rows alone already meet MIN_BAND_N, no widening", flatBand?.testFileCountSpan?.[0] === 300 && flatBand?.testFileCountSpan?.[1] === 300);
+  check("(8 flat self) nExact is 8 — ONLY the flat rows, never the 3 same-testCount isolated-phase rows", flatBand?.nExact === 8);
+  check("(8 flat self) n is 8 (not 11 — proves the isolated-phase rows never entered the pool)", flatBand?.n === 8);
+  check("(8 flat self) minSec/maxSec stay inside the flat range (300s/370s), never reaching the isolated 700s-720s durations", flatBand?.minSec === 300 && flatBand?.maxSec === 370);
+  check("(8 flat self) medianSec is the flat group's own median (335s)", flatBand?.medianSec === 335);
+  check("(8 flat self) filter names isolatedPhaseFileCount=0", typeof flatBand?.filter === "string" && flatBand.filter.includes("isolatedPhaseFileCount=0"));
+
+  const isoBand = await computeGateTimingBand(SELF_ISO, shapePath);
+  check("(8 iso self) band found", isoBand !== undefined);
+  check("(8 iso self) isolatedPhaseFileCount echoes 5", isoBand?.isolatedPhaseFileCount === 5);
+  check("(8 iso self) nExact is 3 — ONLY the isolated-phase rows at testCount=300, never the 8 same-testCount flat rows", isoBand?.nExact === 3);
+  check("(8 iso self) testFileCountSpan widens to [299,300] — WITHIN shape 5 only, never touching the flat population sitting at distance 0", isoBand?.testFileCountSpan?.[0] === 299 && isoBand?.testFileCountSpan?.[1] === 300);
+  check("(8 iso self) n is 8 (3 exact + 5 neighbour, not 11 — proves the flat rows never entered the pool)", isoBand?.n === 8);
+  check("(8 iso self) minSec/maxSec stay inside the isolated-phase range (670s/720s), never reaching the flat 300s-370s durations", isoBand?.minSec === 670 && isoBand?.maxSec === 720);
+  check("(8 iso self) medianSec is the isolated-phase population's own median (697.5s)", isoBand?.medianSec === 697.5);
+  check("(8 iso self) filter names isolatedPhaseFileCount=5", typeof isoBand?.filter === "string" && isoBand.filter.includes("isolatedPhaseFileCount=5"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card 19c0ef1e: computeGateTimingBand stratifies by EXACT poolSize (never widened), picks the largest-testCount row when an op's opId spans more than one run-summary row (the single-file merge-retry shape) and excludes ALL of that op's own rows from its own baseline, filters to complete+zero-failure runs before computing min/median/max, widens the testCount match to the nearest neighbours (stopping the instant MIN_BAND_N is reached) only when the exact match alone is too thin, reports the exact-only count (nExact) alongside the (possibly widened) n/nUnfiltered, names the actual testCountSpan the band was computed over, and bounds its read of the unboundedly-growing NDJSON to a tail byte cap."
+  ? "\n✅ ALL PASS — card 19c0ef1e: computeGateTimingBand stratifies by EXACT poolSize (never widened), picks the largest-testCount row when an op's opId spans more than one run-summary row (the single-file merge-retry shape) and excludes ALL of that op's own rows from its own baseline, filters to complete+zero-failure runs before computing min/median/max, widens the testCount match to the nearest neighbours (stopping the instant MIN_BAND_N is reached) only when the exact match alone is too thin, reports the exact-only count (nExact) alongside the (possibly widened) n/nUnfiltered, names the actual testCountSpan the band was computed over, and bounds its read of the unboundedly-growing NDJSON to a tail byte cap. Card c8df9663: isolatedPhaseFileCount (scheduling shape) is a second exact, never-widened key dimension alongside poolSize — a band can never silently mix a flat run's history with an isolated-phase run's, in either direction."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
