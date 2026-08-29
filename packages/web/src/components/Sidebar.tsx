@@ -150,7 +150,11 @@ export function Sidebar() {
   const alertCount = attentionItems.filter((it) => !it.questionId).length;
   const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 4000 });
   const pendingRequests = (questions.data ?? []).filter((q) => q.state === "pending").length;
-  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 4000 });
+  // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba): FleetSocketProvider seeds this cache
+  // on every /ws/fleet (re)connect and patches it from C5's `status` deltas, with a disconnected-ONLY
+  // fallback poll. This used to poll GET /api/orchestration/status every 4s from the rail, i.e. on every
+  // page of the app, for a value that only changes on a human pause/resume.
+  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus });
   const globalPaused = status.data?.pausedScopes.includes("global") ?? false;
   const version = useQuery({ queryKey: ["version"], queryFn: api.version, staleTime: Infinity, refetchOnWindowFocus: false });
 

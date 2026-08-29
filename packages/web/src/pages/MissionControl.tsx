@@ -44,7 +44,11 @@ export default function MissionControl() {
   const openRequest = useOpenRequest();
 
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
-  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
+  // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba) — same shared cache the rail reads;
+  // FleetSocketProvider keeps it live off the /ws/fleet `status` feed. `refreshStatus` below is KEPT: it is
+  // a one-shot invalidate on this page's OWN pause/resume mutation, not a poll, and it is what still gives
+  // the button immediate feedback when the socket happens to be down.
+  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus });
   // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
   // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used for
   // inactive-project detection + each project's muted archived history (any role — see `archivedItems`

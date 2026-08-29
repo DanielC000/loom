@@ -10,6 +10,13 @@ import { applyFleetDelta } from "../lib/fleetSocket";
  * `["allSessions"]` react-query cache live, replacing what used to be ~14 per-page `refetchInterval`
  * polls of `GET /api/sessions`.
  *
+ * C6 adds the SECOND feed to this SAME socket (never a second socket, never a second provider): the
+ * orchestration-`status` change-feed C5 emits on every `OrchestrationControl.pause()/resume()`, which
+ * replaces the `/api/orchestration/status` polls that used to run at 2s (MissionControl) and 4s
+ * (Sidebar). Both feeds share one connection, one seed-on-(re)connect step, and one disconnected-only
+ * fallback timer — so "connected implies nothing polls" is a property of the lifecycle itself rather
+ * than of two independent things that have to stay in agreement.
+ *
  * Lifecycle mirrors CompanionChat's WS discipline (open/close/reconnect with capped exponential backoff),
  * plus two things unique to a shared cache:
  *  - Seed-then-patch: on every (re)connect we re-fetch `GET /api/sessions` as the seed (a WS reconnect can
@@ -25,6 +32,35 @@ const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10000;
 const FALLBACK_POLL_MS = 10000;
 
+/**
+ * The `status` payload, DERIVED from the wire union rather than restated — so if C5's message shape ever
+ * changes, this fails at compile time instead of silently writing a stale shape into the cache. It is
+ * structurally identical to what `GET /api/orchestration/status` (api.orchestrationStatus) returns, which
+ * is what makes the socket delta and the HTTP seed interchangeable writers of the same cache.
+ */
+type OrchestrationStatus = Omit<Extract<ServerFleetMessage, { t: "status" }>, "t">;
+
+/**
+ * TWO cache keys hold the same `/api/orchestration/status` payload — `["orchStatus"]` (Sidebar,
+ * MissionControl) and `["orchestrationStatus"]` (Schedules) — a pre-existing split this card does not
+ * consolidate. The feed writes BOTH, and it is worth being exact about why, because the obvious
+ * justification overstates it:
+ *
+ * The divergence is NOT introduced here. It already exists: on /automation the rail pill (fed by the
+ * first key) and the Schedules page (fed by the second, which has no interval) can already disagree.
+ * Nor is it currently VISIBLE — Schedules reads only `schedulerEnabled`, which is a fixed const after
+ * boot (see GatewayDeps), never `pausedScopes`. So this is not a live user-facing bug and writing one
+ * key would not create one.
+ *
+ * What it actually buys: bringing one sibling live while leaving the other cold widens a gap that costs
+ * exactly one expression to close, and it pre-empts the next consumer that reads `pausedScopes` off the
+ * Schedules key from silently getting a cold value. Cheap insurance, honestly priced.
+ *
+ * Unifying or renaming these keys is the RIGHT fix and is deliberately NOT done here — it touches
+ * consumers and belongs in its own change (see the `workerDiffQuery` factory in lib/api.ts for the shape).
+ */
+const ORCH_STATUS_QUERY_KEYS: string[][] = [["orchStatus"], ["orchestrationStatus"]];
+
 function log(...args: unknown[]) {
   // eslint-disable-next-line no-console
   console.debug("[fleet-ws]", ...args);
@@ -38,23 +74,42 @@ export function FleetSocketProvider() {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let seedRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let statusSeedRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let fallbackPollTimer: ReturnType<typeof setInterval> | undefined;
     let backoff = RECONNECT_MIN_MS;
     // While a seed fetch is in flight, inbound deltas are buffered (in wire order) instead of patching the
     // cache directly, then replayed onto the seed once it lands — see the seed() comment below.
     let seeding = false;
     let buffered: ServerFleetMessage[] = [];
+    // The status feed carries a FULL SNAPSHOT per message, not a delta, so it needs no replay buffer — but
+    // it still has the seed race, in the opposite direction: a `status` frame that lands while the seed
+    // fetch is in flight is NEWER than the response that fetch will return (an HTTP read reflects state at
+    // request time). Applying the seed on top would silently revert the UI to the pre-mutation state and
+    // leave it wrong until the NEXT pause/resume. So we record that a delta won, and discard the stale seed.
+    let statusSeeding = false;
+    let statusDeltaDuringSeed = false;
+
+    const writeStatus = (s: OrchestrationStatus) => {
+      for (const key of ORCH_STATUS_QUERY_KEYS) qc.setQueryData<OrchestrationStatus>(key, s);
+    };
 
     const stopFallbackPoll = () => {
       if (fallbackPollTimer) { clearInterval(fallbackPollTimer); fallbackPollTimer = undefined; }
     };
     const startFallbackPoll = () => {
       if (fallbackPollTimer || disposed) return;
-      log("fallback: slow-polling /api/sessions while disconnected");
+      log("fallback: slow-polling /api/sessions + /api/orchestration/status while disconnected");
+      // ONE timer drives BOTH feeds' fallback, so the status fallback structurally cannot outlive the
+      // session one: stopFallbackPoll() on open kills both, or neither. A second timer here would be the
+      // exact regression this card exists to prevent — a fallback still polling while connected silently
+      // re-adds the load, and every screen still looks correct.
       fallbackPollTimer = setInterval(() => {
         api.allSessions()
           .then((rows) => { if (!disposed) qc.setQueryData<SessionListItem[]>(["allSessions"], rows); })
           .catch((err) => log("fallback poll failed, will retry", err));
+        api.orchestrationStatus()
+          .then((s) => { if (!disposed) writeStatus(s); })
+          .catch((err) => log("status fallback poll failed, will retry", err));
       }, FALLBACK_POLL_MS);
     };
 
@@ -80,6 +135,28 @@ export function FleetSocketProvider() {
         });
     };
 
+    // Cold-load seed + reconnect resync for the status feed. The server sends only `hello` on connect (no
+    // opening `status` frame — see gateway/server.ts's /ws/fleet handler), and a reconnect can follow an
+    // arbitrary gap, so this HTTP read is what makes a change-ONLY feed complete. It stays precisely
+    // because it is not a poll: it fires once per (re)connect, never on a timer.
+    const seedStatus = () => {
+      statusSeeding = true;
+      statusDeltaDuringSeed = false;
+      api.orchestrationStatus()
+        .then((s) => {
+          if (disposed) return;
+          statusSeeding = false;
+          if (statusDeltaDuringSeed) { log("status seed superseded by a live delta, discarding"); return; }
+          writeStatus(s);
+          log(`seeded status (${s.pausedScopes.length} paused scope(s))`);
+        })
+        .catch((err) => {
+          if (disposed) return;
+          log("status seed fetch failed, retrying", err);
+          statusSeedRetryTimer = setTimeout(seedStatus, RECONNECT_MIN_MS);
+        });
+    };
+
     const connect = () => {
       if (disposed) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -92,12 +169,20 @@ export function FleetSocketProvider() {
         stopFallbackPoll();
         log("connected");
         seed();
+        seedStatus();
       };
       socket.onmessage = (e) => {
         if (disposed || typeof e.data !== "string") return;
         let msg: ServerFleetMessage;
         try { msg = JSON.parse(e.data); } catch { return; }
-        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello/status/event — a later card
+        if (msg.t === "status") {
+          // Full snapshot — applied directly, no reducer and no replay buffer. If the seed is still in
+          // flight, flag it so that older seed response is dropped rather than applied on top of this.
+          if (statusSeeding) statusDeltaDuringSeed = true;
+          writeStatus({ pausedScopes: msg.pausedScopes, schedulerEnabled: msg.schedulerEnabled });
+          return;
+        }
+        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello / event (event is C7)
         if (seeding) { buffered.push(msg); return; }
         qc.setQueryData<SessionListItem[]>(["allSessions"], (prev) => applyFleetDelta(prev ?? [], msg));
       };
@@ -106,6 +191,8 @@ export function FleetSocketProvider() {
         ws = null;
         seeding = false;
         buffered = [];
+        statusSeeding = false;
+        statusDeltaDuringSeed = false;
         log("disconnected — falling back to polling and reconnecting");
         startFallbackPoll();
         reconnectTimer = setTimeout(connect, backoff);
@@ -123,6 +210,7 @@ export function FleetSocketProvider() {
       disposed = true;
       clearTimeout(reconnectTimer);
       clearTimeout(seedRetryTimer);
+      clearTimeout(statusSeedRetryTimer);
       stopFallbackPoll();
       const socket = ws;
       ws = null;
