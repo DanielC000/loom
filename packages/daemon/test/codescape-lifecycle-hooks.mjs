@@ -170,6 +170,9 @@ function makeHost(db, orderLog) {
   return new SeamHost(events, orderLog);
 }
 
+// Card e66ea3c2: NOT migrated onto _wait.mjs — retry-COUNT contract ({tries, everyMs}); tries*everyMs
+// would cap wall-clock and shrink the effective budget under load, where sleep() is a floor not a
+// ceiling. Same class as 43f5b242's group 4.
 async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
   for (let i = 0; i < tries && !cond(); i++) await sleep(everyMs);
   return cond();

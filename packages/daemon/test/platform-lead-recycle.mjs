@@ -47,6 +47,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -85,14 +86,13 @@ const svc = new SessionService(db, host, new OrchestrationControl());
 const liveLeads = (agentId) => db.liveSessions(agentId).filter((s) => s.role === "platform");
 const platformRows = (agentId) => db.listSessions(agentId).filter((s) => s.role === "platform");
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "platform-lead-recycle" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return true;
 };
 
 try {

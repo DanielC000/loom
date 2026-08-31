@@ -19,10 +19,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const isAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -30,12 +30,12 @@ const isAlive = (pid) => {
 // MONOTONIC performance.now() (not Date.now()): a wall-clock forward/backward step under load can't
 // inflate or hide the elapsed budget (same convention as trust-lock.mjs).
 const waitUntil = async (cond, timeoutMs, stepMs = 100) => {
-  const start = performance.now();
-  while (performance.now() - start < timeoutMs) {
-    if (cond()) return true;
-    await sleep(stepMs);
+  try {
+    return await sharedWaitUntil(cond, { timeoutMs, intervalMs: stepMs, label: "dev-server-teardown" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
   }
-  return cond();
 };
 
 // Ambient-load calibration (mirrors trust-lock.mjs): measure how much slower a nominal 50ms sleep runs

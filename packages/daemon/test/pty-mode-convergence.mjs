@@ -48,17 +48,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "pty-mode-convergence" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return true;
 };
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn). Speed up the

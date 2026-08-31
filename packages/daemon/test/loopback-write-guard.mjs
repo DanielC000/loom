@@ -65,6 +65,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const TMP = mkdtempManaged("loom-loopback-guard-");
 process.env.LOOM_HOME = TMP;
@@ -82,16 +83,15 @@ const { WS_GENERIC_SUBPROTOCOL, WS_BEARER_PREFIX } = await import("../dist/gatew
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Anchored to the OBSERVABLE event (the spy counter actually incrementing), not a fixed sleep — mirrors
 // shutdown-endpoint.mjs / update-endpoint.mjs's own waitUntil for the same deferred-setTimeout shape.
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "loopback-write-guard" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return true;
 };
 
 const now = new Date().toISOString();

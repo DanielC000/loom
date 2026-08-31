@@ -11,6 +11,7 @@ import "./_guard.mjs";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 if (!process.env.LOOM_HOME) process.env.LOOM_HOME = mkdtempManaged("loom-cvp-");
 const { requireHermeticEnv } = await import("./_guard.mjs");
@@ -23,12 +24,12 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 async function waitUntil(fn, timeoutMs = 4000, stepMs = 25) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (fn()) return true;
-    await new Promise((r) => setTimeout(r, stepMs));
+  try {
+    return await sharedWaitUntil(fn, { timeoutMs, intervalMs: stepMs, label: "claude-version-prewarm" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return false;
 }
 
 // --- Cold start: nothing has warmed the cache yet -------------------------------------------------

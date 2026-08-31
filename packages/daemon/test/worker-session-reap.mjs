@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wksr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -32,12 +33,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const waitUntil = async (cond, timeoutMs, stepMs = 100) => {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (cond()) return true;
-    await sleep(stepMs);
+  try {
+    return await sharedWaitUntil(cond, { timeoutMs, intervalMs: stepMs, label: "worker-session-reap" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return cond();
   }
-  return cond();
 };
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

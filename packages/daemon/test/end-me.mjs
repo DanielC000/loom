@@ -21,6 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-endme-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -36,12 +37,12 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "end-me" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return true;
 };
 const now = new Date().toISOString();
 

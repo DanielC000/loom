@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,12 +33,12 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return false;
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "shutdown-endpoint" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return false;
   }
-  return true;
 };
 
 let shutdownCalls = 0;

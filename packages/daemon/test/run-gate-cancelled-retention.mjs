@@ -29,6 +29,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gcr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -42,12 +43,11 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitUntil(predicate, timeoutMs = 8000, intervalMs = 15) {
-  const start = Date.now();
-  for (;;) {
-    const v = predicate();
-    if (v) return v;
-    if (Date.now() - start > timeoutMs) return predicate(); // one last try, then give up honestly
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "run-gate-cancelled-retention" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return predicate(); // one last try, then give up honestly
   }
 }
 const GIT_ID = "-c user.email=gcr@loom -c user.name=gcr";

@@ -48,6 +48,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 const { VaultVersioner } = await import("../dist/vault/versioner.js");
 
@@ -105,11 +106,11 @@ const hookDonePath = (repo) => path.join(repo, ".git", "pre-commit-done");
 // exists or the bounded budget ran out; either way this RETURNS with a real answer instead of guessing at
 // "surely done by now".
 async function waitForFile(filePath, timeoutMs) {
-  const start = performance.now(); // MONOTONIC — see test/worktrees.mjs
-  for (;;) {
-    if (fs.existsSync(filePath)) return true;
-    if (performance.now() - start >= timeoutMs) return fs.existsSync(filePath);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    return await sharedWaitUntil(() => fs.existsSync(filePath), { timeoutMs, intervalMs: 100, label: "vault-flush-sync-hang-bound: waitForFile" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return fs.existsSync(filePath);
   }
 }
 // KNOWN, ACCEPTED cleanup risk (same as merge-hang-does-not-wedge-queue.mjs's own note): the shell-string

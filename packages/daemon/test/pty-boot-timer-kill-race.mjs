@@ -46,18 +46,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { sleepPast } from "./_wait.mjs";
+import { sleepPast, waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (pred, timeoutMs, intervalMs = 10) => {
-  const start = Date.now();
-  while (!pred()) {
-    if (Date.now() - start > timeoutMs) return pred();
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "pty-boot-timer-kill-race" });
+  } catch (err) {
+    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    return pred();
   }
-  return true;
 };
 
 const tmpHome = path.join(os.tmpdir(), `loom-pty-boot-kill-race-${Date.now()}-${process.pid}`);

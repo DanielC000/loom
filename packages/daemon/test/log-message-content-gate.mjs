@@ -21,6 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -158,16 +159,16 @@ try {
   {
     const { PtyHost } = await import("../dist/pty/host.js");
     const { createSeamHost } = await import("./_seam-host-fixture.mjs");
-    // Card 43f5b242: kept local rather than consolidated onto the shared `_wait.mjs` `waitUntil` — a
-    // genuinely different CONTRACT: returns false on timeout, never throws (this block's own single call
-    // site below relies on that boolean, not an exception).
+    // Migrated onto _wait.mjs by card e66ea3c2: 43f5b242 grouped this with the two retry-count files, but
+    // this fn is elapsed-time (pred, timeoutMs, intervalMs) with no tries param — that grouping was a
+    // misclassification, not a contract.
     const waitUntil = async (pred, timeoutMs = 5000, intervalMs = 20) => {
-      const start = Date.now();
-      while (!pred()) {
-        if (Date.now() - start > timeoutMs) return false;
-        await new Promise((r) => setTimeout(r, intervalMs));
+      try {
+        return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "log-message-content-gate" });
+      } catch (err) {
+        if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+        return false;
       }
-      return true;
     };
 
     const fakesFooter = [];
