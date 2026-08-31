@@ -92,6 +92,35 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // is about) and confirms the SAME evaluation function now goes RED. Section (B) is the real backstop:
 // every tracked text file in THIS repo, scanned live.
 //
+// UNTRACKED-FILE VISIBILITY (card c3e70c20, 2026-08-31): `listTrackedTextFiles` below enumerates via
+// `git ls-files` — TRACKED FILES ONLY. A file created but never `git add`ed contributed nothing to that
+// population and was invisible to section (B)'s scan, so a genuine EOL-policy violation in a brand-new
+// file reported a clean `exit 0` — verified empirically on this card in a throwaway fixture repo (a
+// never-added bare-LF file under a CRLF policy: absent from `git ls-files -z`, present in `git status
+// --porcelain`). This cost a real 15-minute gate lane here (`opId bb4dc964`) and a rejected gate on a peer
+// project, in both cases because the worker's own PRE-COMMIT guard run returned a meaningless clean pass.
+// FIX: `listUntrackedTextFiles` below reuses the SAME primitive `fixed-wait-witness-guard.mjs`'s
+// `listUntrackedTestFiles` (card 40643460) already established for exactly this hazard in this repo —
+// `git ls-files --others --exclude-standard` — rather than re-typing it (re-typing it is how this
+// two-guard asymmetry was created in the first place).
+//
+// DELIBERATE CHOICE, AND WHY THE SIBLING'S PRECEDENT DOES NOT TRANSFER (card c3e70c20 DoD-2, corrected by
+// the manager on review — the card's own original wording recommended "NAME IT AND FAIL" bare presence,
+// borrowed from that sibling; that recommendation was considered here and REJECTED): the sibling guard is
+// DIFF-scoped — an untracked file genuinely contributes nothing to a `HEAD`-vs-merge-base diff, so bare
+// presence-fail is the only option it has. THIS guard is CONTENT-scoped — it already reads raw
+// working-tree bytes directly off disk regardless of tracked status, and `git check-attr` resolves
+// `.gitattributes` patterns for ANY path whether tracked or not (verified empirically on this card: an
+// untracked path's `eol`/`text` attrs resolve exactly like a tracked one's). A real verdict is available,
+// so a blanket presence-fail would be strictly worse than useless here: it would fail every CORRECT new
+// file too, training workers to distrust (and eventually silence) the guard. So an untracked text file is
+// evaluated through the EXACT SAME content-aware pipeline as a tracked one — FAIL only on an actual
+// violation, never on bare presence. Same repo, same-looking hazard, opposite correct answer — a
+// precedent is evidence about its OWN case, not a license to copy the verdict into a differently-shaped
+// one. And because `git ls-files --others --exclude-standard` honours `.gitignore`, a legitimately
+// ignored file (build output, `dist/`, `node_modules`) never enters this population at all — verified as
+// a third fixture polarity below, since without it this guard would be unusable in any real tree.
+//
 // HERMETIC: git + fs only — no daemon, no build required.
 // Run: node packages/daemon/test/working-tree-eol-guard.mjs
 import fs from "node:fs";
@@ -99,6 +128,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, unregister, finishAndExit } from "./_tmp-fixture.mjs";
+import { listUntrackedTestFiles as listUntrackedRepoFiles } from "./fixed-wait-witness-guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", ".."); // test/ -> daemon -> packages -> repo root
@@ -170,6 +200,19 @@ function listTrackedTextFiles(root) {
   return raw.split("\0").filter(Boolean).filter((p) => TEXT_EXTENSIONS.has(path.extname(p)));
 }
 
+/** Card c3e70c20 — the population-visibility fix (see this file's own header for the full rationale).
+ *  Reuses `fixed-wait-witness-guard.mjs`'s `listUntrackedTestFiles` (a thin wrapper around `git ls-files
+ *  --others --exclude-standard`) with pathspec `"."` (repo-root-relative, matches at any depth — verified
+ *  empirically on this card) rather than re-typing the same git invocation a second time, then applies
+ *  the SAME extension filter `listTrackedTextFiles` uses above. Mirrors that helper's null-vs-empty
+ *  contract: `null` means "git itself failed" (could not check), `[]` means "checked, found none" — a
+ *  caller must not conflate the two. */
+function listUntrackedTextFiles(root) {
+  const untracked = listUntrackedRepoFiles(root, ".");
+  if (untracked === null) return null;
+  return untracked.filter((p) => TEXT_EXTENSIONS.has(path.extname(p)));
+}
+
 /** Batched `git check-attr eol text` over every path at once via stdin (never argv — sidesteps any
  *  OS command-line length limit for a corpus this size). Returns Map<path, {eol, text}>. */
 function checkAttrsBatch(root, files) {
@@ -226,6 +269,69 @@ function checkAttrsBatch(root, files) {
     check("(fixture) sanity: the simulated flip actually changed the bytes", !cleanBufBefore.equals(flipped));
     check("(fixture) RED PROOF: the flipped bytes are caught against the SAME policy the clean bytes passed", evaluate(flipped, cleanPolicy).ok === false);
     check("(fixture) RED PROOF: a flipped file still passes an \"lf\" policy (proves this is a targeted check, not a blanket fail)", evaluate(flipped, "lf").ok === true);
+
+    // Card c3e70c20 — POSITIVE CONTROL, BOTH DIRECTIONS, ON THIS SAME FIXTURE (DoD-3): a never-`git
+    // add`ed new file with bare LF under this fixture's CRLF policy must now be VISIBLE and FAIL; a
+    // never-added new file that's already correct must NOT spuriously fail; and the tracked-file walk
+    // above must stay unaware of either (byte-identical tracked behaviour — DoD-3(c)).
+    fs.writeFileSync(path.join(fixtureRoot, "untracked-bad.json"), '{\n  "bad": true\n}\n'); // bare LF — violates crlf policy
+    fs.writeFileSync(path.join(fixtureRoot, "untracked-good.json"), '{\r\n  "good": true\r\n}\r\n'); // correct CRLF
+    // deliberately never `git add`ed — this is the exact never-added-new-file shape the card is about
+
+    const untrackedFound = listUntrackedTextFiles(fixtureRoot);
+    check(
+      "(fixture) RED CASE: a never-`git add`ed new file is now VISIBLE to the untracked-file enumerator (this is the exact blindness the card fixes)",
+      untrackedFound !== null && untrackedFound.includes("untracked-bad.json") && untrackedFound.includes("untracked-good.json"),
+    );
+    check(
+      "(fixture) the untracked enumerator does NOT pick up already-tracked files (clean.json/pinned.md stay out of it — no double-scanning)",
+      untrackedFound !== null && !untrackedFound.includes("clean.json") && !untrackedFound.includes("pinned.md"),
+    );
+
+    const untrackedAttrs = checkAttrsBatch(fixtureRoot, ["untracked-bad.json", "untracked-good.json"]);
+    const badAttr = untrackedAttrs.get("untracked-bad.json") || {};
+    const goodAttr = untrackedAttrs.get("untracked-good.json") || {};
+    const badPolicy = expectedPolicy(badAttr.eol, badAttr.text, true);
+    const goodPolicy = expectedPolicy(goodAttr.eol, goodAttr.text, true);
+    check(
+      "(fixture) `git check-attr` resolves .gitattributes for an untracked path too (no tracked-status requirement)",
+      badPolicy === "crlf" && goodPolicy === "crlf",
+    );
+
+    const badBuf = fs.readFileSync(path.join(fixtureRoot, "untracked-bad.json"));
+    const goodBuf = fs.readFileSync(path.join(fixtureRoot, "untracked-good.json"));
+    check(
+      "(fixture) RED PROOF: the never-added bare-LF file evaluates as a real violation once scanned (this is the fix, not just visibility)",
+      evaluate(badBuf, badPolicy).ok === false,
+    );
+    check(
+      "(fixture) DoD-3(b) NEGATIVE CONTROL: the never-added but CORRECT file does NOT spuriously fail",
+      evaluate(goodBuf, goodPolicy).ok === true,
+    );
+
+    check(
+      "(fixture) DoD-3(c): the tracked-file walk stays byte-identical — still finds exactly clean.json + pinned.md, unaffected by the two new untracked files",
+      listTrackedTextFiles(fixtureRoot).sort().join(",") === ["clean.json", "pinned.md"].sort().join(","),
+    );
+
+    // Card c3e70c20 (manager review, 2026-09-01) — THIRD POLARITY: `--exclude-standard` honours
+    // `.gitignore`, which is exactly what makes it the right primitive here — a legitimately ignored file
+    // (build output, `dist/`, `node_modules`) must NEVER be swept into the population just because it's
+    // untracked, even if its raw bytes would otherwise violate the policy. Without this polarity the guard
+    // would be unusable in a real tree (every stray ignored artifact could fail it). This is NOT redundant
+    // with the RED/negative-control pair above: those prove the guard SEES and correctly EVALUATES a real
+    // untracked file; this proves it correctly EXCLUDES one that was never meant to be seen at all.
+    fs.writeFileSync(path.join(fixtureRoot, ".gitignore"), "ignored-*.json\n");
+    fs.writeFileSync(path.join(fixtureRoot, "ignored-bad.json"), '{\n  "ignored": true\n}\n'); // bare LF — would violate crlf IF it entered the scan
+    const untrackedAfterIgnore = listUntrackedTextFiles(fixtureRoot);
+    check(
+      "(fixture) IGNORED-FILE POLARITY: a .gitignore-matched file is NOT swept into the untracked population, even though its own content would otherwise violate the policy",
+      untrackedAfterIgnore !== null && !untrackedAfterIgnore.includes("ignored-bad.json"),
+    );
+    check(
+      "(fixture) sanity: excluding the ignored file didn't also hide the two genuinely-untracked files from the same scan",
+      untrackedAfterIgnore !== null && untrackedAfterIgnore.includes("untracked-bad.json") && untrackedAfterIgnore.includes("untracked-good.json"),
+    );
   } finally {
     try { fs.rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
     catch (err) { console.error(`[tmp] retained for backstop: ${fixtureRoot} — ${err}`); }
@@ -241,25 +347,39 @@ function checkAttrsBatch(root, files) {
   const files = listTrackedTextFiles(repoRoot);
   check(`sanity: the tracked-file walk found a non-trivial population (found ${files.length} file(s) across ${TEXT_EXTENSIONS.size} extensions)`, files.length > 100);
 
-  const attrs = checkAttrsBatch(repoRoot, files);
+  // Card c3e70c20 — the population-visibility fix itself: a never-`git add`ed text file was previously
+  // invisible to everything below. `null` means git failed (skip, don't fail an unrelated build over it
+  // — same fail-safe posture as the sibling this reuses); `[]` means checked, genuinely none found.
+  const untrackedFiles = listUntrackedTextFiles(repoRoot);
+  if (untrackedFiles === null) {
+    console.log("[working-tree-eol-guard] could not enumerate untracked files (git ls-files --others failed) — skipping the untracked-visibility scan this run");
+  } else {
+    console.log(`[working-tree-eol-guard] population: ${untrackedFiles.length} untracked text file(s) found alongside ${files.length} tracked (state the actual population, not just a bare "found 0")`);
+  }
+  const scanTargets = [
+    ...files.map((rel) => ({ rel, tracked: true })),
+    ...(untrackedFiles || []).map((rel) => ({ rel, tracked: false })),
+  ];
+
+  const attrs = checkAttrsBatch(repoRoot, scanTargets.map((t) => t.rel));
 
   const violations = [];
   const skippedBinary = [];
   let lfPinnedCount = 0;
   let crlfPinnedCount = 0;
 
-  for (const rel of files) {
+  for (const { rel, tracked } of scanTargets) {
     const attr = attrs.get(rel) || {};
-    if (attr.eol === "lf") lfPinnedCount++;
-    if (attr.eol === "crlf") crlfPinnedCount++;
+    if (tracked && attr.eol === "lf") lfPinnedCount++;
+    if (tracked && attr.eol === "crlf") crlfPinnedCount++;
     const abs = path.join(repoRoot, rel);
     let buf;
-    try { buf = fs.readFileSync(abs); } catch { continue; } // tracked but absent from the working tree
-    if (containsNul(buf)) { skippedBinary.push(rel); continue; }
+    try { buf = fs.readFileSync(abs); } catch { continue; } // gone from the working tree since enumeration
+    if (containsNul(buf)) { if (tracked) skippedBinary.push(rel); continue; }
     const policy = expectedPolicy(attr.eol, attr.text, autocrlfTrue);
     const result = evaluate(buf, policy);
     if (result.skip) continue;
-    if (!result.ok) violations.push({ file: rel, policy, crlf: result.crlf, bareLf: result.bareLf });
+    if (!result.ok) violations.push({ file: rel, tracked, policy, crlf: result.crlf, bareLf: result.bareLf });
   }
 
   check(`sanity: .gitattributes' real eol=lf pin(s) actually resolve to ≥1 tracked file (found ${lfPinnedCount}) — proves check-attr reads .gitattributes rather than defaulting`, lfPinnedCount > 0);
@@ -271,15 +391,15 @@ function checkAttrsBatch(root, files) {
   );
 
   if (violations.length) {
-    for (const v of violations) console.log(`  EOL-MISMATCH  ${v.file}  expected all-${v.policy}, found CRLF=${v.crlf} bareLF=${v.bareLf}`);
+    for (const v of violations) console.log(`  EOL-MISMATCH${v.tracked ? "" : " (UNTRACKED — never added to git; stage it and re-run)"}  ${v.file}  expected all-${v.policy}, found CRLF=${v.crlf} bareLF=${v.bareLf}`);
   }
   check(
-    `every tracked text file's WORKING-TREE bytes on disk match the line-ending policy .gitattributes + core.autocrlf(=${autocrlfTrue}) imply for it (found ${violations.length} violation(s) across ${files.length} file(s) scanned)`,
+    `every tracked text file's WORKING-TREE bytes on disk, AND every untracked-but-present text file's (never added to git — see this file's header for why those are scanned too), match the line-ending policy .gitattributes + core.autocrlf(=${autocrlfTrue}) imply for it (found ${violations.length} violation(s) across ${scanTargets.length} file(s) scanned: ${files.length} tracked + ${(untrackedFiles || []).length} untracked)`,
     violations.length === 0,
   );
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the guard fires on a simulated flip in a real fixture repo, and every tracked text file in this repo currently matches its implied line-ending policy."
+  ? "\n✅ ALL PASS — the guard fires on a simulated flip in a real fixture repo, and every tracked AND untracked text file in this repo currently matches its implied line-ending policy."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
