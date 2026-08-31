@@ -64,17 +64,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // subprocess takes, which is genuinely elapsed-time dependent, not JS-synchronous-guaranteed. Poll the
 // LIVE `snapshotGates()` registry for the actual phase instead of betting a fixed sleep outlasts it.
 //
-// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148): this file was excluded from the
-// 22796d42 migration on the stated reason "deliberately performance.now(); migrating as-is reintroduces
-// a documented CI flake class." That reason was accurate ONLY while _wait.mjs's own waitUntil was
-// Date.now()-anchored — card 32ac0273 made it performance.now()-anchored (monotonic) before batch 3 even
-// started, so both sides now share the same clock and the original discriminator no longer holds. This
-// file's local waitUntil is a pure poll-until-predicate loop (no lower-bound elapsed-time assertion
-// anywhere in this file), the exact shape already migrated elsewhere — same timeoutMs/intervalMs defaults
-// and throw-on-timeout contract preserved; no call site here ever used the return value.
-async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
-  return sharedWaitUntil(cond, { timeoutMs, intervalMs, label });
-}
+// Card 43f5b242: this file used to keep a local `waitUntil(cond, label, timeoutMs, intervalMs)` wrapper
+// here that just forwarded to `sharedWaitUntil` — removed, since its (cond, label, ...) positional order
+// put `label` where the shared helper expects a bare timeout number, the exact silent-misread shape that
+// card exists to eliminate. Call sites below now call `sharedWaitUntil` directly with an explicit options
+// object (same timeoutMs:5000/intervalMs:25 the old wrapper defaulted to — values unchanged).
 const GIT_ID = "-c user.email=rghc@loom -c user.name=rghc";
 const now = new Date().toISOString();
 const ptyStub = () => ({ stop() {}, isAlive() { return false; }, enqueueStdin() {} });
@@ -153,15 +147,15 @@ try {
     const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
 
     const pBlocker = sessions.runWorkerGate(blockerId); // grabs the only slot first
-    await waitUntil(
+    await sharedWaitUntil(
       () => sessions.snapshotGates().gates.some((g) => g.sessionId === blockerId && g.phase === "running"),
-      "(B) the blocker genuinely admitted",
+      { timeoutMs: 5000, intervalMs: 25, label: "(B) the blocker genuinely admitted" },
     );
     const pSubject = sessions.runWorkerGate(subjectId); // queues behind the blocker (subject's startStamp
     // is taken now, BEFORE it queues — clean tree, since nothing's been mutated yet)
-    await waitUntil(
+    await sharedWaitUntil(
       () => sessions.snapshotGates().gates.some((g) => g.sessionId === subjectId && g.phase === "queued"),
-      "(B) the subject genuinely queued",
+      { timeoutMs: 5000, intervalMs: 25, label: "(B) the subject genuinely queued" },
     );
 
     // The mutation that would have landed "while the worker kept working during the queue wait" — this

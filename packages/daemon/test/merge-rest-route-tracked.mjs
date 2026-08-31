@@ -37,15 +37,8 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = predicate();
-    if (v) return v;
-    if (Date.now() - start > timeoutMs) return predicate();
-    await sleep(intervalMs);
-  }
-}
+// Card 43f5b242: a local `waitUntil` used to be defined here but had ZERO call sites in this file —
+// dead code, removed rather than converted (nothing depended on its behavior).
 const GIT_ID = "-c user.email=mrt@loom -c user.name=mrt";
 const now = new Date().toISOString();
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };

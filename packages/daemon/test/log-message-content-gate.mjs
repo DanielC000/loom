@@ -158,6 +158,9 @@ try {
   {
     const { PtyHost } = await import("../dist/pty/host.js");
     const { createSeamHost } = await import("./_seam-host-fixture.mjs");
+    // Card 43f5b242: kept local rather than consolidated onto the shared `_wait.mjs` `waitUntil` — a
+    // genuinely different CONTRACT: returns false on timeout, never throws (this block's own single call
+    // site below relies on that boolean, not an exception).
     const waitUntil = async (pred, timeoutMs = 5000, intervalMs = 20) => {
       const start = Date.now();
       while (!pred()) {

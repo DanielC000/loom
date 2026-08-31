@@ -46,17 +46,20 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Poll instead of a blind fixed sleep — mirrors merge-gate-single-file-retry.mjs's own `waitUntil`
-// verbatim (same reasoning: a blind sleep is the wall-clock-coincidence flake this suite's own DoD
-// rejects). Bounded generously (8s) so a real bug still fails fast rather than hanging.
+// Poll instead of a blind fixed sleep (a blind sleep is the wall-clock-coincidence flake this suite's own
+// DoD rejects). Bounded generously (8s) so a real bug still fails fast rather than hanging.
+// Card 43f5b242: this used to be a from-scratch poll loop (mirroring merge-gate-single-file-retry.mjs's
+// own copy verbatim) — now delegates its actual polling to the shared `_wait.mjs` helper, keeping only
+// the local "never throw — one last predicate() try, then give up honestly" contract on top, since real
+// call sites below (`holderQueued`/`retryEntry`) depend on a timed-out call yielding a falsy/undefined
+// value rather than throwing.
 async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
-  const start = Date.now();
-  for (;;) {
-    const v = predicate();
-    if (v) return v;
-    if (Date.now() - start > timeoutMs) return predicate(); // one last try, then give up honestly
-    await sleep(intervalMs);
+  try {
+    return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "merge-gate-retry: condition" });
+  } catch {
+    return predicate(); // one last try, then give up honestly
   }
 }
 

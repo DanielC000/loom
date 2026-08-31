@@ -42,6 +42,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs/intervalMs defaults,
 // same "return the predicate's own value; one last try, then give up honestly" contract on timeout — only
 // difference is the added [waitUntil-outcome] diagnostic before that fallback try.
+// Card 43f5b242: kept as a local wrapper rather than flattened to bare `sharedWaitUntil` calls — its
+// never-throw contract genuinely differs from the shared helper's throw-on-timeout one, and real call
+// sites below (e.g. the `liveEntry`/`mergeEntry` guards) depend on a timed-out call yielding undefined
+// instead of throwing. merge-gate-retry.mjs/merge-gate-single-file-retry.mjs now share this exact pattern.
 async function waitUntil(predicate, { intervalMs = 15, timeoutMs = 8000 } = {}) {
   try {
     return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "gate-cancel: condition" });

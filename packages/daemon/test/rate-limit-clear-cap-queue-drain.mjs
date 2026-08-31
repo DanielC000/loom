@@ -51,6 +51,12 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 43f5b242: kept local rather than consolidated onto the shared `_wait.mjs` `waitUntil` — this is a
+// genuinely different CONTRACT, not a divergent spelling of the same one: it's retry-COUNT based
+// (tries/delayMs, not a timeout budget) and returns false on exhaustion, it never throws. Forcing it onto
+// the throw-based shared helper would be a behaviour change wearing consolidation's clothes —
+// `waitUntilDiagnosed` below wraps this exact fn and depends on the {tries, delayMs} shape + boolean
+// return to compute its own diagnostic budget.
 const waitUntil = async (fn, { tries = 50, delayMs = 20 } = {}) => {
   for (let i = 0; i < tries; i++) { if (await fn()) return true; await sleep(delayMs); }
   return false;

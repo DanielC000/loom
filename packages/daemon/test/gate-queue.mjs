@@ -74,10 +74,11 @@ async function waitUntilInvoked(getRelease, label, timeoutMs = 5000, intervalMs 
 // which is genuinely elapsed-time dependent, not JS-synchronous-guaranteed. A fixed `sleep(...)` before
 // issuing a competing op is a bet on a margin, not a guarantee. This polls the LIVE gateQueueForManager/
 // snapshotGates registry for the actual admission state instead, so ordering is ESTABLISHED BY OBSERVATION.
-// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148) — see waitUntilInvoked's doc above.
-async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
-  return sharedWaitUntil(cond, { timeoutMs, intervalMs, label });
-}
+// Card 43f5b242: the local `waitUntil(cond, label, timeoutMs, intervalMs)` wrapper that used to sit here
+// was removed — its (cond, label, ...) positional order put `label` where the shared `_wait.mjs` helper
+// expects a bare timeout number, the exact silent-misread shape that card exists to eliminate. Call sites
+// below now call `sharedWaitUntil` directly with an explicit options object (same timeoutMs:5000/
+// intervalMs:25 the old wrapper defaulted to — values unchanged).
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -136,9 +137,9 @@ function makeRepo(repo) {
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
 
     const p1 = sessions.runWorkerGate(w1).catch((e) => { console.error("p1 rejected:", e); });
-    await waitUntil(() => sessions.gateQueueForManager(P1).activeCount === 1, "(unit) w1's gate admitted"); // cap 1, nothing else queued yet
+    await sharedWaitUntil(() => sessions.gateQueueForManager(P1).activeCount === 1, { timeoutMs: 5000, intervalMs: 25, label: "(unit) w1's gate admitted" }); // cap 1, nothing else queued yet
     const p2 = sessions.runWorkerGate(w2).catch((e) => { console.error("p2 rejected:", e); }); // queues behind w1 (SAME daemon-global cap)
-    await waitUntil(() => sessions.gateQueueForManager(P1).queuedCount === 1, "(unit) w2 registered as queued");
+    await sharedWaitUntil(() => sessions.gateQueueForManager(P1).queuedCount === 1, { timeoutMs: 5000, intervalMs: 25, label: "(unit) w2 registered as queued" });
 
     const own = sessions.gateQueueForManager(P1);
     check("(unit) cap resolves to the schema default (1, no platform override)", own.cap === 1);
@@ -254,9 +255,9 @@ function makeRepo(repo) {
     // BEFORE the fakeGate below is ever invoked. Card 7b3a585a: that FIRST stamp read happens BEFORE the
     // semaphore ever sees the op, so a fixed sleep before issuing the competing op only ever BETS that it
     // outlasts a real async git subprocess — poll the live registry for actual admission instead.
-    await waitUntil(() => sessions.gateQueueForManager(P1).activeCount === 1, "(e2e, MCP) w1's gate genuinely admitted"); // real git-stamp work precedes admission
+    await sharedWaitUntil(() => sessions.gateQueueForManager(P1).activeCount === 1, { timeoutMs: 5000, intervalMs: 25, label: "(e2e, MCP) w1's gate genuinely admitted" }); // real git-stamp work precedes admission
     const p2 = sessions.runWorkerGate(w2).catch(() => {}); // different project, SAME daemon-global cap
-    await waitUntil(() => sessions.gateQueueForManager(P1).queuedCount === 1, "(e2e, MCP) w2 registered as queued");
+    await sharedWaitUntil(() => sessions.gateQueueForManager(P1).queuedCount === 1, { timeoutMs: 5000, intervalMs: 25, label: "(e2e, MCP) w2 registered as queued" });
 
     const snap = await mgr.call("gate_queue");
     check("(e2e, MCP) gate_queue: cap/activeCount/queuedCount correct", snap.cap === 1 && snap.activeCount === 1 && snap.queuedCount === 1);
@@ -364,7 +365,7 @@ function makeRepo(repo) {
     const p2 = sessions.runWorkerGate(w).catch((e) => { console.error("second run_gate rejected:", e); });
     // Lower severity than the two sites above (nothing else contends for the slot, so there's no ordering
     // to flip) — but still poll rather than sleep for the fresh op to actually register as admitted.
-    await waitUntil(() => sessions.gateQueueForManager(P).activeCount === 1, "(unit, streak) the fresh op registered as running");
+    await sharedWaitUntil(() => sessions.gateQueueForManager(P).activeCount === 1, { timeoutMs: 5000, intervalMs: 25, label: "(unit, streak) the fresh op registered as running" });
 
     const snap = sessions.gateQueueForManager(P);
     check("(unit, streak) a fresh op on the SAME branch is live (running, since nothing else contends for the slot)", snap.running.length === 1 && snap.running[0].branch === wt.branch);

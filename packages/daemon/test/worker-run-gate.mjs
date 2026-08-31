@@ -61,10 +61,11 @@ async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs =
 // side effect (an enqueued array, a callback firing) with a bounded poll against the ACTUAL condition.
 // `timeoutMs` is a safety-net backstop against a genuine hang/regression, never part of the correctness
 // logic — same role as `waitUntilGatePhase`'s own `timeoutMs`.
-// Retrofitted onto the shared _wait.mjs waitUntil (card 0b8d8148) — see waitUntilGatePhase's doc above.
-async function waitUntil(conditionFn, label, timeoutMs = 10000, intervalMs = 20) {
-  return sharedWaitUntil(conditionFn, { timeoutMs, intervalMs, label });
-}
+// Card 43f5b242: the local `waitUntil(conditionFn, label, timeoutMs, intervalMs)` wrapper that used to sit
+// here was removed — its (fn, label, ...) positional order put `label` where the shared `_wait.mjs` helper
+// expects a bare timeout number, the exact silent-misread shape that card exists to eliminate. The two
+// call sites below now call `sharedWaitUntil` directly with an explicit options object (same
+// timeoutMs:10000/intervalMs:20 the old wrapper defaulted to — values unchanged).
 
 const GIT_ID = "-c user.email=wg@loom -c user.name=wg";
 const now = new Date().toISOString();
@@ -336,7 +337,7 @@ try {
     // callback turn as the `onSettledAfterPending` push below it, so by the time this observes the entry
     // gone, the (sole legitimate) push has already happened. Counting only AFTER that structural terminal
     // state is reached is sound, unlike counting the instant the first push lands.
-    await waitUntil(() => registry.peek("gate:manual-test") === undefined, "(E) settle callback");
+    await sharedWaitUntil(() => registry.peek("gate:manual-test") === undefined, { timeoutMs: 10000, intervalMs: 20, label: "(E) settle callback" });
     check("(E) the terminal settle callback eventually fired", enqueued.length === 1 && enqueued[0][0] === short.op.opId);
   }
 
@@ -594,7 +595,7 @@ try {
     // `onSettledAfterPending` push that sends this nudge, so by the time this observes the terminal state,
     // the (sole legitimate) push has already landed. Same seam an existing sibling test already uses for
     // this exact purpose — see run-gate-result-consumption.mjs's own `sessions.pendingOps.peek(...)` wait.
-    await waitUntil(() => sessions.pendingOps.peek(`gate:${gateWorkerId}`)?.state !== "running", "(K) gate op settle");
+    await sharedWaitUntil(() => sessions.pendingOps.peek(`gate:${gateWorkerId}`)?.state !== "running", { timeoutMs: 10000, intervalMs: 20, label: "(K) gate op settle" });
 
     const gateFailedMsgs = enqueued.filter(isGateFailedMsg);
     check("(K) exactly ONE [loom:gate-failed] nudge reached the worker's own pty", gateFailedMsgs.length === 1);

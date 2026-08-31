@@ -105,6 +105,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // flake surface measured in rate-limit-clear-cap-queue-drain.mjs (card f11f3aae, 2026-07-25 — cap=2
 // merge-gate contention exceeded 1000ms) and passes its own widened { tries, delayMs } override there.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 43f5b242: kept local rather than consolidated onto the shared `_wait.mjs` `waitUntil` — a
+// genuinely different CONTRACT (same shape as rate-limit-clear-cap-queue-drain.mjs), not a divergent
+// spelling of the same one: retry-COUNT based (tries/delayMs, not a timeout budget), returns false on
+// exhaustion, never throws.
 const waitUntil = async (fn, { tries = 50, delayMs = 20 } = {}) => {
   for (let i = 0; i < tries; i++) { if (await fn()) return true; await sleep(delayMs); }
   return false;
