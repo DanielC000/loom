@@ -31,6 +31,13 @@
 // Every hard assertion is deferred to the END (following worker-diff-staletime.spec.ts): a run against
 // the pre-change bundle then walks the WHOLE scenario and prints the real before-number instead of
 // aborting on the first divergence.
+//
+// d90b30d8 then added assertion 1b. C6 left the COLD LOAD costing two identical requests — the provider's
+// connect-time `seedStatus()` plus the consumers' own react-query mount fetch, which did not share a
+// cache entry with it. Collapsing the three hand-written query configs onto one `orchStatusQuery` factory
+// and seeding THROUGH that shared entry makes those two one (measured here: seed 2 -> 1). That is a
+// cold-load saving, NOT a poll — one request per page load, not recurring traffic — and it is pinned
+// below so a future consumer that hand-writes its own key silently re-adds it and this spec says so.
 import { expect, test } from "./fixtures/daemon";
 
 // The slower of the two `refetchInterval`s this card removed (the other was MissionControl's 2s). The
@@ -166,13 +173,23 @@ test.describe("orchestration status feed over /ws/fleet (C6)", () => {
       `dwell=+${dwellPolls} over ${Math.round(dwellElapsedMs)}ms (${pollsPerMin}/min) ` +
       `pause=+${afterPause - afterDwell} resume=+${afterResume - afterPause} ` +
       `burst=+${afterBurst - afterResume} | total=${statusRequests} ` +
-      `(expected post-C6: dwell/pause/resume/burst all +0; MEASURED pre-C6: dwell +4, pause +1, resume +1, burst +1)`,
+      `(expected: seed=1, dwell/pause/resume/burst all +0; MEASURED pre-C6: seed=1, dwell +4, pause +1, ` +
+      `resume +1, burst +1; MEASURED at C6: seed=2, everything else +0)`,
     );
 
     // 1. INSTRUMENT CONTROL, asserted BEFORE any zero is believed: the interceptor counted a real
     //    request. Without this, a detached route handler would report 0 for every window below and read
     //    exactly like a clean pass.
     expect(atSeed, "the cold-load seed must have been counted — otherwise every zero below is meaningless").toBeGreaterThanOrEqual(1);
+
+    // 1b. THE COLD LOAD COSTS EXACTLY ONE REQUEST (d90b30d8). The socket provider's connect-time seed and
+    //     the two mounted consumers all observe ONE query now, so they collapse into a single fetch: the
+    //     seed joins the mount fetch that is already in flight, or (if it has just landed) is served from
+    //     that same entry inside its staleTime. Two here means a consumer or the seed has drifted back off
+    //     the shared `orchStatusQuery` factory. Deliberately an EQUALITY and not a ceiling — paired with
+    //     assertion 1 above it brackets the count from both sides, so neither a silent duplicate nor a
+    //     dead instrument can pass.
+    expect(atSeed, "the cold load must issue exactly ONE /api/orchestration/status request").toBe(1);
 
     // 2. THE CARD'S CENTRAL CLAIM: nothing polls while the socket is open. This is the assertion the
     //    cross-build positive control must break against the pre-change bundle.

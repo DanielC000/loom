@@ -687,6 +687,8 @@ export const api = {
   // `schedulerEnabled` is the boot-time cron-Scheduler gate (LOOM_SCHEDULER_ENABLED=1 OR resolved
   // orchestration.schedulerEnabled). Read-only; the Schedules page uses it to warn, honestly, when
   // created schedules will NOT fire because the scheduler is off (the default).
+  // The cache key and freshness policy for this one live in `orchStatusQuery` below — every consumer
+  // (and the /ws/fleet feed that seeds it) spreads that rather than hand-writing the key.
   orchestrationStatus: () => get<{ pausedScopes: string[]; schedulerEnabled: boolean }>("/api/orchestration/status"),
 
   // --- Manager→human DECISION INBOX (card 8701bdbb, child B). READ side: `openQuestions` is the GLOBAL
@@ -1152,6 +1154,40 @@ export const workerDiffQuery = (sessionId: string) => ({
   queryKey: ["workerDiff", sessionId] as const,
   queryFn: () => api.workerDiff(sessionId),
   staleTime: WORKER_DIFF_STALE_MS,
+});
+
+// How long a fetched orchestration status counts as FRESH client-side. While the /ws/fleet socket is up
+// this cache is kept live by C5's `status` change-feed, so a mount-time refetch is pure duplication; while
+// the socket is down FleetSocketProvider's fallback poll already refreshes it on the same 10s cadence.
+//
+// ⚠️ THIS VALUE IS LOAD-BEARING, not just a nicety — it is what makes the cold load cost ONE request
+// rather than two. FleetSocketProvider's connect-time seed and the consumers' own mount fetch observe this
+// same entry, and they collapse by one of TWO mechanisms depending on which happens first:
+//   (a) seed while the mount fetch is still IN FLIGHT — react-query returns the in-flight promise, and
+//       this window is irrelevant;
+//   (b) seed AFTER the mount fetch resolved — the collapse then depends ENTIRELY on the cached entry
+//       still being fresh, i.e. on this window.
+// Measured in-page on one clock (n=5, local e2e fixture): (a) wins every time, but only by 0.9-9.6ms. That
+// is a race, not a guarantee — a loaded CI runner can invert it. A forced-inversion control confirmed the
+// (b) path is real and that this window is what covers it: with the seed deliberately delayed past the
+// mount fetch, 10s here => 1 request, 0 here => 2. So the margin is ~1000x the observed spread, and the
+// failure it protects against is bounded anyway (a socket opening >10s after the seed fetch would break
+// the feed's own liveness assertions long before this window lapsed). ⛔ Don't raise it to buy more
+// margin, and don't drop it to 0 assuming ordering carries the drop — it does not.
+export const ORCH_STATUS_STALE_MS = 10_000;
+
+// The single source of the orchestration-status query: its cache key, its fetcher, and its freshness
+// window. All three consumers — the Sidebar rail's run pill, Mission Control's orchestration badge, and
+// the Schedules page's scheduler-off warning — spread this, so they SHARE one cache entry and cannot
+// drift on the key. They previously hand-wrote it in three places under TWO different names
+// (`["orchStatus"]` twice, `["orchestrationStatus"]` once), which is why the /ws/fleet status feed had to
+// write both keys to reach all of them. Spread it first and add your own options after it.
+// MissionControl's refresh button invalidates this key directly, which bypasses staleTime by design —
+// that one-shot refetch is what preserves button feedback while the socket is down.
+export const orchStatusQuery = () => ({
+  queryKey: ["orchStatus"] as const,
+  queryFn: api.orchestrationStatus,
+  staleTime: ORCH_STATUS_STALE_MS,
 });
 
 // Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like

@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, orchStatusQuery } from "../lib/api";
 import { bySessionActivity, mostRecentActivity } from "../lib/sessions";
 import { useAttention, attentionOpenTarget, dismissAttention } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
@@ -47,8 +47,9 @@ export default function MissionControl() {
   // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba) — same shared cache the rail reads;
   // FleetSocketProvider keeps it live off the /ws/fleet `status` feed. `refreshStatus` below is KEPT: it is
   // a one-shot invalidate on this page's OWN pause/resume mutation, not a poll, and it is what still gives
-  // the button immediate feedback when the socket happens to be down.
-  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus });
+  // the button immediate feedback when the socket happens to be down. `refreshStatus` invalidates the
+  // factory's key, which is exactly what bypasses its staleTime for that one-shot.
+  const status = useQuery({ ...orchStatusQuery() });
   // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
   // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used for
   // inactive-project detection + each project's muted archived history (any role — see `archivedItems`
@@ -182,7 +183,7 @@ export default function MissionControl() {
     ...archivedManagers,
   ];
 
-  const refreshStatus = () => qc.invalidateQueries({ queryKey: ["orchStatus"] });
+  const refreshStatus = () => qc.invalidateQueries({ queryKey: orchStatusQuery().queryKey });
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
   const pause = useMutation({ mutationFn: () => api.pauseOrchestration(), onSuccess: refreshStatus });
   const resume = useMutation({ mutationFn: () => api.resumeOrchestration(), onSuccess: refreshStatus });

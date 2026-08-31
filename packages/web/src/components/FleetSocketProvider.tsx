@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ServerFleetMessage, SessionListItem } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 
 /**
@@ -41,25 +41,15 @@ const FALLBACK_POLL_MS = 10000;
 type OrchestrationStatus = Omit<Extract<ServerFleetMessage, { t: "status" }>, "t">;
 
 /**
- * TWO cache keys hold the same `/api/orchestration/status` payload — `["orchStatus"]` (Sidebar,
- * MissionControl) and `["orchestrationStatus"]` (Schedules) — a pre-existing split this card does not
- * consolidate. The feed writes BOTH, and it is worth being exact about why, because the obvious
- * justification overstates it:
+ * The ONE cache key holding the `/api/orchestration/status` payload, taken from the shared
+ * `orchStatusQuery` factory rather than restated here — so this feed and its three consumers (Sidebar,
+ * MissionControl, Schedules) structurally cannot drift on it.
  *
- * The divergence is NOT introduced here. It already exists: on /automation the rail pill (fed by the
- * first key) and the Schedules page (fed by the second, which has no interval) can already disagree.
- * Nor is it currently VISIBLE — Schedules reads only `schedulerEnabled`, which is a fixed const after
- * boot (see GatewayDeps), never `pausedScopes`. So this is not a live user-facing bug and writing one
- * key would not create one.
- *
- * What it actually buys: bringing one sibling live while leaving the other cold widens a gap that costs
- * exactly one expression to close, and it pre-empts the next consumer that reads `pausedScopes` off the
- * Schedules key from silently getting a cold value. Cheap insurance, honestly priced.
- *
- * Unifying or renaming these keys is the RIGHT fix and is deliberately NOT done here — it touches
- * consumers and belongs in its own change (see the `workerDiffQuery` factory in lib/api.ts for the shape).
+ * C6 shipped with TWO keys here (`["orchStatus"]` and Schedules' own `["orchestrationStatus"]`) and wrote
+ * both, because unifying them touched a consumer and belonged in its own change. That change is
+ * d90b30d8: all three now spread the factory, so the second write had nothing left to reach and is gone.
  */
-const ORCH_STATUS_QUERY_KEYS: string[][] = [["orchStatus"], ["orchestrationStatus"]];
+const ORCH_STATUS_QUERY_KEY = orchStatusQuery().queryKey;
 
 function log(...args: unknown[]) {
   // eslint-disable-next-line no-console
@@ -85,12 +75,19 @@ export function FleetSocketProvider() {
     // it still has the seed race, in the opposite direction: a `status` frame that lands while the seed
     // fetch is in flight is NEWER than the response that fetch will return (an HTTP read reflects state at
     // request time). Applying the seed on top would silently revert the UI to the pre-mutation state and
-    // leave it wrong until the NEXT pause/resume. So we record that a delta won, and discard the stale seed.
+    // leave it wrong until the NEXT pause/resume. So we hold on to the frame that won and put it back.
+    //
+    // It holds the FRAME, not a boolean, because the seed's cache write is now react-query's rather than
+    // ours: by the time seedStatus's promise resolves the older response has ALREADY been committed, so
+    // "discard the stale seed" means re-writing the winning frame, not skipping a write of our own.
     let statusSeeding = false;
-    let statusDeltaDuringSeed = false;
+    let statusDeltaDuringSeed: OrchestrationStatus | null = null;
+    // False until the socket has opened once. The FIRST seed may share the consumers' own cold-load fetch
+    // (see seedStatus); every seed after a DROP must be a real HTTP read.
+    let reconnecting = false;
 
     const writeStatus = (s: OrchestrationStatus) => {
-      for (const key of ORCH_STATUS_QUERY_KEYS) qc.setQueryData<OrchestrationStatus>(key, s);
+      qc.setQueryData<OrchestrationStatus>(ORCH_STATUS_QUERY_KEY, s);
     };
 
     const stopFallbackPoll = () => {
@@ -139,21 +136,42 @@ export function FleetSocketProvider() {
     // opening `status` frame — see gateway/server.ts's /ws/fleet handler), and a reconnect can follow an
     // arbitrary gap, so this HTTP read is what makes a change-ONLY feed complete. It stays precisely
     // because it is not a poll: it fires once per (re)connect, never on a timer.
-    const seedStatus = () => {
+    //
+    // It goes through the SHARED react-query entry (fetchQuery on the factory) rather than calling the
+    // endpoint directly, and that is what makes the COLD load cost one request instead of two — measured
+    // on the C6 spec, cold-load `seed` 2 -> 1. Calling the endpoint directly, as this used to, is a fetch
+    // site OUTSIDE react-query and so can never dedupe with the consumers, however the keys are arranged.
+    //
+    // Two mechanisms can do the collapse, and it is worth knowing which: locally the socket opens while the
+    // consumers' mount fetch is still IN FLIGHT (so react-query hands back that promise), but only by
+    // 0.9-9.6ms measured — a race, not an ordering guarantee. What actually makes it deterministic is the
+    // factory's staleTime covering the other order; see ORCH_STATUS_STALE_MS in lib/api.ts for the
+    // measurement and the forced-inversion control behind that claim.
+    //
+    // `force` (every seed after a DROP) overrides that staleTime to 0. A reconnect can follow an arbitrary
+    // gap, so a cached value is exactly what must not be trusted there — and there is no concurrent mount
+    // fetch to share at that point anyway, since no consumer remounts on a reconnect.
+    const seedStatus = (force: boolean) => {
       statusSeeding = true;
-      statusDeltaDuringSeed = false;
-      api.orchestrationStatus()
+      statusDeltaDuringSeed = null;
+      // `retry: false` preserves this seed's original failure shape — fail fast, then the bounded retry
+      // below — instead of stacking react-query's default 3 internal retries underneath it.
+      qc.fetchQuery({ ...orchStatusQuery(), retry: false, ...(force ? { staleTime: 0 } : {}) })
         .then((s) => {
           if (disposed) return;
           statusSeeding = false;
-          if (statusDeltaDuringSeed) { log("status seed superseded by a live delta, discarding"); return; }
-          writeStatus(s);
+          // fetchQuery has already written `s` into the shared entry, so a frame that won mid-flight has
+          // to be put BACK on top of it rather than merely left alone.
+          const won = statusDeltaDuringSeed;
+          statusDeltaDuringSeed = null;
+          if (won) { log("status seed superseded by a live delta, restoring the delta"); writeStatus(won); return; }
           log(`seeded status (${s.pausedScopes.length} paused scope(s))`);
         })
         .catch((err) => {
           if (disposed) return;
           log("status seed fetch failed, retrying", err);
-          statusSeedRetryTimer = setTimeout(seedStatus, RECONNECT_MIN_MS);
+          // Retry forces a real read: a failed seed means nothing trustworthy landed in the shared entry.
+          statusSeedRetryTimer = setTimeout(() => seedStatus(true), RECONNECT_MIN_MS);
         });
     };
 
@@ -169,7 +187,8 @@ export function FleetSocketProvider() {
         stopFallbackPoll();
         log("connected");
         seed();
-        seedStatus();
+        seedStatus(reconnecting);
+        reconnecting = true;
       };
       socket.onmessage = (e) => {
         if (disposed || typeof e.data !== "string") return;
@@ -177,9 +196,11 @@ export function FleetSocketProvider() {
         try { msg = JSON.parse(e.data); } catch { return; }
         if (msg.t === "status") {
           // Full snapshot — applied directly, no reducer and no replay buffer. If the seed is still in
-          // flight, flag it so that older seed response is dropped rather than applied on top of this.
-          if (statusSeeding) statusDeltaDuringSeed = true;
-          writeStatus({ pausedScopes: msg.pausedScopes, schedulerEnabled: msg.schedulerEnabled });
+          // flight, keep this frame so the older seed response gets overwritten by it again once it lands
+          // (react-query commits that response itself — see seedStatus).
+          const frame = { pausedScopes: msg.pausedScopes, schedulerEnabled: msg.schedulerEnabled };
+          if (statusSeeding) statusDeltaDuringSeed = frame;
+          writeStatus(frame);
           return;
         }
         if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello / event (event is C7)
@@ -192,7 +213,7 @@ export function FleetSocketProvider() {
         seeding = false;
         buffered = [];
         statusSeeding = false;
-        statusDeltaDuringSeed = false;
+        statusDeltaDuringSeed = null;
         log("disconnected — falling back to polling and reconnecting");
         startFallbackPoll();
         reconnectTimer = setTimeout(connect, backoff);

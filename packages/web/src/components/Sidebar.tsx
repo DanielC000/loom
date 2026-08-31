@@ -11,7 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useVisibleNavPages, type NavGroup } from "../nav";
 import { NavIcon, AlertsIcon, PinIcon } from "./navIcons";
 import { LogoMark } from "./Logo";
-import { api } from "../lib/api";
+import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
 import { isCompanionSession } from "../lib/sessions";
@@ -153,8 +153,10 @@ export function Sidebar() {
   // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba): FleetSocketProvider seeds this cache
   // on every /ws/fleet (re)connect and patches it from C5's `status` deltas, with a disconnected-ONLY
   // fallback poll. This used to poll GET /api/orchestration/status every 4s from the rail, i.e. on every
-  // page of the app, for a value that only changes on a human pause/resume.
-  const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus });
+  // page of the app, for a value that only changes on a human pause/resume. Key, fetcher and staleTime
+  // all come from the shared `orchStatusQuery` factory, so this rail, Mission Control and Schedules
+  // observe ONE cache entry rather than three hand-written configs.
+  const status = useQuery({ ...orchStatusQuery() });
   const globalPaused = status.data?.pausedScopes.includes("global") ?? false;
   const version = useQuery({ queryKey: ["version"], queryFn: api.version, staleTime: Infinity, refetchOnWindowFocus: false });
 

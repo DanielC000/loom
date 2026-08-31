@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Schedule, CronBuilderState, CronFrequency, ScheduleHistoryEntry } from "@loom/shared";
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill } from "../components/ui";
@@ -44,8 +44,10 @@ export default function Schedules() {
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
   // The boot-time cron-Scheduler gate. The daemon only starts the ticker when this is true, so a
   // schedule created while it's off is saved but never fires — surface that honestly (below). Gate the
-  // warning on an explicit `=== false` so it doesn't flash while the status is still loading.
-  const orch = useQuery({ queryKey: ["orchestrationStatus"], queryFn: api.orchestrationStatus });
+  // warning on an explicit `=== false` so it doesn't flash while the status is still loading. Reads the
+  // SHARED `orchStatusQuery` entry: this page used to hand-write a SECOND key (`["orchestrationStatus"]`)
+  // over the same endpoint and payload, so it sat on a cache entry nothing else kept warm.
+  const orch = useQuery({ ...orchStatusQuery() });
   const schedulerOff = orch.data?.schedulerEnabled === false;
   // Flat cross-project "Project / Agent" labels for TABLE resolution only — the table stays god-eye
   // (shows schedules targeting any project). The builder's picker below is scoped to the active project.
