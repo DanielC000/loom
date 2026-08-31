@@ -53,13 +53,9 @@ async function waitForCount(getCount, target, timeoutMs = 5000) {
 async function awaitClockPast(t) {
   while (Date.now() <= t) await sleep(1);
 }
-async function waitUntil(predicate, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: a local `waitUntil(predicate, timeoutMs = 5000)` poll loop used to sit here, genuinely
+// unused (no call site in this file — `waitForCount` above already covers every wait this suite needs) —
+// deleted rather than converted.
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveupsuppressedsticky-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });

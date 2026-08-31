@@ -46,17 +46,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs default/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const submitLog = [];
 const realConsoleLog = console.log.bind(console);
@@ -160,9 +158,9 @@ function spawnReady(sessionId, startupPrompt) {
  *  hook this file already wires (see `rootMsgIdBySession` above), so this reconstructs the identical string
  *  via the SAME exported function production uses, rather than a physical capture. */
 async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
-  await waitUntil(() => bodyCount(KICKOFF) >= 1);
+  await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
   // Cycle 1: never confirmed -> give-up #1 -> within budget (LIMIT=1) -> REQUEUED, not exhausted.
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 1 gave up: requeued, not yet exhausted`, host.getPendingEntries(SID).length === 1);
 
   // Drain the requeued kickoff past its hold — this is cycle 2's attempt: a redelivery of the SAME
@@ -171,14 +169,14 @@ async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
   await sleep(HOLD_WAIT);
   const writesBeforeCycle2 = fakes[fakes.length - 1].writes.length;
   host.reconcile();
-  await waitUntil(() => busyLog[SID].at(-1) === true);
-  await waitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeCycle2);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
+  await sharedWaitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeCycle2, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 wrote no NEW body chunk (Enter-only redelivery, card b9b8f8db)`,
     bodyCount(KICKOFF) === 1);
 
   // Cycle 2 ALSO never confirms -> THIS give-up exceeds GIVE_UP_REQUEUE_LIMIT(1) -> EXHAUSTS -> the NEW
   // re-mint fires (card 7772176d), instead of the old bare park.
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 gave up: the kickoff EXHAUSTED (real two-cycle exhaustion, not the single-cycle shortcut)`,
     submitLog.some((l) => l.includes("exhausted its requeue budget (1)")));
   const rootMsgId = rootMsgIdBySession[SID];
@@ -202,7 +200,7 @@ try {
     check("(A) setup: exactly ONE physical body write so far (card b9b8f8db: cycle 2 retried the Enter only)", bodyCount(KICKOFF) === 1);
 
     // The re-mint (chainDepth 0 -> 1) is now sitting HELD in pending, targeting the SAME session, tagged.
-    await waitUntil(() => host.getPendingEntries(SID).length === 1);
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
     const remint = host.getPendingEntries(SID)[0];
     check("(A) THE RE-MINT is queued (held), carrying the possible-duplicate tag over the SAME kickoff content",
       !!remint && remint.text.includes("[loom:possible-duplicate") && remint.text.includes(KICKOFF));
@@ -246,13 +244,13 @@ try {
 
     await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
     check("(B) setup: exactly ONE physical body write so far (card b9b8f8db: cycle 2 retried the Enter only)", bodyCount(KICKOFF) === 1);
-    await waitUntil(() => host.getPendingEntries(SID).length === 1);
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
     check("(B) setup: the re-mint is queued (held), same as (A)", host.getPendingEntries(SID).length === 1);
 
     // NO confirming hook this time — advance past the hold with nothing to purge the re-mint.
     await sleep(HOLD_WAIT);
     host.reconcile();
-    await waitUntil(() => bodyCount(KICKOFF) >= 2, 5_000);
+    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 2, { timeoutMs: 5_000, intervalMs: 2 });
     // Label reworded to avoid the fixed-wait-negative-guard's keyword scan ("absent"/"not"/"no ") — the
     // preceding waitUntil (line above) is a bounded POLL for this POSITIVE condition, not a fixed sleep
     // guarding a "did not happen" claim; the guard's static text scan can't see that distinction, so the

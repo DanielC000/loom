@@ -38,17 +38,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 20_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(10);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 20_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:20_000/
+// intervalMs:10 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-runaway-bound-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -276,7 +274,7 @@ try {
     const fake = fakes[fakes.length - 1];
     const bodyCount = () => fake.writes.join("").split(KICKOFF).length - 1;
 
-    await waitUntil(() => bodyCount() >= 1);
+    await sharedWaitUntil(() => bodyCount() >= 1, { timeoutMs: 20_000, intervalMs: 10 });
     check("(2) setup: the kickoff was written (a real paste, not just queued)", bodyCount() === 1);
     check("(2) DoD-6, the branch an over-aggressive gate would strangle: composerDirtyLen was never >0 for a "
       + "healthy first attempt — a plain, untouched paste, zero clear-prefix bytes",

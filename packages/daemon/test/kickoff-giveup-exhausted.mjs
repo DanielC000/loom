@@ -101,19 +101,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Bounded poll until `predicate()` is true — observes the real state transition instead of guessing a
- *  wall-clock deadline (see pty-giveup-requeue.mjs's own comment for this project's blind-sleep history). */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn).
 const tmpHome = path.join(os.tmpdir(), `loom-kickoff-exhausted-${Date.now()}-${process.pid}`);
@@ -197,11 +193,11 @@ try {
     const SID = "kickoff-exhaust-pos";
     const KICKOFF = "orchestrate task tk-exhaust — two silent give-ups must EXHAUST, not loop forever";
     const { bodyCount } = spawnReady(SID, KICKOFF);
-    await waitUntil(() => bodyCount(KICKOFF) >= 1);
+    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
     check("(H1) setup: kickoff delivered via direct submit()", bodyCount(KICKOFF) === 1);
 
     // Cycle 1: never confirmed → give-up #1 → within budget (GIVE_UP_REQUEUE_LIMIT=1) → REQUEUED, not exhausted.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(H1) cycle 1 gave up: the kickoff was requeued (not dropped)",
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === KICKOFF);
     check("(H1) NEGATIVE CONTROL: after ONE give-up that successfully requeues, onKickoffGiveUpExhausted has NOT fired",
@@ -213,7 +209,7 @@ try {
     check("(H1) reconcile drained the requeued kickoff: busy re-armed", busyLog[SID].at(-1) === true);
 
     // Cycle 2 ALSO never confirms — this SECOND give-up exceeds GIVE_UP_REQUEUE_LIMIT(1) → EXHAUSTED.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(H1) POSITIVE: onKickoffGiveUpExhausted fired exactly once, after the SECOND give-up",
       exhaustedLog[SID]?.length === 1);
     check("(H1) BOUNDED: the kickoff is finally gone from pending — handed to onGiveUpExhausted, not looping forever",
@@ -233,9 +229,9 @@ try {
     const SID = "kickoff-exhaust-neg-recovers";
     const KICKOFF = "orchestrate task tk-recovers — one give-up then a real confirm must NEVER exhaust";
     const { bodyCount } = spawnReady(SID, KICKOFF);
-    await waitUntil(() => bodyCount(KICKOFF) >= 1);
+    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
 
-    await waitUntil(() => busyLog[SID].at(-1) === false); // cycle 1 gives up, requeues
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 }); // cycle 1 gives up, requeues
     check("(H2) setup: cycle 1 gave up, requeued", host.getPendingEntries(SID).length === 1);
     check("(H2) setup: not exhausted after the first give-up", !exhaustedLog[SID]);
 

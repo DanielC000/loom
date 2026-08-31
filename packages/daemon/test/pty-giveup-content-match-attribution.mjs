@@ -40,11 +40,10 @@ import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Retrofitted onto the shared _wait.mjs waitUntil (card 22796d42) — same timeoutMs default and same
-// intervalMs (2ms), still throws on timeout; only difference is the added [waitUntil-outcome] diagnostic.
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  await sharedWaitUntil(predicate, { timeoutMs, intervalMs: 2, label: "pty-giveup-content-match-attribution: condition" });
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs)` pass-through wrapper that used to sit here was
+// removed — it was already a trivial delegate to `sharedWaitUntil` with no contract change, so the call
+// below now goes straight to it with an explicit options object (same timeoutMs:10_000/intervalMs:2 this
+// file's own wrapper defaulted to — values unchanged).
 
 const submitLog = [];
 const realConsoleLog = console.log.bind(console);
@@ -113,7 +112,7 @@ try {
   // ===== gen 1: idle-immediate, then a genuine give-up (silent pty never confirms) =====
   const r1 = host.enqueueStdin(SID, TEXT1);
   check("(setup) gen 1 delivered immediately, busy armed", r1.delivered === true && busyLog[SID]?.at(-1) === true);
-  await waitUntil(() => busyLog[SID]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2, label: "pty-giveup-content-match-attribution: condition" });
   check("(setup) gen 1 genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
   check("(setup) gen 1's TEXT1 is requeued, sitting ambiguous in pending", host.getPendingEntries(SID).some((m) => m.text === TEXT1));
 

@@ -42,17 +42,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
@@ -149,7 +147,7 @@ function annotatedVariant(tag, rest, mintedAtGen, currentGen, mintedAtWallClock)
     check("(A setup) the ACTUAL write is byte-identical to the pristine text — no annotation baked in yet (currentGen === mintedAtGen at write time)", written.includes(RECOVERY_TEXT));
 
     // ===== Let this generation (gen 2) genuinely give up — the silent pty never emits output =====
-    await waitUntil(() => busyLog[SID]?.at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(A) the recovery notice's generation genuinely gave up (GIVE-UP RECOVERY fired)", submitLog.some((l) => l.includes(`[submit] ${SID} `) && l.includes("GIVE-UP RECOVERY after")));
     check("(A setup) the recovery notice is requeued, sitting ambiguous", host.getPendingEntries(SID).some((m) => m.text === RECOVERY_TEXT));
 

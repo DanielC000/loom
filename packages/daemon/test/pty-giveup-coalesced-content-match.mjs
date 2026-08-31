@@ -28,17 +28,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const submitLog = [];
 const realConsoleLog = console.log.bind(console);
@@ -103,7 +101,7 @@ try {
 
   // ===== let this coalesced generation give up (silent pty never confirms) — requeueGiveUpOrigin runs with =====
   // ===== origin=[entryA, entryB] ==============================================================================
-  await waitUntil(() => busyLog[SID]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) the coalesced generation genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
   const pendingAfterGiveUp = host.getPendingEntries(SID);
   check("(setup) BOTH coalesced members are requeued, sitting ambiguous",

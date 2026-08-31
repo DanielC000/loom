@@ -37,20 +37,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Bounded poll until `predicate()` is true — observe the real state transition instead of guessing a
- *  wall-clock deadline (this project's own blind-sleep campaign, cards 0fa5beef/595aad10/fea23514/
- *  47a515ff/b64b3726, found repeated flakes from computed-deadline waits racing chained setTimeouts). */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 // Capture every `[submit] <sessionId> ...` log line host.ts emits so a scenario can assert on WHICH
 // branch actually fired, not just the eventual pending/body state.
@@ -135,7 +130,7 @@ try {
     // Gen 1: immediate submit, then a genuine give-up (RECOVERY) — requeues TEXT1 tagged giveUpGen:1.
     const r1 = host.enqueueStdin(SID, TEXT1);
     check("(1) setup: TEXT1 delivered immediately (gen 1), busy armed", r1.delivered === true && busyLog[SID].at(-1) === true);
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(1) gen 1 gave up and requeued TEXT1", host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT1);
     check("(1) gen 1's give-up was a genuine RECOVERY (not suppressed)", giveUpLinesFor(SID).some((l) => l.includes("GIVE-UP RECOVERY")));
 
@@ -146,7 +141,7 @@ try {
     check("(1) TEXT1 is untouched in pending while gen 2 is in flight", host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT1);
 
     // Gen 2 ALSO gives up (genuine RECOVERY) — requeues TEXT2 tagged giveUpGen:2 onto the FRONT of pending.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     const afterBothGiveUps = host.getPendingEntries(SID);
     check("(1) both TEXT1 (giveUpGen:1) and TEXT2 (giveUpGen:2) are now pending, TEXT2 in front",
       afterBothGiveUps.length === 2 && afterBothGiveUps[0].text === TEXT2 && afterBothGiveUps[1].text === TEXT1);
@@ -178,7 +173,7 @@ try {
     const { bodyCount } = spawnReady(SID);
     const r = host.enqueueStdin(SID, TEXT);
     check("(2) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(2) RECOVERY requeued the message", host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT);
 
     host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });

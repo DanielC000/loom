@@ -55,17 +55,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const submitLog = [];
 const realConsoleLog = console.log.bind(console);
@@ -114,7 +112,7 @@ try {
   // ===== dispatch A: idle-immediate, then a genuine give-up (silent pty never confirms) =====
   const rA = host.enqueueStdin(SID, COLLISION_TEXT);
   check("(setup) dispatch A delivered immediately, busy armed", rA.delivered === true && busyLog[SID]?.at(-1) === true);
-  await waitUntil(() => busyLog[SID]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) dispatch A genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
   check("(setup) dispatch A's copy is requeued, sitting ambiguous in pending",
     host.getPendingEntries(SID).filter((m) => m.text === COLLISION_TEXT).length === 1);
@@ -126,7 +124,7 @@ try {
   const rB = host.enqueueStdin(SID, COLLISION_TEXT);
   check("(setup) dispatch B delivered immediately (a SEPARATE generation, not a coalesced batch with A), busy armed",
     rB.delivered === true && busyLog[SID]?.at(-1) === true);
-  await waitUntil(() => busyLog[SID]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) dispatch B ALSO genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
   check("(setup) BOTH A and B now sit ambiguous, sharing one signature, TWO copies in pending",
     host.getPendingEntries(SID).filter((m) => m.text === COLLISION_TEXT).length === 2);
@@ -165,7 +163,7 @@ try {
   submitLog.length = 0;
   const rC = host.enqueueStdin(SID2, UNRELATED_TEXT);
   check("(setup) unrelated dispatch C delivered immediately, busy armed", rC.delivered === true && busyLog[SID2]?.at(-1) === true);
-  await waitUntil(() => busyLog[SID2]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID2]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) unrelated dispatch C genuinely gave up (RECOVERY)", submitLog.some((l) => l.includes("GIVE-UP RECOVERY")));
 
   submitLog.length = 0;

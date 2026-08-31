@@ -54,20 +54,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const flush = () => new Promise((r) => setTimeout(r, 0));
-/** Bounded poll until `predicate()` is true — observe the real state transition instead of guessing a
- *  wall-clock deadline (this project's own blind-sleep campaign; see pty-giveup-hold-until-confirmed.mjs). */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-rgh-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -128,7 +124,7 @@ try {
   const rPlain = hostPre.enqueueStdin(SID, PLAIN_TEXT, "system", undefined, undefined, "agent");
   check("(setup) the plain entry queues behind TEXT's in-flight retries", rPlain.delivered === false);
 
-  await waitUntil(() => busyLogPre[SID]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLogPre[SID]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) the give-up requeued TEXT to the front, held, with PLAIN_TEXT now behind it",
     hostPre.getPendingEntries(SID).length === 2 && hostPre.getPendingEntries(SID)[0].text === TEXT && hostPre.getPendingEntries(SID)[1].text === PLAIN_TEXT);
 

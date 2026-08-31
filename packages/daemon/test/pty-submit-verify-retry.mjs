@@ -47,6 +47,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -76,14 +77,11 @@ async function sleepUntil(t0, targetMs) {
  *  under host/scheduler jitter (a real merge-gate run caught exactly this: a comfortable margin pre-Half-1
  *  stopped being comfortable once Half 1 added one more chained setTimeout to the path being timed — see
  *  pty-giveup-false-negative.mjs's own `waitUntil` for the full incident). Polling for the actual
- *  transition removes the race instead of padding the margin again. */
-async function waitUntil(predicate, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+ *  transition removes the race instead of padding the margin again. *
+ * Card ba4eebc1: the poll loop itself (canonical-compatible — throw-on-timeout, positional predicate +
+ * timeout) was deleted; the call below now goes straight to the shared `_wait.mjs` helper with an explicit
+ * options object (same timeoutMs:5000/intervalMs:2 this file's own defaults used — values unchanged).
+ */
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Also shrink the
 // verify-retry timing constants (generously, not down to the wire — see the TIMING note above) so this
@@ -214,7 +212,7 @@ try {
     // Never deliver ANY confirming hook. With MAX_ATTEMPTS=3, the give-up decision (after the 3rd write's
     // own verify window elapses with nothing confirmed) lands at writeAt(3)+VERIFY_TIMEOUT. Poll for the
     // ACTUAL busy=false transition (see waitUntil's doc) rather than a computed deadline.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 5000, intervalMs: 2 });
     check("(4) all 3 Enter attempts were written (bounded retries, not infinite)", countOf(ENTER) === MAX_ATTEMPTS);
     check("(4) GIVE-UP RECOVERY: busy fell back to false — the session is NOT left wedged busy=true forever",
       busyLog[SID].at(-1) === false);

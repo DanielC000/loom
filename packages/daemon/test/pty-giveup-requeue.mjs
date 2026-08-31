@@ -49,20 +49,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Bounded poll until `predicate()` is true — observe the real state transition instead of guessing a
- *  wall-clock deadline (this project's own blind-sleep campaign, cards 0fa5beef/595aad10/fea23514/
- *  47a515ff/b64b3726, found repeated flakes from computed-deadline waits racing chained setTimeouts). */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 // Capture every `[submit] <sessionId> ...` log line host.ts emits (GIVE-UP SUPPRESSED/RECOVERY, requeue,
 // purge) so scenarios can assert on WHICH branch actually fired, not just the eventual pending/body state
@@ -199,7 +194,7 @@ try {
 
     // Cycle 1 gives up (never confirmed, no output at all). No auto-redrain happens (by design — see the
     // fix's own doc) — busy settles false and STAYS false until something else drains it.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(1) cycle 1: all attempts written", entryCount() === MAX_ATTEMPTS);
     check("(1) THE FIX: the message was NOT silently dropped — it reappears in the pending queue",
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT);
@@ -221,7 +216,7 @@ try {
 
     // Cycle 2: the re-submitted turn ALSO never confirms — this is its SECOND failure, so with
     // LOOM_GIVE_UP_REQUEUE_LIMIT=1 it must be dropped for real this time (no infinite requeue loop).
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(1) cycle 2: a full second round of Enter attempts was actually written (a genuine second try, not a no-op)",
       entryCount() === MAX_ATTEMPTS * 2);
     // Card b9b8f8db (the composer-runaway fix): cycle 2 is a REDELIVERY of the SAME give-up'd message
@@ -266,7 +261,7 @@ try {
     // TEXT1 never confirms (genuine drop) — wait for its give-up. Per the fix, TEXT1 must be restored to
     // the FRONT of pending (ahead of TEXT2, which merely queued later in real time but is logically
     // SECOND) — checkable directly from the queue order, no drain needed yet.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     const afterGiveUp = host.getPendingEntries(SID);
     check("(2) ORDERING: pending is now [TEXT1 (recovered), TEXT2] — TEXT1 restored to the FRONT",
       afterGiveUp.length === 2 && afterGiveUp[0].text === TEXT1 && afterGiveUp[1].text === TEXT2);
@@ -294,11 +289,11 @@ try {
 
     // TEXT1's re-drained submit ALSO fails a second time (LOOM_GIVE_UP_REQUEUE_LIMIT=1) — it's finally
     // dropped for real, and TEXT2 (which was never touched) should now be the only thing left to drain.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(2) after TEXT1's second failure, only TEXT2 remains queued",
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT2);
     host.reconcile();
-    await waitUntil(() => written().includes(TEXT2));
+    await sharedWaitUntil(() => written().includes(TEXT2), { timeoutMs: 10_000, intervalMs: 2 });
     check("(2) TEXT2 finally drains normally (untouched by the whole TEXT1 episode)", written().includes(TEXT2));
     check("(2) TEXT1's body was never re-pasted at all beyond its ORIGINAL single write (its own requeue budget was exhausted, not TEXT2's)",
       written().split(TEXT1).length - 1 === 1);
@@ -337,7 +332,7 @@ try {
     // Wait for all attempts to be written, then emit engine output AFTER the final Enter write — the
     // documented SUPPRESSED case (card 71de1f9c): the Enter almost certainly registered, just slow to
     // confirm, so give-up must be suppressed (busy left alone, nothing requeued).
-    await waitUntil(() => entryCount2() === MAX_ATTEMPTS);
+    await sharedWaitUntil(() => entryCount2() === MAX_ATTEMPTS, { timeoutMs: 10_000, intervalMs: 2 });
     fake2.emitOutput("late-output-after-final-enter");
     await sleep(VERIFY_TIMEOUT + VERIFY_TIMEOUT / 2); // cross the give-up deadline
     check("(3) SUPPRESSED: busy is still true (the real Stop/UserPromptSubmit will finalize it)",
@@ -374,7 +369,7 @@ try {
     // This fake never emits output, so — exactly like the production sample that motivated this scenario —
     // GIVE-UP RECOVERY fires (not SUPPRESSED), even though we're about to prove (via the late hook) that
     // the turn actually started. The requeue happens first, same as scenario (1).
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(4) RECOVERY requeued the message (this is the false-negative give-up itself, not the fix)",
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT);
     check("(4) confirms GIVE-UP RECOVERY actually fired (not the settle-suppress) — the log says so explicitly",
@@ -421,7 +416,7 @@ try {
     // branch this scenario means to exercise. Firing the instant entry is OBSERVED (rather than guessed)
     // is both start-edge safe (can never fire before the branch has actually committed to waiting) and
     // leaves maximal margin — nearly the full CONFIRM_SETTLE_BOUND — before the close edge.
-    await waitUntil(() => confirmSettleEnteredAt[SID] != null);
+    await sharedWaitUntil(() => confirmSettleEnteredAt[SID] != null, { timeoutMs: 10_000, intervalMs: 2 });
     settleHost.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
 
     check("(5) THE INVERSION: busy reflects the hook's own rising edge (the turn IS actually running)",
@@ -434,7 +429,7 @@ try {
     // poll notices `enterConfirmed` ASYNCHRONOUSLY (on its own next poll tick, up to CONFIRM_SETTLE_POLL ms
     // later — deliverHook above only set the flag, it doesn't synchronously wake the poll), so wait for its
     // own log line to actually land before asserting on it.
-    await waitUntil(() => giveUpLinesFor(SID).length > 0);
+    await sharedWaitUntil(() => giveUpLinesFor(SID).length > 0, { timeoutMs: 10_000, intervalMs: 2 });
     check("(5) THE INVERSION (log-verified): the settle-suppress branch fired, GIVE-UP RECOVERY never did",
       giveUpLinesFor(SID).some((l) => l.includes("during the post-give-up settle wait"))
       && !giveUpLinesFor(SID).some((l) => l.includes("GIVE-UP RECOVERY")));
@@ -476,12 +471,12 @@ try {
 
     // The kickoff delivers via scheduleKickoffGuarantee's direct submit() (nothing else is queued/busy for
     // this fresh session, so it takes the "safe to write now" branch, not the enqueue-and-hold sibling).
-    await waitUntil(() => bodyCount(KICKOFF) >= 1);
+    await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
     check("(6) setup: the kickoff was actually written (direct submit(), not just queued)", bodyCount(KICKOFF) === 1);
 
     // This suite's silent fake pty never confirms Enter — the kickoff's own submit() cycle gives up after
     // MAX_ATTEMPTS, exactly like scenario (1)'s ordinary message.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(6) THE FIX: the kickoff was NOT silently dropped — it reappears in the pending queue",
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === KICKOFF);
 
@@ -495,7 +490,7 @@ try {
     host.reconcile();
     check("(6) reconcile drained the requeued kickoff: busy re-armed for a genuine second attempt",
       busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === true);
-    await waitUntil(() => host.getPendingEntries(SID).length === 0);
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 0, { timeoutMs: 10_000, intervalMs: 2 });
     check("(6) card b9b8f8db: the kickoff body was written to the pty exactly ONCE — the redrain retried the Enter only",
       bodyCount(KICKOFF) === 1);
 

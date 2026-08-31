@@ -47,20 +47,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Bounded poll until `predicate()` is true — observe the real state transition instead of guessing a
- *  wall-clock deadline (this project's own blind-sleep campaign, cards 0fa5beef/595aad10/fea23514/
- *  47a515ff/b64b3726, found repeated flakes from computed-deadline waits racing chained setTimeouts). */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveuphold-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -139,7 +134,7 @@ try {
     const r = host.enqueueStdin(SID, TEXT);
     check("(1) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(1) give-up requeued the message", host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT);
     check("(1) exactly one body write so far (the original attempt, never yet re-delivered)", bodyCount(TEXT) === 1);
 
@@ -182,7 +177,7 @@ try {
     check("(2) setup: TEXT2 held in the queue (session busy with TEXT1's retries)", r2.delivered === false && r2.reason === "held");
 
     // TEXT1 never confirms (genuine drop) — give-up requeues it to the FRONT, ahead of TEXT2.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     const afterGiveUp = host.getPendingEntries(SID);
     check("(2) pending is now [TEXT1 (held), TEXT2] — TEXT1 restored to the front",
       afterGiveUp.length === 2 && afterGiveUp[0].text === TEXT1 && afterGiveUp[1].text === TEXT2);
@@ -208,7 +203,7 @@ try {
     const r = host.enqueueStdin(SID, TEXT);
     check("(3) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(3) cycle 1 gave up and requeued the message", host.getPendingEntries(SID).length === 1);
     check("(3) exactly one body write so far", bodyCount(TEXT) === 1);
 
@@ -238,7 +233,7 @@ try {
 
     // Cycle 2 ALSO never confirms — with LOOM_GIVE_UP_REQUEUE_LIMIT=1, this second failure is dropped for
     // real (no infinite requeue loop) rather than held again.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(3) BOUNDED: after the second failure the message is dropped for real, not held/requeued again",
       host.getPendingEntries(SID).length === 0);
     host.reconcile();
@@ -265,7 +260,7 @@ try {
 
     // TEXT1 never confirms (genuine drop) — give-up requeues it, held, giveUpGen:1 pushed onto
     // giveUpConfirmQueue.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(4) TEXT1 gave up and was requeued, held", host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT1);
 
     // THE DANGEROUS CHAIN: busy is false (give-up cleared it) — a completely UNRELATED message (a fresh

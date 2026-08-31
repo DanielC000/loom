@@ -40,6 +40,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -89,14 +90,11 @@ async function awaitClockPast(t) {
  * chained setTimeout was added to the path it's racing. Padding the margin further repeats the exact
  * anti-pattern this file's own header already flags (6 prior margin regressions); polling for the ACTUAL
  * transition removes the race instead of out-guessing it.
+ *
+ * Card ba4eebc1: the poll loop itself (canonical-compatible — throw-on-timeout, positional predicate +
+ * timeout) was deleted; calls below now go straight to the shared `_wait.mjs` helper with an explicit
+ * options object (same timeoutMs:5000/intervalMs:2 this file's own defaults used — values unchanged).
  */
-async function waitUntil(predicate, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveupfalseneg-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -235,7 +233,7 @@ try {
     // ACTUAL busy=false transition (see waitUntil's doc) rather than guessing a deadline — give-up
     // eventually recovering within a generous bound IS the assertion; a `sleepUntil` here would just be
     // racing the give-up chain's own timers again.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 5000, intervalMs: 2 });
     check("(2) all attempts written (bounded retries)", entryCount() === MAX_ATTEMPTS);
     check("(2) GIVE-UP RECOVERY: busy fell back to false — genuine drops are still recovered, unchanged",
       busyLog[SID].at(-1) === false);
@@ -268,7 +266,7 @@ try {
     await waitForCount(entryCount, 1);
     fake.emitOutput("stale-output-from-an-earlier-attempt-only");
 
-    await waitUntil(() => busyLog[SID].at(-1) === false); // observe the transition — see waitUntil's doc
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 5000, intervalMs: 2 }); // observe the transition
     check("(3) all attempts written", entryCount() === MAX_ATTEMPTS);
     check("(3) GIVE-UP RECOVERY still fires: stale pre-final-attempt output does NOT suppress give-up",
       busyLog[SID].at(-1) === false);
@@ -317,7 +315,7 @@ try {
     // dirtyLen===0 and skip the clear-prefix entirely — the very regression this scenario exists to catch.
     const r2 = host.enqueueStdin(SID, SECOND_TEXT);
     check("(4) setup: the second, distinct message was delivered", r2.delivered === true);
-    await waitUntil(() => written().includes(SECOND_TEXT));
+    await sharedWaitUntil(() => written().includes(SECOND_TEXT), { timeoutMs: 5000, intervalMs: 2 });
 
     check(`(4) THE FIX: the second message's own submit carried a defensive clear — exactly ${TEXT.length} backspaces written`,
       backspaceCount() === TEXT.length);

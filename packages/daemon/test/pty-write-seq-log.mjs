@@ -33,17 +33,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 5000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:5000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 // Hermetic LOOM_HOME + shrunk timing constants (read at import time, so set BEFORE importing host.js).
 // Chunk size deliberately small so a modest payload spans several real writeChunked ticks — the exact
@@ -117,7 +115,7 @@ try {
     const r = host.enqueueStdin(SID, text);
     check("(A) setup: idle session accepts the turn immediately", r.delivered === true);
 
-    await waitUntil(() => recordsFor(SID).some((rec) => rec.tag === "enter"));
+    await sharedWaitUntil(() => recordsFor(SID).some((rec) => rec.tag === "enter"), { timeoutMs: 5000, intervalMs: 2 });
     const recs = recordsFor(SID);
 
     check("(A) every record is anchored + parses (sessionId/seq/tag/gen/len/h all present)",
@@ -146,7 +144,7 @@ try {
     check("(B) repaint logs its Ctrl-L write", recordsFor(SID).some((r) => r.tag === "repaint-ctrl-l" && r.len === 1));
 
     host.stop(SID, "graceful");
-    await waitUntil(() => recordsFor(SID).filter((r) => r.tag === "stop-ctrl-c").length === 2);
+    await sharedWaitUntil(() => recordsFor(SID).filter((r) => r.tag === "stop-ctrl-c").length === 2, { timeoutMs: 5000, intervalMs: 2 });
     const stopRecs = recordsFor(SID).filter((r) => r.tag === "stop-ctrl-c");
     check("(B) graceful stop logs both Ctrl-C writes (immediate + the delayed re-send) at distinct seq",
       stopRecs.length === 2 && stopRecs[0].seq !== stopRecs[1].seq);

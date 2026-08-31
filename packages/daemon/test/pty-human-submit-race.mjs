@@ -32,6 +32,7 @@ import "./_guard.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -64,13 +65,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** writeChunked paces a LARGE payload across multiple setTimeout-scheduled writes (see its own doc) — a
  *  long queued turn's body can still be mid-flight several chunks after drainPending/submit() returns.
  *  Poll the ACTUAL observable (the joined write log) rather than guessing a fixed delay. */
-async function waitUntil(predicate, timeoutMs = 5_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(5);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 5_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:5_000/
+// intervalMs:5 this file's own defaults used — values unchanged).
 
 function freshSession(id) {
   host.spawn({ sessionId: id, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
@@ -124,7 +122,7 @@ try {
       host.getPending(SID).length === 0);
     // A LONG queued body is chunked across several paced writeChunked() calls (see its own doc) — poll
     // for the full body to actually land rather than asserting synchronously right after Stop.
-    await waitUntil(() => written().includes(queuedText));
+    await sharedWaitUntil(() => written().includes(queuedText), { timeoutMs: 5_000, intervalMs: 5 });
     check(`(${label}) (C) confirmed: the queued turn's full body was written`, written().includes(queuedText));
     check(`(${label}) (C) FIFO order preserved: the human's own Enter is still written before the queued paste`,
       written().indexOf("\r") < written().lastIndexOf(PASTE_START));

@@ -32,6 +32,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -42,16 +43,10 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
-/** Card b64b3726: bounded poll until `predicate()` is true — used for a state TRANSITION (busy becoming
- *  false) instead of a computed-deadline `sleepUntil`, which races the give-up chain's own timers under
- *  host/scheduler jitter — see pty-giveup-false-negative.mjs's `waitUntil` for the incident that found this. */
-async function waitUntil(predicate, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 5000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so the call below now
+// goes straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:5000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-pasteendretry-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -158,7 +153,7 @@ try {
 
     // Never confirm anything — exhaust every attempt (each retry still re-asserting START+END). Poll for
     // the ACTUAL busy=false transition (see waitUntil's doc) rather than a computed deadline.
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 5000, intervalMs: 2 });
     check("(c) all attempts exhausted (bounded, not infinite)", countOf(ENTER) === MAX_ATTEMPTS);
     check("(c) retries still re-asserted the pair (this fix applies through give-up, not just early retries)",
       countOf(REASSERT) === MAX_ATTEMPTS - 1);

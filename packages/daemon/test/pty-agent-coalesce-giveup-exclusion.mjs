@@ -23,17 +23,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-agent-coalesce-giveup-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -115,7 +113,7 @@ try {
 
   // GIVEUP_TEXT never confirms (silent pty) — wait for its give-up. Per the existing (pre-eac3464d)
   // mechanism, it's restored to the FRONT of pending, ahead of FRESH1/FRESH2.
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   const beforeDrain = host.getPending(SID);
   check("(1) setup: the give-up requeued GIVEUP_TEXT to the FRONT — pending is [GIVEUP_TEXT, FRESH1, FRESH2]",
     JSON.stringify(beforeDrain) === JSON.stringify([GIVEUP_TEXT, FRESH1, FRESH2]));
@@ -147,7 +145,7 @@ try {
 
   // GIVEUP_TEXT's redrain ALSO never confirms (silent pty) — its SECOND failure exceeds
   // LOOM_GIVE_UP_REQUEUE_LIMIT=1, so this time it is dropped for real (no infinite requeue).
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(3) setup: GIVEUP_TEXT is finally gone from pending — requeue budget exhausted",
     !host.getPendingEntries(SID).some((m) => m.text === GIVEUP_TEXT));
   check("(3) setup: FRESH1/FRESH2 are now the WHOLE queue, head-to-tail, still same-sender/adjacent",

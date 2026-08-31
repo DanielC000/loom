@@ -20,17 +20,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-marked-resend-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -103,7 +101,7 @@ try {
   // ===== SETUP: gen A — idle → immediate delivery → genuinely gives up (silent pty) → requeued/kept =====
   const rA = sessions.messageWorker(mgrId, wkrId, TEXT);
   check("(setup) gen A delivered immediately, busy armed", rA.delivered === true && busyLog[wkrId]?.at(-1) === true);
-  await waitUntil(() => busyLog[wkrId]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) gen A requeued after its first give-up, NOT yet marked (its own seed predates giveUpGen)",
     host.getPendingEntries(wkrId).some((m) => m.text === FRAMED && m.giveUpGen !== undefined));
 
@@ -111,8 +109,8 @@ try {
   // ===== it ALSO gives up, so requeueGiveUpOrigin re-seeds ambiguousDispatches from the MARKED text =========
   await sleep(HOLD_WAIT);
   host.reconcile();
-  await waitUntil(() => busyLog[wkrId]?.at(-1) === true);
-  await waitUntil(() => busyLog[wkrId]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
+  await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   // Phrased as a pure PRESENCE check (never "not parked") — GIVE_UP_REMINT_LIMIT=1 means chainDepth 0 is
   // still below the limit, so this generation re-mints rather than parking; the assertion itself only
   // confirms the re-mint log line is present, so it reads correctly to fixed-wait-negative-guard.mjs too.

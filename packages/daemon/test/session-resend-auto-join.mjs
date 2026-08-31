@@ -34,19 +34,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Bounded poll until `predicate()` is true — this project's own established pattern (see
- *  pty-giveup-purge-cross-generation.mjs) instead of a guessed wall-clock deadline. */
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 const tmpHome = path.join(os.tmpdir(), `loom-resend-autojoin-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -120,7 +116,7 @@ try {
   // ===== SETUP: the ORIGINAL directive is delivered idle-immediate (gen 1) and gives up (silent pty) =====
   const r1 = sessions.messageWorker(mgrId, wkrId, ORIGINAL_TEXT);
   check("(setup) ORIGINAL delivered immediately (worker was idle), busy armed", r1.delivered === true && busyLog[wkrId]?.at(-1) === true);
-  await waitUntil(() => busyLog[wkrId]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check("(setup) gen 1 genuinely gave up (RECOVERY, not SUPPRESSED)", submitLog.some((l) => l.includes(wkrId) && l.includes("GIVE-UP RECOVERY")));
   check("(setup) the ORIGINAL is requeued, held, sitting in pending", host.getPendingEntries(wkrId).some((m) => m.text === FRAMED_ORIGINAL));
 
@@ -181,7 +177,7 @@ try {
   // old one — an orthogonal, pre-existing quirk of the busy-gate, not something this card touches). End
   // this phantom turn cleanly before starting the next scenario from a real idle state.
   host.deliverHook(wkrId, { hook_event_name: "Stop" });
-  await waitUntil(() => busyLog[wkrId]?.at(-1) === false);
+  await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
 
   // ===== (3) POSITIVE CONTROL: a genuinely DIFFERENT follow-up must NOT auto-join and must NOT be purged =====
   // ===== by an unrelated confirmation — the join is content-scoped, not "purge anything queued" ============
@@ -190,7 +186,7 @@ try {
     // empty), so this ALSO gives up (silent pty) to create a SECOND, independent ambiguity to test against.
     const r3 = sessions.messageWorker(mgrId, wkrId, "SECOND_UNRELATED_DIRECTIVE");
     check("(3) setup: a second, unrelated directive is delivered and given up on its own", r3.delivered === true);
-    await waitUntil(() => busyLog[wkrId]?.at(-1) === false);
+    await sharedWaitUntil(() => busyLog[wkrId]?.at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     const framedSecond = "[loom:from-manager]\nSECOND_UNRELATED_DIRECTIVE";
     check("(3) setup: it is requeued, ambiguous, sitting in pending", host.getPendingEntries(wkrId).some((m) => m.text === framedSecond));
 

@@ -55,13 +55,13 @@ async function waitForCount(getCount, target, timeoutMs = 5000) {
 async function awaitClockPast(t) {
   while (Date.now() <= t) await sleep(1);
 }
-async function waitUntil(predicate, timeoutMs = 5000, label = "waitUntil") {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`${label}: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs, label)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout) but its OWN 3rd
+// positional arg was `label`, not `intervalMs` (this file's own instance of the exact silent-misread this
+// card exists to eliminate) — every call site below was read individually and its label string moved into
+// the options object's `label:` field, never `intervalMs:` (this file's fixed poll interval was always 2ms,
+// with no caller-settable knob — so `intervalMs: 2` on every converted call site is that same fixed value,
+// not a per-call default).
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveupsuppressedrecheck-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -154,7 +154,7 @@ try {
     fake.emitOutput("spinner-tick-after-final-enter");
     // Detect the SUPPRESSED branch firing via its own synchronous side effect (composerDirtyLen marked)
     // rather than a fixed sleep — this must land WELL inside the bounded re-check window below.
-    await waitUntil(() => host.getComposerDirtyLen(SID) === TEXT.length, giveUpAt() + 2000, "(1) suppression mark");
+    await sharedWaitUntil(() => host.getComposerDirtyLen(SID) === TEXT.length, { timeoutMs: giveUpAt() + 2000, intervalMs: 2, label: "(1) suppression mark" });
     check("(1) provisional GIVE-UP SUPPRESSED fired (busy still true immediately after)", busyLog[SID]?.at(-1) === true);
     // Placed BEFORE the timing-sensitive reads below on purpose (not just style): this claim is a
     // STRUCTURAL invariant, not a race — `onTurnCompleted` is wired ONLY to the real Stop-hook chokepoint
@@ -181,7 +181,7 @@ try {
 
     // THE FIX: no confirming hook is EVER delivered for this generation. Before this card, busy would
     // stay true forever here. Now, the bounded re-check must eventually give up for real.
-    await waitUntil(() => busyLog[SID]?.at(-1) === false, CONFIRM_SETTLE_BOUND + 2000, "(1) GIVE-UP RECOVERY (busy=false)");
+    await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: CONFIRM_SETTLE_BOUND + 2000, intervalMs: 2, label: "(1) GIVE-UP RECOVERY (busy=false)" });
     check("(1) THE FIX: GIVE-UP RECOVERY eventually fired — busy is no longer stuck true forever",
       busyLog[SID]?.at(-1) === false);
     check("(1) the original text was requeued (fail toward a duplicate, never a silent loss)",
@@ -201,7 +201,7 @@ try {
     await waitForCount(entryCount, MAX_ATTEMPTS);
     await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
     fake.emitOutput("spinner-tick-after-final-enter");
-    await waitUntil(() => host.getComposerDirtyLen(SID) === TEXT.length, giveUpAt() + 2000, "(2) suppression mark");
+    await sharedWaitUntil(() => host.getComposerDirtyLen(SID) === TEXT.length, { timeoutMs: giveUpAt() + 2000, intervalMs: 2, label: "(2) suppression mark" });
     check("(2) provisional GIVE-UP SUPPRESSED fired (busy still true)", busyLog[SID]?.at(-1) === true);
 
     // A REAL confirming hook lands immediately after — well inside the bounded re-check window opened by
@@ -244,13 +244,13 @@ try {
     await waitForCount(entryCount, MAX_ATTEMPTS);
     await awaitClockPast(fake.enterWriteTimes.at(-1));
     fake.emitOutput("spinner-tick-after-final-enter-A");
-    await waitUntil(() => host.getComposerDirtyLen(SID) === TEXT_A.length, giveUpAt() + 2000, "(3) A's suppression mark");
+    await sharedWaitUntil(() => host.getComposerDirtyLen(SID) === TEXT_A.length, { timeoutMs: giveUpAt() + 2000, intervalMs: 2, label: "(3) A's suppression mark" });
     check("(3) A's provisional GIVE-UP SUPPRESSED fired, both fields in lockstep (nothing to doubt yet)",
       host.getComposerDirtyLen(SID) === TEXT_A.length && host.getComposerDirtyLenBelieved(SID) === TEXT_A.length);
 
     // No confirming hook for A either — the fix's own bounded re-check recovers it (as scenario (1) proves
     // in isolation); this scenario cares about what happens NEXT, while A sits held.
-    await waitUntil(() => busyLog[SID]?.at(-1) === false, CONFIRM_SETTLE_BOUND + 2000, "(3) A's GIVE-UP RECOVERY");
+    await sharedWaitUntil(() => busyLog[SID]?.at(-1) === false, { timeoutMs: CONFIRM_SETTLE_BOUND + 2000, intervalMs: 2, label: "(3) A's GIVE-UP RECOVERY" });
     check("(3) A is held (requeued, not yet eligible to redrain)", host.getPending(SID).includes(TEXT_A));
 
     // THE ESCALATION LADDER: B (a DIFFERENT, longer message — modelling a manager's worker_message landing
@@ -273,7 +273,7 @@ try {
     await waitForCount(entryCount, entryCountBeforeB + MAX_ATTEMPTS);
     await awaitClockPast(fake.enterWriteTimes.at(-1));
     fake.emitOutput("spinner-tick-after-final-enter-B");
-    await waitUntil(() => host.getComposerDirtyLenBelieved(SID) === TEXT_B.length, giveUpAt() + 2000, "(3) B's suppression mark");
+    await sharedWaitUntil(() => host.getComposerDirtyLenBelieved(SID) === TEXT_B.length, { timeoutMs: giveUpAt() + 2000, intervalMs: 2, label: "(3) B's suppression mark" });
     check("(3) THE COMPOUNDING: composerDirtyLen is ADDITIVE (A+B) — matches the live specimen's 1761->8227 growth",
       host.getComposerDirtyLen(SID) === TEXT_A.length + TEXT_B.length);
     check("(3) THE DIVERGENCE: composerDirtyLenBelieved reads ONLY B's own fresh contribution — matches the " +
@@ -284,8 +284,8 @@ try {
 
     // THE FIX STILL HOLDS under compounding: no confirming hook for B either — busy must not stay stuck.
     const busyLenBeforeBRecovery = busyLog[SID].length;
-    await waitUntil(() => busyLog[SID].length > busyLenBeforeBRecovery && busyLog[SID].at(-1) === false,
-      CONFIRM_SETTLE_BOUND + 2000, "(3) B's GIVE-UP RECOVERY");
+    await sharedWaitUntil(() => busyLog[SID].length > busyLenBeforeBRecovery && busyLog[SID].at(-1) === false,
+      { timeoutMs: CONFIRM_SETTLE_BOUND + 2000, intervalMs: 2, label: "(3) B's GIVE-UP RECOVERY" });
     check("(3) THE FIX HOLDS UNDER COMPOUNDING: busy resolved for B too, not stuck forever",
       busyLog[SID].at(-1) === false);
     const pendingNow = host.getPending(SID);

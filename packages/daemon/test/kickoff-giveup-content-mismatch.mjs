@@ -56,17 +56,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitUntil(predicate, timeoutMs = 10_000) {
-  const t0 = Date.now();
-  while (!predicate()) {
-    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
-    await sleep(2);
-  }
-}
+// Card ba4eebc1: the local `waitUntil(predicate, timeoutMs = 10_000)` poll loop that used to sit here was
+// deleted — canonical-compatible (throw-on-timeout, positional predicate + timeout), so calls below now go
+// straight to the shared `_wait.mjs` helper with an explicit options object (same timeoutMs:10_000/
+// intervalMs:2 this file's own defaults used — values unchanged).
 
 /** Repeatedly sleeps a short beat and calls `host.reconcile()` until `predicate()` is true or `timeoutMs`
  *  elapses — needed because the mismatched hook ALSO triggers the (real, production) `[loom:prompt-mismatch]`
@@ -171,19 +169,19 @@ function spawnReady(sessionId, startupPrompt) {
  *  full reasoning (card b9b8f8db: cycle 2 retries only the Enter, so `framePossibleDuplicate(KICKOFF,
  *  rootMsgId)` reconstructs the exact signature `requeueGiveUpOrigin` seeds, without a physical capture). */
 async function driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount) {
-  await waitUntil(() => bodyCount(KICKOFF) >= 1);
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => bodyCount(KICKOFF) >= 1, { timeoutMs: 10_000, intervalMs: 2 });
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 1 gave up: requeued, not yet exhausted`, host.getPendingEntries(SID).length === 1);
 
   await sleep(HOLD_WAIT);
   const writesBeforeCycle2 = fakes[fakes.length - 1].writes.length;
   host.reconcile();
-  await waitUntil(() => busyLog[SID].at(-1) === true);
-  await waitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeCycle2);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === true, { timeoutMs: 10_000, intervalMs: 2 });
+  await sharedWaitUntil(() => fakes[fakes.length - 1].writes.length > writesBeforeCycle2, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 wrote no NEW body chunk (Enter-only redelivery, card b9b8f8db)`,
     bodyCount(KICKOFF) === 1);
 
-  await waitUntil(() => busyLog[SID].at(-1) === false);
+  await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
   check(`(${SID}) cycle 2 gave up: the kickoff EXHAUSTED (real two-cycle exhaustion, not the single-cycle shortcut)`,
     submitLog.some((l) => l.includes("exhausted its requeue budget (1)")));
   const rootMsgId = rootMsgIdBySession[SID];
@@ -207,7 +205,7 @@ try {
     const cycle2Text = await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
     check("(C) setup: exactly ONE physical body write so far", bodyCount(KICKOFF) === 1);
 
-    await waitUntil(() => host.getPendingEntries(SID).length === 1);
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
     check("(C) setup: the re-mint is queued (held)", host.getPendingEntries(SID).length === 1);
 
     // THE GENUINE, BUT MISMATCHED, CONFIRMING HOOK — truncated by 5 chars, same shape class as the real
@@ -230,7 +228,7 @@ try {
     check("(C) THE RE-MINT IS STILL QUEUED — a genuine confirming hook arrived and changed nothing",
       host.getPendingEntries(SID).length === 1);
     host.deliverHook(SID, { hook_event_name: "Stop" }); // closes out the genuine turn this hook opened
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
     check("(C) after Stop: still un-purged", host.getPendingEntries(SID).length === 1);
 
     // Advance past the re-mint's OWN hold with nothing having purged it. NOTE: the mismatch ALSO triggers
@@ -256,7 +254,7 @@ try {
     const { bodyCount } = spawnReady(SID, KICKOFF);
 
     const cycle2Text = await driveToExhaustionAndCaptureCycle2Text(SID, KICKOFF, bodyCount);
-    await waitUntil(() => host.getPendingEntries(SID).length === 1);
+    await sharedWaitUntil(() => host.getPendingEntries(SID).length === 1, { timeoutMs: 10_000, intervalMs: 2 });
 
     submitLog.length = 0;
     host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: cycle2Text }); // byte-identical this time
@@ -264,7 +262,7 @@ try {
       submitLog.some((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched")));
     check("(D) NEGATIVE CONTROL: the re-mint IS purged", host.getPendingEntries(SID).length === 0);
     host.deliverHook(SID, { hook_event_name: "Stop" });
-    await waitUntil(() => busyLog[SID].at(-1) === false);
+    await sharedWaitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 10_000, intervalMs: 2 });
 
     // NO sleep needed here (unlike (C)): the content-match purge already ran SYNCHRONOUSLY inside
     // deliverHook (checked at line "the re-mint IS purged" above, before Stop even fired) — pending is
