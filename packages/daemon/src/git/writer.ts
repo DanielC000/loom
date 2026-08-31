@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { simpleGit, type SimpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
 import {
   recordGitPushOutcome,
   pauseVaultAutoCommit,
@@ -9,6 +9,7 @@ import {
   humanBytes,
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
+import { withTimeout, boundedSimpleGit } from "./bounded.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -123,17 +124,6 @@ export function nonInteractiveEnv(): Record<string, string | undefined> {
   return { ...env, ...NONINTERACTIVE_ENV };
 }
 
-/** Reject `p` after `ms` if it hasn't settled — the hard guarantee the call returns even if git hangs. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
-}
-
 /** A structured outcome the UI can render — never a thrown 500 for an EXPECTED git failure. */
 export type GitWriteResult<T = Record<string, never>> = ({ ok: true } & T) | { ok: false; error: string };
 
@@ -233,7 +223,7 @@ export class GitWriter {
 
   /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env. */
   private git(blockMs: number): SimpleGit {
-    return simpleGit(this.repoPath, { timeout: { block: blockMs } }).env(nonInteractiveEnv());
+    return boundedSimpleGit(this.repoPath, blockMs, nonInteractiveEnv());
   }
 
   /**

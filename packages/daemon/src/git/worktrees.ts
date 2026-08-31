@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
+import { withTimeout, boundedSimpleGit } from "./bounded.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
@@ -109,7 +110,7 @@ export interface BoundedGitDeps {
 /** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. */
 function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
 }
 
@@ -127,7 +128,7 @@ function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleG
  */
 function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }).env(nonInteractiveEnv()));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms, nonInteractiveEnv()));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
 }
 
@@ -148,25 +149,8 @@ export interface DiffBranchDeps {
 /** Build the bounded git instance + resolve the timeout for {@link diffBranch}'s ops, applying the seam's defaults. */
 function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
-}
-
-/**
- * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
- * NEVER settles. In production the simpleGit `block` timeout (set on the instance) also kills the hung
- * child so it doesn't leak — this race is the belt-and-suspenders guarantee that the FUNCTION returns
- * within the window regardless. The timer is cleared on the winning path; if it fires first the timer
- * is already done, so nothing lingers on the event loop.
- */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung child?)`)), ms);
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
 }
 
 /**
@@ -1419,7 +1403,7 @@ export async function precheckWorkerDone(
   deps: BoundedGitDeps = {},
 ): Promise<DoneReportPrecheck> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
@@ -1492,7 +1476,7 @@ export async function worktreeHasWork(
   } catch {
     return true; // bounded failure → fail SAFE (assume work, keep the dir)
   }
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
   //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
@@ -1556,7 +1540,7 @@ export async function detectStrandedWork(
   deps: BoundedGitDeps = {},
 ): Promise<StrandedWork> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
   try {
     const mainSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD")).trim();
 
@@ -4241,7 +4225,7 @@ export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
   const repoGit = makeGit(repoPath, timeoutMs);
   const wtGit = makeGit(worktreePath, timeoutMs);
 

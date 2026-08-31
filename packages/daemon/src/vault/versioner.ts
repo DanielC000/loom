@@ -7,6 +7,7 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
+import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
 
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
@@ -89,20 +90,6 @@ const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
  */
 const VAULT_FLUSH_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 
-/** Reject `p` after `ms` if it hasn't settled — same belt-and-suspenders race as git/worktrees.ts's and
- *  git/writer.ts's own `withTimeout`: the simpleGit `block` timeout (set on the instance below) also
- *  kills the hung child in production, but this guarantees the FUNCTION returns within the window
- *  regardless. Timer cleared on the winning path. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
-}
-
 /**
  * The git method surface {@link boundedVaultGit} exposes: the plumbing methods this module's
  * OTHER bounded call sites use (`checkIsRepo`/`revparse`/`init`/`raw`) UNION the three working-tree
@@ -178,7 +165,7 @@ function boundedVaultGit(
   deps: VaultGitDeps,
 ): { git: BoundedVaultGit; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? VAULT_GIT_OP_TIMEOUT_MS;
-  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
 }
 

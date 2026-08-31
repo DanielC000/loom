@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
-import { simpleGit } from "simple-git";
 import { WORKSPACE_ROOT, LOOM_HOME } from "../paths.js";
+import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
 
 /**
  * Host-bootstrap for the ungated Setup/Platform operator's `project_init` tool — the ONLY host-write the
@@ -25,14 +25,6 @@ import { WORKSPACE_ROOT, LOOM_HOME } from "../paths.js";
 const GIT_INIT_TIMEOUT_MS = 15_000;
 
 export type BootstrapResult = { ok: true; dir: string } | { ok: false; error: string };
-
-/** Reject `p` after `ms` so a wedged git child can't hang the daemon (mirrors the git writers' guard). */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms (hung git child?)`)), ms);
-    p.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
-  });
-}
 
 /**
  * Derive a filesystem-safe leaf directory name from a project name: lowercase, non-alphanumerics collapsed
@@ -101,7 +93,7 @@ export async function bootstrapProjectDir(opts: {
   if (opts.git) {
     try {
       const gitInit = opts.gitInit ?? (async (dir: string) => {
-        await withTimeout(simpleGit(dir, { timeout: { block: GIT_INIT_TIMEOUT_MS } }).init(), GIT_INIT_TIMEOUT_MS, "git init");
+        await withTimeout(boundedSimpleGit(dir, GIT_INIT_TIMEOUT_MS).init(), GIT_INIT_TIMEOUT_MS, "git init");
       });
       await gitInit(target);
     } catch (e) {

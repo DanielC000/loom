@@ -3,12 +3,12 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { simpleGit } from "simple-git";
 import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import { writeJsonAtomic } from "../pty/claude-config.js";
 import { DEPLOY_PACKAGES } from "../deploy-packages.js";
 import type { CapQueuedSpawn } from "./cap-queue.js";
+import { boundedSimpleGit } from "../git/bounded.js";
 
 const require = createRequire(import.meta.url);
 
@@ -554,7 +554,7 @@ export interface SupervisorChangeDeps {
 }
 
 async function defaultGitLogSince(root: string, sinceIso: string, file: string): Promise<string> {
-  const git = simpleGit(root, { timeout: { block: SUPERVISOR_CHECK_TIMEOUT_MS } }).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" });
+  const git = boundedSimpleGit(root, SUPERVISOR_CHECK_TIMEOUT_MS, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
   return git.raw(["log", `--since=${sinceIso}`, "--format=%H", "--", file]);
 }
 

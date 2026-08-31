@@ -17,7 +17,8 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
-import { simpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
+import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, isLogMessageContentEnabled } from "../paths.js";
@@ -17120,6 +17121,14 @@ export class SessionService {
     return { count: entries.length, entries };
   }
 
+  /** A simpleGit instance for `repoPath` bound by a kill-the-hung-child block timeout (card 9df3ea71 —
+   *  the one construction site this file's few bounded-git call sites now share, instead of each
+   *  reconstructing `simpleGit(path, { timeout: { block: ms } })` inline). No env, no `withTimeout`
+   *  race — neither was applied at any of these call sites before, so neither is added now. */
+  private boundedGit(repoPath: string, timeoutMs: number): SimpleGit {
+    return boundedSimpleGit(repoPath, timeoutMs);
+  }
+
   /**
    * Best-effort, read-time classification of ONE already-retained worktree into `worktreeHasWork`'s two
    * constituent signals (dirty tree / commits ahead) for display. Never called from Pass B itself — only
@@ -17138,7 +17147,7 @@ export class SessionService {
     const timeoutMs = this.gitOpMs ?? 15_000; // mirrors git/worktrees.ts's own GIT_OP_TIMEOUT_MS default
     let dirty: boolean;
     try {
-      const porcelain = await simpleGit(worktreePath, { timeout: { block: timeoutMs } }).raw(["status", "--porcelain"]);
+      const porcelain = await this.boundedGit(worktreePath, timeoutMs).raw(["status", "--porcelain"]);
       dirty = worktreeStatusHasWork(porcelain);
     } catch {
       dirty = true; // fail safe — an error means "don't know", not "clean"
@@ -17146,7 +17155,7 @@ export class SessionService {
     let commitsAhead: number | null = null;
     if (branch) {
       try {
-        const raw = await simpleGit(repoPath, { timeout: { block: timeoutMs } }).raw(["rev-list", "--count", `HEAD..${branch}`]);
+        const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `HEAD..${branch}`]);
         const parsed = parseInt(raw.trim(), 10);
         commitsAhead = Number.isFinite(parsed) ? parsed : null;
       } catch {
@@ -17282,7 +17291,7 @@ export class SessionService {
     try {
       const repoPath = resolveRepoByKey(project, w.repoKey).path;
       const timeoutMs = this.gitOpMs ?? 15_000;
-      const raw = await simpleGit(repoPath, { timeout: { block: timeoutMs } }).raw(["rev-list", "--count", `HEAD..${w.branch}`]);
+      const raw = await this.boundedGit(repoPath, timeoutMs).raw(["rev-list", "--count", `HEAD..${w.branch}`]);
       const parsed = parseInt(raw.trim(), 10);
       const result = Number.isFinite(parsed) ? parsed : null;
       if (cacheKey && result !== null) this.danglingAheadCache.set(cacheKey, result);
