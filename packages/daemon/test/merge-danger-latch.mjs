@@ -28,7 +28,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (F) describeMergeDangerLatchAtBoot, the boot-time classifier, exercised against a REAL
 //       scanCanonicalReposForMergeResidue result on a REAL repo: staged residue present ⇒ the
 //       "very likely that dead squash, not WIP" attribution; clean tree ⇒ DoD-2.5's required
-//       "tree looks clean" sentence — the case that is silent WITHOUT a latch.
+//       "tree looks clean" sentence — the case that is silent WITHOUT a latch; and (card b272d215)
+//       a repo ABSENT from the scanned-repo-paths input (e.g. a secondary registry repo the boot
+//       caller forgot to include) ⇒ the distinct "not scanned" sentence, never the clean-tree one —
+//       closed by mutation: drop the repo from `scannedRepoPaths` and the message must flip.
 //   (G) END-TO-END through the real production call path: a REAL mergeBranch() success/conflict both leave
 //       NO latch file behind afterward (extends merge-danger-window.mjs's in-memory assertion to the
 //       durable side of the SAME enter/exit calls).
@@ -206,23 +209,50 @@ try {
     try {
       const latch = { repoPath: repo, branch: "loom/mdl-classify", opId: "op-classify", enteredAt: new Date(Date.now() - 12_000).toISOString() };
 
-      // (F1) CLEAN tree — the case that is SILENT today without a latch.
+      // (F1) CLEAN tree — the case that is SILENT today without a latch. `repo` IS in scannedRepoPaths.
       const cleanDirty = await scanCanonicalReposForMergeResidue([repo]);
       check("[F1] sanity: the fixture repo is genuinely clean per the real scan", cleanDirty.every((d) => d.repoPath !== repo));
-      const cleanMsg = describeMergeDangerLatchAtBoot(latch, cleanDirty);
+      const cleanMsg = describeMergeDangerLatchAtBoot(latch, cleanDirty, [repo]);
       check("[F1] clean tree ⇒ the required DoD-2.5 sentence", cleanMsg.includes("tree looks clean"));
       check("[F1] clean-tree message still names the repo/branch/op", cleanMsg.includes(repo) && cleanMsg.includes("loom/mdl-classify") && cleanMsg.includes("op-classify"));
       check("[F1] clean-tree message does NOT falsely claim residue", !cleanMsg.includes("staged residue"));
+      check("[F1] clean-tree message does NOT use the not-scanned wording", !cleanMsg.includes("NOT scanned"));
 
-      // (F2) STAGED-dirty tree — real residue, via the REAL scan.
+      // (F2) STAGED-dirty tree — real residue, via the REAL scan. `repo` IS in scannedRepoPaths.
       fs.writeFileSync(path.join(repo, "leftover.txt"), "dead-squash-leftover\n");
       execSync("git add -A", { cwd: repo });
       const dirtyDirty = await scanCanonicalReposForMergeResidue([repo]);
       check("[F2] sanity: the fixture repo is genuinely staged-dirty per the real scan", dirtyDirty.some((d) => d.repoPath === repo && d.staged === true));
-      const dirtyMsg = describeMergeDangerLatchAtBoot(latch, dirtyDirty);
+      const dirtyMsg = describeMergeDangerLatchAtBoot(latch, dirtyDirty, [repo]);
       check("[F2] staged residue ⇒ the attribution sentence (not the generic scan wording)", dirtyMsg.includes("VERY LIKELY that dead squash") && dirtyMsg.includes("not WIP"));
       check("[F2] staged-residue message names the repo/branch/op", dirtyMsg.includes(repo) && dirtyMsg.includes("loom/mdl-classify") && dirtyMsg.includes("op-classify"));
       check("[F2] staged-residue message does NOT use the clean-tree wording", !dirtyMsg.includes("tree looks clean"));
+
+      // (F3) card b272d215 — repo ABSENT from scannedRepoPaths (e.g. a secondary registry repo the boot
+      // caller's input list forgot to include) must NOT collapse into the clean-tree message, even though
+      // `dirty` (computed against the SAME repo, real scan, genuinely clean) looks identical to F1's. Only
+      // the third argument differs from F1 — closed by mutation below.
+      const notScannedMsg = describeMergeDangerLatchAtBoot(latch, cleanDirty, []);
+      check("[F3] repo absent from scannedRepoPaths ⇒ the distinct not-scanned sentence", notScannedMsg.includes("NOT scanned"));
+      check("[F3] not-scanned message does NOT use the clean-tree wording", !notScannedMsg.includes("tree looks clean"));
+      check("[F3] not-scanned message does NOT falsely claim residue", !notScannedMsg.includes("staged residue"));
+      check("[F3] not-scanned message still names the repo/branch/op", notScannedMsg.includes(repo) && notScannedMsg.includes("loom/mdl-classify") && notScannedMsg.includes("op-classify"));
+      // Close by mutation: restoring `repo` to scannedRepoPaths (identical to F1's call) must flip it BACK
+      // to the clean-tree wording — proves F3's distinct message is driven by scannedRepoPaths membership,
+      // not some other accidental difference from F1.
+      const restoredMsg = describeMergeDangerLatchAtBoot(latch, cleanDirty, [repo]);
+      check("[F3] restoring the repo to scannedRepoPaths flips the message back to clean-tree (mutation check)", restoredMsg.includes("tree looks clean") && !restoredMsg.includes("NOT scanned"));
+
+      // (F4) card b272d215 DoD-4 — canonicalRepoLockKey keying survives a case/separator-differing spelling
+      // of the SAME physical directory (the Windows false-all-clear the reviewer's control demonstrated).
+      // Only meaningful on win32 (canonicalRepoLockKey lowercases there; POSIX paths are case-sensitive by
+      // filesystem convention, so an artificially-cased path there is a genuinely different, nonexistent
+      // path and would correctly fall through to "not scanned").
+      if (process.platform === "win32") {
+        const upperSpelling = repo.toUpperCase();
+        const upperMsg = describeMergeDangerLatchAtBoot(latch, cleanDirty, [upperSpelling]);
+        check("[F4] a differently-cased spelling of the SAME repo in scannedRepoPaths still counts as scanned", upperMsg.includes("tree looks clean") && !upperMsg.includes("NOT scanned"));
+      }
     } finally {
       try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
     }

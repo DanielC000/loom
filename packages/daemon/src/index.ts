@@ -963,7 +963,22 @@ async function main(): Promise<void> {
   // merge would refuse, which was simply false for unstaged dirt (measured 4-for-4 false positives) and
   // gave a user staring at a submodule gitlink (` M some/submodule` — a normal steady state for a repo
   // with submodules, not residue) no way to guess what was being asked of them.
-  void scanCanonicalReposForMergeResidue(db.listProjects().map((p) => p.repoPath)).then((dirty) => {
+  //
+  // Card b272d215: this list must name EVERY canonical repo a merge can land on, not just each project's
+  // PRIMARY `repoPath` — a multi-repo project's SECONDARY registry repos (`project.repos`, epic 49136451;
+  // `mergeBranchLocked` merges against them directly) are just as reachable by a real merge, and omitting
+  // them here isn't merely a gap: it makes `describeMergeDangerLatchAtBoot` below take its CLEAN branch for
+  // a secondary repo it never scanned, printing a false all-clear over a repo that actually holds a dead
+  // squash's stage. Mirrors the sibling enumeration at sessions/service.ts's branch-ref sweep
+  // (`[project.repoPath, ...project.repos.map((r) => r.path)]`) — two independent enumerations of "this
+  // project's canonical repos" must agree. De-duped (two projects can register the same path).
+  const canonicalRepoPaths = new Set<string>();
+  for (const project of db.listProjects()) {
+    for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
+      if (repoPath) canonicalRepoPaths.add(repoPath);
+    }
+  }
+  void scanCanonicalReposForMergeResidue([...canonicalRepoPaths]).then((dirty) => {
     for (const d of dirty) {
       if (d.staged) {
         console.warn(`[boot] canonical repo has STAGED uncommitted changes at ${d.repoPath} — possible stale merge residue (card 9e77050f); the next merge attempt against it WILL refuse rather than risk absorbing it, a human should inspect \`git status\`/\`git diff --cached\` there:\n${d.status}`);
@@ -982,7 +997,7 @@ async function main(): Promise<void> {
     // see merge-danger-window.ts) never leaves anything here to find; only a hard death does.
     const latches = readAndClearMergeDangerLatches();
     for (const latch of latches) {
-      console.warn(describeMergeDangerLatchAtBoot(latch, dirty));
+      console.warn(describeMergeDangerLatchAtBoot(latch, dirty, canonicalRepoPaths));
     }
   }).catch((err) => {
     console.warn(`[boot] canonical-repo merge-residue scan failed (continuing boot): ${(err as Error).message}`);

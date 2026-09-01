@@ -124,26 +124,46 @@ export function readAndClearMergeDangerLatches(): MergeDangerLatchRecord[] {
 /**
  * PURE classification — a latch found at boot, cross-referenced against `scanCanonicalReposForMergeResidue`'s
  * own result (`dirty`, already resolved by the caller — see index.ts's boot sequence, which calls this
- * from inside that scan's own `.then()`). Extracted as its own function (rather than inlined at the one
- * call site) so it is independently testable without needing to drive the whole daemon boot sequence — see
- * test/merge-danger-latch.mjs. Never throws (pure string formatting over already-validated inputs).
+ * from inside that scan's own `.then()`), AND against the actual set of repo paths that scan was asked to
+ * cover (`scannedRepoPaths`, card b272d215) — `dirty` alone can't distinguish "this repo was scanned and
+ * came back clean" from "this repo was never in the scanned set at all" (a project's SECONDARY registry
+ * repo omitted from the caller's input list, say), and those two cases must never share a message: the
+ * first is a genuine all-clear, the second is a repo nobody actually checked. Extracted as its own function
+ * (rather than inlined at the one call site) so it is independently testable without needing to drive the
+ * whole daemon boot sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting over
+ * already-validated inputs).
  *
- * Two branches, matching DoD-2.3/2.5:
+ * Both comparisons key through `canonicalRepoLockKey` rather than raw string equality (card b272d215 DoD-4)
+ * — the latch and a `dirty`/`scannedRepoPaths` entry can each name the SAME physical directory with a
+ * different case or separator spelling (notably on Windows), and a raw `===` would then silently take the
+ * "not this repo" branch for what is actually the same repo.
+ *
+ * Three branches, matching DoD-2/DoD-3/DoD-2.5:
  *  - The scan found THIS repo STAGED-dirty ⇒ attribute it: this is very likely the dead squash the latch
  *    recorded, not unrelated human WIP — a distinction the scan alone cannot make.
- *  - The scan found nothing (clean tree, or this repo wasn't dirty) ⇒ DoD-2.5's required sentence: a
+ *  - The repo was never in the scanned set at all ⇒ say so explicitly, rather than falling through to the
+ *    clean-tree wording below: "absent from input" and "absent because clean" must not collapse into one
+ *    message — a human should still check this repo by hand.
+ *  - The repo WAS scanned and came back clean (or unstaged-only) ⇒ DoD-2.5's required sentence: a
  *    mid-window death that happened to leave no residue is still worth reporting, and today (latch-free)
  *    that case is completely silent — `status === ""` from the scan gives it nothing to print.
  */
 export function describeMergeDangerLatchAtBoot(
-  latch: MergeDangerLatchRecord, dirty: Array<{ repoPath: string; staged: boolean }>,
+  latch: MergeDangerLatchRecord,
+  dirty: Array<{ repoPath: string; staged: boolean }>,
+  scannedRepoPaths: Iterable<string>,
 ): string {
   const enteredMs = Date.parse(latch.enteredAt);
   const ageText = Number.isFinite(enteredMs) ? ` (entered ${Math.round((Date.now() - enteredMs) / 1000)}s before this boot)` : "";
   const opText = latch.opId ? `, op ${latch.opId}` : "";
-  const stagedMatch = dirty.some((d) => d.repoPath === latch.repoPath && d.staged);
+  const latchKey = canonicalRepoLockKey(latch.repoPath);
+  const stagedMatch = dirty.some((d) => canonicalRepoLockKey(d.repoPath) === latchKey && d.staged);
   if (stagedMatch) {
     return `[boot] we exited inside a merge squash on ${latch.repoPath} (branch '${latch.branch}'${opText})${ageText} — this staged residue is VERY LIKELY that dead squash, not WIP; it WILL refuse the next merge attempt until a human resolves it by hand.`;
+  }
+  const wasScanned = [...scannedRepoPaths].some((p) => canonicalRepoLockKey(p) === latchKey);
+  if (!wasScanned) {
+    return `[boot] we exited inside a merge window on ${latch.repoPath} (branch '${latch.branch}'${opText})${ageText} — this repo was NOT scanned for residue (absent from the registered canonical repo list), so its tree state is UNKNOWN; a human should check \`git status\`/\`git diff --cached\` there by hand rather than assume it's clean.`;
   }
   return `[boot] we exited inside a merge window on ${latch.repoPath} (branch '${latch.branch}'${opText})${ageText}; tree looks clean — no action needed.`;
 }
