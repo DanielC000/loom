@@ -160,6 +160,23 @@ try {
   check("(1h) pure: worktree location block + brief + dynamic still all present alongside the review block", composedReview.includes("/wt/path") && composedReview.includes("BRIEF") && composedReview.includes("DYNAMIC"));
   check("(1h) pure: no cwd ⇒ reviewOf is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, undefined, undefined, undefined, reviewInfo) === "BRIEF\n\n---\n\nDYNAMIC");
 
+  // ===================== (1i) board card 13cc2300: discardedOnRecut destroyed-work note block =====================
+  check("(1i) pure: no discardedOnRecut (undefined, 8-arg call) ⇒ byte-identical to the pre-card composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined) === composedCwd);
+  check("(1i) pure: no discardedOnRecut ⇒ no discarded block", !composedCwd.includes("was DISCARDED"));
+  const discardedInfo = { statusSummary: "M destroyed-tracked.txt", fileCount: 1, truncated: false };
+  const composedDiscarded = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, undefined, discardedInfo);
+  check("(1i) pure: discardedOnRecut set (9th/LAST param) ⇒ discarded block present", composedDiscarded.includes("was DISCARDED"));
+  check("(1i) pure: discarded block names the destroyed path", composedDiscarded.includes("destroyed-tracked.txt"));
+  check("(1i) pure: discarded block tells the worker there's nothing left to reconcile", /nothing (here )?to (finish or revert|reconcile)/i.test(composedDiscarded));
+  check("(1i) pure: worktree location block + brief + dynamic still all present alongside the discarded block", composedDiscarded.includes("/wt/path") && composedDiscarded.includes("BRIEF") && composedDiscarded.includes("DYNAMIC"));
+  check("(1i) pure: no cwd ⇒ discardedOnRecut is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, undefined, undefined, undefined, undefined, discardedInfo) === "BRIEF\n\n---\n\nDYNAMIC");
+  // dirtyBlock (SURVIVED) + discardedBlock (DESTROYED) are DISTINCT, independent signals and can co-exist —
+  // never merged into one field/block. Order: dirty leads discarded (mirrors the dirty-then-stale ordering
+  // proven above).
+  const composedDirtyAndDiscarded = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo, undefined, undefined, undefined, discardedInfo);
+  check("(1i) pure: dirtyBlock + discardedBlock can co-exist (survived vs. destroyed are independent signals)", composedDirtyAndDiscarded.includes("reconcile before you start") && composedDirtyAndDiscarded.includes("was DISCARDED"));
+  check("(1i) pure: dirty block leads the discarded block", order(composedDirtyAndDiscarded, "reconcile before you start", "was DISCARDED"));
+
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);
@@ -289,6 +306,47 @@ try {
   const normE = (s) => s.replace(/\r\n/g, "\n");
   check("(6) the branch's own committed content survived the aborted auto-forward attempt",
     normE(fs.readFileSync(path.join(wE2.worktreePath, "README.md"), "utf8")) === "branch version E\n");
+  db.setProcessState(wE2.id, "exited"); // free a concurrency-cap slot under mgr1 for section (8) below
+
+  // ===================== (8) board card 13cc2300: a 0-ahead reused worktree's DESTROYED tracked work is
+  // captured (before the recut discards it) and reported DISTINCTLY from whatever SURVIVES the same
+  // recut — end-to-end through the real spawnWorker/createWorktree path, same style as sections (5)/(6).
+  const taskF = "66666666-6666-6666-8666-666666666666";
+  db.insertTask({ id: taskF, projectId: "pW", title: "F", body: "", columnKey: "todo", position: 5, createdAt: now, updatedAt: now });
+
+  const wF1 = await svc.spawnWorker("mgr1", { taskId: taskF, agentId: "agentDev", kickoffPrompt: "KICKOFF_F1" });
+  worktrees.push(wF1.worktreePath);
+  check("(8) fresh spawn never sets discardedOnRecut", wF1.discardedOnRecut === undefined);
+
+  // Simulate worker_stop(hard) BEFORE any commit (0 commits ahead — exactly the scenario the card names):
+  // a TRACKED modification (README.md, already committed on main) the reset below WILL discard, plus an
+  // UNTRACKED leftover that a `reset --hard` never touches and so survives.
+  fs.writeFileSync(path.join(wF1.worktreePath, "README.md"), "TRACKED EDIT ABOUT TO BE DISCARDED\n");
+  fs.writeFileSync(path.join(wF1.worktreePath, "f-untracked.txt"), "survives the reset\n");
+  db.setProcessState(wF1.id, "exited"); // frees the one-live-worker-per-task guard for the re-spawn below
+
+  // Re-spawn onto the SAME task → 0-ahead branch ⇒ recutStaleReusedBranch resets --hard onto main.
+  const wF2 = await svc.spawnWorker("mgr1", { taskId: taskF, agentId: "agentDev", kickoffPrompt: "KICKOFF_F2" });
+  check("(8) re-spawn reuses the SAME worktree path", wF2.worktreePath === wF1.worktreePath);
+  check("(8) re-spawn RESULT carries discardedOnRecut", wF2.discardedOnRecut !== undefined);
+  check("(8) discardedOnRecut names the destroyed TRACKED path", wF2.discardedOnRecut?.statusSummary.includes("README.md"));
+  check("(8) discardedOnRecut does NOT include the untracked survivor (it was never discarded)", !wF2.discardedOnRecut?.statusSummary.includes("f-untracked.txt"));
+  check("(8) discardedOnRecut.fileCount is 1 (only the tracked path)", wF2.discardedOnRecut?.fileCount === 1);
+  check("(8) re-spawn RESULT ALSO carries reusedDirtyWorktree for what SURVIVED (the untracked leftover)", wF2.reusedDirtyWorktree !== undefined);
+  check("(8) reusedDirtyWorktree names the SURVIVING untracked file, not the destroyed tracked one",
+    wF2.reusedDirtyWorktree?.statusSummary.includes("f-untracked.txt") && !wF2.reusedDirtyWorktree?.statusSummary.includes("README.md"));
+  check("(8) the tracked edit is GONE on disk — reverted to the main-branch version",
+    normE(fs.readFileSync(path.join(wF2.worktreePath, "README.md"), "utf8")) === normE(fs.readFileSync(path.join(repo, "README.md"), "utf8")));
+  check("(8) the untracked leftover IS STILL on disk — reset --hard never touches it", fs.existsSync(path.join(wF2.worktreePath, "f-untracked.txt")));
+
+  const oWF2 = optsFor(wF2.id);
+  check("(8) the NEW worker's OWN kickoff carries the discarded-work note", (oWF2?.startupPrompt ?? "").includes("was DISCARDED"));
+  check("(8) the discarded-work note names the destroyed path", (oWF2?.startupPrompt ?? "").includes("README.md"));
+  check("(8) the kickoff ALSO carries the reconcile note for what survived", (oWF2?.startupPrompt ?? "").includes("reconcile before you start"));
+  check("(8) the reconcile note names the surviving untracked path", (oWF2?.startupPrompt ?? "").includes("f-untracked.txt"));
+  check("(8) both notes still lead into the manager's own kickoff text",
+    order(oWF2?.startupPrompt ?? "", "was DISCARDED", "KICKOFF_F2") && order(oWF2?.startupPrompt ?? "", "reconcile before you start", "KICKOFF_F2"));
+  db.setProcessState(wF2.id, "exited"); // free a concurrency-cap slot under mgr1 for anything after
 
   // ===================== (7) REVIEW SPAWN (card 47bbdc3f) =====================
   // A review-only worker's own branch is cut from the TIP of the branch under review — not from HEAD —

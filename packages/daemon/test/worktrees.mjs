@@ -228,9 +228,11 @@ try {
     await deleteBranch(repo, brH1);
 
     // (h2) STALE-branch case (0 ahead ⇒ recutStaleReusedBranch DOES `reset --hard` the worktree onto
-    //      main): a worker hard-stopped WITHOUT ever committing. The reset discards the tracked
-    //      modification (pre-existing recut behavior, unchanged by this fix) but an UNTRACKED file
-    //      survives `reset --hard` — exactly the residue a manager would see running `git status`
+    //      main): a worker hard-stopped WITHOUT ever committing. The reset discards any TRACKED
+    //      modification (pre-existing recut behavior, unchanged by this fix — board card 13cc2300 made
+    //      that discard REPORTABLE via `discardedOnRecut`, see the worktrees.mjs section further down /
+    //      worker-prompt.mjs section (8) for the tracked-edit case; this case has none) but an UNTRACKED
+    //      file survives `reset --hard` — exactly the residue a manager would see running `git status`
     //      themselves post-respawn. Detection must still flag it.
     const tH2 = "reuseddirty-ffff-8888";
     const { worktreePath: wtH2, branch: brH2 } = await createWorktree(repo, "projWT", tH2); // 0 commits ahead
@@ -238,6 +240,7 @@ try {
     const reuseH2 = await createWorktree(repo, "projWT", tH2);
     check("(h2) reusedDirtyWorktree IS set for the untracked-only stale-branch case", reuseH2.reusedDirtyWorktree !== undefined);
     check("(h2) statusSummary names the untracked leftover", reuseH2.reusedDirtyWorktree?.statusSummary.includes("h2-untracked.txt"));
+    check("(h2) discardedOnRecut is ABSENT — nothing TRACKED was dirty here to discard (untracked-only leftover)", reuseH2.discardedOnRecut === undefined);
     await removeWorktree(repo, wtH2);
     await deleteBranch(repo, brH2);
 

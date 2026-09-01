@@ -1,6 +1,6 @@
 import type { Project, RepoRegistryEntry } from "@loom/shared";
 import type { ResolvedRepo } from "../projects/resolve-repo.js";
-import type { ReusedDirtyWorktreeInfo, StaleBaseInfo } from "../git/worktrees.js";
+import type { ReusedDirtyWorktreeInfo, DiscardedOnRecutInfo, StaleBaseInfo } from "../git/worktrees.js";
 
 /**
  * What a REVIEW-ONLY spawn (card 47bbdc3f) needs mechanically injected into its kickoff — the
@@ -119,6 +119,18 @@ export function buildWorkerRepoContext(
  * worktree's content already IS that reviewed branch's committed tip — ordinary Read/Grep is correct by
  * construction, no `git show`/diff gymnastics needed — while also flagging that it's a PINNED SNAPSHOT
  * (a later push to the reviewed branch is not reflected without a fresh spawn).
+ *
+ * `discardedOnRecut` (board card 13cc2300) is likewise OPTIONAL, and deliberately the LAST parameter
+ * (appended rather than inserted earlier) so every existing positional call site — including every test
+ * that composes this prompt without it — stays byte-identical: `undefined` omits the block entirely (a
+ * fresh worktree, a reattached-branch-only worktree, a reused worktree that was already clean, or a
+ * >0-ahead recovery branch that was never recut never sets it). When present, a DISTINCT block from
+ * `dirtyBlock` below fires: `reusedDirtyWorktree` means "this survived and needs reconciling before you
+ * build on it"; this one means the OPPOSITE — prior tracked edits on this reused worktree were ALREADY
+ * DESTROYED by Loom's own pre-spawn re-cut (a 0-ahead branch's `git reset --hard` onto the mainline,
+ * fired before this worker was ever spawned), so there is nothing left in the tree to reconcile — the
+ * block exists purely so a worker whose task looks under-progressed knows WHY, instead of silently
+ * assuming no prior attempt happened.
  */
 export function composeWorkerStartupPrompt(
   brief: string | undefined,
@@ -129,6 +141,7 @@ export function composeWorkerStartupPrompt(
   staleBase?: StaleBaseInfo,
   repoContext?: WorkerRepoContext,
   reviewOf?: ReviewOfInfo,
+  discardedOnRecut?: DiscardedOnRecutInfo,
 ): string {
   const base = brief?.trim();
   const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
@@ -191,6 +204,23 @@ export function composeWorkerStartupPrompt(
       "\nFinish that work if it's good, or revert it (`git checkout .` / `git clean -fd`) before you make " +
       "any new edits — reconcile BEFORE building on top of an unreviewed leftover."
     : "";
+  // Board card 13cc2300 — the OPPOSITE fact from dirtyBlock above: dirtyBlock says "this survived, go
+  // reconcile it"; this says "this did NOT survive — Loom's own pre-spawn re-cut already destroyed it,
+  // there is nothing left in the tree to reconcile." The two are mutually exclusive in practice (a
+  // 0-ahead branch is either recut — possibly discarding work — or left alone as a >0-ahead recovery
+  // branch that dirtyBlock covers instead), but each reads its OWN info object, so nothing here assumes
+  // that exclusivity.
+  const discardedBlock = discardedOnRecut
+    ? "\n\n**ℹ️ Reused worktree — prior tracked work was DISCARDED, not left for you to reconcile:** this " +
+      "worktree was reused from a prior hard-stopped (or rejected-merge) attempt on this task, but its " +
+      "branch had 0 commits ahead of the mainline, so Loom re-cut it onto the current mainline tip " +
+      "BEFORE you were spawned — a `git reset --hard` that discarded these prior tracked edits (they are " +
+      `gone from this worktree; there is nothing here to finish or revert):\n\n\`\`\`\n${discardedOnRecut.statusSummary}\n\`\`\`\n` +
+      (discardedOnRecut.truncated ? `\n(${discardedOnRecut.fileCount} paths total — showing the first ones)\n` : "") +
+      "\nThis worktree now starts clean from the current mainline. If this task looks like it should " +
+      "already have progress and doesn't, that discarded work is why — say so in your report so your " +
+      "manager knows prior work was lost, not simply never attempted."
+    : "";
   const staleBlock = staleBase
     ? "\n\n**⚠ Stale branch base — merge the mainline forward before building:** your branch's history is " +
       `${staleBase.behindBy} commit(s) behind the project's current mainline tip (this branch forked at ` +
@@ -213,5 +243,5 @@ export function composeWorkerStartupPrompt(
       "say so in your report if the timing matters, and ask for a fresh review spawn if you need the " +
       "latest tip."
     : "";
-  return `${block}${refBlock}${repoBlock}${dirtyBlock}${staleBlock}${reviewBlock}\n\n${body}`;
+  return `${block}${refBlock}${repoBlock}${dirtyBlock}${discardedBlock}${staleBlock}${reviewBlock}\n\n${body}`;
 }

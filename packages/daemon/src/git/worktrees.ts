@@ -39,6 +39,20 @@ export interface WorktreeInfo {
    * staleness is STILL THERE for the manager/worker to see.
    */
   staleBase?: StaleBaseInfo;
+  /**
+   * Set ONLY when this call REUSED an existing 0-ahead worktree/branch (the `fs.existsSync(worktreePath)`
+   * branch of {@link createWorktree}) AND {@link recutStaleReusedBranch}'s `git reset --hard` actually
+   * discarded real tracked work in the process (board card 13cc2300). Captured BEFORE that reset — the
+   * only moment the worktree still carries what is about to be destroyed — so it survives to be reported
+   * even though the files themselves do not. DISTINCT from {@link reusedDirtyWorktree}: that field means
+   * "survived and is still dirty" (read AFTER the recut, on whatever a >0-ahead recovery branch or a
+   * daemon-noise-filtered leftover left behind); this one means "was destroyed" (a 0-ahead branch's
+   * tracked edits, reverted to the main-branch version by the reset). A caller must be able to tell the
+   * two facts apart, never conflate them into one field. Absent for a fresh worktree, a reattached-branch-
+   * only worktree, a reused worktree that was already clean, or a >0-ahead recovery branch (never recut —
+   * see {@link mayRecutOntoMain}).
+   */
+  discardedOnRecut?: DiscardedOnRecutInfo;
 }
 
 /** {@link WorktreeInfo.reusedDirtyWorktree} — a bounded summary of a reused worktree's leftover uncommitted work. */
@@ -53,6 +67,14 @@ export interface ReusedDirtyWorktreeInfo {
   /** True when `statusSummary` was capped (by line count or byte length) and does not list every path. */
   truncated: boolean;
 }
+
+/** {@link WorktreeInfo.discardedOnRecut} — same shape as {@link ReusedDirtyWorktreeInfo} (a bounded
+ *  `statusSummary`/`fileCount`/`truncated` triple), a deliberate type ALIAS rather than a duplicate
+ *  interface: the two are structurally identical bounded-porcelain-summary shapes, and reusing the type
+ *  keeps them from drifting apart. The DISTINCT FACT the card requires lives in the FIELD NAME on {@link
+ *  WorktreeInfo}, not the type — see that field's own doc for what separates "destroyed" from "survived
+ *  and still dirty". */
+export type DiscardedOnRecutInfo = ReusedDirtyWorktreeInfo;
 
 /** {@link WorktreeInfo.staleBase} — card 5150fdc2: a reused/reattached branch's base is behind current
  *  main, and no clean auto-forward was possible (see {@link resolveStaleBase}). */
@@ -607,10 +629,23 @@ export function mayRecutOntoMain(aheadRaw: string): boolean {
  * "provably empty" (a timeout can NEVER synthesize a 0-ahead result that reaches {@link
  * mayRecutOntoMain}). A hung child now surfaces as a failed (visible, recoverable) spawn instead of a
  * wedged one — see the card for why that distinction matters on this hot path.
+ *
+ * Board card 13cc2300: for the 0-ahead path, captures whatever the worktree carries as TRACKED work
+ * IMMEDIATELY BEFORE the destructive `reset --hard` below — the only moment it's still there to read —
+ * and returns it as {@link DiscardedOnRecutInfo} so a caller can report what the reset just destroyed.
+ * Delegates to {@link captureDiscardedOnRecut}, which shares its bound/truncation caps and FAIL-SAFE
+ * posture with {@link detectReusedDirtyWorktree} (a capture hiccup reads as "nothing to report", never
+ * blocking or altering the reset) but filters to TRACKED paths ONLY ({@link discardedByResetFiles}) — an
+ * UNTRACKED leftover survives `reset --hard` untouched, so it is never "discarded" by one; it is still
+ * reported, separately, by `createWorktree`'s own post-recut {@link detectReusedDirtyWorktree} read.
+ * `undefined` covers BOTH "the branch was never recut" (>0 ahead, the early return below) and "it was
+ * recut but no TRACKED path was dirty" (an untracked-only leftover, or a genuinely clean reuse) — a
+ * caller cannot distinguish those two from this return value alone, and does not need to: either way
+ * there is nothing destroyed to report.
  */
 async function recutStaleReusedBranch(
   repoPath: string, worktreePath: string, branch: string, deps: BoundedGitDeps = {},
-): Promise<void> {
+): Promise<DiscardedOnRecutInfo | undefined> {
   const { git: repoGit, timeoutMs: repoTimeoutMs } = boundedGit(repoPath, deps);
   const mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), repoTimeoutMs, "git rev-parse HEAD")).trim();
   const aheadRaw = await withTimeout(
@@ -619,16 +654,36 @@ async function recutStaleReusedBranch(
   // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
   // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
   // DESTRUCTIVE reset below (the `|| 0`-treats-NaN-as-0 data-loss footgun). See {@link mayRecutOntoMain}.
-  if (!mayRecutOntoMain(aheadRaw)) return;
+  if (!mayRecutOntoMain(aheadRaw)) return undefined;
+  // Snapshot what's about to be destroyed BEFORE the reset — see this function's own doc above.
+  const discardedOnRecut = await captureDiscardedOnRecut(worktreePath, deps);
   // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
   const { git: wtGit, timeoutMs: wtTimeoutMs } = boundedGit(worktreePath, deps);
   await withTimeout(wtGit.raw(["reset", "--hard", mainSha]), wtTimeoutMs, "git reset --hard");
+  return discardedOnRecut;
 }
 
-/** Cap on {@link ReusedDirtyWorktreeInfo.statusSummary} — enough for a manager (or an injected worker
- *  kickoff note) to see real leftover changes without growing the spawn result/prompt unboundedly. */
+/** Cap on {@link ReusedDirtyWorktreeInfo.statusSummary} (and its {@link DiscardedOnRecutInfo} twin) —
+ *  enough for a manager (or an injected worker kickoff note) to see real leftover changes without growing
+ *  the spawn result/prompt unboundedly. */
 const REUSED_DIRTY_SUMMARY_MAX_LINES = 30;
 const REUSED_DIRTY_SUMMARY_MAX_CHARS = 2000;
+
+/** Bound + shape a real-work file list into the {@link ReusedDirtyWorktreeInfo}/{@link
+ *  DiscardedOnRecutInfo} triple (they're the same type — see that type's own doc) — the ONE place both
+ *  {@link detectReusedDirtyWorktree} and {@link captureDiscardedOnRecut} apply {@link
+ *  REUSED_DIRTY_SUMMARY_MAX_LINES}/{@link REUSED_DIRTY_SUMMARY_MAX_CHARS}, so the two can never apply that
+ *  bound differently. `undefined` on an empty list — "nothing to report" is never a zero-length summary. */
+function summarizeDirtyFiles(files: string[]): ReusedDirtyWorktreeInfo | undefined {
+  if (files.length === 0) return undefined;
+  let truncated = files.length > REUSED_DIRTY_SUMMARY_MAX_LINES;
+  let statusSummary = files.slice(0, REUSED_DIRTY_SUMMARY_MAX_LINES).join("\n");
+  if (statusSummary.length > REUSED_DIRTY_SUMMARY_MAX_CHARS) {
+    statusSummary = statusSummary.slice(0, REUSED_DIRTY_SUMMARY_MAX_CHARS);
+    truncated = true;
+  }
+  return { statusSummary, fileCount: files.length, truncated };
+}
 
 /**
  * Read-only check (board card 2250836c) for the `fs.existsSync(worktreePath)` REUSE branch of {@link
@@ -647,17 +702,50 @@ async function detectReusedDirtyWorktree(worktreePath: string, deps: BoundedGitD
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
     const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
-    const files = uncommittedWorkFiles(porcelain);
-    if (files.length === 0) return undefined;
-    let truncated = files.length > REUSED_DIRTY_SUMMARY_MAX_LINES;
-    let statusSummary = files.slice(0, REUSED_DIRTY_SUMMARY_MAX_LINES).join("\n");
-    if (statusSummary.length > REUSED_DIRTY_SUMMARY_MAX_CHARS) {
-      statusSummary = statusSummary.slice(0, REUSED_DIRTY_SUMMARY_MAX_CHARS);
-      truncated = true;
-    }
-    return { statusSummary, fileCount: files.length, truncated };
+    return summarizeDirtyFiles(uncommittedWorkFiles(porcelain));
   } catch {
     return undefined; // FAIL SAFE — a status-check hiccup must never block or alter the spawn
+  }
+}
+
+/**
+ * Board card 13cc2300 — the {@link uncommittedWorkFiles} paths a `git reset --hard` will actually revert:
+ * TRACKED entries only (status not `??`). An untracked file is untouched by `reset --hard` and survives
+ * it, so it must never be reported as "discarded" — that distinction is the whole point of this filter
+ * existing separately from {@link uncommittedWorkFiles} itself. Implemented as a POST-filter on that
+ * function's own already-daemon-noise-filtered output (re-parsing the porcelain only for each line's
+ * status char) rather than a parallel parsing loop, so the two can never drift on what counts as daemon
+ * noise vs. real work — only the tracked/untracked split is new here.
+ */
+function discardedByResetFiles(porcelain: string): string[] {
+  const tracked = new Set<string>();
+  for (const line of porcelain.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked — reset --hard leaves it.
+    if (line.slice(0, 2) === "??") continue;
+    let p = line.slice(3);
+    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
+    tracked.add(p);
+  }
+  return uncommittedWorkFiles(porcelain).filter((p) => tracked.has(p));
+}
+
+/**
+ * Board card 13cc2300 — the pre-recut twin of {@link detectReusedDirtyWorktree}: same read (`git status
+ * --porcelain`), same bound ({@link summarizeDirtyFiles}), same FAIL-SAFE posture (a capture hiccup reads
+ * as "nothing to report", never blocking or altering the caller's reset) — but filtered through {@link
+ * discardedByResetFiles} instead of {@link uncommittedWorkFiles}, so it names only what a `reset --hard`
+ * actually destroys (tracked work), never an untracked leftover that will survive the reset untouched.
+ * Called by {@link recutStaleReusedBranch} IMMEDIATELY BEFORE that reset — the only moment this is still
+ * true to read.
+ */
+async function captureDiscardedOnRecut(worktreePath: string, deps: BoundedGitDeps = {}): Promise<DiscardedOnRecutInfo | undefined> {
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
+    return summarizeDirtyFiles(discardedByResetFiles(porcelain));
+  } catch {
+    return undefined; // FAIL SAFE — a capture hiccup must never block or alter the reset
   }
 }
 
@@ -751,6 +839,16 @@ async function resolveStaleBase(
  * carrying unmerged work (recovery) is left untouched. The fresh `-b` path already cuts off current
  * HEAD, so it needs no re-cut.
  *
+ * ⚠️ THAT RE-CUT IS DESTRUCTIVE, AND THIS IS DELIBERATE, NOT A BUG (board card 13cc2300): for the
+ * worktree-dir-present reuse path, a 0-ahead branch's `reset --hard` discards any tracked edits still in
+ * that worktree (e.g. a worker hard-stopped mid-edit, before its first commit) — untracked leftovers
+ * survive, tracked ones do not. This trade is intentionally kept, not something this function (or its
+ * caller) is meant to opt out of on its own judgement. What this function DOES do about it: {@link
+ * recutStaleReusedBranch} snapshots whatever it's about to discard immediately before the reset and
+ * returns it as {@link WorktreeInfo.discardedOnRecut}, so the loss is at least reportable even though the
+ * files themselves are gone — see that field's own doc for how it differs from {@link
+ * WorktreeInfo.reusedDirtyWorktree} (survived vs. destroyed).
+ *
  * `repoKey` (multi-repo epic 49136451 phase 2) adds a REPO AXIS to the worktree dir for a NON-primary
  * repo: `WORKTREES_DIR/projectId/<repoKey>/<taskKey>` instead of `WORKTREES_DIR/projectId/<taskKey>`, so
  * a task re-targeted across repos (or two different tasks on two different registry repos) can never
@@ -800,8 +898,11 @@ export async function createWorktree(
   const mainSha = (await withTimeout(headGit.raw(["rev-parse", "HEAD"]), headTimeoutMs, "git rev-parse HEAD")).trim();
   if (fs.existsSync(worktreePath)) {
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
-    // first; a recovery branch (unmerged work) is left exactly as-is.
-    await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
+    // first; a recovery branch (unmerged work) is left exactly as-is. Board card 13cc2300: for a 0-ahead
+    // branch this is exactly the DESTRUCTIVE step — recutStaleReusedBranch snapshots what it's about to
+    // discard BEFORE the reset (the only moment it's still there), so it can still be reported below even
+    // though detectReusedDirtyWorktree's own post-recut read (next) will find it already gone.
+    const discardedOnRecut = await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Board card 2250836c: surface (never clean) any real leftover uncommitted work on this reused
     // worktree — read-only, runs after the recut above so it reports the ACTUAL post-recut state.
     const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath, gitDeps);
@@ -812,6 +913,7 @@ export async function createWorktree(
     const staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
     return {
       worktreePath, branch, mainSha,
+      ...(discardedOnRecut ? { discardedOnRecut } : {}),
       ...(reusedDirtyWorktree ? { reusedDirtyWorktree } : {}),
       ...(staleBase ? { staleBase } : {}),
     };
@@ -958,7 +1060,12 @@ export async function createWorktree(
   let staleBase: StaleBaseInfo | undefined;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
-    // recovery branch (unmerged work) → untouched.
+    // recovery branch (unmerged work) → untouched. This worktree dir did NOT exist a moment ago (the
+    // `fs.existsSync` check above was false) — `git worktree add` just cut a FRESH checkout of the
+    // branch's own committed tip, so there is structurally nothing dirty for the recut below to discard;
+    // its `discardedOnRecut` return is intentionally not surfaced on this path (see {@link
+    // WorktreeInfo.reusedDirtyWorktree}'s own doc: "a reattached-branch-only worktree (always a clean
+    // fresh checkout)" — the same reasoning applies here).
     await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Card 5150fdc2 parts 1+3 — same detect+auto-forward as the dir-exists reuse path above, BEFORE
     // provisionWorktreeDeps below so a package.json/lockfile change the forward brings in is what

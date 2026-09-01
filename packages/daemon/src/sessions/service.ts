@@ -16,7 +16,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
@@ -6421,7 +6421,7 @@ export class SessionService {
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -6721,7 +6721,7 @@ export class SessionService {
       // in — never always-primary — so the review target's own resolved repo wins over the normal
       // taskId-or-primary resolution below.
       const targetRepo = reviewForkFrom ? reviewForkFrom.repo : resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
-      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key, reviewForkFrom?.branch);
+      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key, reviewForkFrom?.branch);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
       // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
@@ -6795,7 +6795,7 @@ export class SessionService {
             appendMemoryRecallToStartupPrompt(
               // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
               // session row above — the same resolution, so the prompt can never disagree with the worktree.
-              composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
+              composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut),
               this.resolveCodescapeBlockText(project),
             ),
             workerProjectMemoryFramed,
@@ -6867,7 +6867,7 @@ export class SessionService {
       if (taskId) this.capQueue.clearForTask(taskId);
       else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
       const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
-      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, staleBase, reviewOf };
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -6902,10 +6902,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
     );
