@@ -37,11 +37,23 @@ export interface MergeDangerWindowEntry {
 const activeDangerWindows = new Map<string, MergeDangerWindowEntry>();
 
 /**
- * Called by `mergeBranchLocked` right before its first mutating git call in this attempt (the squash) —
- * never before, so a rejection that returns with zero side effects (e.g. `gateBaseInvalidated`, caught
- * before any write) never marks this repo as being in the danger window at all. Updates the in-memory Map
- * AND durably persists the SAME fact via {@link writeMergeDangerLatch} (synchronous, atomic, never
- * throws) — one call, two persistence layers, so the two can never drift out of sync with each other.
+ * Called by `mergeBranchLocked` right before `git merge --squash` — the call whose interrupted state (a
+ * staged, uncommitted diff) is the actual "trigger-3" hazard this module exists to close. A rejection
+ * that returns with zero side effects before this call (e.g. `gateBaseInvalidated`, caught before any
+ * write) never marks this repo as being in the danger window at all. Updates the in-memory Map AND
+ * durably persists the SAME fact via {@link writeMergeDangerLatch} (synchronous, atomic, never throws)
+ * — one call, two persistence layers, so the two can never drift out of sync with each other.
+ *
+ * ⚠️ NOT literally the attempt's first mutating git call, despite this module's own name (board card
+ * c6a6f405 item 3 — corrects a prior version of this doc that claimed otherwise). When stale
+ * in-progress-merge residue survives from an earlier interrupted attempt, `mergeBranchLocked`'s entry
+ * check runs its OWN earlier `git reset --merge HEAD` to clear it (card 9e77050f/06b5c47f) — a real
+ * mutating call, outside this window and outside the durable latch. Left uncovered deliberately narrow:
+ * that clear only ever runs when residue ALREADY exists, and it only ever resets to the CURRENT HEAD (it
+ * can't manufacture new staged content), so a death mid-clear reproduces the same pre-existing
+ * unattributed-dirty-tree shape at a much smaller blast radius than the squash itself — not a new
+ * regression this window needs to widen to cover. See git/worktrees.ts's residue-clear block (searches:
+ * "residue clear") for the call site and its own cross-reference back here.
  */
 export function enterMergeDangerWindow(repoPath: string, branch: string, opId?: string): void {
   activeDangerWindows.set(canonicalRepoLockKey(repoPath), { repoPath, branch, opId, enteredAt: Date.now() });

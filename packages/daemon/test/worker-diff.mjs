@@ -15,6 +15,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, removeWorktree, deleteBranch, mergeBranch, diffBranch, workerDiff } =
   await import("../dist/git/worktrees.js");
+const { boundedSimpleGit } = await import("../dist/git/bounded.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -96,6 +97,50 @@ try {
     check("(4) no branch → null", (await workerDiff(repo, { branch: null, worktreePath: null })) === null);
     check("(4) unknown branch, no worktree, no merge commit → null",
       (await workerDiff(repo, { branch: "loom/deadbeef", worktreePath: null })) === null);
+  }
+
+  // ── CASE 5 — bounded git calls (card c6a6f405 item 1): workerDiff's stage-1 (uncommitted-worktree)
+  // merge-base/diffSummary/diff calls, and its stage-2 branchExists() check, were bare `simpleGit(...)`
+  // with no timeout and no injectable seam at all — this is what makes a RED-before-the-fix reproduction
+  // for these two stages impossible: the seam itself is the fix, so there is nothing to inject against on
+  // pre-fix code. Instead, this proves the wiring is real: an injected `gitFactory` whose `raw`/
+  // `diffSummary`/`diff` all REJECT IMMEDIATELY with a distinctive sentinel must be reached by EVERY
+  // stage that runs — if `deps` is genuinely threaded through, every stage's real git call is replaced by
+  // the rejection, so all stages fail and workerDiff falls through to null. If `deps` were silently
+  // ignored (the old, pre-fix shape), the REAL git underneath would run unaffected and return the real
+  // uncommitted diff instead of null — so `d === null` only holds when the injection actually lands.
+  {
+    const { worktreePath, branch } = await createWorktree(repo, "projWD", "bounded-dddd-4444");
+    fs.writeFileSync(path.join(worktreePath, "README.md"), "# v1\nbounded-check edit\n"); // uncommitted, so stage 1 is live
+    const SENTINEL = "INJECTED-FAKE-c6a6f405-stage1-2";
+    const rejectSentinel = () => Promise.reject(new Error(SENTINEL));
+    const gitFactory = () => ({ raw: rejectSentinel, diffSummary: rejectSentinel, diff: rejectSentinel });
+    const d = await workerDiff(repo, { branch, worktreePath }, { gitFactory, timeoutMs: 5000 });
+    check("(5) injected gitFactory reaches stage 1 + stage 2's git calls (deps threaded through) → falls through to null", d === null);
+    await removeWorktree(repo, worktreePath);
+    await deleteBranch(repo, branch);
+  }
+
+  // ── CASE 6 — same proof, isolating stage 3 specifically (the merged-branch path's own
+  // `git.diffSummary`/`git.diff`, also bare `simpleGit(repoPath)` before this fix). Uses a REAL bounded
+  // git instance (via boundedSimpleGit) for `.raw` — so findLandedSquashCommit's own trailer lookup
+  // genuinely SUCCEEDS and finds the real sha — but rejects with the sentinel ONLY on `diffSummary`/
+  // `diff`, isolating stage 3's own two calls from findLandedSquashCommit's already-bounded internals.
+  {
+    const { worktreePath, branch } = await createWorktree(repo, "projWD", "bounded-eeee-5555");
+    commitInto(worktreePath, "landed2.txt", "stage-3 bound check\n", "landed2 commit");
+    const merged = await mergeBranch(repo, branch, "Landed task 2 (bound check)");
+    check("(6 setup) clean squash merge", merged.ok === true);
+    await removeWorktree(repo, worktreePath);
+    await deleteBranch(repo, branch);
+    const SENTINEL = "INJECTED-FAKE-c6a6f405-stage3";
+    const rejectSentinel = () => Promise.reject(new Error(SENTINEL));
+    const gitFactory = (repoPathArg, ms) => {
+      const real = boundedSimpleGit(repoPathArg, ms);
+      return { raw: (...args) => real.raw(...args), diffSummary: rejectSentinel, diff: rejectSentinel };
+    };
+    const d = await workerDiff(repo, { branch, worktreePath: null }, { gitFactory, timeoutMs: 5000 });
+    check("(6) stage 3's own diffSummary/diff calls are reached via the injected deps (real git found the sha, diffSummary/diff rejected) → falls through to null", d === null);
   }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });

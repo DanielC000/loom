@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { simpleGit, type SimpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
 import { withTimeout, withTimeoutKillingChild, boundedSimpleGit } from "./bounded.js";
@@ -1331,6 +1331,20 @@ const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
  *
+ * UNLOCKED BY DESIGN, not an oversight (board card c6a6f405 item 2 — filed as a reviewer QUESTION, not
+ * a data-loss finding, and left that way here). `git worktree remove -f -f` + the trailing `prune`
+ * below mutate the SAME shared `.git/worktrees/` admin state {@link createWorktree} takes {@link
+ * withCanonicalIndexLock} for (card 2fcd5eae's "prune → branch --list → add is a multi-step
+ * read-modify-write" rationale) — but this function does NOT take that lock, and runs concurrently with
+ * spawns (`finalizeMerge`, boot-reconcile Pass B, the wedge sweep). Judged safe today because git's own
+ * `locked`/`initializing` admin marker makes a concurrent `prune` SKIP an in-flight `add` BY DESIGN —
+ * the realistic overlap this function can actually race against.
+ * ⚠️ THE LOCK IS NOT RE-ENTRANT: this function's one caller (`SessionService`'s worktree-GC path,
+ * sessions/service.ts) never holds it, and `finalizeMerge` only calls this function AFTER `mergeBranch`
+ * has fully released the lock — but a FUTURE caller invoking this from inside an already-held
+ * `withCanonicalIndexLock` block would DEADLOCK. Before wrapping this call in the lock reflexively,
+ * confirm no caller holds it first, or give this function (and its callers) a re-entrancy story.
+ *
  * Windows handle-release race: when a worker is hard-stopped just before its worktree is removed
  * (the merge path — confirmWorkerMerge), node-pty's exit event fires when the process SIGNALS
  * exit, but the OS releases the worktree's directory handle a beat later. `git worktree remove`
@@ -2229,10 +2243,17 @@ export interface WorkerDiff {
   merged?: boolean;
 }
 
-/** Does `branch` still exist as a ref in `repoPath`? (A completed merge deletes it.) */
-async function branchExists(repoPath: string, branch: string): Promise<boolean> {
+/**
+ * Does `branch` still exist as a ref in `repoPath`? (A completed merge deletes it.) BOUNDED (card
+ * c6a6f405 — mirrors {@link branchExistsInRepo}/{@link deleteBranch}/{@link isBranchMerged}, every
+ * sibling git op in this file): a hung `git branch --list` must not wedge workerDiff's on-demand HTTP
+ * request indefinitely; was previously a bare `simpleGit(repoPath)` with no block-timeout and no
+ * {@link withTimeout} race.
+ */
+async function branchExists(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<boolean> {
   try {
-    return (await simpleGit(repoPath).raw(["branch", "--list", branch])).trim() !== "";
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    return (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list (workerDiff branchExists)")).trim() !== "";
   } catch {
     return false;
   }
@@ -3508,23 +3529,29 @@ export async function findLandedSquashCommit(
  * Returns null only when there is genuinely nothing to show (no branch + no worktree, or a merged
  * branch whose merge commit can't be located) — the caller renders that as an honest "no diff".
  *
- * NOT bounded like the boot-reconcile ops: this runs on-demand per HTTP request, so a wedged git
- * child hangs only that one request, never daemon boot. Each stage is guarded so a failure falls
- * through to the next rather than throwing the whole call.
+ * BOUNDED (card c6a6f405): every git call below now goes through the same {@link boundedDiffGit} +
+ * {@link withTimeout} convention {@link diffBranch} already uses — a busy/locked repo now fails within
+ * the file's normal ~{@link GIT_OP_TIMEOUT_MS} bound instead of hanging indefinitely. This still runs
+ * on-demand per HTTP request (never at boot), so even before this fix a wedged child only ever blocked
+ * that one request, never daemon boot — but "only one request" is not the same as "fine to hang
+ * forever," which is why this now gets the same bound as every sibling git op in this file. Each stage
+ * is still guarded so a failure falls through to the next rather than throwing the whole call.
  */
 export async function workerDiff(
   repoPath: string,
   opts: { branch: string | null; worktreePath: string | null },
+  deps: DiffBranchDeps = {},
 ): Promise<WorkerDiff | null> {
   const { branch, worktreePath } = opts;
 
   // 1. Live/retained worktree → include uncommitted work (diff from spawn point to the working tree).
   if (branch && worktreePath && fs.existsSync(worktreePath)) {
     try {
-      const base = (await simpleGit(repoPath).raw(["merge-base", "HEAD", branch])).trim();
-      const wt = simpleGit(worktreePath);
-      const summary = await wt.diffSummary([base]); // <base> with one arg = base..WORKING-TREE
-      const patch = await wt.diff([base]);
+      const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
+      const base = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (workerDiff uncommitted)")).trim();
+      const { git: wt } = boundedDiffGit(worktreePath, deps);
+      const summary = await withTimeout(wt.diffSummary([base]), timeoutMs, "git diff --stat (workerDiff uncommitted)"); // <base> with one arg = base..WORKING-TREE
+      const patch = await withTimeout(wt.diff([base]), timeoutMs, "git diff (workerDiff uncommitted)");
       return {
         filesChanged: summary.files.length, insertions: summary.insertions,
         deletions: summary.deletions, patch, uncommitted: true,
@@ -3533,20 +3560,20 @@ export async function workerDiff(
   }
 
   // 2. Branch still on the canonical repo (committed, not yet merged) → committed 3-dot diff.
-  if (branch && await branchExists(repoPath, branch)) {
-    try { return await diffBranch(repoPath, branch); } catch { /* fall through */ }
+  if (branch && await branchExists(repoPath, branch, deps)) {
+    try { return await diffBranch(repoPath, branch, "HEAD", {}, deps); } catch { /* fall through */ }
   }
 
   // 3. Branch merged + deleted → reconstruct the landed diff from the SQUASH commit, found by the
   //    deterministic Loom-Worker-Branch trailer (under squash there is no merge commit to grep for).
   if (branch) {
     try {
-      const sha = await findLandedSquashCommit(repoPath, branch);
+      const sha = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
       if (sha) {
-        const git = simpleGit(repoPath);
+        const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
         const range = `${sha}^..${sha}`; // the squash commit's own changes (single parent)
-        const summary = await git.diffSummary([range]);
-        const patch = await git.diff([range]);
+        const summary = await withTimeout(git.diffSummary([range]), timeoutMs, "git diff --stat (workerDiff merged)");
+        const patch = await withTimeout(git.diff([range]), timeoutMs, "git diff (workerDiff merged)");
         return {
           filesChanged: summary.files.length, insertions: summary.insertions,
           deletions: summary.deletions, patch, merged: true,
@@ -4082,8 +4109,9 @@ async function resolveMergedCommitMapHit(
 ): Promise<ResolvedMergedHit | null> {
   try {
     // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
-    // OWN `branch --list` check exactly) — NOT the shared branchExists() helper, whose bare `simpleGit()`
-    // has no block-timeout and no withTimeout race.
+    // OWN `branch --list` check exactly) — NOT the shared (workerDiff-private) branchExists() helper,
+    // which as of card c6a6f405 is also bounded but would construct its own separate bounded git client
+    // for the same repo; reusing this one instance avoids that redundant construction.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     const branchPresent = (await withTimeout(
       git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
@@ -4702,6 +4730,10 @@ async function mergeBranchLocked(
       };
     }
   }
+  // ── residue clear ── (card c6a6f405 item 3: this block's own `git reset --merge HEAD` below is a real
+  // mutating git call that runs BEFORE `enterMergeDangerWindow` — see that function's own doc in
+  // merge-danger-window.ts for why it's deliberately left outside the danger window/latch instead of
+  // moving the window's entry earlier to cover it.)
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
   // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is
