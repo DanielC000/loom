@@ -8029,6 +8029,13 @@ export class PtyHost {
       // together. Only a message with a GENUINE (non-null) senderId ever participates in this branch.
       const key = routeKeyOf(head.route);
       const senderKey = head.senderId ?? null;
+      // Card 66b78175: `submit()` below reads `drained[0]!.proactive` HEAD-ONLY (like route/senderId,
+      // NOT per-member) — so unlike route/senderId this run must equalize `proactive` itself, or a
+      // proactive-tagged tail member silently loses its flag the instant it coalesces behind a
+      // non-proactive head (or vice versa). `proactive` is always a real boolean by the time an entry
+      // reaches `pending` (enqueueStdin defaults the param to `false`, never leaves it undefined), but
+      // the `?? false` here matches the defensive style already used for `senderId` just above.
+      const proactiveKey = head.proactive ?? false;
       let n = 1;
       // Card f41d6617: bound on `projectedWrittenLength` (what `joinSubmittedText` will actually write
       // for this member), not `m.text.length` — the pristine length undercounts a real write by
@@ -8046,6 +8053,7 @@ export class PtyHost {
           && live.pending[startIdx + n]!.giveUpGen === undefined
           && routeKeyOf(live.pending[startIdx + n]!.route) === key
           && (live.pending[startIdx + n]!.senderId ?? null) === senderKey
+          && (live.pending[startIdx + n]!.proactive ?? false) === proactiveKey
           && bytes + DRAIN_SEPARATOR.length + projectedWrittenLength(live.pending[startIdx + n]!, live.submitGeneration) <= AGENT_COALESCE_MAX_BYTES
         ) {
           bytes += DRAIN_SEPARATOR.length + projectedWrittenLength(live.pending[startIdx + n]!, live.submitGeneration);
