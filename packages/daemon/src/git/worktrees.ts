@@ -1216,6 +1216,24 @@ const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
  *     abandoned; only a long give-up bound stops the retries.
  * Returns `{removed, wedged}` so the caller can decide how to track/retry it, without re-deriving the
  * same `fs.existsSync` check itself.
+ *
+ * Card 79b8d8a9: uses `-f -f` (not a single `--force`), git's own documented override for a LOCKED
+ * admin record (e.g. the `.git/worktrees/<name>/locked` residue a killed `worktree add` can leave —
+ * card 1a858805). Against a locked record, single `--force` refuses outright ("cannot remove a locked
+ * working tree"); the filesystem backstop below still deletes the directory anyway, but the trailing
+ * `prune` SKIPS locked records BY DESIGN, so the admin record survived forever and the next `worktree
+ * add` at that path failed with "is a missing but locked worktree" — a real, verified bug this closes.
+ *
+ * This is judged SAFE, not merely convenient, because the second `-f` adds NO destructive capability
+ * beyond what this function's own filesystem backstop already exercises today: (1) git's SINGLE
+ * `--force` already deletes tracked-dirty and untracked files on an ordinary (non-locked) worktree —
+ * verified against real git — so `-f -f` changes nothing for that, the overwhelmingly common, case
+ * (the second force bit only ever gates the LOCKED/corrupted-HEAD check, per git's own semantics); and
+ * (2) even when the git removal fails for ANY reason (locked or not), the filesystem backstop below
+ * runs UNCONDITIONALLY and deletes the directory's contents regardless of dirty/uncommitted state — so
+ * a locked-and-dirty worktree ALREADY loses its uncommitted files today, via the backstop, before this
+ * change. `-f -f` therefore does not create a new way to lose work; it only makes git's own admin
+ * bookkeeping match what the backstop already does to the filesystem, closing the ghost-record gap.
  */
 export async function removeWorktree(
   repoPath: string,
@@ -1224,7 +1242,7 @@ export async function removeWorktree(
 ): Promise<{ removed: boolean; wedged: boolean }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
-    await withTimeout(git.raw(["worktree", "remove", worktreePath, "--force"]), timeoutMs, "git worktree remove");
+    await withTimeout(git.raw(["worktree", "remove", worktreePath, "-f", "-f"]), timeoutMs, "git worktree remove");
   } catch {
     // A hang (timeout-kill), a busy handle, or git already de-registering the worktree without
     // deleting the dir — all fall through to the filesystem backstop.
