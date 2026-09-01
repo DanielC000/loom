@@ -41,7 +41,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
 import { currentDeployStaleness } from "../served-status.js";
 import type { DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
@@ -3584,7 +3584,7 @@ export class SessionService {
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
     deps: { buildDeps?: BuildDeps; exit?: (code: number) => void } = {},
-  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorWarning?: string }> {
+  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string }> {
     const caller = this.db.getSession(callerSessionId);
     if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
       throw new Error("only a manager or the platform Lead can restart the daemon");
@@ -3599,10 +3599,14 @@ export class SessionService {
     // Best-effort advisory: does the diff going live touch the outer supervisor script? daemon_restart
     // re-execs only the daemon process, never the supervisor that spawned it, so a change there is
     // silently inert until a manual `pnpm daemon:stable` — flag it now so an agent never reports the
-    // deploy fully live when part of it isn't. A detection failure (git unavailable/timeout) degrades
-    // to `false`, never blocking the restart itself.
+    // deploy fully live when part of it isn't. Card 2e84a250: a detection FAILURE is now a THIRD,
+    // distinguishable state (`supervisorCheck.status === "could-not-check"`), never blocking the restart
+    // itself — see `supervisorCheckResponseFields`'s own doc for why "unchanged" must stay indistinguishable
+    // from the pre-card response shape while "could-not-check" must not be.
     const bootTime = new Date(Date.now() - process.uptime() * 1000);
-    const supervisorChanged = await supervisorScriptChangedSince(bootTime);
+    const supervisorCheck = await supervisorScriptChangedSince(bootTime);
+    const supervisorChanged = supervisorCheck.status === "changed";
+    const supervisorResponseFields = supervisorCheckResponseFields(supervisorCheck);
     // A restart is the riskiest moment (a bad merge that just built clean can still wedge boot) — snapshot
     // the DB before we exit, after the green build. Best-effort: takeBackup never throws, so a backup
     // failure can NEVER block the restart. `this.db` is live here (unlike index.ts's pre-migration boot
@@ -3700,14 +3704,18 @@ export class SessionService {
       ...(Object.keys(pendingMintedAt).length > 0 ? { pendingMintedAt } : {}),
       ...(Object.keys(capQueuedSnapshot).length > 0 ? { capQueued: capQueuedSnapshot } : {}),
       ...(supervisorChanged ? { supervisorChanged: true } : {}),
+      // Card 2e84a250: the sibling stamp for a FAILED check — see RestartIntent.supervisorCheckFailed's
+      // own doc for why this is a separate field rather than folding into `supervisorChanged` above.
+      ...(supervisorCheck.status === "could-not-check" ? { supervisorCheckFailed: true } : {}),
     });
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
-    // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
+    // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent. NOTE: this
+    // immediate response is returned into a session that is about to be KILLED by that exit — the
+    // requester's RELIABLE read surface is the post-restart nudge (resumeFleetOnBoot, below), fed by the
+    // SAME `supervisorResponseFields`-shaped distinction via the persisted intent stamped just above.
     const exit = deps.exit ?? ((code: number) => process.exit(code));
     setTimeout(() => exit(RESTART_EXIT_CODE), 300);
-    return supervisorChanged
-      ? { restarting: true, supervisorChanged: true, supervisorWarning: SUPERVISOR_CHANGED_WARNING }
-      : { restarting: true };
+    return { restarting: true, ...supervisorResponseFields };
   }
 
   /**
@@ -5197,6 +5205,15 @@ export class SessionService {
           : intent.supervisorChanged
           ? `your merged daemon code is now live in the running daemon EXCEPT the supervisor script itself ` +
             `— a human must run \`pnpm daemon:stable\` for those lines to take effect`
+          // Card 2e84a250: the sibling of the branch above, for a FAILED (not a confirmed) check —
+          // mutually exclusive with intent.supervisorChanged (both derive from the SAME check; see
+          // RestartIntent.supervisorCheckFailed's own doc). Worded as bluntly as SUPERVISOR_CHECK_FAILED_WARNING
+          // on purpose: this is the exact case the card exists to stop reading as a clean negative.
+          : intent.supervisorCheckFailed
+          ? `your merged daemon code is now live in the running daemon, but whether it ALSO touches the ` +
+            `supervisor script itself could NOT be confirmed — the check failed (see the daemon log for ` +
+            `the underlying error); treat that as UNKNOWN, not confirmed unchanged — verify directly or ` +
+            `run \`pnpm daemon:stable\` if in doubt`
           : `your merged daemon code is now LIVE in the running daemon`;
         // Card 6d6b1b7b: same worktreeNoteFor helper as the non-requester manager/platform branch above —
         // NOT applied to the platform-Lead reqText branch just below, matching its existing "no

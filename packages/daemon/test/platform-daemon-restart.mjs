@@ -331,6 +331,92 @@ class ControllableMcpPty {
   rmDb(file);
 }
 
+// --- (N-SCF1) card 2e84a250: supervisorCheckFailed:true — the SIBLING of (N4): a MANAGER requester's
+// nudge must say the check ITSELF failed (unknown), not that a confirmed change was found and NOT the
+// unconditional "now LIVE" claim either. This is the whole point of card 2e84a250 — the manager's most
+// reliable read surface (this post-restart nudge — the immediate MCP daemon_restart response returns
+// into a session about to be killed by the restart itself) must not collapse could-not-check back onto
+// a genuine unchanged. ---
+{
+  const file = tmpDbFile("nudge-mgr-scf");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npscf", name: "NPSCF", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nascf", projectId: "npscf", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqMgrSCF", projectId: "npscf", agentId: "nascf", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy, supervisor check failed", managerSessionId: "reqMgrSCF", requestedAt: now, supervisorCheckFailed: true, resume: [{ sessionId: "reqMgrSCF", role: "manager", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+  pty.markMcpSeen("reqMgrSCF"); // manager requester's nudge is gated behind waitForMcpSeen — see (N1)
+  await flush();
+  const msgs = pty.getPending("reqMgrSCF");
+  check("(N-SCF1) supervisorCheckFailed:true — the manager requester's nudge says the check FAILED and treats it as UNKNOWN",
+    msgs.length === 1 && /could NOT be confirmed/.test(msgs[0]) && /UNKNOWN/.test(msgs[0]));
+  check("(N-SCF1) it drops the unconditional 'now LIVE in the running daemon' claim it makes in the common case",
+    !/now LIVE in the running daemon/.test(msgs[0]));
+  check("(N-SCF1) it does NOT use the supervisorChanged (confirmed-change) wording — could-not-check must not be mistaken for a confirmed change either",
+    !/EXCEPT the supervisor script itself/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N-SCF2) card 2e84a250: supervisorCheckFailed:true — the PLATFORM (Lead) requester gets the SAME
+// could-not-check wording as the manager branch above (both branches share the one ternary). ---
+{
+  const file = tmpDbFile("nudge-plat-scf");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npscf2", name: "NPSCF2", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nascf2", projectId: "npscf2", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqPlatSCF", projectId: "npscf2", agentId: "nascf2", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy, supervisor check failed", managerSessionId: "reqPlatSCF", requestedAt: now, supervisorCheckFailed: true, resume: [{ sessionId: "reqPlatSCF", role: "platform", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+  await flush();
+  const msgs = pty.getPending("reqPlatSCF");
+  check("(N-SCF2) supervisorCheckFailed:true — the platform Lead requester's nudge ALSO says the check failed / UNKNOWN",
+    msgs.length === 1 && /could NOT be confirmed/.test(msgs[0]) && /UNKNOWN/.test(msgs[0]) && !/now LIVE in the running daemon/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
+// --- (N-SCF3) card 2e84a250: supervisorChanged:true AND supervisorCheckFailed:true set TOGETHER is not
+// a real production state (the two derive from ONE check and are mutually exclusive by construction —
+// see RestartIntent.supervisorCheckFailed's own doc) — but the ternary's declared precedence (checked in
+// source order: deploySignatureMismatch, then supervisorChanged, then supervisorCheckFailed) should still
+// resolve deterministically rather than accidentally OR silently combining both wordings, so this pins
+// that the confirmed-change wording wins if both are ever set. ---
+{
+  const file = tmpDbFile("nudge-mgr-scf-both");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "npscfboth", name: "NPSCFBOTH", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "nascfboth", projectId: "npscfboth", name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: "reqMgrSCFBoth", projectId: "npscfboth", agentId: "nascfboth", engineSessionId: null, title: null, cwd: "/x", processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  const pty = new ControllableMcpPty();
+  const sessions = new SessionService(db, pty, new OrchestrationControl());
+  const intent = { reason: "deploy", managerSessionId: "reqMgrSCFBoth", requestedAt: now, supervisorChanged: true, supervisorCheckFailed: true, resume: [{ sessionId: "reqMgrSCFBoth", role: "manager", parentSessionId: null }] };
+
+  sessions.resumeFleetOnBoot(intent, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+  pty.markMcpSeen("reqMgrSCFBoth");
+  await flush();
+  const msgs = pty.getPending("reqMgrSCFBoth");
+  check("(N-SCF3) both flags set (non-production shape) — the confirmed-change wording wins, per the ternary's declared source-order precedence",
+    msgs.length === 1 && /EXCEPT the supervisor script itself/.test(msgs[0]) && !/could NOT be confirmed/.test(msgs[0]));
+
+  db.close();
+  rmDb(file);
+}
+
 // --- (N7) card 062fa934: deploySignatureMismatch:true — a MANAGER requester's "code is live" claim is
 // WITHHELD (not a refusal — the restart already happened; only the assurance is gated). Checked FIRST,
 // ahead of supervisorChanged (a strictly stronger doubt — see service.ts's own comment at the liveClaim

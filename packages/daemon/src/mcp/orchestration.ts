@@ -4015,7 +4015,14 @@ export class OrchestrationMcpRouter {
           "deploy going live also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this " +
           "daemon and is NOT re-execed by this restart), the success result additionally carries " +
           "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does a " +
-          "manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 062fa934: the " +
+          "manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 2e84a250: if " +
+          "that check ITSELF fails (e.g. git unavailable) the result instead carries " +
+          "{supervisorCheckFailed:true, supervisorWarning} — a DIFFERENT, mutually-exclusive pair of fields, " +
+          "never folded into supervisorChanged/false — treat this as UNKNOWN whether the supervisor script " +
+          "changed, not as a confirmed-clean deploy; the SAME distinction also appears on the post-restart " +
+          "resume nudge you receive once the fleet comes back (this immediate response returns into a " +
+          "session about to be killed by the restart itself, so that nudge is your reliable read of it). " +
+          "Card 062fa934: the " +
           "post-restart resume nudge you receive may likewise WITHHOLD its usual 'your merged daemon code is " +
           "now LIVE' assurance if the freshly-restarted process's own build signature can't be confirmed " +
           "(`deploySignatureMismatch` — a turbo cache-replay signature; see `served_status`) — that is a notice " +

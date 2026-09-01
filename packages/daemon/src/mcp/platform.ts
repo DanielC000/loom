@@ -1732,7 +1732,13 @@ export class PlatformMcpRouter {
           "also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this daemon and is " +
           "NOT re-execed by this restart), the success result additionally carries " +
           "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does " +
-          "a manual `pnpm daemon:stable`; never report that part of the change as fully live.",
+          "a manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 2e84a250: " +
+          "if that check ITSELF fails (e.g. git unavailable) the result instead carries " +
+          "{supervisorCheckFailed:true, supervisorWarning} — a DIFFERENT, mutually-exclusive pair of fields " +
+          "from supervisorChanged — treat this as UNKNOWN whether the supervisor script changed, never as a " +
+          "confirmed-clean deploy; the SAME distinction also appears on the post-restart resume nudge (your " +
+          "reliable read of it — this immediate response returns into a session about to be killed by the " +
+          "restart itself).",
         inputSchema: strictShape({ reason: z.string() }),
       },
       async ({ reason }) => {

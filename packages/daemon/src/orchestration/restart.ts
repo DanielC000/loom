@@ -164,6 +164,16 @@ export interface RestartIntent {
    * field, which degrades to the old unconditional wording — never a crash.
    */
   supervisorChanged?: boolean;
+  /**
+   * Card 2e84a250 — the sibling of {@link RestartIntent.supervisorChanged}: set when
+   * {@link supervisorScriptChangedSince} resolved `"could-not-check"` rather than a confirmed
+   * changed/unchanged. Mutually exclusive with `supervisorChanged` (both come from the SAME check, at
+   * most one is ever true) — kept as a separate field rather than a `supervisorChanged: boolean | "unknown"`
+   * union so an old on-disk intent (or any reader that only knows `supervisorChanged`) degrades exactly
+   * as before: absent/false, never a crash or a misread "unknown". resumeFleetOnBoot's requester nudge
+   * surfaces this as SUPERVISOR_CHECK_FAILED_WARNING instead of the unconditional "now LIVE" claim.
+   */
+  supervisorCheckFailed?: boolean;
   requestedAt: string;
 }
 
@@ -573,6 +583,19 @@ async function defaultGitLogSince(root: string, sinceIso: string, file: string):
 }
 
 /**
+ * Card 2e84a250: the three states `supervisorScriptChangedSince` can resolve to. Deliberately a
+ * discriminated union, NOT a second boolean — a second boolean just recreates the exact collapse this
+ * card exists to kill one layer up, and a caller that tries to fold this back into a bare true/false is
+ * a TYPE ERROR, not a silent possibility. `reason` on `"could-not-check"` carries the same message
+ * already logged by {@link supervisorScriptChangedSince}'s own `console.warn`, so an up-stack caller
+ * that wants to surface WHY doesn't need to re-derive it.
+ */
+export type SupervisorCheckResult =
+  | { status: "changed" }
+  | { status: "unchanged" }
+  | { status: "could-not-check"; reason: string };
+
+/**
  * Whether the deploy about to go live touches `scripts/daemon-supervisor.mjs` — the daemon_restart
  * path (install → buildDaemon → relaunch) re-execs the DAEMON but NOT the outer supervisor process
  * that spawned it, so a committed change to that script (or its launch env — the env is set INSIDE
@@ -581,29 +604,56 @@ async function defaultGitLogSince(root: string, sinceIso: string, file: string):
  * daemon:stable`. Scope: everything committed since `bootTime` — a daemon only ever loses its
  * in-memory code on a restart, so "since this process booted" IS "since the last deploy"; no separate
  * last-deployed-SHA bookkeeping is needed. BEST-EFFORT + BOUNDED + NEVER throws: a git failure (no
- * repo, git unavailable, timeout) degrades to `false` — this is an ADVISORY warning only, so an
- * inability to check must never block the restart itself. But "checked, unchanged" and "could not check"
- * must not be indistinguishable to a human: card 469b5e67 found the two folded into one silent `false`
- * with NO trace of which happened, which is exactly the failure mode that made an env bug in
- * {@link defaultGitLogSince} invisible for as long as it was. A check failure is now logged (never
- * thrown — the return value is unchanged) so the daemon's own log carries the "could not check" signal
- * a reader can actually find, instead of a false result that reads identically to a confirmed negative.
+ * repo, git unavailable, timeout) resolves to `{status:"could-not-check"}` — this is an ADVISORY
+ * warning only, so an inability to check must never block the restart itself. But "checked, unchanged"
+ * and "could not check" must not be indistinguishable to a caller: card 469b5e67 found the two folded
+ * into one silent `false` with NO trace of which happened, which is exactly the failure mode that made
+ * an env bug in {@link defaultGitLogSince} invisible for as long as it was. Card 2e84a250 carries that
+ * distinction past this function's own return value (469b5e67 only got it into the daemon log) — see
+ * `SupervisorCheckResult`. A check failure is still logged here too (never thrown), so the daemon log
+ * keeps its own independently-findable trace.
  */
-export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<boolean> {
+export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<SupervisorCheckResult> {
   try {
     const log = deps.gitLogSince ?? defaultGitLogSince;
     const out = await log(repoRoot(), bootTime.toISOString(), SUPERVISOR_SCRIPT_REL_PATH);
-    return out.trim().length > 0;
+    return { status: out.trim().length > 0 ? "changed" : "unchanged" };
   } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
     console.warn(
       `[restart] could NOT check whether this deploy touches ${SUPERVISOR_SCRIPT_REL_PATH} — ` +
-      `treating as unchanged, but this is a FAILED CHECK, not a confirmed negative: ` +
-      `${e instanceof Error ? e.message : String(e)}`,
+      `treating as unchanged, but this is a FAILED CHECK, not a confirmed negative: ${reason}`,
     );
-    return false;
+    return { status: "could-not-check", reason };
   }
 }
 
-/** Advisory message surfaced on `daemon_restart`'s result when {@link supervisorScriptChangedSince} is true. */
+/** Advisory message surfaced on `daemon_restart`'s result when {@link supervisorScriptChangedSince} resolves `"changed"`. */
 export const SUPERVISOR_CHANGED_WARNING =
   `this deploy modifies the supervisor (${SUPERVISOR_SCRIPT_REL_PATH}); a manual \`pnpm daemon:stable\` restart is required for those lines to take effect.`;
+
+/**
+ * Card 2e84a250: surfaced on `daemon_restart`'s result (and the post-restart nudge) when
+ * {@link supervisorScriptChangedSince} resolves `"could-not-check"` — deliberately worded as blunt as
+ * {@link SUPERVISOR_CHANGED_WARNING}, not softened into "may not have been verified": the defect this
+ * closes was exactly a failure reading as a clean negative, so this must read as unmistakably UNKNOWN.
+ */
+export const SUPERVISOR_CHECK_FAILED_WARNING =
+  `could not confirm whether this deploy touches the supervisor (${SUPERVISOR_SCRIPT_REL_PATH}) — the check itself failed (see the daemon log for the underlying error); treat this as UNKNOWN, not confirmed unchanged — verify directly or run \`pnpm daemon:stable\` if in doubt.`;
+
+/**
+ * Card 2e84a250: pure derivation of the manager-facing response fields from a {@link SupervisorCheckResult}
+ * — factored out of `requestDaemonRestart` so the "could-not-check must be distinguishable from a genuine
+ * unchanged" invariant (card DoD-4) is unit-testable directly, without a real build/spawn. `"unchanged"`
+ * returns `{}` — byte-identical to the pre-card behavior on the common case, so every existing consumer
+ * that only ever checked `supervisorChanged` truthiness keeps working unmodified.
+ */
+export function supervisorCheckResponseFields(
+  check: SupervisorCheckResult,
+): { supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string } {
+  switch (check.status) {
+    case "changed": return { supervisorChanged: true, supervisorWarning: SUPERVISOR_CHANGED_WARNING };
+    case "could-not-check": return { supervisorCheckFailed: true, supervisorWarning: SUPERVISOR_CHECK_FAILED_WARNING };
+    case "unchanged": return {};
+  }
+}
