@@ -8240,15 +8240,34 @@ export class PtyHost {
     // leaves `recentOwnerTurns` newest-first, byte-identical to the pre-existing single-entry ordering.
     // Falls back to the plain `ownerText` param only when no `origin` was supplied at all (rate-limit
     // replay, `resumeAfterRateLimit`'s "rate-limit-replay" caller) — unchanged from before this card.
+    // Card f286919e: derive the attested owner text AND the trust-window sender key from ONE check, so a
+    // multi-sender batch can never split them — the legacy `coalesceAgentMessages:true` branch in
+    // drainPending has NO per-member sender check (unlike the default agent-kind branch, which enforces
+    // `senderId` equality via its own run condition), so `origin` there can legitimately span more than
+    // one sender. `originSenderId` is the batch's single common senderId when every member agrees, else
+    // null; it's computed once here and reused below to pin `activeTurnSenderId`, so the two facts share
+    // one derivation instead of this loop plus a separate `drained[0]` read.
+    let originSenderId: string | null = null;
     if (origin && origin.length > 0) {
-      let attributedAny = false;
-      for (const m of origin) {
-        if (m.ownerText !== undefined) {
-          this.attributeOwnerText(live, m.ownerText);
-          attributedAny = true;
+      const firstSenderId = origin[0]!.senderId ?? null;
+      const sameSender = origin.every((m) => (m.senderId ?? null) === firstSenderId);
+      if (sameSender) {
+        originSenderId = firstSenderId;
+        let attributedAny = false;
+        for (const m of origin) {
+          if (m.ownerText !== undefined) {
+            this.attributeOwnerText(live, m.ownerText);
+            attributedAny = true;
+          }
         }
-      }
-      if (!attributedAny) {
+        if (!attributedAny) {
+          live.activeTurnOwnerText = null;
+          live.lastPromptOwnerText = null;
+        }
+      } else {
+        // Fail CLOSED: a multi-sender batch cannot attest any one member's owner text under another
+        // member's identity — null both facts together rather than let one survive and the other drop
+        // (the exact split that let a coalesced turn's sender key and owner text disagree).
         live.activeTurnOwnerText = null;
         live.lastPromptOwnerText = null;
       }
@@ -8263,9 +8282,12 @@ export class PtyHost {
     // through enqueueStdin, not just a group-companion route; the "authenticated GROUP-companion turn" fact
     // that field used to guarantee alone now needs pairing with activeTurnOwnerText/Primitive A). Undefined
     // for every caller that omits it, exactly like activeTurnOwnerText for a non-owner-authored turn.
-    // lastPromptSenderId mirrors lastPromptOwnerText for replay.
-    live.activeTurnSenderId = senderId ?? null;
-    live.lastPromptSenderId = senderId ?? null;
+    // lastPromptSenderId mirrors lastPromptOwnerText for replay. Card f286919e: when `origin` is present,
+    // this uses `originSenderId` — the SAME same-sender check that gated the owner-text attribution above
+    // — instead of the raw `senderId` param, so a multi-sender coalesced batch nulls this too, not just
+    // ownerText. A caller with no `origin` (rate-limit replay) is unaffected and keeps the plain param.
+    live.activeTurnSenderId = origin && origin.length > 0 ? originSenderId : (senderId ?? null);
+    live.lastPromptSenderId = live.activeTurnSenderId;
     // Loom Companion (proactive event-line producer): pin whether THIS turn is a daemon-driven proactive
     // submit, caller-supplied — false for every existing caller this change didn't touch. Persists like
     // activeTurnRoute (not cleared at Stop); `lastPromptProactive` mirrors lastPromptRoute for replay.

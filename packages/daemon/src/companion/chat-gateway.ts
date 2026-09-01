@@ -408,7 +408,12 @@ export class ChatGateway {
       // getActiveTurnOwnerText can attest it for the sensitive ACT levers later cards will add. `senderId`
       // (Companion Trust Window) mirrors voicePrefRoute's own group-only rule: the authenticated sender for
       // a GROUP-scope binding, null for DM (the chatId alone already identifies the single owner) — so a
-      // trust window keyed off it can never let one group member's confirm cover another's.
+      // trust window keyed off it can never let one group member's confirm cover another's. Card f286919e:
+      // that guarantee holds even once the pty host COALESCES this submit with another queued one into the
+      // same turn (drainPending) — a coalesced batch spanning more than one sender (only reachable via the
+      // legacy `coalesceAgentMessages:true` full-coalesce) has `submit()` null BOTH `activeTurnSenderId`
+      // and the owner-text primitive together, by construction, rather than let a trust window read back
+      // one member's id paired with a DIFFERENT member's attested words.
       submit = this.submitTurn(
         binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId }, body,
         binding.scope === "group" ? (msg.sender?.id ?? null) : null,
