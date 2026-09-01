@@ -3342,10 +3342,15 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
 
 /** Builds the `&&`-chained reduced gate command for a diff {@link computeEmitCompareGate} proved eligible
  *  — `pnpm build` (unconditional, real typecheck+emit) + the static guards (unconditional, source-text
- *  scanners, run as bare `node <path>` since they never touch `LOOM_HOME`/a port) + — only when a test
- *  file actually changed — ONE `pnpm --filter @loom/daemon test:daemon --only=<names>` step naming every
- *  changed file, so each runs THROUGH THE HARNESS (its own fresh temp `LOOM_HOME` + non-4317 `LOOM_PORT`,
- *  per `scripts/test-daemon.mjs`'s own header contract) instead of as a bare `node <path>` with neither.
+ *  scanners, run as bare `node <path>` — with NO env scrub, so they inherit this process's own ambient
+ *  `LOOM_HOME`/`LOOM_PORT`, same as `scripts/run-static-guards.mjs`'s own bare spawns; card 49c50b80
+ *  corrects a prior version of this comment that claimed these guards "never touch `LOOM_HOME`/a port" —
+ *  false: `test/_guard.mjs`'s `exit` hook reads `LOOM_HOME` in every one of them. Safety against that now
+ *  lives IN `_guard.mjs` itself — see `isTestCreatedHome` there — not in how these are invoked) + — only
+ *  when a test file actually changed — ONE `pnpm --filter @loom/daemon test:daemon --only=<names>` step
+ *  naming every changed file, so each runs THROUGH THE HARNESS (its own fresh temp `LOOM_HOME` +
+ *  non-4317 `LOOM_PORT`, per `scripts/test-daemon.mjs`'s own header contract) instead of as a bare
+ *  `node <path>` with neither.
  *
  *  Card dd4349ff: the prior bare invocation left any changed file that needed that env unable to even
  *  START (`test/_guard.mjs`'s `requireHermeticEnv` refuses at exit 99, 0s, no assertion ever run) —

@@ -32,6 +32,32 @@ import path from "node:path";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 const REAL_LOOM_HOME = path.resolve(path.join(os.homedir(), ".loom"));
+const OS_TMPDIR = path.resolve(os.tmpdir());
+
+// Windows paths are case-insensitive, so a differently-cased LOOM_HOME (`c:\users\danie\.loom` vs the
+// canonical `C:\Users\danie\.loom`) must not defeat a comparison against it — path.resolve() does NOT
+// normalize case. Both comparisons below (the real-home exclusion and the tmpdir-scoped proof) go
+// through this (card 49c50b80 DoD-2).
+function normalizeForCompare(p) {
+  return process.platform === "win32" ? p.toLowerCase() : p;
+}
+
+// Card 49c50b80: a LOOM_HOME this hook may safely clean up (i.e. whose `-worktrees` sibling it deletes)
+// MUST be a genuine, strict subdirectory of the OS temp dir — that is the structural proof it's a
+// throwaway home a TEST created (`fs.mkdtempSync(path.join(os.tmpdir(), ...))`, the shape every test in
+// this suite uses — the harness's own `runOne`, `_tmp-fixture.mjs`'s `mkdtempManaged`/`useOwnLoomHome`,
+// and 600+ hand-rolled per-file `tmpHome` variables all satisfy this by construction), never a REAL
+// non-default LOOM_HOME a human pointed a second daemon at (`CLAUDE.md`: "override LOOM_HOME/LOOM_PORT
+// for two daemons side by side") — which is exactly the exposure this card fixed: the old code deleted
+// `<LOOM_HOME>-worktrees` for ANY LOOM_HOME other than the real one, with no proof it was test-created.
+// This needs no per-caller marker file (the DoD's alternative (a) — "restores an invariant each new
+// caller must remember", per the card) because the proof is a property of HOW every test-created home is
+// already built, not something a new caller could forget to add.
+function isTestCreatedHome(resolved) {
+  const home = normalizeForCompare(resolved);
+  const tmp = normalizeForCompare(OS_TMPDIR);
+  return home !== tmp && home.startsWith(tmp + path.sep);
+}
 
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
@@ -65,7 +91,14 @@ process.on("exit", () => {
   const home = process.env.LOOM_HOME;
   if (!home) return;
   const resolved = path.resolve(home);
-  if (resolved === REAL_LOOM_HOME) return; // never touch the real ~/.loom-worktrees
+  if (normalizeForCompare(resolved) === normalizeForCompare(REAL_LOOM_HOME)) return; // never touch the real ~/.loom-worktrees
+  // Card 49c50b80: refuse unless `resolved` is provably a test-created temp home (see isTestCreatedHome
+  // above) — this hook is reachable from a bare `node <guard-file>.mjs` invocation (both
+  // buildReducedGateCommand's reduced merge-gate steps and `pnpm --filter @loom/daemon guards`), which
+  // inherits the CALLER's ambient LOOM_HOME with no scrub. Before this fix, ANY non-real LOOM_HOME —
+  // including a real, non-default one a human pointed a second daemon at — had its `-worktrees` sibling
+  // (every project's live worker worktrees on that daemon) deleted unconditionally.
+  if (!isTestCreatedHome(resolved)) return;
   cleanupPathSync(`${resolved}-worktrees`);
 });
 

@@ -214,7 +214,7 @@ try {
   {
     const cmd = buildReducedGateCommand(["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"]);
     check("(M) still runs pnpm build", cmd.includes("pnpm build"));
-    for (const g of GUARD_BASENAMES) check(`(M) still runs guard ${g} bare (guards never touch LOOM_HOME)`, cmd.includes(`node packages/daemon/test/${g}`));
+    for (const g of GUARD_BASENAMES) check(`(M) still runs guard ${g} bare (card 49c50b80: safe under any LOOM_HOME via _guard.mjs's isTestCreatedHome, not because guards avoid touching it)`, cmd.includes(`node packages/daemon/test/${g}`));
     check("(M) routes BOTH changed files through test:daemon --only=, comma-joined",
       cmd.includes("pnpm --filter @loom/daemon test:daemon --only=dev-server,other-thing"));
     check("(M) NEVER invokes a changed test file as a bare `node <path>` (the defect this card fixes)",
