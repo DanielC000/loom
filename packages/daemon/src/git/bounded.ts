@@ -31,17 +31,20 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
 }
 
 /**
- * Build a simpleGit instance bound by a kill-the-hung-child block timeout. `env`, when supplied, is
- * applied via `.env(env)`; OMIT it to get a plain instance with NO `.env()` call at all — that is a
- * deliberate default, not an oversight. `.env()` REPLACES the whole child env (not a merge), which is
- * exactly why `vault/versioner.ts`'s own bounded-git site calls this with no `env` argument at all (see
- * its own doc, card 54b839c5): passing `.env()` anything there — even `{}` or a spread of `process.env`
- * — either throws on an ambient `GIT_EDITOR`/`PAGER` in the caller's own env, or (if those are stripped
- * first) silently drops a caller's legitimate `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` redirection. A
- * caller that needs a non-interactive env passes one explicitly (e.g. `git/writer.ts`'s
- * `nonInteractiveEnv()`). `orchestration/restart.ts` passes `{ ...process.env, GIT_TERMINAL_PROMPT: "0"
- * }` — a `process.env` spread of exactly the shape this doc warns against above. That is a KNOWN DEFECT
- * at that site, not a sanctioned exception: measured against the installed simple-git, an ambient
+ * Build a simpleGit instance bound by a kill-the-hung-child block timeout. `env`, when supplied and
+ * non-empty, is applied via `.env(env)`; OMIT it (or pass `{}`) to get a plain instance with NO `.env()`
+ * call at all — that is a deliberate default, not an oversight. `.env()` REPLACES the whole child env
+ * (not a merge), which is exactly why `vault/versioner.ts`'s own bounded-git site calls this with no
+ * `env` argument at all (see its own doc, card 54b839c5): passing `.env()` anything there — even `{}` or
+ * a spread of `process.env` — either throws on an ambient `GIT_EDITOR`/`PAGER` in the caller's own env,
+ * or (if those are stripped first) silently drops a caller's legitimate
+ * `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` redirection. Treating `{}` the same as `undefined` (card
+ * e02d0d06) closes that hazard for a caller that computes its env and happens to produce an empty
+ * object, without changing behavior for `undefined` or a populated env. A caller that needs a
+ * non-interactive env passes one explicitly (e.g. `git/writer.ts`'s `nonInteractiveEnv()`).
+ * `orchestration/restart.ts` passes `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` — a `process.env`
+ * spread of exactly the shape this doc warns against above. That is a KNOWN DEFECT at that site, not a
+ * sanctioned exception: measured against the installed simple-git, an ambient
  * `GIT_EDITOR`/`GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` makes it THROW, and
  * `supervisorScriptChangedSince` swallows that throw into `return false`, so the supervisor-changed
  * warning silently never fires. Tracked by card 469b5e67 — do NOT copy this shape into a new call site.
@@ -53,5 +56,5 @@ export function boundedSimpleGit(
   env?: Record<string, string | undefined>,
 ): SimpleGit {
   const git = simpleGit(repoPath, { timeout: { block: blockTimeoutMs } });
-  return env ? git.env(env) : git;
+  return env && Object.keys(env).length > 0 ? git.env(env) : git;
 }
