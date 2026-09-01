@@ -640,6 +640,139 @@ try {
     check("(q3) the branch-name fallback, once nothing else is available, still coerces to chore: <branch>",
       toConventionalSubject("loom/deadbeef1234") === "chore: loom/deadbeef1234");
   }
+
+  // (r) card c801d688 — createWorktree's SIX previously-bare `simpleGit(` constructor sites are now all
+  //     bounded (block-timeout + withTimeout race), threaded via a new optional `gitDeps` param. RED-PROOF
+  //     WITH A HANGING GIT (never a failing one — every one of these sites' callers already handles a
+  //     THROW, so a test only proving an error is caught would not cover a hang). Each sub-test delegates
+  //     every OTHER git command to REAL simple-git against the real repo/worktree (so the surrounding
+  //     scenario — ahead/behind counts, branch state — is genuinely real, not hand-faked), and hangs ONLY
+  //     the one command under test, proving that ONE site is bounded without faking the rest of the flow.
+  {
+    const { simpleGit: realSimpleGit } = await import("simple-git");
+    const tinyMs = 250;
+    /** A gitFactory that delegates every command NOT in `hangOn` to REAL simple-git against whatever path
+     *  createWorktree's own boundedGit call was made with (repoPath or worktreePath, depending on site),
+     *  and hangs (never settles) any command whose `args[0]` IS in `hangOn`. */
+    const delegatingHangFactory = (hangOn) => (repoPathArg, _blockMs) => {
+      const real = realSimpleGit(repoPathArg);
+      return { raw: (args) => (hangOn.includes(args[0]) ? new Promise(() => {}) : real.raw(args)) };
+    };
+    const timeAndSettle = async (p) => {
+      const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
+      let ok = true, err;
+      const value = await p.then((v) => v, (e) => { ok = false; err = e; return undefined; });
+      return { elapsed: performance.now() - t0, ok, err, value };
+    };
+    const boundedEnough = (elapsed) => elapsed >= tinyMs - TIMER_SLACK_MS && elapsed < tinyMs * 8 + 1500;
+
+    // (r1) mainSha rev-parse HEAD — createWorktree's OWN first git call, hit on every path (fresh AND
+    //      reuse). No local catch around it, so a timeout propagates straight up: createWorktree must
+    //      REJECT within the bound, not hang forever.
+    {
+      const tR1 = "bounded-mainsha-rev-parse";
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR1, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["rev-parse"]), timeoutMs: tinyMs }));
+      check("(r1) mainSha rev-parse: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check(`(r1) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+    }
+
+    // (r2) the prune/branch-list/worktree-add sequence — createWorktree's own SECOND git call, on the
+    //      FRESH (-b) branch-cut path. rev-parse is delegated to real git (fast); only "worktree" (prune,
+    //      then add) hangs.
+    {
+      const tR2 = "bounded-worktree-add-seq";
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR2, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["worktree"]), timeoutMs: tinyMs }));
+      check("(r2) worktree prune/add: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check(`(r2) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+    }
+
+    // (r3) recutStaleReusedBranch's OWN ahead-check (`rev-list --count <mainSha>..<branch>`) — the
+    //      REUSE path (worktree dir already exists). rev-parse delegates to real git; "rev-list" hangs
+    //      BEFORE mayRecutOntoMain ever sees a value, so this must never reach the destructive reset —
+    //      it can only propagate the timeout up (createWorktree REJECTS), landing on the SAFE
+    //      "could not determine" side of the guard, never a synthesized "provably empty" result.
+    {
+      const tR3 = "bounded-recut-ahead-check";
+      const seed = await createWorktree(repo, "projWT", tR3); // real fresh worktree → reuse path next call
+      check("(r3) setup: worktree exists on disk before the reuse call", fs.existsSync(seed.worktreePath));
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR3, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["rev-list"]), timeoutMs: tinyMs }));
+      check("(r3) recut ahead-check: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check(`(r3) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+      check("(r3) the worktree's branch tip is UNCHANGED — the timeout never reached the destructive reset",
+        git(seed.worktreePath, "rev-parse HEAD") === seed.mainSha);
+      await removeWorktree(repo, seed.worktreePath);
+      await deleteBranch(repo, seed.branch);
+    }
+
+    // (r4) recutStaleReusedBranch's destructive `reset --hard` — reached only when the branch is
+    //      PROVABLY 0 ahead (a fresh, uncommitted-into worktree). rev-parse + rev-list delegate to real
+    //      git (so mayRecutOntoMain genuinely evaluates true); only "reset" hangs. A hang here must still
+    //      surface as a bounded, visible failure (createWorktree REJECTS) — never an infinite wedge on
+    //      the daemon's hottest path.
+    {
+      const tR4 = "bounded-recut-reset-hard";
+      const seed = await createWorktree(repo, "projWT", tR4); // 0 commits added → provably 0 ahead of main
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR4, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["reset"]), timeoutMs: tinyMs }));
+      check("(r4) recut reset --hard: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check(`(r4) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+      await removeWorktree(repo, seed.worktreePath);
+      await deleteBranch(repo, seed.branch);
+    }
+
+    // (r5) detectReusedDirtyWorktree's `git status --porcelain` — FAILS SAFE (its own try/catch), so a
+    //      hang here must NOT make createWorktree hang or reject: it resolves within the bound, with
+    //      reusedDirtyWorktree simply absent (the documented "worst case is a missed flag" degrade).
+    {
+      const tR5 = "bounded-detect-dirty-status";
+      const seed = await createWorktree(repo, "projWT", tR5);
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR5, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["status"]), timeoutMs: tinyMs }));
+      check("(r5) detectReusedDirtyWorktree status: createWorktree RESOLVES despite a never-resolving git op (fails safe, not a hang)", res.ok === true);
+      check(`(r5) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+      check("(r5) reusedDirtyWorktree is absent (fail-safe degrade — a missed flag, never a spawn failure)",
+        res.value?.reusedDirtyWorktree === undefined);
+      await removeWorktree(repo, seed.worktreePath);
+      await deleteBranch(repo, seed.branch);
+    }
+
+    // (r6) detectStaleBase's `merge-base` + `diff --name-only` — reached only for a REAL recovery branch
+    //      (>0 ahead of its own base, whose base has since fallen behind main), mirroring (p1)/(p2)'s own
+    //      real scenario setup. rev-parse/rev-list delegate to real git (so countCommitsBehind genuinely
+    //      computes behindBy > 0 and the code path is really exercised); "merge-base"/"diff" hang.
+    //      detectStaleBase FAILS SAFE (its own try/catch) — createWorktree must RESOLVE within the bound,
+    //      with staleBase simply absent (purely advisory, must never block or alter a spawn).
+    {
+      const tR6 = "bounded-detect-stale-base";
+      const seed = await createWorktree(repo, "projWT", tR6);
+      commitInto(seed.worktreePath, "r6.txt", "r6\n", "r6 commit"); // >0 ahead ⇒ a recovery branch (recut is a no-op)
+      commitInto(repo, "main-advance-r6.txt", "main moved forward\n", "main advance r6"); // base falls behind main
+      const res = await timeAndSettle(createWorktree(repo, "projWT", tR6, {}, undefined, undefined,
+        { gitFactory: delegatingHangFactory(["merge-base", "diff"]), timeoutMs: tinyMs }));
+      check("(r6) detectStaleBase merge-base/diff: createWorktree RESOLVES despite a never-resolving git op (fails safe, not a hang)", res.ok === true);
+      check(`(r6) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
+      check("(r6) staleBase is absent (fail-safe degrade — purely advisory, never blocks/alters the spawn)",
+        res.value?.staleBase === undefined);
+      await removeWorktree(repo, seed.worktreePath);
+      await deleteBranch(repo, seed.branch);
+    }
+
+    // (r7) default (no timeoutMs) per-op block timeout is 15000ms for the new `gitDeps` seam too —
+    //      matching every other bounded op in this file (GIT_OP_TIMEOUT_MS). Fast stub (no hang) so the
+    //      assertion stays hermetic and doesn't pay a real 15s wait.
+    {
+      const tR7 = "bounded-default-timeout-mainsha";
+      let seenMs = -1;
+      const seededR7 = await createWorktree(repo, "projWT", tR7, {}, undefined, undefined,
+        { gitFactory: (p, ms) => { seenMs = ms; return realSimpleGit(p); } });
+      check("(r7) default per-op block timeout is 15000ms (generous-but-bounded), same as GIT_OP_TIMEOUT_MS", seenMs === 15000);
+      await removeWorktree(repo, seededR7.worktreePath);
+      await deleteBranch(repo, seededR7.branch);
+    }
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });

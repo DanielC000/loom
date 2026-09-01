@@ -598,19 +598,31 @@ export function mayRecutOntoMain(aheadRaw: string): boolean {
  * main) is 0, and for a recovery branch is its real prior commit(s). The 0-check is delegated to the
  * FAIL-SAFE {@link mayRecutOntoMain} so a malformed count can never fall through to the reset. We reset
  * to a SHA, never a branch name — a worktree can't check out a branch that's checked out elsewhere
- * (canonical main lives in repoPath). Plain `git.raw` to match createWorktree's existing (unbounded)
- * style; on the spawn hot path these are sub-second ref ops.
+ * (canonical main lives in repoPath).
+ *
+ * BOUNDED (card c801d688) via {@link boundedGit}/{@link withTimeout}: every read here throws straight
+ * through (no local try/catch), so a timeout is indistinguishable from any other git failure — it
+ * propagates to the caller and the function returns WITHOUT ever reaching the `reset --hard` below.
+ * That is the fail-safe this timeout must land on: "could not determine" (throw, no reset), never
+ * "provably empty" (a timeout can NEVER synthesize a 0-ahead result that reaches {@link
+ * mayRecutOntoMain}). A hung child now surfaces as a failed (visible, recoverable) spawn instead of a
+ * wedged one — see the card for why that distinction matters on this hot path.
  */
-async function recutStaleReusedBranch(repoPath: string, worktreePath: string, branch: string): Promise<void> {
-  const git = simpleGit(repoPath);
-  const mainSha = (await git.raw(["rev-parse", "HEAD"])).trim();
-  const aheadRaw = await git.raw(["rev-list", "--count", `${mainSha}..${branch}`]);
+async function recutStaleReusedBranch(
+  repoPath: string, worktreePath: string, branch: string, deps: BoundedGitDeps = {},
+): Promise<void> {
+  const { git: repoGit, timeoutMs: repoTimeoutMs } = boundedGit(repoPath, deps);
+  const mainSha = (await withTimeout(repoGit.raw(["rev-parse", "HEAD"]), repoTimeoutMs, "git rev-parse HEAD")).trim();
+  const aheadRaw = await withTimeout(
+    repoGit.raw(["rev-list", "--count", `${mainSha}..${branch}`]), repoTimeoutMs, "git rev-list --count (ahead of main)",
+  );
   // FAIL SAFE: only re-cut a PROVABLY-empty branch (0 ahead). A recovery branch (>0 ahead) OR a malformed/
   // unparseable count (NaN) → leave the branch EXACTLY as-is; never let a bad count fall through to the
   // DESTRUCTIVE reset below (the `|| 0`-treats-NaN-as-0 data-loss footgun). See {@link mayRecutOntoMain}.
   if (!mayRecutOntoMain(aheadRaw)) return;
   // Empty/stale branch → re-cut its pointer + checkout onto current main (SHA, never a branch name).
-  await simpleGit(worktreePath).raw(["reset", "--hard", mainSha]);
+  const { git: wtGit, timeoutMs: wtTimeoutMs } = boundedGit(worktreePath, deps);
+  await withTimeout(wtGit.raw(["reset", "--hard", mainSha]), wtTimeoutMs, "git reset --hard");
 }
 
 /** Cap on {@link ReusedDirtyWorktreeInfo.statusSummary} — enough for a manager (or an injected worker
@@ -627,12 +639,14 @@ const REUSED_DIRTY_SUMMARY_MAX_CHARS = 2000;
  * `.claude/` churn never false-positives a clean reuse as dirty).
  *
  * FAILS SAFE: any git error/timeout is read as "not dirty" (`undefined`) rather than blocking the spawn —
- * the worst case is a missed flag, never a spawn failure. Plain (unbounded) `simpleGit` call to match this
- * function's existing style (`recutStaleReusedBranch` above is equally unbounded on the same hot path).
+ * the worst case is a missed flag, never a spawn failure. BOUNDED (card c801d688) via {@link boundedGit}/
+ * {@link withTimeout} — a timeout falls into the same catch-all below as any other git error, so bounding
+ * this changes nothing about the existing fail-safe semantics, only the ceiling before they kick in.
  */
-async function detectReusedDirtyWorktree(worktreePath: string): Promise<ReusedDirtyWorktreeInfo | undefined> {
+async function detectReusedDirtyWorktree(worktreePath: string, deps: BoundedGitDeps = {}): Promise<ReusedDirtyWorktreeInfo | undefined> {
   try {
-    const porcelain = await simpleGit(worktreePath).raw(["status", "--porcelain"]);
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
     const files = uncommittedWorkFiles(porcelain);
     if (files.length === 0) return undefined;
     let truncated = files.length > REUSED_DIRTY_SUMMARY_MAX_LINES;
@@ -661,17 +675,18 @@ const STALE_BASE_FILES_MAX = 30;
  * that started at the old fork point silently stays rooted there across every re-spawn.
  *
  * Uses {@link countCommitsBehind} for the "how many" signal (fail-safe to `undefined`/not-stale on any
- * error); only when that's genuinely > 0 do we pay for `merge-base` + a bounded `diff --name-only` to name
- * the fork point and what changed since. Any error past the count read also reads as "not stale" — this is
- * purely ADVISORY and must never block or alter a spawn.
+ * error, and already BOUNDED itself); only when that's genuinely > 0 do we pay for `merge-base` + a
+ * `diff --name-only` to name the fork point and what changed since — also BOUNDED (card c801d688) via
+ * {@link boundedGit}/{@link withTimeout}. Any error past the count read (including a timeout) also reads
+ * as "not stale" — this is purely ADVISORY and must never block or alter a spawn.
  */
-async function detectStaleBase(repoPath: string, branch: string, mainSha: string): Promise<StaleBaseInfo | undefined> {
-  const behindBy = await countCommitsBehind(repoPath, branch, mainSha);
+async function detectStaleBase(repoPath: string, branch: string, mainSha: string, deps: BoundedGitDeps = {}): Promise<StaleBaseInfo | undefined> {
+  const behindBy = await countCommitsBehind(repoPath, branch, mainSha, deps);
   if (!behindBy || behindBy <= 0) return undefined;
   try {
-    const git = simpleGit(repoPath);
-    const baseSha = (await git.raw(["merge-base", branch, mainSha])).trim();
-    const filesRaw = await git.raw(["diff", "--name-only", baseSha, mainSha]);
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const baseSha = (await withTimeout(git.raw(["merge-base", branch, mainSha]), timeoutMs, "git merge-base")).trim();
+    const filesRaw = await withTimeout(git.raw(["diff", "--name-only", baseSha, mainSha]), timeoutMs, "git diff --name-only");
     const allFiles = filesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     return {
       baseSha, behindBy,
@@ -709,11 +724,13 @@ async function autoForwardStaleBase(
 }
 
 /** Combines {@link detectStaleBase} + the optional {@link autoForwardStaleBase} for ONE reuse/reattach
- *  path of {@link createWorktree} (card 5150fdc2, parts 1+3). */
+ *  path of {@link createWorktree} (card 5150fdc2, parts 1+3). `deps` threads only to {@link
+ *  detectStaleBase} — {@link autoForwardStaleBase}'s `mergeMainIntoWorktree` call is a separate,
+ *  already-settled bounding question (card c801d688 scope) and is untouched here. */
 async function resolveStaleBase(
-  repoPath: string, worktreePath: string, branch: string, mainSha: string,
+  repoPath: string, worktreePath: string, branch: string, mainSha: string, deps: BoundedGitDeps = {},
 ): Promise<StaleBaseInfo | undefined> {
-  const info = await detectStaleBase(repoPath, branch, mainSha);
+  const info = await detectStaleBase(repoPath, branch, mainSha, deps);
   if (!info) return undefined;
   return autoForwardStaleBase(repoPath, worktreePath, info);
 }
@@ -758,6 +775,16 @@ export async function createWorktree(
    * the review branch's tip resolve it themselves before calling (see `spawnWorker`'s `reviewForkFrom`).
    */
   forkFrom?: string,
+  /**
+   * Injectable seam (card c801d688) for the git ops createWorktree's OWN body performs directly (the
+   * `mainSha` rev-parse, and the prune/branch-list/worktree-add sequence below) — threaded on to {@link
+   * recutStaleReusedBranch}/{@link detectReusedDirtyWorktree}/{@link resolveStaleBase} too, so a test can
+   * inject one hanging `gitFactory` and prove every one of this function's six bare git call sites
+   * returns within a bound instead of hanging the spawn path forever. Defaults to the real bounded git
+   * (see {@link boundedGit}) — every existing caller (there is exactly one, `sessions/service.ts`
+   * `spawnWorker`) is byte-identical when omitted.
+   */
+  gitDeps: BoundedGitDeps = {},
 ): Promise<WorktreeInfo> {
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
@@ -766,19 +793,23 @@ export async function createWorktree(
     : path.join(WORKTREES_DIR, projectId, key);
   // The repo's CURRENT HEAD — the fork point this worktree's branch is (or was) cut off, captured up
   // front so it's correct for every path below (fresh cut, reuse, and reattach all fork off THIS sha).
-  const mainSha = (await simpleGit(repoPath).raw(["rev-parse", "HEAD"])).trim();
+  // BOUNDED (card c801d688): a hung rev-parse now throws within the bound instead of stalling the spawn
+  // forever — this call has no local catch, so the throw propagates to createWorktree's own caller
+  // exactly as an unbounded failure already did, just with a ceiling on how long that takes.
+  const { git: headGit, timeoutMs: headTimeoutMs } = boundedGit(repoPath, gitDeps);
+  const mainSha = (await withTimeout(headGit.raw(["rev-parse", "HEAD"]), headTimeoutMs, "git rev-parse HEAD")).trim();
   if (fs.existsSync(worktreePath)) {
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
     // first; a recovery branch (unmerged work) is left exactly as-is.
-    await recutStaleReusedBranch(repoPath, worktreePath, branch);
+    await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Board card 2250836c: surface (never clean) any real leftover uncommitted work on this reused
     // worktree — read-only, runs after the recut above so it reports the ACTUAL post-recut state.
-    const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath);
+    const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath, gitDeps);
     // Card 5150fdc2 parts 1+3: a recovery (>0-ahead) branch whose base has since fallen behind main is
     // detected and, when possible, auto-forwarded — see resolveStaleBase. Runs AFTER the dirty-leftover
     // read above so that read reflects the PRE-merge state (the leftover uncommitted work a manager/
     // worker should see is whatever was there before Loom does anything else to the tree).
-    const staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha);
+    const staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
     return {
       worktreePath, branch, mainSha,
       ...(reusedDirtyWorktree ? { reusedDirtyWorktree } : {}),
@@ -786,7 +817,9 @@ export async function createWorktree(
     };
   }
 
-  const git = simpleGit(repoPath);
+  // BOUNDED (card c801d688) — same rationale as the rev-parse above: no local catch, so a timeout
+  // propagates exactly like any other git failure already did, just bounded instead of unbounded.
+  const { git, timeoutMs } = boundedGit(repoPath, gitDeps);
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   // Card 2fcd5eae: `prune` -> `branch --list` -> `add` is a multi-step read-modify-write against the
   // SHARED `.git/worktrees/` admin state — serialize ONLY this sequence per canonical repo path, via the
@@ -798,24 +831,25 @@ export async function createWorktree(
   // does NOT wrap `provisionWorktreeDeps` below (a package-manager install, potentially minutes) — that
   // would serialize every worker spawn on the daemon behind each other's install.
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
-    await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
-    const exists = (await git.raw(["branch", "--list", branch])).trim() !== "";
-    await git.raw(exists
+    await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune"); // drop any stale admin record for a since-deleted dir
+    const exists = (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list")).trim() !== "";
+    await withTimeout(git.raw(exists
       ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
       : forkFrom
         ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
-        : ["worktree", "add", worktreePath, "-b", branch]);         // fresh task → new branch off current HEAD
+        : ["worktree", "add", worktreePath, "-b", branch]),         // fresh task → new branch off current HEAD
+      timeoutMs, "git worktree add");
     return exists;
   });
   let staleBase: StaleBaseInfo | undefined;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
     // recovery branch (unmerged work) → untouched.
-    await recutStaleReusedBranch(repoPath, worktreePath, branch);
+    await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Card 5150fdc2 parts 1+3 — same detect+auto-forward as the dir-exists reuse path above, BEFORE
     // provisionWorktreeDeps below so a package.json/lockfile change the forward brings in is what
     // actually gets installed.
-    staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha);
+    staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
   }
 
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
