@@ -18,12 +18,41 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // immediately followed (within 5 lines) by a check()/assert() whose label reads as a NEGATIVE-polarity
 // claim (never/not/no/zero/unchanged/frozen/refuse/omit/etc.).
 //
+// ALSO CATCHES (card 0f744aa4): a `windowMs` sampling config — `observeOnce`/`assertNeverWithControl`'s
+// (`_timing-guard.mjs`) fixed-duration sampling fallback — is a fixed wait too, even though it never spells
+// `sleep(`/`setTimeout(` at the call site; a shipped file carried two uncontrolled negatives this way, one
+// of them outright vacuous, and this guard ran green over it. Card 5e51e778 closed the SAME gap first, for
+// the sibling DIFF-SCOPED guard (fixed-wait-witness-guard.mjs) — this is the matching fix for THIS
+// (corpus-wide, negative-polarity-classifying) guard, deliberately using the SAME clearing rule that
+// proved out there rather than a fresh, unproven one: a `windowMs`-idiom candidate is cleared the instant
+// a `positiveControl` token (object key or call) appears ANYWHERE in its CONTIGUOUS blank-line-delimited
+// BLOCK (see `blockBounds` below) — never a fixed line count. A fixed line count was measured, empirically,
+// against THIS corpus while building this change, to be the wrong instrument here: a real, already-
+// sanctioned site (ws-fleet-session-feed.mjs's own `positiveControl`-wrapped `observeOnce` call) has its
+// consuming `check()` land INSIDE a naive 5-line window from the wait line, which would have produced a
+// live false positive on real, already-correct production code the very first time this idiom was added —
+// exactly the kind of repo-wide false positive CLAUDE.md warns this guard's blast radius makes unaffordable.
+// `assertNeverWithControl` REFUSES to run without a `positiveControl` that itself proves, at runtime, that
+// the check it guards CAN go true (card 1addef27) — so a `windowMs` site inside that structure is already
+// runtime-proven, and clearing it here is not a bet, it's recognizing proof that already exists elsewhere.
+//
 // WHAT IT CANNOT SEE (stated plainly — a guard silently blind to an idiom is the same failure one level
 // up, DoD-6): a locally-reimplemented waitUntil/poll-loop misused with a bad predicate (975956b2 found
 // these are USUALLY safe — this guard does not verify that; it simply never flags the shape at all); a
 // differently-named delay()/wait() helper; a raw non-awaited `setTimeout(fn, N)` (fire-and-forget, never
 // `await`ed); or a check()/assert() whose label doesn't textually read as negative even though its polarity
-// is (a mislabeled assertion escapes both a human reviewer and this heuristic alike).
+// is (a mislabeled assertion escapes both a human reviewer and this heuristic alike). AND, new to the
+// `windowMs` idiom specifically: a `positiveControl` supplied BY REFERENCE — a named function assigned to
+// the `positiveControl` key from somewhere else in the file (worker-composer-dirty-signal.mjs's
+// `proveClearMechanismWorks` is the real specimen) rather than an inline closure — is invisible to this
+// block-scoped clearing rule, because the block containing the `windowMs` call never textually contains
+// the word `positiveControl` at all. This residue is judged ACCEPTABLE, not closed: every current by-
+// reference specimen in this corpus also has ZERO check()/assert() calls anywhere in its own block (it's a
+// helper that RETURNS a verdict for something else to assert on), which already exempts it via the "no
+// assertion nearby" rule below — so the by-reference gap is real in principle but, as of this card,
+// unrealized in practice. A future by-reference site that DOES carry its own local check()/assert() call
+// would need an explicit TIMING-GUARD-SAFE marker (same as any other reviewed exception) to clear — it will
+// NOT be silently accepted.
 //
 // EXEMPTIONS: a flagged site clears ONLY by (a) a `// TIMING-GUARD-SAFE: <reason>` comment anywhere in the
 // contiguous `//`-comment block immediately above the wait line (or on the wait line itself), where
@@ -143,7 +172,16 @@ const FALSE_MATCH_REASONS = new Set(["keyword-in-methodology-aside"]);
 
 const IDIOM_A = /\bsleep\(\s*[^)]+\)/;
 const IDIOM_B = /new Promise\(\s*\(?\s*[a-zA-Z_$][\w$]*\s*\)?\s*=>\s*setTimeout\(\s*[a-zA-Z_$][\w$]*\s*,\s*[^)]+\)/;
+// Card 0f744aa4 — see the header's "ALSO CATCHES" note. Deliberately the SAME regex as the sibling
+// diff-scoped guard's own `IDIOM_WINDOWMS` (fixed-wait-witness-guard.mjs) — a proven idiom shape, not a
+// fresh one. `\bwindowMs` alone (no trailing `:` in this comment, on purpose — this guard scans its own
+// source, and the real token IS spelled with a colon in code).
+const IDIOM_C = new RegExp("\\bwindowMs\\s*:");
 const NEG_KEYWORDS = /\b(never|not\b|no\s|zero|absent|unaffected|unchanged|stops advancing|stayed|stays|frozen|didn.?t|doesn.?t|hasn.?t|won.?t|refuse|omit)/i;
+// Card 0f744aa4: clears a `windowMs`-idiom candidate whose block already carries `assertNeverWithControl`'s
+// mandatory, runtime-enforced positive control (card 1addef27) — same regex as the sibling diff-scoped
+// guard's own `POSITIVE_CONTROL_RE`.
+const POSITIVE_CONTROL_RE = /\bpositiveControl\s*[:(]/;
 const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*([a-z-]+)/;
 const FALSE_MATCH_RE = /TIMING-GUARD-FALSE-MATCH:\s*([a-z-]+)/;
 // Card a14717af: every check()/assert() call in a wait's window, not just the textually-first one — a
@@ -574,20 +612,78 @@ function markerReasonFor(lines, waitLineIdx, markerRe) {
 const exemptionReasonFor = (lines, waitLineIdx) => markerReasonFor(lines, waitLineIdx, EXEMPT_RE);
 const falseMatchReasonFor = (lines, waitLineIdx) => markerReasonFor(lines, waitLineIdx, FALSE_MATCH_RE);
 
+// Card 0f744aa4 — the CONTIGUOUS blank-line-delimited block containing `lines[idx]`. Deliberately the SAME
+// function (by behavior, not by import — see below) as the sibling diff-scoped guard's own `blockBounds`
+// (fixed-wait-witness-guard.mjs, card 5e51e778), which validated this boundary empirically (card e3faa8ac:
+// a fixed ±25-line radius flagged 23/26 sites in one file; the blank-line boundary cut that to 15/26). A
+// fresh, small copy rather than an import: that sibling guard needs a BUILD (it imports dist/git/
+// worktrees.js for the real `git diff`); THIS guard's whole design point is "no build needed — pure
+// source-text scan" (see the file header), and importing from a build-dependent module would quietly
+// undo that property for every worker who only touched a test file. Returns [start, end] inclusive
+// 0-based line indices.
+function blockBounds(lines, idx) {
+  let start = idx;
+  while (start > 0 && lines[start - 1].trim() !== "") start--;
+  let end = idx;
+  while (end < lines.length - 1 && lines[end + 1].trim() !== "") end++;
+  return [start, end];
+}
+
+// Card 0f744aa4 — measured, REAL false-positive collision: `windowMs` is not unique to the timing-guard
+// idiom. Loom's own production config shape carries an UNRELATED `authFailLockout: { maxAttempts,
+// windowMs, lockoutMs }` (a rate-limiter lockout window in ms — see PlatformConfig's `remoteAccess.
+// rateLimit`), and two real test files (platform-forensics-reads.mjs, remote-bind.mjs) pass that literal
+// config shape as test DATA, with genuinely negative-polarity check()/assert() calls elsewhere in the same
+// block — a live false positive found by running this exact widened guard against the real corpus, not a
+// hypothetical. Bare `windowMs:` alone is NOT a safe idiom test; a candidate only counts if its block also
+// names the ONE primitive that actually consumes a `windowMs` sampling config (`_timing-guard.mjs`'s
+// `observeOnce`/`assertNeverWithControl`) — an unrelated data literal never does.
+const TIMING_GUARD_CALL_RE = /\b(?:observeOnce|assertNeverWithControl)\s*\(/;
+
+/** Card 0f744aa4: classify a `windowMs`-idiom candidate line (0-indexed `i`). Not a candidate at all
+ *  (returns `[]`) unless its blockBounds block also names `observeOnce`/`assertNeverWithControl` — see
+ *  TIMING_GUARD_CALL_RE above for the real collision this guards against. Cleared (returns `[]`) if a
+ *  `positiveControl` token appears anywhere in that same block — see the file header's "ALSO CATCHES" note
+ *  for why block-scoped, not a fixed line count. Otherwise returns the label of every NEGATIVE-polarity
+ *  check()/assert() call found AFTER `i` within the same block (a14717af's multi-match fix applies here
+ *  too — a single wait can guard more than one assertion). A block with no check()/assert() at all after
+ *  `i` returns `[]` too — a settle/pacing wait, out of scope by design, same posture the raw-idiom path
+ *  already takes for a windowless site. */
+function windowMsCandidateHits(lines, i) {
+  const [start, end] = blockBounds(lines, i);
+  const blockText = lines.slice(start, end + 1).join("\n");
+  if (!TIMING_GUARD_CALL_RE.test(blockText)) return [];
+  if (POSITIVE_CONTROL_RE.test(blockText)) return [];
+  const afterText = lines.slice(i + 1, end + 1).join("\n");
+  const out = [];
+  for (const m of afterText.matchAll(CHECK_OR_ASSERT_RE)) {
+    if (NEG_KEYWORDS.test(m[2])) out.push(m[2]);
+  }
+  return out;
+}
+
 function scanFile(file) {
   const text = fs.readFileSync(path.join(TEST_DIR, file), "utf8");
   const lines = text.split("\n");
   const hits = [];
   for (let i = 0; i < lines.length; i++) {
     const codeOnly = stripTrailingComment(lines[i]);
-    if (!IDIOM_A.test(codeOnly) && !IDIOM_B.test(codeOnly)) continue;
-    const window = lines.slice(i, i + 5).join("\n");
-    // Scan EVERY check()/assert() in the window (matchAll, not the first match only) — a single wait can
-    // guard more than one assertion, and dropping anything past the first is a silent under-report.
-    for (const m of window.matchAll(CHECK_OR_ASSERT_RE)) {
-      const label = m[2];
-      if (!NEG_KEYWORDS.test(label)) continue;
-      hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i), falseMatch: falseMatchReasonFor(lines, i) });
+    const isRawIdiom = IDIOM_A.test(codeOnly) || IDIOM_B.test(codeOnly);
+    if (isRawIdiom) {
+      const window = lines.slice(i, i + 5).join("\n");
+      // Scan EVERY check()/assert() in the window (matchAll, not the first match only) — a single wait can
+      // guard more than one assertion, and dropping anything past the first is a silent under-report.
+      for (const m of window.matchAll(CHECK_OR_ASSERT_RE)) {
+        const label = m[2];
+        if (!NEG_KEYWORDS.test(label)) continue;
+        hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i), falseMatch: falseMatchReasonFor(lines, i) });
+      }
+      continue;
+    }
+    if (IDIOM_C.test(codeOnly)) {
+      for (const label of windowMsCandidateHits(lines, i)) {
+        hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i), falseMatch: falseMatchReasonFor(lines, i) });
+      }
     }
   }
   return hits;
@@ -635,6 +731,60 @@ check("sanity: a real wait call on a code line still matches after comment-strip
     !IDIOM_A.test(stripTrailingComment(commentLine)));
   check("REAL CORPUS: the real wait at pending-ops-registry.mjs:270 still matches after comment-stripping (fix does not blind it)",
     IDIOM_A.test(stripTrailingComment(realWaitLine)));
+}
+
+// Card 0f744aa4, DoD-2 — POSITIVE CONTROL for the new `windowMs` idiom, both directions, synthetic (built
+// via concatenation — the self-scan trap: this guard scans its own source, so the literal text "window" +
+// "Ms" + ":" written contiguously anywhere in THIS file's code would itself become a genuine hit against
+// this file, same trap the SLEEP_IDIOM_SAMPLE block above already works around for IDIOM_A).
+{
+  const WMS = "window" + "Ms";
+  // (1) UNCONTROLLED: a windowMs-sampled observeOnce with NO positiveControl anywhere in its block,
+  // immediately followed by a NEGATIVE-polarity check() — the exact shape of the real incident this card
+  // exists to close (a shipped file carrying two uncontrolled negatives this way).
+  const uncontrolled = [
+    "{",
+    `  const ok = await observeOnce({ check: () => x > 5, ${WMS}: 100 });`,
+    '  check("x never exceeds 5 within the window", ok);',
+    "}",
+  ];
+  check("sanity: the UNCONTROLLED synthetic candidate line matches the new windowMs idiom",
+    IDIOM_C.test(stripTrailingComment(uncontrolled[1])));
+  check("POSITIVE CONTROL: an uncontrolled windowMs site immediately followed by a NEGATIVE-polarity check() IS detected",
+    windowMsCandidateHits(uncontrolled, 1).length > 0);
+
+  // (2) CONTROLLED: the identical shape, but with a `positiveControl` key present anywhere in the SAME
+  // block — the sanctioned route (card 1addef27) — must clear, not merely happen to fall outside some
+  // fixed line count. This is the case a naive fixed-line-window widening gets wrong: the real specimen
+  // (ws-fleet-session-feed.mjs) has its own consuming check() land INSIDE a 5-line window from the wait
+  // line, which a window-based (rather than block-based) rule would have flagged as a live false positive
+  // on already-correct production code.
+  const controlled = [
+    "{",
+    "  positiveControl: async () => {",
+    `    const ok = await observeOnce({ check: () => x > 5, ${WMS}: 100 });`,
+    "    return ok;",
+    "  },",
+    '  check("x never exceeds 5 within the window", ok);',
+    "}",
+  ];
+  check("sanity: the CONTROLLED synthetic candidate line ALSO matches the new windowMs idiom (fix does not blind real sites)",
+    IDIOM_C.test(stripTrailingComment(controlled[2])));
+  check("a positiveControl token anywhere in the block clears a windowMs candidate (card 5e51e778's own proven clearing rule)",
+    windowMsCandidateHits(controlled, 2).length === 0);
+
+  // (3) NO ASSERTION NEARBY: a windowMs-sampled observeOnce with no check()/assert() anywhere in its own
+  // block at all — the ordinary settle/pacing shape, left alone by design (same posture the raw-idiom path
+  // already takes for a windowless site). This is the REAL shape of worker-composer-dirty-signal.mjs's
+  // `proveClearMechanismWorks` (a helper that RETURNS a verdict for something else, far away, to assert
+  // on) — see the header's "WHAT IT CANNOT SEE" note on by-reference positiveControl.
+  const noAssertionNearby = [
+    "{",
+    `  return await observeOnce({ check: () => x > 5, ${WMS}: 100 });`,
+    "}",
+  ];
+  check("sanity: a windowMs candidate with no check()/assert() anywhere in its block is left alone (settle/pacing wait, out of scope by design)",
+    windowMsCandidateHits(noAssertionNearby, 1).length === 0);
 }
 
 const newViolations = [];
