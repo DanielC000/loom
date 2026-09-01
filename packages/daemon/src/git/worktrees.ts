@@ -2664,6 +2664,17 @@ export const STATIC_GUARD_REPO_PATHS = [
   // reproduced cache-replay chain and for what this guard deliberately does NOT flag (bare
   // `computeDeployStaleness()` calls, and `buildServedStatus()`'s two deliberate real-tree tests).
   "packages/daemon/test/deploy-staleness-fixture-guard.mjs",
+  // Card 27d6c5a4 (Code Review finding #3): a corpus-wide source-TEXT scan consolidating six "this
+  // human-only surface is NEVER an MCP tool" sub-assertions that used to live only inside their own full
+  // behavioral test files (setup-project-init-rest.mjs, setup-templates-rest.mjs, companion-lead-mode.mjs,
+  // event-trigger-mcp-absence.mjs, update-endpoint.mjs, shell-terminal.mjs) — none of those files were in
+  // this list, so a comment-only src/mcp/**\/*.ts edit quoting a forbidden literal (e.g. a doc comment
+  // citing "/api/setup/project-init") took the reduced path and never tripped a single one of them: exactly
+  // the merge-gate incident shape this array exists to close. See the guard's own header for the full
+  // enumeration, the sweep that found it (10 raw "no MCP" hits, 4 ruled out as purely dynamic), and why (4)
+  // and (5) below scan SOURCE `.ts` rather than the COMPILED `.js` their origin tests use (same content,
+  // consistent with every other member here).
+  "packages/daemon/test/human-only-surface-leak-guard.mjs",
   // Card 82bb198a: the gate's own verdict (`runOne` in scripts/test-daemon.mjs) is exit-code-only — a
   // hermetic test file whose `check()`/`failures` bookkeeping never reaches a real `process.exit`/
   // `finishAndExit`/`process.exitCode=`/`node:test`/`node:assert`/`throw new` route exits 0 by Node's own
