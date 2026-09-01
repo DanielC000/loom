@@ -42,12 +42,13 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
  * e02d0d06) closes that hazard for a caller that computes its env and happens to produce an empty
  * object, without changing behavior for `undefined` or a populated env. A caller that needs a
  * non-interactive env passes one explicitly (e.g. `git/writer.ts`'s `nonInteractiveEnv()`).
- * `orchestration/restart.ts` passes `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` — a `process.env`
- * spread of exactly the shape this doc warns against above. That is a KNOWN DEFECT at that site, not a
- * sanctioned exception: measured against the installed simple-git, an ambient
- * `GIT_EDITOR`/`GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` makes it THROW, and
- * `supervisorScriptChangedSince` swallows that throw into `return false`, so the supervisor-changed
- * warning silently never fires. Tracked by card 469b5e67 — do NOT copy this shape into a new call site.
+ * A `process.env` spread (e.g. `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }`) is exactly the shape this
+ * doc warns against above: measured against the installed simple-git, an ambient `GIT_EDITOR`/
+ * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` in the spread makes `.env()`
+ * THROW — and a caller that swallows that throw (e.g. into a `return false` "unchanged" advisory) ends up
+ * silently and permanently wrong. `orchestration/restart.ts` once passed this exact shape and was fixed to
+ * call `boundedSimpleGit` with no `env` argument at all (card 469b5e67) — do NOT copy the spread shape
+ * into a new call site.
  * This function never chooses or widens a caller's env on its behalf.
  */
 export function boundedSimpleGit(
