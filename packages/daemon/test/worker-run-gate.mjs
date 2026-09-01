@@ -312,6 +312,13 @@ try {
     await sessions.runWorkerGate(gateWorkerId);
     check("(D2) run_gate pins LOOM_GATE_TEST_CONCURRENCY=3 on its spawned child", capturedEnvOverride?.LOOM_GATE_TEST_CONCURRENCY === "3");
     check("(D2) run_gate does NOT inject the old generic LOOM_TEST_CONCURRENCY name (closes the cross-project collision hazard)", capturedEnvOverride?.LOOM_TEST_CONCURRENCY === undefined);
+    // Card 85c3812d DoD-3: `gateOpIdEnvOverride(opId, WORKER_GATE_ENV_OVERRIDE)` (service.ts, both private —
+    // this real `runWorkerGate` call is the only way to exercise that merge without re-deriving its logic
+    // by hand) must deliver BOTH keys in the SAME object, not just the LOOM_GATE_TEST_CONCURRENCY checked
+    // above — a merge that silently clobbered LOOM_GATE_OP_ID while keeping the concurrency pin would still
+    // pass the two checks above.
+    check("(D2) the SAME captured envOverride also carries a LOOM_GATE_OP_ID (the merge keeps BOTH keys, neither clobbers the other)",
+      typeof capturedEnvOverride?.LOOM_GATE_OP_ID === "string" && capturedEnvOverride.LOOM_GATE_OP_ID.length > 0);
   }
 
   // ── (E) slow path degrades to {opId,status:pending} and later delivers a [loom:gate-*] nudge ──────
