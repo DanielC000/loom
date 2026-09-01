@@ -849,12 +849,67 @@ export async function createWorktree(
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
     await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
     const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
-    await boundedLockedRaw(exists
-      ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
-      : forkFrom
-        ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
-        : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
-      "git worktree add");
+    try {
+      await boundedLockedRaw(exists
+        ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
+        : forkFrom
+          ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
+          : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
+        "git worktree add");
+    } catch (addErr) {
+      // Card 1a858805: a killed `worktree add` (withTimeoutKillingChild above, card 8e75ee20) can leave
+      // `.git/worktrees/<name>/locked` (content `initializing`) behind — git's own in-progress marker,
+      // normally cleared on success, now orphaned because the child died mid-checkout. `git worktree
+      // prune` SKIPS locked records BY DESIGN (so a concurrent prune can't delete an in-progress add) —
+      // neither the leading prune above nor removeWorktree()'s existing single `--force` can ever clear
+      // it (git refuses: "cannot remove a locked working tree, lock reason: initializing").
+      //
+      // `git worktree remove -f -f` is git's own documented override for exactly this lock reason — the
+      // error text names it verbatim. Recover it here, best-effort, via the SAME lock-scoped
+      // `boundedLockedRaw` the three calls above use (still inside withCanonicalIndexLock's callback, so
+      // this doesn't reopen the race the lock exists to close).
+      //
+      // BOUNDED, not absolute: `worktreePath` is confirmed non-existent by the `fs.existsSync(worktreePath)`
+      // reuse-return check above (OUTSIDE this lock) before control ever reaches this lock block — so in
+      // practice this only ever targets a fresh directory Loom itself is trying to create, never an
+      // existing worktree a human deliberately locked. That check and this `add` are NOT atomic with
+      // each other (the existsSync read is outside the lock the add runs inside), so this is a narrow
+      // TOCTOU window, not a proof — accepted because worktree paths are per-spawn unique, making the
+      // realistic exposure nil, not because the window is closed.
+      //
+      // Two failure shapes reach this catch, both handled the same best-effort way:
+      //  - the add failed WITHOUT ever creating worktreePath (e.g. "already used by worktree at
+      //    <other path>") — the remove below is then a harmless no-op against a path that was never
+      //    registered; it must never be able to touch whatever OTHER path such an error names.
+      //  - the add left a genuine locked ghost — the remove below clears it.
+      // Either way, a failure to clean must NEVER throw past createWorktree — swallow it and rethrow the
+      // ORIGINAL add error unchanged, so a cleanup failure can never mask or replace the real one.
+      //
+      // NOTE on "confirmed dead": `boundedLockedRaw`'s production path (`withTimeoutKillingChild`) only
+      // guarantees the child is confirmed dead on its PATH-1 settlement (the "(git child killed)"
+      // rejection). Its `giveUpTimer` fallback (PATH 2, "...giving up (hung git child?)") rejects on a
+      // bare timer with NO such confirmation — see card 963f69ab for the discriminator. On a PATH-2
+      // `addErr`, the add's child may still be alive when this cleanup's own `remove -f -f` runs, so the
+      // remove could race a still-writing child (e.g. clear the dir, then have a still-live add re-create
+      // part of it with no admin record — a shape Code Review flagged as newly reachable here, probability
+      // unquantified). That is NO WORSE than the pre-existing PATH-2 exposure `withTimeoutKillingChild`
+      // already carries independent of this cleanup (a caller there already tolerates the child possibly
+      // still running) — this comment names the possibility rather than claiming it away.
+      await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
+        .catch((cleanupErr: unknown) => {
+          const cleanupMsg = (cleanupErr as Error).message;
+          // "is not a working tree" is the COMMON, EXPECTED shape (addErr's add failed without ever
+          // creating worktreePath — e.g. "already used by worktree at <other path>" — so there is
+          // nothing here to remove); logging it as a warning on every such ordinary failure would be
+          // noise on a log shared across every tenant on the host. Warn only on a genuinely unexpected
+          // cleanup failure.
+          if (!/is not a working tree/i.test(cleanupMsg)) {
+            // eslint-disable-next-line no-console
+            console.warn(`[worktree] best-effort locked-record cleanup after a failed worktree add also failed: ${cleanupMsg}`);
+          }
+        });
+      throw addErr;
+    }
     return exists;
   });
   let staleBase: StaleBaseInfo | undefined;

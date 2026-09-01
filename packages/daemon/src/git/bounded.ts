@@ -72,6 +72,21 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
  * to kill or wait for), or, in production, a pathological child that doesn't die on signal. Past that
  * grace window this gives up and rejects anyway, accepting the same abandon-the-child risk `withTimeout`
  * always has — bounding the CONSEQUENCE of a kill that doesn't work, not pretending it can't happen.
+ *
+ * ⚠️ A SUCCESSFUL kill still leaves whatever the child had already written to disk — killing the process
+ * stops it from doing MORE, it does not undo what it already did. Card 1a858805: `git worktree add`
+ * writes `.git/worktrees/<name>/locked` (content `initializing`) at the START of the add and removes it
+ * on success; a kill mid-checkout leaves that marker behind, and `git worktree prune` SKIPS locked
+ * records by design, so it never self-heals. `createWorktree`'s own `worktree add` call site (git/
+ * worktrees.ts) is the one caller of this function that also owns recovering that residue — see the
+ * catch around its `boundedLockedRaw(["worktree", "add", ...])` call for the recovery, not here; this
+ * function only guarantees the CHILD is dead (on its path-1 settlement — see below), never that its
+ * on-disk side effects are undone.
+ *
+ * A kill's "confirmed dead" guarantee (the load-bearing property documented above) holds only for this
+ * function's PATH-1 settlement (the `p.then(...)` "(git child killed)" rejection) — the `giveUpTimer`
+ * fallback (PATH 2, "...giving up (hung git child?)") rejects on a bare timer with NO such confirmation.
+ * A caller that needs to tell the two apart has card 963f69ab's discriminator.
  */
 export function withTimeoutKillingChild<T>(
   p: Promise<T>,
