@@ -114,8 +114,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // "investigate before accepting" rule is for.
 //
 // KNOWN_UNAUDITED_WAITS is a PERMANENT BASELINE, not a countdown to zero — same posture as
-// codescape-privacy-guard.mjs's KNOWN_LEAKING_FILES. Every one of its 115 entries (113 auto-derived +
-// 2 hand-added for companion-voice-tts-provision.mjs — see the comment at that entry) is UNEXAMINED under
+// codescape-privacy-guard.mjs's KNOWN_LEAKING_FILES. Card 4479e6f0: this comment used to restate the entry
+// count in prose ("115 entries") — it drifted to stale (real count 116) without anyone editing this
+// comment, because nothing here re-derives it. A count stored beside the data it counts is a cache with no
+// invalidation; the fix is to stop storing it here at all. The real count is DERIVED and PRINTED AT
+// RUNTIME instead — see KNOWN_UNAUDITED_WAITS_TOTAL below and the final PASS/FAIL summary line, never
+// restated as a literal in this comment again. Every entry in it (hand-added ones carry their own inline
+// comment explaining why, e.g. companion-voice-tts-provision.mjs's) is UNEXAMINED under
 // this card — 975956b2's own language — NOT cleared. Do not read this baseline as a completed census
 // (DoD-7), and do not remove an entry to "clean up" without actually auditing that site's polarity/timing
 // risk first. The property that matters: a NEW (file, label) pair — or one of the four retrofitted files
@@ -412,12 +417,6 @@ const KNOWN_UNAUDITED_WAITS = new Map([
     "(b) beginSelfUpdate NOT invoked by the rejected caller (still 1)",
     "(c) beginSelfUpdate NOT invoked on a source daemon (still 1)",
   ]],
-  ["worker-kickoff-guarantee.mjs", [
-    "(H1a) still exactly ONE forced submit (no repeat firing)",
-    "(H1b) NO forced submit — nothing was ever written to the pty by Loom's own submit()",
-    "(H1c) ready-after-enqueue: no forced submit — the turn had already started when ready landed",
-    "(H1d) resume path: NEVER force-submits (no kickoff was ever passed)",
-  ]],
   ["worker-liveness-signal.mjs", [
     "(1) getLastOutputAt ADVANCES AGAIN on a second chunk — WITHIN the same turn (no Stop/hook in between)",
     "(3) with no further engine output, lastEngineOutputAt FREEZES (does not advance) — the wedge signal",
@@ -451,6 +450,11 @@ const KNOWN_UNAUDITED_WAITS = new Map([
 function baselineHas(file, label) {
   return KNOWN_UNAUDITED_WAITS.get(file)?.includes(label) ?? false;
 }
+
+// Card 4479e6f0: DERIVED, never hand-typed — see the header comment above for why a hand-typed count here
+// went stale (115 written, 116 real) with no edit ever touching this line. Printed in the final PASS/FAIL
+// summary below; nowhere in this file states the count as a literal.
+const KNOWN_UNAUDITED_WAITS_TOTAL = [...KNOWN_UNAUDITED_WAITS.values()].reduce((n, arr) => n + arr.length, 0);
 
 // Card a14717af: the pre-`ecf4e391` matcher scanned each wait's 5-line window with a non-global
 // `.match()`, which silently returns only the FIRST check()/assert() found in that window — any further
@@ -588,8 +592,21 @@ function newlyVisibleHas(file, label) {
 // The 4 files card 1addef27 retrofitted to assertNeverWithControl — a raw fixed-wait-then-negative-check
 // hit in ANY of these is a REGRESSION (the guard rejects it as a fresh flag, never silently re-baselines
 // it), not new/unrelated debt.
+// Card 4479e6f0, DoD-3: worker-kickoff-guarantee.mjs added as a 5th member. It was independently migrated
+// to the SAME assertNeverWithControl/observeOnce shared helpers (with a `positiveControl` on every site —
+// confirmed by reading the file directly, 2026-09-01), but was never recorded here, so it got no explicit
+// regression check — only the generic "no new violations" catch-all. Membership here does two things a
+// pruned KNOWN_UNAUDITED_WAITS entry alone would not: it names the file's migrated status explicitly
+// (self-documenting, matching its true state) and it adds it to the loop below (`for (const retrofitted of
+// RETROFITTED_FILES)`), which asserts — by name, every run — that this file specifically shows ZERO
+// un-exempted raw-idiom hits, the same positive proof the original 4 files get. Leaving it out would mean
+// a future regression here is caught only generically, with no file-specific confirmation it's expected
+// clean. Verified safe to add now: scanFile('worker-kickoff-guarantee.mjs') finds no un-exempted hits as
+// of this commit (every windowMs-idiom site in it carries a `positiveControl` in its own block, which
+// clears it — see windowMsCandidateHits below).
 const RETROFITTED_FILES = new Set([
   "ws-fleet-session-feed.mjs", "markitdown-prewarm.mjs", "markitdown-provision-nonblocking.mjs", "dev-server.mjs",
+  "worker-kickoff-guarantee.mjs",
 ]);
 
 function walkTestFiles() {
@@ -844,6 +861,6 @@ for (const retrofitted of RETROFITTED_FILES) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — no new/regressed fixed-wait-guarding-a-negative-assertion sites. This is NOT a completed census: the baseline above (115 entries, keyed by file+label — see the header's BASELINE KEY note) is UNAUDITED debt, not cleared code."
+  ? `\n✅ ALL PASS — no new/regressed fixed-wait-guarding-a-negative-assertion sites. This is NOT a completed census: the baseline above (${KNOWN_UNAUDITED_WAITS_TOTAL} entries, keyed by file+label — see the header's BASELINE KEY note) is UNAUDITED debt, not cleared code.`
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
