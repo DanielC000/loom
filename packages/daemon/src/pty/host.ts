@@ -2952,7 +2952,18 @@ interface Live {
   // `batchId`; a match spanning more than one is left untouched entirely rather than guessed at, restoring
   // the "never a false-positive purge" property for real — see that method's own doc for why guessing
   // (even an age-based tie-break) was rejected in favor of resolving nothing.
-  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number }>;
+  //
+  // Card ee56a894: `memberSig` is a SECOND signature, added alongside `{len,hash}` (never replacing it —
+  // `{len,hash}` stays the JOINED text's signature, load-bearing for `purgeConfirmedGiveUpRequeue`'s
+  // engine-echo match above) — THIS entry's own single member's text, exactly as `requeueGiveUpOrigin`
+  // would individually write it (mirrors `joinSubmittedText`'s own per-member transform, just not joined
+  // with any sibling). For a single-member batch (the common case) `memberSig` is byte-identical to
+  // `{len,hash}` — joining one element with a separator is that element itself. For a COALESCED batch
+  // (2+ members), the two diverge: `{len,hash}` is what the engine's real echo carries and
+  // `hasAmbiguousMatch` (the manual-resend auto-join check) needs `memberSig` instead, since a manual
+  // resend can only ever carry ONE member's own text, never the joined text of a batch the sender never
+  // knew was coalesced. See `hasAmbiguousMatch`'s own doc for why both are tried.
+  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -9089,7 +9100,16 @@ export class PtyHost {
       // events — that happen to land on the same text): `gen` only ever increases and is captured once per
       // call, so it's a free, already-threaded batch identity — the SAME value already stamped onto each
       // kept `QueuedMessage.giveUpGen` below — no new counter needed.
-      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
+      //
+      // Card ee56a894: ALSO seed `memberSig` — THIS member's own text alone, transformed the SAME way
+      // `joinSubmittedText` transforms each element before joining (`annotatedMessageText`, not a bare
+      // `.text`), so it stays byte-identical to `submittedSig` for the common single-member case (joining
+      // one element is that element itself) and diverges only once a batch actually has 2+ members. This
+      // is an ADD alongside `submittedSig`, never a replacement — `hasAmbiguousMatch` is the only consumer
+      // that needs it; `purgeConfirmedGiveUpRequeue`'s engine-echo match still keys off `submittedSig`
+      // alone, unchanged.
+      const memberSig = textSignature(annotatedMessageText(m, gen - 1));
+      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
@@ -9148,6 +9168,18 @@ export class PtyHost {
    * they resend the plain ORIGINAL content the notice's own (tag-stripped) head quoted back to them. So
    * `text` is tried BOTH as-is AND with the tag this SPECIFIC candidate `logicalId` would carry — the tag
    * embeds the logicalId itself, so it must be reconstructed per-entry, not once outside the loop.
+   *
+   * Card ee56a894: an entry's `{len,hash}` is the JOINED text's signature — correct for a single-member
+   * batch (the common case), but a COALESCED batch (2+ members, e.g. same-sender agent coalescing, card
+   * 8d4f9a08) seeds every member's entry with that SAME joined signature, which no single member's own
+   * text can ever equal once there's more than one. A manual resend can only ever carry ONE message's own
+   * text — the sender has no way to know it was ever coalesced with anything else — so this method now
+   * ALSO tries each entry's `memberSig` (that member's own text alone; see `Live.ambiguousDispatches`'s
+   * own doc), both as-is and tag-marked, exactly like the joined `{len,hash}` check above. An ADD, never a
+   * swap: `{len,hash}` stays checked too, since `purgeConfirmedGiveUpRequeue`'s engine-echo path — the
+   * other, unrelated consumer of this same map — still needs the joined shape to keep matching, and this
+   * method must keep resolving a resend of the FULL joined text too (a caller who happens to paste back
+   * everything the notice showed, joined text included).
    */
   hasAmbiguousMatch(sessionId: string, text: string): string | null {
     const live = this.live.get(sessionId);
@@ -9155,8 +9187,10 @@ export class PtyHost {
     const sig = textSignature(text);
     for (const [logicalId, entry] of live.ambiguousDispatches) {
       if (entry.len === sig.len && entry.hash === sig.hash) return logicalId;
+      if (entry.memberSig.len === sig.len && entry.memberSig.hash === sig.hash) return logicalId;
       const markedSig = textSignature(framePossibleDuplicate(text, logicalId));
       if (entry.len === markedSig.len && entry.hash === markedSig.hash) return logicalId;
+      if (entry.memberSig.len === markedSig.len && entry.memberSig.hash === markedSig.hash) return logicalId;
     }
     return null;
   }
