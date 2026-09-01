@@ -30,6 +30,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // repo's own real, permanent commit history for scripts/daemon-supervisor.mjs — the fake-gitLogSince
 // tests above never touched the buggy `.env()` call at all, so they could not have caught this.
 //
+// Card f7a80d76 (manager review round 3, gate opId ed3da42a): the FIRST of the two RED-PROOF sections
+// below used to prove its comparison baseline was still dangerous by literally reconstructing the OLD
+// shape via `boundedSimpleGit(root, ms, { ...process.env, GIT_TERMINAL_PROMPT: "0" })` and asserting it
+// THROWS. That premise is now GENUINELY OBSOLETE, not merely inconvenient: `boundedSimpleGit` — the ONLY
+// simple-git construction site anywhere in packages/daemon/src (verified: `grep -rn 'from "simple-git"'`
+// finds the VALUE import — not just the `SimpleGit` type — nowhere else) — now scrubs whatever env it is
+// given unconditionally, so this exact reconstructed shape can no longer reproduce the original bug
+// through ANY call site in this codebase, not just this one. This is the (A) case, not (B): there is no
+// bypass of the chokepoint anywhere for the fix to have missed. The section below is REPOINTED (never
+// deleted) to pin the NEW guarantee — that this once-dangerous shape is now SAFE at the chokepoint, and
+// that the reconstructed call's result AGREES with the real production path's — which is what must not
+// regress going forward.
+//
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/supervisor-change-detect.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -177,14 +190,16 @@ try {
       JSON.stringify(supervisorCheckResponseFields({ status: "could-not-check", reason: "boom" })) !== JSON.stringify(supervisorCheckResponseFields({ status: "unchanged" })));
   }
 
-  // --- RED-PROOF (DoD-1 + DoD-3): with an ambient GIT_PAGER set, the OLD `.env(process.env spread)`
-  // shape must THROW, and the REAL (uninjected) production defaultGitLogSince — reached only by calling
-  // supervisorScriptChangedSince with NO deps override — must NOT, and must correctly surface a real
-  // hit. Uses this repo's own permanent commit history for scripts/daemon-supervisor.mjs (Conventional
-  // Commits are enforced going-forward-only / never rewritten per this repo's own CLAUDE.md, so commits
-  // already on main since 2000-01-01 stay reachable indefinitely — this is not fragile against future
-  // history). Independently confirmed present at the time this test was written via a plain
-  // `git log --since=2000-01-01 -- scripts/daemon-supervisor.mjs`.
+  // --- RED-PROOF (DoD-1 + DoD-3), REPOINTED by card f7a80d76 round 3: with an ambient GIT_PAGER set,
+  // the OLD `.env(process.env spread)` shape — reconstructed via `boundedSimpleGit` for comparison, NOT a
+  // live production call site (defaultGitLogSince has passed NO env since card 469b5e67, unaffected by
+  // any of this) — must now SURVIVE (boundedSimpleGit's own chokepoint scrub, card f7a80d76), and its
+  // result must AGREE with the REAL (uninjected) production defaultGitLogSince — reached only by calling
+  // supervisorScriptChangedSince with NO deps override. Uses this repo's own permanent commit history for
+  // scripts/daemon-supervisor.mjs (Conventional Commits are enforced going-forward-only / never rewritten
+  // per this repo's own CLAUDE.md, so commits already on main since 2000-01-01 stay reachable
+  // indefinitely — this is not fragile against future history). Independently confirmed present at the
+  // time this test was written via a plain `git log --since=2000-01-01 -- scripts/daemon-supervisor.mjs`.
   {
     const savedEnv = {};
     for (const k of ["GIT_EDITOR", "GIT_PAGER", "PAGER", "EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_EXTERNAL_DIFF"]) {
@@ -194,19 +209,23 @@ try {
     process.env.GIT_PAGER = "cat";
     const FAR_PAST_ISO = "2000-01-01T00:00:00.000Z";
     try {
-      // Mechanism: literally reconstruct the OLD buggy shape (the exact change reverted by this card)
-      // against a real repo and prove it throws under the ambient var this test just set.
+      // Mechanism: literally reconstruct the OLD buggy shape (the exact shape card 469b5e67 removed from
+      // defaultGitLogSince) against a real repo and prove the CHOKEPOINT now defends it — not merely
+      // "did not throw" (a vacuous pass could mean the call silently did nothing), but that it returns
+      // the SAME real commit hash the fixed production path independently derives below.
       const oldStyleGit = boundedSimpleGit(REPO_ROOT, 10_000, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
-      let oldThrew = false, oldMessage = "";
+      let oldThrew = false, oldMessage = "", oldLog = "";
       try {
-        await oldStyleGit.raw(["log", `--since=${FAR_PAST_ISO}`, "--format=%H", "--", SUPERVISOR_SCRIPT_REL_PATH]);
+        oldLog = await oldStyleGit.raw(["log", `--since=${FAR_PAST_ISO}`, "--format=%H", "--", SUPERVISOR_SCRIPT_REL_PATH]);
       } catch (e) {
         oldThrew = true;
         oldMessage = e instanceof Error ? e.message : String(e);
       }
-      check("(RED-PROOF mechanism) the OLD `.env(process.env spread)` shape THROWS under ambient GIT_PAGER", oldThrew === true);
-      check("(RED-PROOF mechanism) the throw is simple-git's unsafe-operations guard on GIT_PAGER specifically",
-        /GIT_PAGER/.test(oldMessage) && /unsafe/i.test(oldMessage));
+      check("(GUARANTEE mechanism) the OLD `.env(process.env spread)` shape no longer throws under ambient GIT_PAGER (boundedSimpleGit's chokepoint scrub)",
+        oldThrew === false);
+      check("(GUARANTEE mechanism) the reconstructed old-style call returns a REAL, non-empty commit hash (not a vacuous pass)",
+        /^[0-9a-f]{40}/m.test(oldLog.trim()));
+      if (oldThrew) console.log(`  (diagnostic — should not happen: ${oldMessage})`);
 
       // Behavior: the REAL production path (no deps override — this is defaultGitLogSince, not a fake)
       // must NOT throw under the same ambient var, and must correctly report the real hit as "changed".
@@ -221,6 +240,11 @@ try {
       }
       check("(RED-PROOF fixed) the REAL uninjected defaultGitLogSince does NOT throw/degrade under the same ambient GIT_PAGER", fixedResult.status === "changed");
       check("(RED-PROOF fixed) no 'could not check' warning fired — this was a genuine successful check, not a masked failure", capturedWarnings.length === 0);
+      // NOTE: SupervisorCheckResult's "changed" variant carries no headSha (see restart.ts's own type) —
+      // there is no public field to diff the reconstructed old-style hash against, so "agreement" is
+      // proven only at the STATUS level (both report a hit), not by comparing hash values.
+      check("(GUARANTEE agreement) both routes report the SAME real hit — the reconstructed old-style call found a commit AND the real production path independently confirms it as \"changed\"",
+        !oldThrew && oldLog.trim().length > 0 && fixedResult.status === "changed");
     } finally {
       for (const k of Object.keys(savedEnv)) {
         if (savedEnv[k] === undefined) delete process.env[k];

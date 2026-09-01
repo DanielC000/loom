@@ -1,4 +1,4 @@
-import { simpleGit, type SimpleGit } from "simple-git";
+import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 
 /**
  * Neutral extraction (card 9df3ea71) of the bounded-git primitives six independent copies across this
@@ -119,6 +119,52 @@ export function withTimeoutKillingChild<T>(
 }
 
 /**
+ * Env keys simple-git's `blockUnsafeOperationsPlugin` refuses when present in an explicitly-supplied
+ * `.env()` object (verified by EXECUTING `@simple-git/argv-parser@1.1.1`'s real `parseEnv` against the
+ * installed simple-git, one key at a time, card f7a80d76 — this is the FULL set; a prior audit's copy of
+ * "eight keys" undercounted it by ten) that (1) a real host/session can plausibly carry ambiently AND
+ * (2) no non-interactive git op in this codebase (piped stdio, never a real TTY — no op here ever opens
+ * an editor/pager/diff tool) legitimately needs. Unconditionally safe to strip: a leftover value here
+ * could only cause an unwanted throw, never a needed effect. This is the STRIP half of the design call in
+ * card f7a80d76's DoD-2 — see {@link boundedSimpleGit}'s doc for the sibling PASS-THROUGH half (the
+ * `GIT_CONFIG_*` / config-path family), which is deliberately NOT in this list.
+ *
+ * Left OUT of this list, deliberately, matching `git/writer.ts`'s original `nonInteractiveEnv()` reasoning
+ * (card 42544916) extended to the now-verified full set:
+ *  - `GIT_ASKPASS` / `SSH_ASKPASS` / `GIT_SSH` / `GIT_SSH_COMMAND` / `GIT_PROXY_COMMAND` — each names an
+ *    arbitrary program git would exec in its place; bypassing simple-git's refusal is an arbitrary-command
+ *    vector during real auth/transport. Left BLOCKED (present ⇒ simple-git still throws) rather than
+ *    stripped or allowed — a caller with one of these ambiently set gets a loud, honest failure, not a
+ *    silently-widened trust boundary.
+ *  - `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` / `GIT_CONFIG` / `GIT_EXEC_PATH` / `PREFIX` — simple-git's
+ *    `allowUnsafeConfigPaths` category; see {@link boundedSimpleGit}'s doc — passed THROUGH, not stripped.
+ *  - `GIT_CONFIG_COUNT` / `GIT_TEMPLATE_DIR` — a separate category each (`allowUnsafeConfigEnvCount` /
+ *    `allowUnsafeTemplateDir`); not realistically ambient (a script-authored env-config convention and a
+ *    `git init`-only var this codebase's ops never invoke that way) and not exercised by anything this
+ *    fix touches — left unhandled (blocked if ever present), same posture `writer.ts` already documented.
+ */
+export const GIT_ENV_STRIP_KEYS = [
+  "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "GIT_PAGER", "PAGER", "GIT_EXTERNAL_DIFF",
+] as const;
+
+/**
+ * The ONE place this codebase decides which ambient env vars are safe to remove before handing an env to
+ * simple-git — returns a NEW object with {@link GIT_ENV_STRIP_KEYS} deleted (never mutates `env`).
+ * {@link boundedSimpleGit} applies this ITSELF, unconditionally, to whatever `env` it is given (card
+ * f7a80d76 review round 2) — so a caller does NOT need to call this before passing an env; it is exported
+ * for a caller that wants the scrubbed value earlier (to inspect/log/test it, or to feed it to something
+ * other than `boundedSimpleGit`), not because skipping it would be unsafe. This function only ever handles
+ * the STRIP half; the sibling config-path PASS-THROUGH+ALLOW half lives entirely in
+ * {@link boundedSimpleGit} (below), since it's a construction-time simple-git option, not an env
+ * transform.
+ */
+export function scrubGitEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const out = { ...env };
+  for (const key of GIT_ENV_STRIP_KEYS) delete out[key];
+  return out;
+}
+
+/**
  * Build a simpleGit instance bound by a block timeout. ⚠️ **`block` is an IDLE timeout — the kill timer
  * resets on every `data` event from the child's stdout/stderr (verified at source,
  * `node_modules/.pnpm/simple-git@3.36.0/.../timeoutPlugin`) — it is NOT a total-elapsed ceiling.** A
@@ -128,24 +174,42 @@ export function withTimeoutKillingChild<T>(
  * total-elapsed kill (not just idle) passes `abortSignal` (below) and bounds elapsed time itself via
  * {@link withTimeoutKillingChild}.
  *
- * `env`, when supplied and non-empty, is applied via `.env(env)`; OMIT it (or pass `{}`) to get a plain
- * instance with NO `.env()` call at all — that is a deliberate default, not an oversight. `.env()`
- * REPLACES the whole child env (not a merge), which is exactly why `vault/versioner.ts`'s own bounded-git
- * site calls this with no `env` argument at all (see its own doc, card 54b839c5): passing `.env()`
- * anything there — even `{}` or a spread of `process.env` — either throws on an ambient
- * `GIT_EDITOR`/`PAGER` in the caller's own env, or (if those are stripped first) silently drops a
- * caller's legitimate `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` redirection. Treating `{}` the same as
- * `undefined` (card e02d0d06) closes that hazard for a caller that computes its env and happens to
- * produce an empty object, without changing behavior for `undefined` or a populated env. A caller that
- * needs a non-interactive env passes one explicitly (e.g. `git/writer.ts`'s `nonInteractiveEnv()`).
- * A `process.env` spread (e.g. `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }`) is exactly the shape this
- * doc warns against above: measured against the installed simple-git, an ambient `GIT_EDITOR`/
- * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` in the spread makes `.env()`
- * THROW — and a caller that swallows that throw (e.g. into a `return false` "unchanged" advisory) ends up
- * silently and permanently wrong. `orchestration/restart.ts` once passed this exact shape and was fixed to
- * call `boundedSimpleGit` with no `env` argument at all (card 469b5e67) — do NOT copy the spread shape
- * into a new call site.
- * This function never chooses or widens a caller's env on its behalf.
+ * **`env`, when supplied, is run through {@link scrubGitEnv} HERE, unconditionally, before being applied
+ * (card f7a80d76 review round 2 — this used to be the caller's job, and "the caller must remember to
+ * scrub first" is EXACTLY the failure mode that produced the card's M1/M2 findings in the first place: two
+ * independent copies covering only 2-of-18 and 6-of-18 of simple-git's real refusal list, because
+ * remembering was load-bearing).** A caller now passes a RAW env (e.g. a `process.env` spread) and gets
+ * the same safety a caller that pre-scrubbed would have; {@link scrubGitEnv} stays exported for a caller
+ * that wants the scrubbed value for its own separate purpose, not because it is still required here. If
+ * the result is empty (rare — a caller would have to pass ONLY {@link GIT_ENV_STRIP_KEYS} and nothing
+ * else) this falls back to a plain instance with NO `.env()` call at all, exactly as `env:undefined`/`{}`
+ * already did — that is a deliberate default, not an oversight, since `.env()` REPLACES the whole child
+ * env (not a merge) and calling it with an empty object is never useful. This is exactly why
+ * `vault/versioner.ts`'s own bounded-git site calls this with NO `env` argument at all instead of routing
+ * through this scrub (see its own doc, card 54b839c5): `commitVault` needs to PRESERVE whatever the
+ * caller's real ambient `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` resolves to (including a test's
+ * deliberately-broken path, to exercise its own identity-fallback) — stripping those keys there silently
+ * redirects identity resolution to this HOST's real `~/.gitconfig` instead, a worse failure than a loud
+ * throw. That is a narrower, caller-specific need this function does not try to solve generically;
+ * `versioner.ts` stays on its own no-`.env()` path (card f7a80d76 leaves it untouched) — it is the one
+ * legitimate way to opt OUT of this scrub, by not passing an env at all.
+ *
+ * **The config-path family is PASSED THROUGH, not stripped, and explicitly ALLOWED (card f7a80d76 DoD-2):**
+ * whenever the scrubbed `env` is non-empty, this constructs the instance with
+ * `unsafe: { allowUnsafeConfigPaths: true }` — the simple-git category covering
+ * `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG`/`GIT_EXEC_PATH`/`PREFIX` (verified via
+ * `@simple-git/argv-parser`'s own category map). The two honest options were (a) omit `.env()` entirely —
+ * unavailable to a caller that genuinely needs an explicit env (both `runs/snapshot.ts` and
+ * `git/writer.ts`'s `nonInteractiveEnv()` do, for `GIT_INDEX_FILE` / `GIT_TERMINAL_PROMPT` respectively) —
+ * or (b) opt into `allowUnsafeConfigPaths`. (b) is chosen and applied HERE, at the one construction
+ * chokepoint, exactly like the scrub above, so no caller can produce a partial copy of the decision. It is
+ * a no-op (the vulnerability check never runs) for the many callers in this codebase that never pass `env`
+ * at all — this only takes effect for a caller that explicitly hands simple-git an env, which is exactly
+ * the population that can carry the ambient var in the first place. This does NOT widen anything else:
+ * `allowUnsafeConfigPaths` covers only config-PATH redirection, not the arbitrary-command-exec categories
+ * (editor/pager/diff/askpass/ssh/proxy) that {@link GIT_ENV_STRIP_KEYS} strips or that stay deliberately
+ * blocked (see that constant's own doc for the full breakdown) — this function DOES widen a caller's env
+ * on its behalf (the strip + the allowance), by design, precisely so a caller cannot fail to.
  *
  * `abortSignal`, when supplied, is passed through as simple-git's own `abort` option — wiring up its
  * `abortPlugin` so a later `controller.abort()` (the controller this signal came from) issues a real kill
@@ -158,9 +222,13 @@ export function boundedSimpleGit(
   env?: Record<string, string | undefined>,
   abortSignal?: AbortSignal,
 ): SimpleGit {
+  const scrubbedEnv = env ? scrubGitEnv(env) : undefined;
+  const hasEnv = !!scrubbedEnv && Object.keys(scrubbedEnv).length > 0;
+  const unsafe: SimpleGitOptions["unsafe"] = { allowUnsafeConfigPaths: true };
   const git = simpleGit(repoPath, {
     timeout: { block: blockTimeoutMs },
     ...(abortSignal ? { abort: abortSignal } : {}),
+    ...(hasEnv ? { unsafe } : {}),
   });
-  return env && Object.keys(env).length > 0 ? git.env(env) : git;
+  return hasEnv ? git.env(scrubbedEnv as Record<string, string | undefined>) : git;
 }

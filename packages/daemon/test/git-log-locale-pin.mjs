@@ -19,9 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) `nonInteractiveEnv()` overrides an INHERITED foreign LC_ALL/LANG to "C" — the exact override
 //       writer.ts's comment describes ("LC_ALL wins over any inherited LANG/LC_*"), exercised against a
 //       real foreign value set on this very process, not a hardcoded literal.
-//   (2) a WIRING guard — GitReader's compiled source actually calls `.env(nonInteractiveEnv())` — so a
-//       regression that quietly drops that call (while `nonInteractiveEnv()` itself stays correct
-//       elsewhere) is still caught.
+//   (2) a WIRING guard — GitReader's compiled source actually passes `nonInteractiveEnv()` to
+//       `boundedSimpleGit`'s CONSTRUCTOR (card f7a80d76: this used to be a chained `.env(nonInteractiveEnv())`
+//       call after construction — changed because `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths`
+//       allowance is a construction-time option; a post-construction `.env()` chain would silently miss it
+//       and leave GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM throwing) — so a regression that quietly drops the
+//       env from construction (while `nonInteractiveEnv()` itself stays correct elsewhere) is still caught.
 //   (3) an end-to-end sanity pass with the process's OWN LC_ALL/LANG temporarily set to a foreign value —
 //       the commitless-repo routes still return a clean empty log. This can't by itself DISPROVE a
 //       locale regression on this host (git here doesn't localize either way — see above), but it does
@@ -71,7 +74,10 @@ try {
 // --- (2) WIRING guard — GitReader's compiled output actually applies the pin, not just defines it. ---
 const readerSrc = fs.readFileSync(new URL("../dist/git/reader.js", import.meta.url), "utf8");
 check("(2) GitReader imports nonInteractiveEnv from writer.js", /nonInteractiveEnv/.test(readerSrc));
-check("(2) GitReader applies it via .env(nonInteractiveEnv())", /\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(readerSrc));
+check(
+  "(2) GitReader applies it via boundedSimpleGit(..., nonInteractiveEnv()) AT CONSTRUCTION (not a later .env() chain)",
+  /boundedSimpleGit\([^;]*nonInteractiveEnv\(\)\s*\)/.test(readerSrc) && !/\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(readerSrc),
+);
 
 // --- (3) End-to-end sanity: commitless-repo routes still return a clean empty log with a FOREIGN host
 // locale set on the test process for the duration of the request. ---

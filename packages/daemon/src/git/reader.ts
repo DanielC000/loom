@@ -124,10 +124,14 @@ export class GitReader {
     // across every git invocation in this file that reads stderr, not a one-off copy here. Deliberately
     // NOT routed through boundedReaderGit (that helper's whole point is NO `.env()`, matching
     // isGitRepo/checkCommitIdentity) — a test-injected gitFactory skips env entirely (test-only; real
-    // callers never pass one).
+    // callers never pass one). `env` is passed to boundedSimpleGit's CONSTRUCTOR (not chained via a
+    // separate `.env()` call afterward, as this used to do) — card f7a80d76: the construction-time
+    // `unsafe.allowUnsafeConfigPaths` allowance boundedSimpleGit applies for a non-empty env only takes
+    // effect if the env is present when the instance is BUILT, so a post-construction `.env()` chain
+    // would silently miss it and leave GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM throwing (M2).
     this.git = deps.gitFactory
       ? deps.gitFactory(repoPath, this.timeoutMs)
-      : boundedSimpleGit(repoPath, this.timeoutMs).env(nonInteractiveEnv());
+      : boundedSimpleGit(repoPath, this.timeoutMs, nonInteractiveEnv());
   }
 
   async log(limit = 50) {

@@ -9,7 +9,7 @@ import {
   humanBytes,
 } from "../vault/versioner.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
-import { withTimeout, boundedSimpleGit } from "./bounded.js";
+import { withTimeout, boundedSimpleGit, scrubGitEnv } from "./bounded.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -63,32 +63,33 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
 };
 
 /**
- * The child env for a git write: the inherited env (git needs PATH/HOME/etc.) MINUS the editor/pager/
- * diff vars, PLUS {@link NONINTERACTIVE_ENV}. simple-git ships a `blockUnsafeOperationsPlugin` (via
- * `@simple-git/argv-parser`'s `vulnerabilityCheck`) that throws if ANY of a fixed list of env vars is
- * present in the supplied env, unless the matching `unsafe.allow*` flag is explicitly set — each entry
- * below is one of those categories, decided on the SAME two-part test the original `GIT_EDITOR`/
- * `GIT_SEQUENCE_EDITOR` strip used: (1) could a real host/session ambiently carry it, and (2) would any
- * op in this file (log/branches/show/checkout/commit/push — all captured stdio, never a real TTY) ever
- * legitimately need it.
+ * The child env for a git write: the inherited env (git needs PATH/HOME/etc.) MINUS
+ * {@link GIT_ENV_STRIP_KEYS}, PLUS {@link NONINTERACTIVE_ENV}. simple-git ships a
+ * `blockUnsafeOperationsPlugin` (via `@simple-git/argv-parser`'s `vulnerabilityCheck`) that throws if ANY
+ * of a fixed list of env vars is present in the supplied env, unless the matching `unsafe.allow*` flag is
+ * explicitly set — each entry below is one of those categories, decided on the SAME two-part test the
+ * original `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` strip used: (1) could a real host/session ambiently carry
+ * it, and (2) would any op in this file (log/branches/show/checkout/commit/push — all captured stdio,
+ * never a real TTY) ever legitimately need it.
  *
- * STRIPPED (both tests say yes — a leftover value could only cause an unwanted 500, never a needed
- * effect, so removing it is pure upside):
- *  - GIT_EDITOR / GIT_SEQUENCE_EDITOR — original strip: no op here ever opens an editor (commit uses
- *    `-m`, no interactive rebase).
- *  - EDITOR — the bare (non-`GIT_`) form is its OWN separate vulnerability category and a VERY common
- *    ambient shell export (`export EDITOR=vim`); missed by the original strip, which only covered the
- *    `GIT_`-prefixed pair.
- *  - GIT_PAGER / PAGER — THE bug this comment block exists to fix: card 42544916 proved every git
- *    read/write 500s once either is set. This repo's OWN worker/session spawn recipe sets both as an
- *    anti-pager backstop (see root CLAUDE.md), so every Loom session was silently poisoned; a real user
- *    with either set in their shell profile hits the identical 500. None of these ops ever page (piped
- *    stdio, not a TTY) — stripping changes nothing about the data returned.
- *  - GIT_EXTERNAL_DIFF — same family as PAGER: `show()` runs a diff-producing `git show`, and if a
- *    custom external diff were allowed through it would replace git's parseable diff text with an
- *    arbitrary tool's own output, breaking the caller's expected format. Stripping is correctness, not
- *    just safety, for that path (currently unwired to any REST route, but part of this shared env's
- *    contract regardless).
+ * **STRIPPED — delegated to `git/bounded.ts`'s {@link scrubGitEnv} (card f7a80d76; both tests above say
+ * yes, so removing them is pure upside)**: GIT_EDITOR/GIT_SEQUENCE_EDITOR (no op here opens an editor;
+ * commit uses `-m`), EDITOR (the bare, non-`GIT_`-prefixed form — its own category, a very common ambient
+ * shell export missed by the original two-key strip), GIT_PAGER/PAGER (card 42544916: proved every git
+ * read/write 500s once either is set — this repo's OWN worker/session spawn recipe sets both, see root
+ * CLAUDE.md — none of these ops ever page, piped stdio not a TTY), GIT_EXTERNAL_DIFF (`show()`'s diff
+ * output must stay git's own parseable format, not an arbitrary external tool's). See
+ * {@link GIT_ENV_STRIP_KEYS}'s own doc for the exact list and why each entry is there — this file no
+ * longer maintains its own copy.
+ *
+ * **PASSED THROUGH, EXPLICITLY ALLOWED — `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths` (card
+ * f7a80d76 DoD-2, fixing M2: this used to leave these unhandled, which meant an ambient one made every
+ * git write throw)**: GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG / GIT_EXEC_PATH / PREFIX — one
+ * simple-git category (`allowUnsafeConfigPaths`), applied at `boundedSimpleGit`'s construction chokepoint
+ * rather than here, so this file cannot drift from `runs/snapshot.ts`'s copy of the same decision again.
+ * NOT stripped: `vault/versioner.ts`'s own doc (card 54b839c5) shows blind-stripping this family silently
+ * redirects identity resolution to the host's real `~/.gitconfig` instead of failing loud — the same risk
+ * applies here, so pass-through + explicit allowance is the correct fix, not removal.
  *
  * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active is the intended behavior, not a gap):
  *  - GIT_ASKPASS / SSH_ASKPASS — pre-existing decision (see {@link NONINTERACTIVE_ENV}'s comment):
@@ -104,24 +105,16 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  *
  * CHECKED, NOT REALISTICALLY REACHABLE (left unhandled — not because bypassing would be unsafe, but
  * because no ordinary shell profile or IDE integration plausibly exports these, unlike EDITOR/PAGER):
- *  - GIT_CONFIG / GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_COUNT — git's env-based config
- *    injection mechanism; a script-authored convention, not an ambient shell export.
- *  - GIT_EXEC_PATH — only meaningful when pointing git at a nonstandard build of its own subcommands.
+ *  - GIT_CONFIG_COUNT — a DIFFERENT category (`allowUnsafeConfigEnvCount`) from the config-path family
+ *    above, NOT covered by `allowUnsafeConfigPaths`; git's env-based config injection count, a
+ *    script-authored convention, not an ambient shell export.
  *  - GIT_TEMPLATE_DIR — only affects `git init`, which no op in this file invokes.
- *  - PREFIX — an install-prefix convention (e.g. Termux), not a general dev-shell export.
- * If any of these turn out to be reachable in practice, they hit the exact same 500 this file already
- * proved GIT_PAGER causes — treat a report of one as confirmation to move it into the STRIPPED list
- * above, not a reason to relitigate the categories left blocked deliberately.
+ * If either of these turns out to be reachable in practice, it hits the exact same 500 this file already
+ * proved GIT_PAGER causes — treat a report of one as confirmation to extend the relevant allowance, not a
+ * reason to relitigate the categories left blocked deliberately above.
  */
 export function nonInteractiveEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env };
-  delete env.GIT_EDITOR;
-  delete env.GIT_SEQUENCE_EDITOR;
-  delete env.EDITOR;
-  delete env.GIT_PAGER;
-  delete env.PAGER;
-  delete env.GIT_EXTERNAL_DIFF;
-  return { ...env, ...NONINTERACTIVE_ENV };
+  return { ...scrubGitEnv(process.env), ...NONINTERACTIVE_ENV };
 }
 
 /** A structured outcome the UI can render — never a thrown 500 for an EXPECTED git failure. */

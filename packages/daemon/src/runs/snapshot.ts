@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { RUNS_DIR } from "../paths.js";
-import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
+import { withTimeout, boundedSimpleGit, scrubGitEnv } from "../git/bounded.js";
 import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
 
 /**
@@ -67,11 +67,16 @@ export async function createRunSnapshot(repoPath: string, sessionId: string, dep
   const indexFile = runIndexFile(sessionId);
   // A complete env (simple-git's .env REPLACES the child env, so we must carry PATH/SystemRoot/etc.) with
   // GIT_INDEX_FILE pointed at the throwaway index, so read-tree/checkout-index never touch the live repo's
-  // real index or working tree. Drop GIT_EDITOR/GIT_SEQUENCE_EDITOR — simple-git refuses a custom env that
-  // carries them (its allowUnsafeEditor guard), and these plumbing commands never open an editor anyway.
+  // real index or working tree. scrubGitEnv (card f7a80d76) drops the full editor/pager/diff strip set —
+  // simple-git refuses a custom env carrying any of them (its allowUnsafe* guards), and these plumbing
+  // commands never open an editor/pager/diff tool anyway; boundedSimpleGit separately allows the
+  // GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM family through rather than stripping it (see its own doc) — this
+  // used to strip only GIT_EDITOR/GIT_SEQUENCE_EDITOR, 2 of the real 18-key refusal list, so any other
+  // ambiently-set key (PAGER chief among them — this repo's own session spawn recipe sets it) made every
+  // `run` session fail to spawn.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined || k === "GIT_EDITOR" || k === "GIT_SEQUENCE_EDITOR") continue;
+  for (const [k, v] of Object.entries(scrubGitEnv(process.env))) {
+    if (v === undefined) continue;
     env[k] = v;
   }
   env.GIT_INDEX_FILE = indexFile;
