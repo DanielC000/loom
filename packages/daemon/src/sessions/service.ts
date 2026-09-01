@@ -5742,9 +5742,11 @@ export class SessionService {
         // Card e01687ea code-review follow-up: same wiring defect as enqueueDurableMessage, same fix — a
         // redrive dropped `sender` (hoisted above) entirely, hardcoding `senderId` undefined, so a
         // restart-redriven agent-kind message could never coalesce with a fresh same-sender arrival.
-        // `coalesceSenderId` null-maps the `"system"` sentinel the same way (a redriven settle-nudge's
-        // persisted `sender` can itself be `"system"` — see that method's own doc).
-        }, route, kind, undefined, undefined, undefined, SessionService.coalesceSenderId(sender), {
+        // Card 6439c51f: pass `sender` RAW (a redriven settle-nudge's persisted `sender` can itself be the
+        // literal `"system"` sentinel) — `enqueueStdin` null-maps that sentinel itself now
+        // (`coalesceSenderIdentity`, pty/host.ts); this call site no longer applies that mapping. The
+        // DURABLE `resolveQueuedMessage` call above keeps `sender` raw for attribution, unaffected.
+        }, route, kind, undefined, undefined, undefined, sender, {
           giveUpHeldUntil,
           onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
           logicalId: rootMsgId, // card 4a0af485 CR follow-up #6 — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
@@ -7789,21 +7791,11 @@ export class SessionService {
    * `annotatePasteRecoveryAge` already established for the same reason. Every other caller (omitting it)
    * is byte-identical to before this field existed.
    */
-  /**
-   * Card e01687ea code-review follow-up: null-map the `"system"` sentinel sender (see
-   * `enqueueDurableMessage`'s own doc, "Callers fall into two shapes") before it reaches `enqueueStdin`'s
-   * `senderId` — that param is a COALESCING/REORDER IDENTITY, not just an attribution field, so passing
-   * `"system"` through unmapped would make every daemon-generated notice that happens to also be
-   * `kind:"agent"` (cap-queue TTL/autofire, merge-rejection/already-merged settle nudges, a run_gate
-   * cancellation nudge, …) share ONE non-null identity — coalescing unrelated tasks' notices into one turn
-   * and letting one leapfrog a manager's queued worker report, both regressions of card `ccb407eb`'s
-   * deliberate one-nudge-per-turn design. A REAL session id (the overwhelming majority of callers) passes
-   * through unchanged. Shared by both `enqueueDurableMessage` and `redriveQueuedMessage` so the mapping
-   * can't drift between the fresh-enqueue and restart-redrive paths.
-   */
-  private static coalesceSenderId(sender: string): string | null {
-    return sender === "system" ? null : sender;
-  }
+  // Card 6439c51f: the `"system"` sentinel → `null` coalescing-identity map that used to live HERE
+  // (`coalesceSenderId`, card e01687ea) is now applied INSIDE `enqueueStdin` itself
+  // (`coalesceSenderIdentity`, pty/host.ts, beside `routeKeyOf`) — the unit that actually consumes
+  // `senderId` as a coalescing/reorder identity, so no caller (this one included) can forget to apply it.
+  // Both call sites below now pass the RAW `sender`/`ctx.sender` straight through; `enqueueStdin` maps it.
 
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
@@ -7861,13 +7853,18 @@ export class SessionService {
     // records WHY the durable record closed without being delivered as a turn.
     const r = this.pty.enqueueStdin(
       recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason, sender: ctx.sender }),
-      // Card e01687ea: `senderId` (positional arg 10) MUST be `ctx.sender` (sentinel null-mapped via
-      // `coalesceSenderId` — see that method's own doc), not `undefined` — this method is the single funnel
-      // for worker_message/redirect/report/session_message/peer-letters/settle-nudges/cross-remints, and
-      // both host.ts consumers (drainPending's same-sender coalesce, enqueueStdin's own reorder) gate on a
-      // non-null senderId. Passing `undefined` here made same-sender coalescing structurally unreachable
-      // for every production caller of this method.
-      ctx.route, kind, undefined, undefined, undefined, SessionService.coalesceSenderId(ctx.sender), {
+      // Card e01687ea: `senderId` (positional arg 10) MUST be `ctx.sender`, not `undefined` — this method
+      // is the single funnel for worker_message/redirect/report/session_message/peer-letters/settle-
+      // nudges/cross-remints, and both host.ts consumers (drainPending's same-sender coalesce,
+      // enqueueStdin's own reorder) gate on a non-null senderId. Passing `undefined` here made same-sender
+      // coalescing structurally unreachable for every production caller of this method.
+      // Card 6439c51f: pass `ctx.sender` RAW — `enqueueStdin` itself null-maps the `"system"` sentinel now
+      // (`coalesceSenderIdentity`, pty/host.ts), so this call site no longer applies that mapping itself.
+      // The DURABLE record above (`resolveQueuedMessage`'s `sender: ctx.sender`, and `db.appendEvent`'s
+      // `managerSessionId: ctx.sender` below) still keeps the RAW string for attribution — only the value
+      // that reaches `enqueueStdin`'s `senderId` (the coalescing/reorder identity) is mapped, and that
+      // mapping now happens inside `enqueueStdin`, not here.
+      ctx.route, kind, undefined, undefined, undefined, ctx.sender, {
         giveUpHeldUntil: ctx.giveUpHeldUntil,
         onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
@@ -8810,9 +8807,10 @@ export class SessionService {
         // agent message stays classified exactly as it was", but before this fix `senderId` (the SAME
         // coalescing/reorder identity DoD-1 threads everywhere else) was silently dropped, so a
         // recycle-carried directive could never coalesce with a fresh same-sender arrival on the successor.
-        // No re-mapping needed here: by the time a message sits in `live.pending`, its `senderId` has
-        // already passed through `coalesceSenderId` (or was a genuine id all along) at its original enqueue
-        // — never the raw `"system"` sentinel.
+        // No re-mapping needed here: by the time a message sits in `live.pending`, `enqueueStdin` has
+        // already null-mapped its `senderId` at ORIGINAL enqueue time (card 6439c51f, `coalesceSenderIdentity`,
+        // pty/host.ts) — every entry in `live.pending` carries either a genuine id or `null`, never the raw
+        // `"system"` sentinel, so carrying `m.senderId` verbatim here is always already-normalized.
         this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, undefined, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
       }
     }

@@ -12,12 +12,19 @@
 // queued worker report to land beside an earlier `"system"` entry. Card `ccb407eb` deliberately made these
 // agent-kind so each lands as its OWN turn; this regression would silently undo that for the whole class.
 //
-// The fix: `SessionService.coalesceSenderId` null-maps the `"system"` sentinel at the coalescing seam
-// (`ctx.sender === "system" ? null : ctx.sender`) before it ever reaches `enqueueStdin`'s `senderId` — a
-// null senderId never coalesces/reorders with anything (drainPending's/enqueueStdin's own `senderKey !==
-// null` gates), restoring the exact pre-e01687ea one-nudge-per-turn behavior for this family, while a REAL
-// sender id (the overwhelming majority of `enqueueDurableMessage` callers) still coalesces/reorders as
-// card e01687ea intends.
+// The fix (card e01687ea): null-map the `"system"` sentinel (`sender === "system" ? null : sender`) before
+// it ever reaches `enqueueStdin`'s `senderId` — a null senderId never coalesces/reorders with anything
+// (drainPending's/enqueueStdin's own `senderKey !== null` gates), restoring the exact pre-e01687ea
+// one-nudge-per-turn behavior for this family, while a REAL sender id (the overwhelming majority of
+// `enqueueDurableMessage` callers) still coalesces/reorders as card e01687ea intends.
+//
+// Card 6439c51f moved that map OFF the caller (`SessionService.coalesceSenderId`, which only the two
+// callers that remembered to call it ever benefited from) and INTO `enqueueStdin` itself
+// (`coalesceSenderIdentity`, pty/host.ts) — the unit that actually consumes `senderId` as a coalescing/
+// reorder identity — so no caller (including one that forgets, or one not yet written) can reintroduce
+// the e01687ea regression. Scenario (C) below is that card's own regression guard: it calls
+// `host.enqueueStdin` DIRECTLY, bypassing `SessionService` entirely, to prove the CONSUMING UNIT refuses
+// the sentinel on its own — scenario (A) alone would only re-test the callers, not the unit doing the work.
 //
 // This suite drives `SessionService.enqueueDurableNudge` — a PUBLIC wrapper around the private
 // `enqueueDurableMessage`, and one of the exact call shapes named above (`sender:"system"`, caller-supplied
@@ -29,6 +36,10 @@
 //   (B) a REAL sender id (messageWorker, via the sibling worker-message-sender-wiring.mjs suite) is
 //       UNAFFECTED by this null-mapping — re-asserted here as a sanity check that this fix is genuinely
 //       narrow to the `"system"` sentinel, not a regression of DoD-1's own coalescing fix.
+//   (C) card 6439c51f: `host.enqueueStdin` called DIRECTLY with the literal `senderId:"system"` (positional
+//       arg 10) — no `SessionService`, no caller-side map in between — still refuses to mint a shared
+//       coalescing identity. Same shape as (A), but proves the rule lives in the CONSUMING unit, not a
+//       caller.
 //
 // RUN (no daemon needed): node test/system-sentinel-sender-no-coalesce.mjs
 //   Requires the daemon built first (reads ../dist/{db,pty/host,sessions/service,orchestration/control}.js):
@@ -145,6 +156,38 @@ try {
     check("(B) both bodies landed in that one turn", written().includes("real sender message one") && written().includes("real sender message two"));
   }
 
+  // ===================== (C) card 6439c51f: enqueueStdin ITSELF refuses the sentinel, called DIRECTLY =====================
+  {
+    const recipient = `sysent-c-recip-${sfx}`;
+    mkSession({ id: recipient, role: "worker" });
+    const { written, countOf } = spawnReady(recipient);
+    primeBusy(recipient);
+    await sleep(250);
+
+    // No SessionService in this call chain at all — `host.enqueueStdin` is called directly with the
+    // literal `"system"` sentinel as `senderId` (positional arg 10). Before card 6439c51f this would have
+    // threaded the RAW string straight into the coalescing/reorder identity (the mapping lived only in
+    // SessionService, which this call bypasses), so DIRECT_NUDGE_ONE/TWO would coalesce into one turn —
+    // exactly the regression this scenario exists to catch.
+    host.enqueueStdin(recipient, "DIRECT_NUDGE_ONE", "system", undefined, undefined, "agent", undefined, undefined, undefined, "system");
+    host.enqueueStdin(recipient, "DIRECT_NUDGE_TWO", "system", undefined, undefined, "agent", undefined, undefined, undefined, "system");
+    check("(C) setup: both direct-call nudges queued (recipient busy)", host.getPending(recipient).length === 2);
+
+    let pasteBefore = countOf(PASTE_START);
+    host.deliverHook(recipient, { hook_event_name: "Stop" });
+    check("(C) turn 1: exactly ONE submit, for DIRECT_NUDGE_ONE alone — enqueueStdin refused the literal \"system\" senderId on its own, minting no shared coalescing identity",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(C) turn 1: DIRECT_NUDGE_TWO is NOT folded into DIRECT_NUDGE_ONE's turn", !written().includes("DIRECT_NUDGE_TWO"));
+    check("(C) turn 1: DIRECT_NUDGE_TWO is still queued, untouched", JSON.stringify(host.getPending(recipient)) === JSON.stringify(["DIRECT_NUDGE_TWO"]));
+    await sleep(250);
+
+    pasteBefore = countOf(PASTE_START);
+    host.deliverHook(recipient, { hook_event_name: "Stop" });
+    check("(C) turn 2: exactly ONE submit, for DIRECT_NUDGE_TWO ALONE — confirms the pair needed two separate turns",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(C) turn 2: queue now empty — both direct-call nudges eventually delivered as TWO separate turns", host.getPending(recipient).length === 0);
+  }
+
   db.close();
 } finally {
   for (const fake of fakes) { try { fake.kill(); } catch { /* ignore */ } }
@@ -152,6 +195,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the \"system\" sentinel sender is null-mapped before it reaches enqueueStdin's coalescing/reorder identity, so unrelated daemon-generated agent-kind notices never coalesce with each other; a real sender id still coalesces exactly as card e01687ea intends."
+  ? "\n✅ ALL PASS — enqueueStdin itself null-maps the \"system\" sentinel sender before it becomes a coalescing/reorder identity (card 6439c51f), so unrelated daemon-generated agent-kind notices never coalesce with each other whether dispatched through SessionService or called directly; a real sender id still coalesces exactly as card e01687ea intends."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

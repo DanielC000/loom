@@ -1036,6 +1036,22 @@ function routeKeyOf(route?: TurnRoute): string {
 }
 
 /**
+ * Card 6439c51f: null-map the literal `"system"` SENTINEL sender (NOT the unrelated `QueueSource`
+ * value of the same spelling — see `enqueueStdin`'s `source` param) before `senderId` is ever used as a
+ * coalescing/reorder identity. Formerly `SessionService.coalesceSenderId` (sessions/service.ts), applied
+ * only by the two callers that remembered to call it before reaching `enqueueStdin` — a THIRD call site
+ * (the companion-inbound funnel, index.ts) threaded a raw, unmapped sender straight through, and any new
+ * `enqueueStdin` call site threading a sender could reintroduce the same gap. Moved HERE, into the unit
+ * that actually treats `senderId` as an identity (this method's own reorder splice below, plus
+ * `drainPending`'s same-sender coalesce), so no caller can forget it — see `enqueueStdin`'s own doc for
+ * why an unmapped `"system"` is a regression risk (card `ccb407eb`'s one-nudge-per-turn design).
+ * `undefined`/`null`/a real id all pass through unchanged; only the exact string `"system"` maps to `null`.
+ */
+function coalesceSenderIdentity(senderId?: string | null): string | null | undefined {
+  return senderId === "system" ? null : senderId;
+}
+
+/**
  * A session marked busy with NO engine output for this long is treated as STUCK (a turn that never
  * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
  * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
@@ -7066,6 +7082,12 @@ export class PtyHost {
     mintedAtGenPositional?: number,
     mintedAtWallClockPositional?: number,
   ): EnqueueResult {
+    // Card 6439c51f: null-map the `"system"` sentinel HERE — inside the unit that consumes `senderId` as
+    // a coalescing/reorder identity — so every caller (including one that forgets, or one not yet
+    // written) shares this rule structurally. See `coalesceSenderIdentity`'s own doc. Every downstream use
+    // of `senderId` in this method (the entry it constructs, the reorder splice, `submit()`) reads the
+    // normalized value from this point on.
+    senderId = coalesceSenderIdentity(senderId);
     // Discriminated by SHAPE, not by an arity count: `giveUpHeldUntil` is always `number | undefined` on
     // the positional form and never an object, so an options object at this position is unambiguous.
     const isTailObject = typeof tailOrGiveUpHeldUntil === "object" && tailOrGiveUpHeldUntil !== null;
