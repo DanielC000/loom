@@ -47,6 +47,7 @@ import type { DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
+import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -3579,12 +3580,22 @@ export class SessionService {
    * `writeRestartIntent` call below from a test would mean either a REAL `pnpm install`/turbo build (slow,
    * heavy, wrong for a hermetic unit test) or a REAL `process.exit(75)` (which would kill the test's own
    * process) — `deps.buildDeps` lets a test fake an instant green build, and `deps.exit` lets it capture
-   * the intended exit instead of actually calling it.
+   * the intended exit instead of actually calling it. `deps.mergeDangerGraceMs` similarly lets a test
+   * shrink the merge-danger-window grace ceiling (see below) below its real {@link MERGE_DANGER_SHUTDOWN_GRACE_MS}
+   * so a hermetic test can observe the wait actually elapsing without a multi-second sleep.
+   *
+   * Card f05e5a06: this exits via `process.exit()` directly (below), which emits NO signal — so
+   * `gracefulShutdown`'s own merge-danger-window guard (index.ts, bound only to SIGINT/SIGTERM/SIGHUP)
+   * never ran for THIS path, even though it's the one that fires in practice (a manager's routine deploy
+   * restart, not an owner's manual `loom stop`). This now awaits the SAME
+   * {@link waitForMergeDangerWindowsToClear} guard, with the same bounded, fail-open semantics
+   * `gracefulShutdown` uses — never a hard refusal; always resolves within the grace ceiling regardless of
+   * what the in-flight squash does.
    */
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
-    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void } = {},
-  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string }> {
+    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number } = {},
+  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string; mergeDangerWait?: { waitedMs: number; windowsActive: number } }> {
     const caller = this.db.getSession(callerSessionId);
     if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
       throw new Error("only a manager or the platform Lead can restart the daemon");
@@ -3708,6 +3719,20 @@ export class SessionService {
       // own doc for why this is a separate field rather than folding into `supervisorChanged` above.
       ...(supervisorCheck.status === "could-not-check" ? { supervisorCheckFailed: true } : {}),
     });
+    // Card f05e5a06 — await the merge-danger-window guard BEFORE scheduling the exit-flush timer below,
+    // not concurrently with it: the restart-intent (the fleet's resumable state) is already durably
+    // written by this point, so a still-draining squash only extends how long THIS call takes to return —
+    // it never races or eats into the 300ms flush window that lets the MCP response below reach a caller
+    // that's about to be killed. Fail-open + bounded (never throws, never exceeds the grace ceiling), so
+    // an unresponsive/hung merge can delay a restart's response by at most the grace ceiling, never block
+    // it outright.
+    const windowsActive = listActiveMergeDangerWindows().length;
+    const mergeWaitStart = Date.now();
+    await waitForMergeDangerWindowsToClear(deps.mergeDangerGraceMs ?? MERGE_DANGER_SHUTDOWN_GRACE_MS);
+    const mergeDangerWait = { waitedMs: Date.now() - mergeWaitStart, windowsActive };
+    if (windowsActive > 0) {
+      console.log(`[restart] daemon_restart waited ${mergeDangerWait.waitedMs}ms for ${windowsActive} in-flight merge danger window(s) before exiting.`);
+    }
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent. NOTE: this
     // immediate response is returned into a session that is about to be KILLED by that exit — the
@@ -3715,7 +3740,7 @@ export class SessionService {
     // SAME `supervisorResponseFields`-shaped distinction via the persisted intent stamped just above.
     const exit = deps.exit ?? ((code: number) => process.exit(code));
     setTimeout(() => exit(RESTART_EXIT_CODE), 300);
-    return { restarting: true, ...supervisorResponseFields };
+    return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
   }
 
   /**
