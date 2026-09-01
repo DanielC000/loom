@@ -19,6 +19,8 @@
 //       the excess stays queued for a later turn, never one unbounded write;
 //   (E) DoD-4's BYTES bound: two same-sender messages whose combined size exceeds
 //       AGENT_COALESCE_MAX_BYTES do NOT coalesce, even though they're adjacent and same-sender.
+//   (H) card 438973ce: EVERY coalesced member's ownerText is attributed (getRecentOwnerTurns), not just
+//       drained[0]'s — the regression this specific file was extended for.
 //
 // give-up/re-mint (giveUpGen-tagged) EXCLUSION from both the coalescing and the reorder is covered
 // separately in pty-agent-coalesce-giveup-exclusion.mjs — it needs the real (slow, verify-timeout-driven)
@@ -303,6 +305,37 @@ try {
       JSON.stringify(host.getPending(SID)) === JSON.stringify(["WALL_A", "WALL_H_HELD", "WALL_B"]));
     check("(G) FIX: B's reported position is the tail (3), not a reorder onto A (2) — it had nothing eligible to anchor onto",
       rB.position === 3);
+  }
+  // ===================== (H) card 438973ce: owner-text attribution for EVERY coalesced member =====================
+  // `drainPending` used to submit a coalesced turn with only `drained[0]!.ownerText` — `submit()` calls
+  // `attributeOwnerText` ONCE, so members 2..N of a same-sender coalesced run were never attributed into
+  // `recentOwnerTurns`/`activeTurnOwnerText`, even though both bodies land in the SAME written turn. This
+  // proves the fix against the REAL coalescing path (not a fake pty): two same-route/same-senderId owner
+  // messages coalesce into one turn, and BOTH bodies must show up via `getRecentOwnerTurns`.
+  {
+    const SID = "sess-owner-text-attrib";
+    const { countOf } = spawnReady(SID);
+    // Checked immediately at spawn, BEFORE primeBusy/sleep below — a fresh session's owner-turn ring is
+    // empty by construction (nothing has ever called attributeOwnerText for it), so this is independent of
+    // the sleep that follows, not a fixed-wait-then-negative-check on anything actually settling.
+    check("(H) setup: fresh session has no owner-turn history yet", host.getRecentOwnerTurns(SID).length === 0);
+    primeBusy(SID);
+    await sleep(250);
+
+    const r1 = host.enqueueStdin(SID, "OWNER_COALESCE_MSG_ONE", "system", undefined, undefined, "agent", undefined, "owner said msg one", false, "sender-owner-attrib");
+    const r2 = host.enqueueStdin(SID, "OWNER_COALESCE_MSG_TWO", "system", undefined, undefined, "agent", undefined, "owner said msg two", false, "sender-owner-attrib");
+    check("(H) setup: both queued, same sender, FIFO [ONE, TWO]",
+      r1.delivered === false && r2.delivered === false &&
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["OWNER_COALESCE_MSG_ONE", "OWNER_COALESCE_MSG_TWO"]));
+
+    const pasteBefore = countOf(PASTE_START);
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(H) COALESCE: exactly ONE submit for both same-sender owner messages", countOf(PASTE_START) - pasteBefore === 1);
+
+    check("(H) FIX: getRecentOwnerTurns returns BOTH bodies, newest-first, in FIFO-attributed order",
+      JSON.stringify(host.getRecentOwnerTurns(SID)) === JSON.stringify(["owner said msg two", "owner said msg one"]));
+    check("(H) FIX: getActiveTurnOwnerText reflects the LAST drained member (msg two), not just the head",
+      host.getActiveTurnOwnerText(SID) === "owner said msg two");
   }
 } finally {
   for (const fake of fakes) { try { fake.kill(); } catch { /* ignore */ } }

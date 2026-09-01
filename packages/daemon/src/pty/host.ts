@@ -8006,7 +8006,7 @@ export class PtyHost {
     // turn ever running would be silently folded into a "turns" count. `annotatePasteRecoveryAge`'s own
     // wording says "submit generations", not "turns", precisely so this snapshot stays true to what it
     // actually counts.
-    this.submit(sessionId, joinSubmittedText(drained, live.submitGeneration), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
+    this.submit(sessionId, joinSubmittedText(drained, live.submitGeneration), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route/proactive/senderId — the head's, mirroring the route; but `origin` (== `drained`) carries EVERY member, so submit()'s own ownerText-attribution loop (card 438973ce) attributes ALL of them, not just the head; `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -8156,7 +8156,31 @@ export class PtyHost {
     // every non-owner-authored caller (proactive/heartbeat/reminder/system inject), so activeTurnOwnerText
     // stays null exactly like activeTurnRoute does today. `lastPromptOwnerText` mirrors lastPromptRoute so a
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
-    if (ownerText !== undefined) {
+    //
+    // Card 438973ce: `origin` — when present — is the FULL set of QueuedMessage this turn was built from
+    // (drainPending's `drained` array, or a single-element synthetic origin for the immediate/kickoff-
+    // guarantee callers), in FIFO order. Attribute EVERY member that carries its own `ownerText`, not just
+    // the single `ownerText` param (which is only ever `drained[0]!.ownerText` — the head). A coalesced
+    // drain (card eac3464d) can fold several same-sender owner turns into ONE submit(); iterating `origin`
+    // here — the same array whose ARITY already tracks the drain's own coalescing — means a future change
+    // to that arity can't silently re-break attribution the way eac3464d did, since there is no separate
+    // "just the head" value left to fall out of sync. FIFO order + `attributeOwnerText`'s own `unshift`
+    // leaves `recentOwnerTurns` newest-first, byte-identical to the pre-existing single-entry ordering.
+    // Falls back to the plain `ownerText` param only when no `origin` was supplied at all (rate-limit
+    // replay, `resumeAfterRateLimit`'s "rate-limit-replay" caller) — unchanged from before this card.
+    if (origin && origin.length > 0) {
+      let attributedAny = false;
+      for (const m of origin) {
+        if (m.ownerText !== undefined) {
+          this.attributeOwnerText(live, m.ownerText);
+          attributedAny = true;
+        }
+      }
+      if (!attributedAny) {
+        live.activeTurnOwnerText = null;
+        live.lastPromptOwnerText = null;
+      }
+    } else if (ownerText !== undefined) {
       this.attributeOwnerText(live, ownerText);
     } else {
       live.activeTurnOwnerText = null;
