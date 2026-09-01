@@ -97,7 +97,7 @@ fs.mkdirSync(repo, { recursive: true });
 execSync(`git init -q "${repo}"`);
 execSync(`git -C "${repo}" ${GIT_ID} commit -q --allow-empty -m init`);
 
-function installSlowTalkingPreCommitHook(repoPath) {
+function installSlowTalkingPreCommitHook(repoPath, markerPath) {
   // A single `node` child does ALL the ticking (not a shell loop spawning `sleep`/`echo` as SEPARATE
   // processes per tick) — deliberately, after measuring the difference under load: a 50-iteration shell
   // loop forks 100 short-lived processes, and under heavy host CPU contention (verified: a 32-worker
@@ -105,11 +105,22 @@ function installSlowTalkingPreCommitHook(repoPath) {
   // blow well past even a generous multi-second polling window — a artifact of this fixture's OWN
   // process-creation overhead under load, not of anything under test. One process paying Node's own
   // (contended, but not fork-multiplied) timer delay is far more robust.
+  //
+  // `markerPath`: written as the VERY FIRST thing the hook script does, before the tick loop — an
+  // observable "the hook actually started running" signal (card e083c9b7 leg 2). `JSON.stringify` (not
+  // string interpolation) escapes the path safely regardless of platform separators.
   const hookPath = path.join(repoPath, ".git", "hooks", "pre-commit");
-  const nodeScript = `(async()=>{for(let i=0;i<${HOOK_TICKS};i++){console.log("tick",i);` +
+  const nodeScript = `require("fs").writeFileSync(${JSON.stringify(markerPath)},String(Date.now()));` +
+    `(async()=>{for(let i=0;i<${HOOK_TICKS};i++){console.log("tick",i);` +
     `await new Promise(r=>setTimeout(r,${HOOK_TICK_MS}));}})();`;
   fs.writeFileSync(hookPath, `#!/bin/sh\nnode -e '${nodeScript}'\n`);
   fs.chmodSync(hookPath, 0o755);
+}
+
+/** Path of the hook-start marker for one attempt, keyed by commit message so concurrent/sequential
+ *  attempts against the shared `repo` never read a stale marker from a different attempt. */
+function hookStartMarkerPath(repoPath, message) {
+  return path.join(repoPath, ".git", `hook-started-${message}.marker`);
 }
 
 function commitSubjectsOnRepo(repoPath) {
@@ -119,24 +130,31 @@ function commitSubjectsOnRepo(repoPath) {
 
 /** Attempt one `git commit` against the shared `repo`, fresh slow-talking hook each time. `kill:true`
  *  routes through the new abort-wired path under test; `kill:false` is today's only mechanism elsewhere
- *  in this codebase (bare `withTimeout`, no kill). Returns the settled elapsed ms, whether it rejected,
- *  and the rejection's own message (so a caller can tell WHICH of withTimeoutKillingChild's two rejection
- *  paths actually fired — see the [green] path-1 check below for why this matters). */
-async function attemptCommit({ kill, message }) {
-  installSlowTalkingPreCommitHook(repo);
+ *  in this codebase (bare `withTimeout`, no kill). `timeoutMs`/`killGraceMs` default to the fixture's
+ *  own `TIMEOUT_MS`/`withTimeoutKillingChild`'s own default (`= ms`) — a caller overrides them only to
+ *  manufacture the leg-2 positive control below (a race so tight the hook can't even start). Returns the
+ *  settled elapsed ms, whether it rejected, the rejection's own message (so a caller can tell WHICH of
+ *  withTimeoutKillingChild's two rejection paths actually fired — see the [green] path-1 check below for
+ *  why this matters), and `hookStarted` (card e083c9b7 leg 2: whether the pre-commit hook's own
+ *  start-marker was ever written — i.e. whether the hook, and thus the commit machinery, got a genuine
+ *  chance to run before the kill landed). */
+async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs }) {
+  const markerPath = hookStartMarkerPath(repo, message);
+  try { fs.rmSync(markerPath, { force: true }); } catch { /* no prior marker for this message — fine */ }
+  installSlowTalkingPreCommitHook(repo, markerPath);
   const t0 = performance.now(); // MONOTONIC
   let rejected = false, rejectMessage = null;
   if (kill) {
     const controller = new AbortController();
-    const git = boundedSimpleGit(repo, TIMEOUT_MS, undefined, controller.signal);
-    await withTimeoutKillingChild(git.raw(["commit", "--allow-empty", "-m", message]), TIMEOUT_MS, `git commit (${message})`, controller)
+    const git = boundedSimpleGit(repo, timeoutMs, undefined, controller.signal);
+    await withTimeoutKillingChild(git.raw(["commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`, controller, killGraceMs)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   } else {
-    const git = boundedSimpleGit(repo, TIMEOUT_MS);
-    await withTimeout(git.raw(["commit", "--allow-empty", "-m", message]), TIMEOUT_MS, `git commit (${message})`)
+    const git = boundedSimpleGit(repo, timeoutMs);
+    await withTimeout(git.raw(["commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   }
-  return { elapsed: performance.now() - t0, rejected, rejectMessage };
+  return { elapsed: performance.now() - t0, rejected, rejectMessage, hookStarted: fs.existsSync(markerPath) };
 }
 
 const RED_MSG = "red-commit";
@@ -162,6 +180,31 @@ try {
     const looksLikePathTwo = /giving up \(hung git child\?\)/.test(giveUpMessage ?? "");
     check(`[setup] negative control: a manufactured give-up (path 2) rejection is classified as path 2, ` +
       `NOT path 1 — actual message: "${giveUpMessage}"`, looksLikePathTwo && !looksLikePathOne);
+  }
+
+  // [setup] POSITIVE CONTROL for the [green] hookStarted assertion below (card e083c9b7 leg 2, the
+  // VACUOUS-PASS gap): "the commit never lands" can pass for the WRONG reason — the kill fired so early
+  // that the pre-commit hook (and thus the commit machinery) never got a genuine chance to run, rather
+  // than because the kill stopped an in-flight commit. The `8e75ee20` worker reproduced this under
+  // 32-worker CPU saturation; the SAME underlying race — kill fires before the hook's own
+  // git→sh→node spawn chain completes — is reproducible WITHOUT artificial contention by making the
+  // kill-trigger timeout tight enough that no real host can win that spawn chain in time. MEASURED on
+  // the authoring host (a throwaway sweep of this exact attemptCommit path, n=8 trials/point, not part
+  // of the committed suite): hookStarted was 0/8 at timeoutMs<=20, 5/8 at 30, and 8/8 at timeoutMs>=50 —
+  // i.e. the spawn-chain floor sits somewhere in [20,50)ms here, so a 5ms trigger sits comfortably below
+  // it, not a close race. Re-run over 5/5 attempts at timeoutMs=5 (this exact positive control, repeated
+  // 5 times) also came back hookStarted:false every time. This is ONE host's measurement, not a
+  // cross-host guarantee — if it ever proves too tight elsewhere, widen this value, not the reasoning.
+  // `killGraceMs` is set generously here (unlike the real [green] run) because this control isn't
+  // testing WHICH rejection path fires, only that the run rejects at all and that the hook never
+  // started.
+  {
+    const vacuous = await attemptCommit({ kill: true, message: "vacuous-control-commit", timeoutMs: 5, killGraceMs: 5000 });
+    check(`[setup] positive control (leg 2): a 5ms kill-trigger still rejects, not hangs — actual message: ` +
+      `"${vacuous.rejectMessage}"`, vacuous.rejected);
+    check(`[setup] positive control (leg 2): hookStarted is false when the kill fires before the hook's ` +
+      `own spawn chain can complete — proving the [green] hookStarted assertion below is NOT vacuous ` +
+      `itself: it CAN observe this exact failure mode`, vacuous.hookStarted === false);
   }
 
   const result = await assertNeverWithControl({
@@ -207,6 +250,17 @@ try {
       // clean path-1 settlement should land well under that.
       check(`[green] settled in ${Math.round(green.elapsed)}ms, under the give-up threshold (${TIMEOUT_MS * 2}ms) too`,
         green.elapsed < TIMEOUT_MS * 2);
+      // card e083c9b7 leg 2 — the VACUOUS-PASS gap: without this, "the commit never lands" can pass
+      // because the kill fired before the pre-commit hook (and thus the commit machinery) ever got a
+      // genuine chance to run, not because the kill stopped an in-flight commit. The positive control
+      // above proves this assertion CAN go red; TIMEOUT_MS here (300ms) is ~6x the measured floor where
+      // the hook started in every one of 8 trials (50ms — see the positive control's own comment for the
+      // full sweep), so it reliably starts on an idle host, but — per this card's own measurement under
+      // 32-worker CPU saturation — can still lose that race under real contention, which is exactly the
+      // case this check exists to catch.
+      check(`[green] the pre-commit hook actually STARTED before the kill landed (hookStarted=` +
+        `${green.hookStarted}) — otherwise this run would be a VACUOUS pass, not a real one`,
+        green.hookStarted === true);
       // Still poll (fail-fast, a SHORT fixed window — see GREEN_POLL_WINDOW_MS's own doc) as extra
       // robustness — nothing else in this fixture's design SHOULD be able to land the commit late, GIVEN
       // the path-1 check above just confirmed the precondition that makes this short window sound; this
