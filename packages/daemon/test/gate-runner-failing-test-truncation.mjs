@@ -381,6 +381,87 @@ const dir = mkdtempManaged("loom-gr-trunc-");
       check("(I) negative control: passing result()/matchCount() (the UNCAUGHT-winning diagnostic fields) instead of the failTier* accessors correctly declines — the two accessor pairs are not interchangeable",
         wrongFieldCandidate === undefined);
     }
+
+    // ── (K) Card 6c84b87b — THE ACTUAL DEFECT, PROVEN END-TO-END THROUGH THE REAL TRACKER (not an
+    //     injected count). DoD-2's own named missing assertion: "a single file failing one check()
+    //     assertion, rendered through test-daemon.mjs's own FAILURES: echo, still yields
+    //     failTierMatchCount() === 1." Before this card, (I-b) above was the ONLY place the real tracker
+    //     fed the real predicate end-to-end, and its only fixture was the UNCAUGHT idiom — the one shape
+    //     that happened to yield 1 even under the old bug (nothing for the epilogue to echo, since an
+    //     UNCAUGHT crash has zero failed check()s). This reconstructs the OTHER, dominant shape (815-of-848
+    //     of this daemon's own test files): a normal check() assertion failure, rendered through the REAL
+    //     runLane wrapper line PLUS the REAL FAILURES: epilogue's 6-space-indented echo of that SAME file's
+    //     own FAIL <label> line — both console.log shapes reproduced verbatim from scripts/test-daemon.mjs,
+    //     not hand-simplified. ──────────────────────────────────────────────────────────────────────────
+    {
+      const testDirFixture = path.join(dir, "packages", "daemon", "test");
+
+      // The runLane wrapper line — printed ONCE, unindented, the moment this file's child process settles.
+      const WRAPPER_LINE = "FAIL  widget-assertion-fail  (exit 1)";
+      // This file's OWN check() print, as ITS OWN stdout carries it: unindented (e.g.
+      // packages/daemon/test/gate-history.mjs:60's `const check = (label, cond) => console.log(...)`).
+      const CHILD_OWN_FAIL_LINE = "FAIL  the widget renders with the right label";
+
+      // (K1) THE BUG, PRE-FIX / PROVEN FIXED POST-FIX: feed the REAL stream shape, in the REAL order — the
+      // wrapper line during the run, then (once the whole suite finishes) the FAILURES: epilogue's own
+      // per-file header + the full stdout echo containing that SAME file's own FAIL line, now re-indented.
+      {
+        fs.writeFileSync(path.join(testDirFixture, "widget-assertion-fail.mjs"), "// fixture\n");
+        const tracker = createFailingTestTracker();
+        tracker.feed(Buffer.from(`${WRAPPER_LINE}\n`, "utf-8"));
+        tracker.feed(Buffer.from([
+          "FAILURES:",
+          `  - widget-assertion-fail (exit 1): ${CHILD_OWN_FAIL_LINE}`,
+          `      ${CHILD_OWN_FAIL_LINE}`,
+        ].join("\n") + "\n", "utf-8"));
+
+        check("(K1) DoD-2 NAMED ASSERTION: a single file failing ONE check() assertion, rendered through test-daemon.mjs's own FAILURES: echo, yields failTierMatchCount() === 1 (pre-fix this read 2 — the wrapper line PLUS its own echoed FAIL line double-counted as two DIFFERENT failing files)",
+          tracker.failTierMatchCount() === 1);
+        check("(K1) failTierResult() names the real wrapper line itself, never the echoed indented copy",
+          tracker.failTierResult() === WRAPPER_LINE);
+
+        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
+        check("(K1) THE ACTUAL FIX: identifyRetriableTestFile now identifies widget-assertion-fail as a working retry target for a plain ASSERTION failure — not just the UNCAUGHT idiom (I-b) already covered (pre-fix: the retry NEVER fired for an assertion failure at all — this is the ~96%-of-the-population case the card names)",
+          candidate !== undefined && candidate.name === "widget-assertion-fail");
+      }
+
+      // (K2) NEGATIVE CONTROL — genuine multi-file ambiguity must still refuse. Two REAL, distinct files
+      // each printing their own real wrapper line must still report failTierMatchCount() === 2 and decline
+      // the retry — proves (K1)'s anchoring didn't accidentally collapse real ambiguity down to 1 along
+      // with fixing the false positive (the unsafe direction this card's own DoD explicitly warns against).
+      {
+        fs.writeFileSync(path.join(testDirFixture, "widget-assertion-fail-2.mjs"), "// fixture\n");
+        const tracker = createFailingTestTracker();
+        tracker.feed(Buffer.from("FAIL  widget-assertion-fail  (exit 1)\nFAIL  widget-assertion-fail-2  (exit 1)\n", "utf-8"));
+        check("(K2) two GENUINELY distinct failing files' own wrapper lines still report failTierMatchCount() === 2 — real ambiguity is not swallowed by the anchoring fix",
+          tracker.failTierMatchCount() === 2);
+        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
+        check("(K2) and the retry correctly declines on that real ambiguity",
+          candidate === undefined);
+      }
+
+      // (K3) card 2a79a74c finding #4, VERIFIED HERE (not just cited): a REDUCED-PATH static guard runs
+      // BARE (`node <guard>.mjs` — git/worktrees.ts's buildReducedGateCommand), so its own failed check()
+      // prints an unindented FAIL <label> line with NO runLane wrapper and NO "(exit " suffix at all —
+      // mirrors the reviewer's own real specimen (a guard check() label starting with the token
+      // "gate-history", which names a real test file). Pre-fix this satisfied the old unanchored FAIL/
+      // not-ok tier at count 1 and produced a candidate that would have retried an UNRELATED file, masking
+      // the guard's own failure. Post-fix it must produce NOTHING — the "(exit " suffix this pattern
+      // requires is something only runLane's own per-FILE wrapper ever prints, so a guard's bare assertion
+      // failure can never satisfy it.
+      {
+        fs.writeFileSync(path.join(testDirFixture, "gate-history.mjs"), "// fixture\n");
+        const tracker = createFailingTestTracker();
+        tracker.feed(Buffer.from("FAIL  gate-history is still witnessed by the fixed-wait guard\n", "utf-8"));
+        check("(K3) card 2a79a74c #4: a bare reduced-path guard's own FAIL <label> line (no runLane wrapper, no exit suffix) is NOT counted by failTierMatchCount()",
+          tracker.failTierMatchCount() === 0);
+        check("(K3) and failTierResult() is undefined — nothing for identifyRetriableTestFile to even parse",
+          tracker.failTierResult() === undefined);
+        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
+        check("(K3) so identifyRetriableTestFile never produces a candidate at all — a guard failure can no longer masquerade as a retry into an unrelated file",
+          candidate === undefined);
+      }
+    }
   }
 
   // ── (J) Card 2f0b2e57 — THE REAL INCIDENT: op `5b2075db` reported gateDetail.failingTest as a PASSING

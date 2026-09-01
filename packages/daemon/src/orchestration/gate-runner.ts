@@ -68,10 +68,12 @@ const OUTPUT_TAIL_BYTES = 4096;
  *  those self-healing retries into a hard merge rejection (~15 extra minutes each) as a SIDE EFFECT of a
  *  diagnostics fix — a real, recurring cost, and a policy change to fleet-wide merge-gate retry behavior
  *  that deserves its own deliberate decision, not an accidental one. So retry reads a SEPARATE accessor —
- *  {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — that returns ONLY the FAIL/
- *  not-ok tier's own line/count, `FAIL_TIER_INDEX` below, independent of whichever tier `result()` picked
- *  for display. `result()`'s diagnostic value and identifyRetriableTestFile's retry target can now differ
- *  on the SAME run (by design) without either one losing information the other already had. */
+ *  {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — independent of whichever tier
+ *  `result()` picked for display. `result()`'s diagnostic value and identifyRetriableTestFile's retry
+ *  target can now differ on the SAME run (by design) without either one losing information the other
+ *  already had. **Card 6c84b87b:** these two accessors do NOT read this file's `FAILING_TEST_PATTERNS`
+ *  tiers at all — see {@link HARNESS_FAIL_WRAPPER_RE}'s own doc for why the retry needs a narrower,
+ *  differently-anchored match than the diagnostic tiers do. */
 const FAILING_TEST_PATTERNS: RegExp[] = [
   /\bUNCAUGHT\b.*/,
   /^\s*(FAIL|✗|✖|not ok)\b.*/i,
@@ -79,12 +81,41 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
   /error TS\d+:.*/,
 ];
 
-/** Index of the `FAIL|✗|✖|not ok` tier within {@link FAILING_TEST_PATTERNS} — the ONLY tier
- *  {@link identifyRetriableTestFile} can ever parse a retriable file name out of. Kept as a named constant
- *  (not re-derived by searching the array) so a future re-ordering of `FAILING_TEST_PATTERNS` can't
- *  silently repoint `failTierResult()`/`failTierMatchCount()` at the wrong tier without a compile-visible
- *  review of this line too. */
-const FAIL_TIER_INDEX = 1;
+/**
+ * Card 6c84b87b: the ONLY line shape {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount`
+ * — and therefore {@link identifyRetriableTestFile} — may ever count. This is `test-daemon.mjs`'s own
+ * `runLane` wrapper line, verbatim: `` console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}  (exit
+ * ${statusLabel})`) `` (packages/daemon/scripts/test-daemon.mjs) — printed UNINDENTED, exactly once per
+ * failing file, the moment that file's own child process settles.
+ *
+ * 🔴🔴 THE BUG THIS REPLACES: `failTierResult`/`failTierMatchCount` used to read `FAILING_TEST_PATTERNS`'
+ * own `FAIL`/not-ok tier — an UNANCHORED, case-insensitive pattern with a leading optional-whitespace run —
+ * a pattern shared with the general-purpose diagnostic scan (`result()`/`matchCount()`, still below). Its
+ * leading whitespace run was written
+ * for THAT purpose (a diagnostic marker can legitimately arrive indented inside another tool's own
+ * output), but it ALSO matches `test-daemon.mjs`'s own end-of-run `FAILURES:` epilogue — which re-echoes
+ * EVERY failing file's full captured stdout/stderr, indented 6 spaces (`console.log(f.stdout…
+ * .map((l) => \`      ${l}\`)…)`) — and 815-of-848 of this daemon's own test files fail an assertion via a
+ * `check()` helper that itself prints an unindented `FAIL  <label>` line (e.g.
+ * `packages/daemon/test/gate-history.mjs:60`). A file that fails ONE such assertion therefore emits TWO
+ * FAIL-tier hits under the old unanchored pattern — the `runLane` wrapper AND its own later echoed
+ * `check()` line — so `failTierMatchCount()` read `2`, `identifyRetriableTestFile` required exactly `1`,
+ * and the retry was refused for every assertion failure. Only a file that died by THROWING (zero failed
+ * `check()`s, so nothing for the epilogue to echo that also matches this tier) ever produced exactly `1`.
+ *
+ * THE FIX: anchor on BOTH ends of what the wrapper line alone has and nothing else in the stream can fake:
+ * (1) NO leading whitespace — every line the `FAILURES:` epilogue echoes is indented (2 spaces for the
+ * per-file `  - <name> (exit N): …` header, 6 spaces for the echoed body) — so the epilogue's own echo of a
+ * file's `FAIL  <label>` line can never satisfy this pattern; and (2) the trailing `  (exit ` suffix —
+ * `check()`'s own per-assertion `FAIL  <label>` print (see the file cited above) never carries it, since
+ * only `runLane`'s own per-FILE wrapper knows an exit status at all. Condition (2) is what ALSO closes card
+ * `2a79a74c` finding #4 (a reduced-path static guard, run bare via `node <path>` with no `runLane` wrapper
+ * at all — see `git/worktrees.ts`'s `buildReducedGateCommand` — prints an unindented `FAIL  <label>` line
+ * on its own failed `check()`, satisfying condition (1) alone; requiring condition (2) too means a guard's
+ * own bare assertion failure can never be mistaken for a real per-file wrapper line, so it never produces a
+ * retry candidate at all, related or not).
+ */
+const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
 /** Card 2f0b2e57 (two real merge-gate rejections, both from this daemon's OWN test suite): a line
  *  recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`, optionally
@@ -96,9 +127,11 @@ const FAIL_TIER_INDEX = 1;
  *  UNCAUGHT diagnostic string"` — a line describing the UNCAUGHT idiom in prose, which PASSED, was
  *  reported as the failing test. Checked BEFORE any `FAILING_TEST_PATTERNS` tier is tried, so no tier —
  *  anchored or not, tier 0 or tier 3 — can ever win against a line that is itself a recorded PASS. The
- *  `FAIL`/`not ok` tier (index {@link FAIL_TIER_INDEX}) already can't match a PASS line on its own (it's
- *  anchored to the start of the line), but this guard makes the invariant FLAT and tier-independent rather
- *  than an accident of which tiers happen to be anchored today. */
+ *  `FAIL`/`not ok` tier already can't match a PASS line on its own (it's anchored to the start of the
+ *  line), but this guard makes the invariant FLAT and tier-independent rather than an accident of which
+ *  tiers happen to be anchored today. Applied in `scanLine` before {@link HARNESS_FAIL_WRAPPER_RE} is
+ *  tried too, for the same reason, even though a PASS line can never actually satisfy that pattern (it
+ *  never starts with the literal word `FAIL`). */
 const PASS_LINE_RE = /^\s*PASS\b/i;
 
 /** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
@@ -171,15 +204,21 @@ export function createFailingTestTracker(): {
   const decoder = new TextDecoder("utf-8");
   let carry = "";
   // Card [manager review, sibling p0 report on 344ce950]: `lastByPattern` alone (below) can only ever
-  // report the LAST line that matched each tier — a run where MULTIPLE lines match the SAME tier (e.g. two
-  // genuinely distinct failing test files, each printing its own `FAIL <name>` line) silently discards
-  // every one but the last. `countByPattern` is the fix's data source: incremented on EVERY match, never
-  // reset, so `matchCount()` (below) can tell a caller "exactly one line matched" apart from "more than
-  // one matched and only the last survived" — the distinction {@link identifyRetriableTestFile} needs to
-  // avoid retrying (and silently accepting) ONE of several genuinely-failing files while the others are
-  // never re-examined.
+  // report the LAST line that matched each tier — a run where MULTIPLE lines match the SAME tier silently
+  // discards every one but the last. `countByPattern` is the fix's data source: incremented on EVERY match,
+  // never reset, so `matchCount()` (below) can tell a caller "exactly one line matched" apart from "more
+  // than one matched and only the last survived". PURELY DIAGNOSTIC now (card 6c84b87b): this pair backs
+  // `result()`/`matchCount()` display only — a "LINE count" that can inflate on a SINGLE genuinely-failing
+  // file (its own multiple echoed assertion lines can all match one tier), not a "FAILING FILE count".
+  // {@link identifyRetriableTestFile}'s own multi-file ambiguity guard reads the SEPARATE
+  // `lastHarnessWrapper`/`harnessWrapperCount` tracking below instead, which counts real per-file wrapper
+  // lines and so doesn't conflate "many lines" with "many files" the way this pair structurally can.
   const lastByPattern: (string | undefined)[] = new Array(FAILING_TEST_PATTERNS.length).fill(undefined);
   const countByPattern: number[] = new Array(FAILING_TEST_PATTERNS.length).fill(0);
+  // Card 6c84b87b: tracked SEPARATELY from lastByPattern/countByPattern above — see HARNESS_FAIL_WRAPPER_RE's
+  // own doc for why the retry needs a narrower, differently-anchored match than the diagnostic tiers do.
+  let lastHarnessWrapper: string | undefined;
+  let harnessWrapperCount = 0;
   // A carry flush (the final partial line, scanned once at `result()`/`matchCount()` time — see below) must
   // never run twice: `scanLine` mutates `countByPattern`, and `result()`/`matchCount()` can each be called
   // once per tracker instance in production (one per gate step) — but nothing prevents a caller invoking
@@ -189,6 +228,10 @@ export function createFailingTestTracker(): {
     // Card 2f0b2e57: a recorded PASS is never a failure, whatever its label says — see PASS_LINE_RE's own
     // doc. Checked before any tier so no tier, anchored or not, can ever win against a PASS line.
     if (PASS_LINE_RE.test(line)) return;
+    // Card 6c84b87b: checked independently of (not instead of) the FAILING_TEST_PATTERNS loop below — a
+    // harness wrapper line already also satisfies FAILING_TEST_PATTERNS' own FAIL tier (used for `result()`/
+    // `matchCount()` diagnostics), and both trackings must see it.
+    if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; }
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
       if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return; }
     }
@@ -224,22 +267,28 @@ export function createFailingTestTracker(): {
       for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) if (lastByPattern[i]) return countByPattern[i] ?? 0;
       return 0;
     },
-    /** Card 0e5b2045: the FAIL/not-ok tier's OWN line, independent of whichever tier {@link result} picked
-     *  for display — the single-file merge retry ({@link identifyRetriableTestFile}) reads THIS, never
-     *  `result()`, so a higher-priority diagnostic tier (e.g. `UNCAUGHT`) winning `result()` never silently
-     *  changes which failure the retry targets. `undefined` when no `FAIL <name>`/`not ok`/✗/✖ line was
-     *  ever seen in this step's output at all — an honest miss, same discipline as `result()`. */
+    /** Card 0e5b2045 (retargeted onto {@link HARNESS_FAIL_WRAPPER_RE} by card 6c84b87b): `test-daemon.mjs`'s
+     *  own per-FILE `runLane` wrapper line, independent of whichever tier {@link result} picked for display —
+     *  the single-file merge retry ({@link identifyRetriableTestFile}) reads THIS, never `result()`, so a
+     *  higher-priority diagnostic tier (e.g. `UNCAUGHT`) winning `result()` never silently changes which
+     *  failure the retry targets. ⚠️ NOT the same match set as `result()`'s own FAIL/not-ok tier — see
+     *  `HARNESS_FAIL_WRAPPER_RE`'s own doc for exactly what distinguishes the two and why the difference is
+     *  the fix, not a bug. `undefined` when no harness wrapper line was ever seen in this step's output at
+     *  all — an honest miss, same discipline as `result()`. */
     failTierResult(): string | undefined {
       flushCarryOnce();
-      return lastByPattern[FAIL_TIER_INDEX];
+      return lastHarnessWrapper;
     },
-    /** How many lines matched the FAIL/not-ok tier specifically — the count {@link identifyRetriableTestFile}
+    /** How many lines matched {@link HARNESS_FAIL_WRAPPER_RE} — the count {@link identifyRetriableTestFile}
      *  actually gates its `=== 1` check on. `0` when `failTierResult()` is `undefined`. Deliberately NOT
      *  deduped by exact line content, same as `matchCount()` — over-counting only ever SUPPRESSES a retry
-     *  (the safe direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. */
+     *  (the safe direction; see {@link identifyRetriableTestFile}'s own doc), never wrongly permits one. As
+     *  of card 6c84b87b, `> 1` here means what it always should have: genuinely MULTIPLE distinct failing
+     *  files each printed their own wrapper line in this run — not an assertion failure's own `check()`
+     *  output getting counted a second time via `test-daemon.mjs`'s later `FAILURES:` echo of it. */
     failTierMatchCount(): number {
       flushCarryOnce();
-      return countByPattern[FAIL_TIER_INDEX] ?? 0;
+      return harnessWrapperCount;
     },
   };
 }
@@ -1095,10 +1144,21 @@ export interface RetriableTestFile {
  * mask, now via a second, distinct route (a second FILE instead of a second RUN). `failTierTestCount` is
  * REQUIRED (not optional) specifically so a caller can't forget to pass it — any value other than exactly
  * `1` (including `undefined`, e.g. a test double/legacy shape that never supplies one) fails closed,
- * mirroring this function's existing "ambiguity ⇒ not identifiable" posture. The safe direction is
- * over-counting (a test's own output prints an incidental FAIL-shaped line ⇒ this refuses a retry that
- * would have been fine) — never under-counting, which `createFailingTestTracker`'s one-line-per-file
- * `runLane` convention makes structurally unlikely.
+ * mirroring this function's existing "ambiguity ⇒ not identifiable" posture.
+ *
+ * 🔴 CORRECTED (card 6c84b87b — the prior wording here asserted a FALSE PREMISE holding up a correct
+ * conclusion; see this repo's own "a comment is a claim" rule): this used to claim over-counting was
+ * merely "a test's own output prints an incidental FAIL-shaped line" and that under-counting was
+ * "structurally unlikely" thanks to `runLane`'s one-line-per-file convention. That ignored
+ * `test-daemon.mjs`'s OWN later `FAILURES:` epilogue, which re-echoes every failing file's FULL captured
+ * stdout/stderr — including that file's own `check()`-printed `FAIL <label>` lines — so over-counting was
+ * not incidental, it was GUARANTEED for any file that fails by a normal assertion (815-of-848 files use
+ * that `check()` convention) rather than by throwing. `failTierTest`/`failTierTestCount` are now sourced
+ * from {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount`, which count ONLY
+ * {@link HARNESS_FAIL_WRAPPER_RE}'s own line shape — see that constant's doc for exactly what it excludes
+ * (the epilogue's own indented echo) and why. Under that anchoring, over-counting (`> 1`) now means what it
+ * always should have: genuinely multiple distinct failing files, each producing their own real wrapper
+ * line — the correct case to fail closed on — never an assertion failure's own output being counted twice.
  */
 export function identifyRetriableTestFile(failTierTest: string | undefined, cwd: string, failTierTestCount: number | undefined): RetriableTestFile | undefined {
   if (!failTierTest) return undefined;
