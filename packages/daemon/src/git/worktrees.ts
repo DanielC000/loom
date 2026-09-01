@@ -861,8 +861,11 @@ export async function createWorktree(
       // `.git/worktrees/<name>/locked` (content `initializing`) behind — git's own in-progress marker,
       // normally cleared on success, now orphaned because the child died mid-checkout. `git worktree
       // prune` SKIPS locked records BY DESIGN (so a concurrent prune can't delete an in-progress add) —
-      // neither the leading prune above nor removeWorktree()'s existing single `--force` can ever clear
-      // it (git refuses: "cannot remove a locked working tree, lock reason: initializing").
+      // the leading prune above can never clear it (git refuses: "cannot remove a locked working tree,
+      // lock reason: initializing"). Neither could `removeWorktree()` at the time this paragraph was
+      // written; card adf03de8 (AFTER this one) has since upgraded IT to the same `-f -f` override this
+      // catch uses, so `removeWorktree()` now also clears an intact locked record on its own — see the
+      // card fdfe8a56 paragraph below, which relies on that.
       //
       // `git worktree remove -f -f` is git's own documented override for exactly this lock reason — the
       // error text names it verbatim. Recover it here, best-effort, via the SAME lock-scoped
@@ -874,8 +877,16 @@ export async function createWorktree(
       // practice this only ever targets a fresh directory Loom itself is trying to create, never an
       // existing worktree a human deliberately locked. That check and this `add` are NOT atomic with
       // each other (the existsSync read is outside the lock the add runs inside), so this is a narrow
-      // TOCTOU window, not a proof — accepted because worktree paths are per-spawn unique, making the
-      // realistic exposure nil, not because the window is closed.
+      // TOCTOU window, not a proof — accepted because `worktreePath` is deterministic PER TASK
+      // (`taskKey(taskId)`, see below) and this daemon never runs two live spawns for the same task
+      // concurrently: `sessions/service.ts` `spawnWorker` refuses a second live worker on a `taskId`
+      // already held by one (`Db.liveSessionIdForTask`, checked before any worktree/pty side effect), AND
+      // closes that check's own TOCTOU gap with a true, proven-atomic in-memory mutex
+      // (`inFlightSpawnTaskIds` — its own doc comment there has the atomicity proof: the daemon is a
+      // single process, and the claim's test-and-set has no `await` between them, so no other spawn call
+      // can interleave). So nothing else can be concurrently creating (or deliberately locking) THIS exact
+      // path while this call runs — making the realistic exposure nil, not because the window itself is
+      // closed.
       //
       // Two failure shapes reach this catch, both handled the same best-effort way:
       //  - the add failed WITHOUT ever creating worktreePath (e.g. "already used by worktree at
@@ -885,29 +896,61 @@ export async function createWorktree(
       // Either way, a failure to clean must NEVER throw past createWorktree — swallow it and rethrow the
       // ORIGINAL add error unchanged, so a cleanup failure can never mask or replace the real one.
       //
-      // NOTE on "confirmed dead": `boundedLockedRaw`'s production path (`withTimeoutKillingChild`) only
-      // guarantees the child is confirmed dead on its PATH-1 settlement (the "(git child killed)"
-      // rejection). Its `giveUpTimer` fallback (PATH 2, "...giving up (hung git child?)") rejects on a
-      // bare timer with NO such confirmation — see card 963f69ab for the discriminator. On a PATH-2
-      // `addErr`, the add's child may still be alive when this cleanup's own `remove -f -f` runs, so the
-      // remove could race a still-writing child (e.g. clear the dir, then have a still-live add re-create
-      // part of it with no admin record — a shape Code Review flagged as newly reachable here, probability
-      // unquantified). That is NO WORSE than the pre-existing PATH-2 exposure `withTimeoutKillingChild`
-      // already carries independent of this cleanup (a caller there already tolerates the child possibly
-      // still running) — this comment names the possibility rather than claiming it away.
-      await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
-        .catch((cleanupErr: unknown) => {
-          const cleanupMsg = (cleanupErr as Error).message;
-          // "is not a working tree" is the COMMON, EXPECTED shape (addErr's add failed without ever
-          // creating worktreePath — e.g. "already used by worktree at <other path>" — so there is
-          // nothing here to remove); logging it as a warning on every such ordinary failure would be
-          // noise on a log shared across every tenant on the host. Warn only on a genuinely unexpected
-          // cleanup failure.
-          if (!/is not a working tree/i.test(cleanupMsg)) {
-            // eslint-disable-next-line no-console
-            console.warn(`[worktree] best-effort locked-record cleanup after a failed worktree add also failed: ${cleanupMsg}`);
-          }
-        });
+      // Card fdfe8a56: `boundedLockedRaw`'s production path (`withTimeoutKillingChild`) only guarantees
+      // the child is confirmed dead on its PATH-1 settlement (the "(git child killed)" rejection). Its
+      // `giveUpTimer` fallback (PATH 2, "...giving up (hung git child?)") rejects on a bare timer with NO
+      // such confirmation — see card 963f69ab for the discriminator regex. On a PATH-2 `addErr` the add's
+      // child may STILL BE ALIVE, so running this destructive `remove -f -f` there would race a possibly-
+      // still-writing child: clear the dir, then have the still-live add re-create part of it with no
+      // admin record — a shape Code Review flagged as newly reachable BY THIS CLEANUP (not pre-existing),
+      // probability unquantified. SKIP the cleanup on PATH 2 rather than risk that race.
+      //
+      // THE TRADE, RE-PRICED against the ACTUAL residue mechanics (a follow-up review of this exact
+      // paragraph, still card fdfe8a56): an earlier draft here claimed `worktreePath` is "per-spawn
+      // unique, never reused" — FALSE. `worktreePath` is `path.join(WORKTREES_DIR, projectId, [repoKey,]
+      // taskKey(taskId))`, a pure deterministic function of `taskId` (see `taskKey` above) — a
+      // respawn/retry/recycle on the SAME task lands on the IDENTICAL path, straight into the
+      // `fs.existsSync(worktreePath)` reuse branch above (its own doc: "a hard-stopped or rejected-merge
+      // attempt on the same task"). So the residue absolutely CAN be reused into. What actually happens
+      // then was traced empirically (real git, not a mock — not just read), for both shapes:
+      //   - SKIP leaves the admin record INTACT whenever the child dies without our cleanup racing it — a
+      //     locked-but-otherwise-valid worktree. A later respawn's reuse path works completely normally
+      //     against it: createWorktree succeeds, and a genuinely-missing/leftover file surfaces via the
+      //     existing `reusedDirtyWorktree` reporting rather than anything throwing — `locked` only ever
+      //     blocks `worktree remove`/`prune`, never ordinary git ops run inside the worktree (verified:
+      //     `reset --hard`/`status` both succeed against a still-locked worktree). It's not a permanent
+      //     leak either: `removeWorktree()` (this file) clears an intact locked residue on its own, no
+      //     manual step, confirmed by direct call — see the paragraph above.
+      //   - NOT skipping risks the OTHER shape: our own `remove -f -f` racing the still-alive add, wiping
+      //     the admin record while the child keeps writing, leaving `worktreePath` populated but with NO
+      //     `.git` link at all. Confirmed by direct call: a later respawn's reuse branch then throws
+      //     "fatal: not a git repository" — LOUD, not silent (the canonical repo's own HEAD stays
+      //     untouched in this test; nothing escaped upward into an unrelated repo) — but createWorktree has
+      //     no fallback to detect and recover from THIS shape, so that task's respawns stay broken until a
+      //     human deletes the stray directory by hand.
+      // So SKIP trades a residue that self-heals through `removeWorktree()`'s ordinary lifecycle for one
+      // that — only if the race actually manifests — needs a human to notice and clear it. And skipping is
+      // what makes that second, worse shape structurally UNREACHABLE via our own code: it can only occur
+      // through OUR destructive call racing the child; leaving the child alone never produces it. PATH 2
+      // has never been observed firing in this fixture (0/45, 0/65 local trials — an upper bound on those
+      // approaches, not a rate, not proof it's unreachable), so this trade is still made on the mechanism
+      // argument, now priced against the TRUE reuse-path behavior rather than an assumed one.
+      const isPath2GiveUp = /giving up \(hung git child\?\)/.test((addErr as Error).message ?? "");
+      if (!isPath2GiveUp) {
+        await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
+          .catch((cleanupErr: unknown) => {
+            const cleanupMsg = (cleanupErr as Error).message;
+            // "is not a working tree" is the COMMON, EXPECTED shape (addErr's add failed without ever
+            // creating worktreePath — e.g. "already used by worktree at <other path>" — so there is
+            // nothing here to remove); logging it as a warning on every such ordinary failure would be
+            // noise on a log shared across every tenant on the host. Warn only on a genuinely unexpected
+            // cleanup failure.
+            if (!/is not a working tree/i.test(cleanupMsg)) {
+              // eslint-disable-next-line no-console
+              console.warn(`[worktree] best-effort locked-record cleanup after a failed worktree add also failed: ${cleanupMsg}`);
+            }
+          });
+      }
       throw addErr;
     }
     return exists;

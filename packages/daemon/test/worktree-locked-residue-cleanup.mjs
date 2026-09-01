@@ -163,6 +163,41 @@ try {
     check("(d) the sibling worktree named in that error is UNTOUCHED (still on disk, still listed)",
       fs.existsSync(sibling) && git(repo, "worktree list --porcelain").includes(path.basename(sibling)));
   }
+
+  // (e) card fdfe8a56: a PATH-2 ("giving up (hung git child?)") addErr must SKIP the cleanup entirely —
+  //     the add's child may still be alive, so createWorktree must not race it with a destructive
+  //     `remove -f -f`. Same real-`worktree-add`-then-inject-residue shape as (b), but the rejection
+  //     message carries PATH 2's own suffix instead of PATH 1's — proving the discriminator, not just
+  //     asserting it. The locked admin record AND the partial worktree directory must both SURVIVE,
+  //     unlike (b) where the identical residue is cleaned.
+  {
+    let capturedWtPath;
+    const path2Factory = (repoPathArg) => {
+      const real = realSimpleGit(repoPathArg);
+      return {
+        raw: async (args) => {
+          if (args[0] === "worktree" && args[1] === "add") {
+            capturedWtPath = args[2];
+            await real.raw(args);
+            fs.writeFileSync(path.join(adminDirFor(repoPathArg, capturedWtPath), "locked"), "initializing");
+            throw new Error("git worktree add exceeded 250ms, killed, but did not die within 250ms — giving up (hung git child?)");
+          }
+          return real.raw(args);
+        },
+      };
+    };
+    let rejected = false, rejectMessage = null;
+    await createWorktree(repo, "projLockE", "task-lock-e", {}, undefined, undefined, { gitFactory: path2Factory, timeoutMs: 5000 })
+      .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
+    check("(e) createWorktree still REJECTS with the original PATH-2 add error", rejected === true);
+    check(`(e) rejection carries the PATH-2 give-up suffix, unchanged by any cleanup (got: "${rejectMessage}")`,
+      /giving up \(hung git child\?\)/.test(rejectMessage ?? ""));
+    check("(e) THE SKIP: the locked admin record SURVIVES — cleanup did not run on PATH 2",
+      capturedWtPath !== undefined && fs.existsSync(adminDirFor(repo, capturedWtPath)));
+    check("(e) THE SKIP: the partial worktree directory itself also SURVIVES",
+      capturedWtPath !== undefined && fs.existsSync(capturedWtPath));
+    extraDirs.push(capturedWtPath); // clean up in finally — createWorktree deliberately left it behind
+  }
 } finally {
   for (const d of extraDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -172,7 +207,8 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — a killed `worktree add`'s locked ghost admin record is recovered by createWorktree's " +
     "own catch (`git worktree remove -f -f`), the OLD single-force remedy genuinely fails against the " +
-    "identical residue (real git, not a mock), and a cleanup failure never masks createWorktree's own " +
-    "rejection nor touches an unrelated worktree."
+    "identical residue (real git, not a mock), a cleanup failure never masks createWorktree's own " +
+    "rejection nor touches an unrelated worktree, and (card fdfe8a56) that same cleanup is correctly " +
+    "SKIPPED on a PATH-2 (\"giving up\") addErr, leaving the identical residue deliberately unhealed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
