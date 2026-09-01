@@ -115,7 +115,7 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
  * own bare assertion failure can never be mistaken for a real per-file wrapper line, so it never produces a
  * retry candidate at all, related or not).
  */
-const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
+export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
 /**
  * Card 2a79a74c finding #5: matches `test-daemon.mjs`'s own structural `notExecuted` invariant failure —
@@ -135,7 +135,7 @@ const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
  * This regex is the caller's own signal to refuse that retry outright regardless of `failTierMatchCount`
  * — see {@link identifyRetriableTestFile}'s `harnessNotExecutedDetected` parameter.
  */
-const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
+export const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
 
 /** Card 2f0b2e57 (two real merge-gate rejections, both from this daemon's OWN test suite): a line
  *  recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`, optionally
