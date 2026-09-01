@@ -207,6 +207,35 @@ const WINDOWMS_KW = "window" + "Ms";
     wrappedHits.length === 0 && wrappedCleared.length === 1 && /positiveControl/.test(wrappedCleared[0].reason));
 }
 
+// ── Card 4bd5c5a4: the REAL authFailLockout.windowMs collision, ported from the sibling guard (card
+// 0f744aa4). Measured false positive: PlatformConfig's unrelated `remoteAccess.rateLimit.
+// authFailLockout.windowMs` is a rate-limiter lockout window, not a timing-guard sampling config — a test
+// passing that literal as DATA, with a genuinely negative-polarity check() nearby, must NOT become a
+// candidate at all (no observeOnce/assertNeverWithControl call anywhere in the block). Manually verified
+// both directions against the actual pre-fix (committed HEAD before this card) and post-fix code before
+// this test was added — see the card's own worker_report for that one-off comparison; this pins the same
+// collision permanently into the standing suite.
+{
+  const collisionSource = [
+    "{",
+    "  const config = {",
+    "    remoteAccess: {",
+    "      rateLimit: {",
+    `        authFailLockout: { maxAttempts: 5, ${WINDOWMS_KW}: 60000, lockoutMs: 300000 },`,
+    "      },",
+    "    },",
+    "  };",
+    "  applyConfig(config);",
+    '  check("no lockout entry was created for this fresh account", getLockoutState(config) === null);',
+    "}",
+  ].join("\n");
+  const { hits, cleared } = scanFileForUnwitnessedHits(
+    "test/authfaillockout-collision.mjs", collisionSource, new Set([2, 3, 4, 5, 6, 7, 8, 9, 10]),
+  );
+  check("DoD-2/DoD-3 regression pin: an authFailLockout.windowMs config literal (unrelated test DATA, no observeOnce/assertNeverWithControl nearby) is NOT a candidate at all — zero hits, zero cleared",
+    hits.length === 0 && cleared.length === 0);
+}
+
 // ── DoD-7: run the guard's real logic against commit 003a1080's ACTUAL added lines ──────────────────
 // This is the specimen the recommendation doc names as the false-positive risk: a legitimate raw
 // `sleep(10)` cleanup drain landed in the SAME commit as the real fix, with no check() immediately after

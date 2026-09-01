@@ -99,6 +99,18 @@ const IDIOM_SETTIMEOUT = /new Promise\(\s*\(?\s*[a-zA-Z_$][\w$]*\s*\)?\s*=>\s*se
 // replacements this project's own _wait.mjs header exists to push people toward, not a fixed-duration
 // idiom at all; flagging them would be exactly backwards.
 const IDIOM_WINDOWMS = /\bwindowMs\s*:/;
+// Card 4bd5c5a4 — measured, REAL false-positive collision (found while widening the SIBLING guard,
+// fixed-wait-negative-guard.mjs, card 0f744aa4): `windowMs` is NOT unique to the timing-guard idiom.
+// Loom's own PlatformConfig carries an unrelated `remoteAccess.rateLimit.authFailLockout.windowMs` (a
+// rate-limiter lockout window), and two real test files (platform-forensics-reads.mjs, remote-bind.mjs)
+// pass that literal config shape as test DATA, with genuinely negative-polarity check()/assert() calls
+// elsewhere in the same block — 6 false hits across those 2 files on the sibling guard. `0f744aa4` fixed
+// it there by requiring a `windowMs`-idiom candidate's block to also name the ONE primitive that actually
+// consumes a `windowMs` sampling config (`_timing-guard.mjs`'s `observeOnce`/`assertNeverWithControl`)
+// before it counts as a candidate at all — an unrelated data literal never does. Deliberately the SAME
+// regex as that guard's own `TIMING_GUARD_CALL_RE`, ported rather than reinvented (shared-unit divergence
+// between the two sibling guards is a recurring anti-pattern in this repo).
+const TIMING_GUARD_CALL_RE = /\b(?:observeOnce|assertNeverWithControl)\s*\(/;
 // A `sleepPast(` call never matches IDIOM_SLEEP (no "(" immediately after "sleep") — this is belt-and-
 // suspenders documentation of that fact, not a second mechanism: see witness (a) in the header above.
 const SLEEP_PAST_RE = /\bsleepPast\(/;
@@ -277,6 +289,12 @@ export function scanFileForUnwitnessedHits(file, sourceText, addedLineNumbers) {
     // real witness, the same principle DoD-5 states for the wait line itself.
     const liveBlockLines = (from, to) => lines.slice(from, to).filter((l, k) => !commentLines[from + k] && !isCommentOnlyLine(l));
     const blockText = liveBlockLines(start, end + 1).join("\n");
+    // Card 4bd5c5a4: a windowMs-only match (not also a raw sleep()/setTimeout() on the same line) is not
+    // even a candidate unless its block also names observeOnce/assertNeverWithControl — see
+    // TIMING_GUARD_CALL_RE above. Checked FIRST, before the check()/assert()/positiveControl scan below,
+    // matching the sibling guard's own `windowMsCandidateHits` ordering.
+    const isWindowMsOnlyMatch = IDIOM_WINDOWMS.test(lines[i]) && !IDIOM_SLEEP.test(lines[i]) && !IDIOM_SETTIMEOUT.test(lines[i]);
+    if (isWindowMsOnlyMatch && !TIMING_GUARD_CALL_RE.test(blockText)) continue;
     const afterText = liveBlockLines(i + 1, end + 1).join("\n");
     const matches = [...afterText.matchAll(CHECK_OR_ASSERT_RE)];
     if (matches.length === 0) continue; // no assertion nearby — a settle/pacing wait, out of scope by design
