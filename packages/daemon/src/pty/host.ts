@@ -2423,7 +2423,18 @@ export type QueuedMessageKind = "warning" | "agent";
  * message they've already read. Never touched by any other caller, so every existing enqueue stays
  * byte-identical.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number };
+/**
+ * `leapfrogCount` (card e01687ea) — how many times this entry has been pushed back (displaced from its
+ * queue position) by the same-sender agent-kind reorder in `enqueueStdin`, below. That reorder inserts a
+ * fresh same-sender arrival right after the sender's own last eligible entry, which shifts every OTHER
+ * entry still queued behind that point one position further from the front — including a quiet entry
+ * from a different sender that never itself matches. Incremented once per displacement; once it reaches
+ * `AGENT_COALESCE_MAX_COUNT`, the reorder scan treats this entry as a boundary (like a give-up-held or
+ * giveUpGen entry) and refuses to displace it again, so a chatty sender's burst caps the extra delay it
+ * can impose on a quiet entry instead of accumulating it unboundedly. See the reorder scan's own
+ * "FAIRNESS BOUND" comment for the mechanism this enforces.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -3009,12 +3020,25 @@ interface Live {
   // this history exists to recognize.
   recentPlaceholderTokens: SeenPlaceholderTokenEntry[];
   // Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
-  // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route only — null for a
-  // DM route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own
-  // group-only senderId rule) and null for every non-companion-inbound turn. Mirrors activeTurnOwnerText's
-  // lifecycle exactly: set alongside it in submit(), CLEARED at the Stop/StopFailure hook (a stale prior
-  // turn's sender must never be attributed to a later turn), with lastPromptSenderId mirroring
-  // lastPromptOwnerText so a rate-limit-killed companion turn's replay keeps the same sender identity.
+  // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route — null for a DM
+  // route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own group-only
+  // senderId rule).
+  // ⚠️ Card e01687ea CORRECTION: this field is NO LONGER null for "every non-companion-inbound turn" in
+  // general — since that card, `enqueueDurableMessage`'s single funnel threads a REAL sender id into this
+  // SAME `senderId` param for worker_message/redirect/session_message/peer-letters/settle-nudges too (the
+  // coalescing/reorder identity DoD-1 wires up), so a non-companion turn (e.g. a `session_message` landing
+  // on a session that also happens to be a companion) can now carry a non-null value here as well. A
+  // non-null read alone therefore no longer PROVES "this was a GROUP-scope companion-route turn" — it only
+  // means SOME real sender was attributed to this turn. It is STILL true, unconditionally, for the
+  // companion-INBOUND path itself (a group route sets it, a DM route never does). Any consumer that needs
+  // the narrower "authenticated GROUP-companion turn" fact (e.g. `transcript_read`'s DM-only co-gate, see
+  // companion/capabilities.ts) must keep pairing this with `activeTurnOwnerText`/Primitive A, which IS
+  // still exclusive to companion-inbound turns — see that lever's own doc for why the pairing, not this
+  // field alone, is what still holds.
+  // Mirrors activeTurnOwnerText's lifecycle exactly: set alongside it in submit(), CLEARED at the Stop/
+  // StopFailure hook (a stale prior turn's sender must never be attributed to a later turn), with
+  // lastPromptSenderId mirroring lastPromptOwnerText so a rate-limit-killed companion turn's replay keeps
+  // the same sender identity.
   activeTurnSenderId: string | null;
   lastPromptSenderId: string | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
@@ -7156,12 +7180,21 @@ export class PtyHost {
       // arrivals. Never reorders past a give-up-held entry or a giveUpGen-tagged (possible-duplicate)
       // entry — those keep their FIFO/front position untouched, exactly like the coalescing exclusion.
       //
-      // FAIRNESS BOUND (a real, STATED trade — a chatty sender CAN delay a quiet one, card eac3464d's
-      // own correction 3 requires this be explicit, not silent): the search for "this sender's last
-      // eligible entry" only looks back AGENT_COALESCE_MAX_COUNT positions from the CURRENT tail. Once
-      // an entry has that many OTHER arrivals queued behind it, it has aged out of the lookback window
-      // and can never again be leapfrogged — capping the worst-case extra delay any one message can
-      // accumulate from this reordering at AGENT_COALESCE_MAX_COUNT same-kind arrivals, not unbounded.
+      // FAIRNESS BOUND — card e01687ea CORRECTION: the wording that used to live here claimed the
+      // AGENT_COALESCE_MAX_COUNT-position lookback window itself capped the delay a quiet entry could
+      // accumulate ("once an entry has that many OTHER arrivals queued behind it, it has aged out ... and
+      // can never again be leapfrogged"). MEASURED FALSE: this reorder always inserts at `matchIndex + 1`
+      // — immediately in front of whatever is already queued after the sender's own last entry — so a
+      // quiet entry sitting right there is found and leapfrogged again on EVERY subsequent same-sender
+      // arrival; its absolute index grows in lockstep with the window's own start, so it NEVER ages out
+      // (reproduced in pty-agent-sender-coalesce.mjs scenario (I)). The lookback window below still bounds
+      // how far back the SCAN walks (a cheap perf bound on a long queue) — it is NOT what caps the delay.
+      // The real cap is `leapfrogCount` (QueuedMessage's own field — see its doc): every entry this splice
+      // actually displaces has its count bumped below, and once an entry's count reaches
+      // AGENT_COALESCE_MAX_COUNT the scan treats FURTHER displacement of it as a boundary — refusing to
+      // walk PAST it in search of an earlier match — which is what genuinely caps the worst-case extra
+      // delay any one entry can accumulate from this reordering at AGENT_COALESCE_MAX_COUNT same-kind
+      // arrivals, not the window by itself.
       // A NULL/undefined `senderId` never matches another null-sender entry (same reasoning as
       // drainPending's own senderKey !== null guard — see that comment): identity can't be established
       // from an absent id, so this whole reorder is skipped for a message with no genuine sender.
@@ -7178,10 +7211,30 @@ export class PtyHost {
           // is EVER inserted before it — its position is genuinely never touched, not merely "not
           // matched against". Regression-covered: pty-agent-sender-coalesce.mjs scenario (G).
           if (this.isGiveUpHeld(candidate) || candidate.giveUpGen !== undefined) break;
+          // Code Review follow-up (card e01687ea): MATCH is checked BEFORE the leapfrogCount freeze below
+          // — a match places the new entry at `i + 1`, strictly AFTER `candidate`'s own index, so taking a
+          // match here never displaces `candidate` itself, regardless of how many times it's already been
+          // leapfrogged. An over-cap entry is still a perfectly legitimate coalescing target; the cap only
+          // has to stop it being pushed back FURTHER by matches found beyond it. (Reachable in production:
+          // an entry can accumulate leapfrogCount from OTHER senders'/routes' insertions scanning past it
+          // without matching, then later be the correct match for its own sender+route once that sender
+          // sends again — checking the freeze first would wrongly deny that safe, non-displacing match.)
           if (candidate.kind === "agent" && (candidate.senderId ?? null) === senderKey && routeKeyOf(candidate.route) === routeKeyOf(route)) {
             insertAt = i + 1;
             break;
           }
+          // Card e01687ea: an entry already leapfrogged AGENT_COALESCE_MAX_COUNT times is frozen from
+          // FURTHER displacement — walking past it (to look for a match still further back) would splice
+          // the new entry at or before its index, displacing it past its cap. It is NOT excluded from
+          // being a match target itself (see the match check above, which runs first).
+          if ((candidate.leapfrogCount ?? 0) >= AGENT_COALESCE_MAX_COUNT) break;
+        }
+        // Card e01687ea: bump leapfrogCount on every entry this splice will actually shift (everything
+        // currently sitting at or after insertAt) — this is what the boundary check above enforces
+        // against on a later arrival. A no-op when insertAt is still the default tail (no match found).
+        for (let j = insertAt; j < live.pending.length; j++) {
+          const displaced = live.pending[j]!;
+          displaced.leapfrogCount = (displaced.leapfrogCount ?? 0) + 1;
         }
       }
       live.pending.splice(insertAt, 0, entry);
@@ -8186,9 +8239,12 @@ export class PtyHost {
       live.activeTurnOwnerText = null;
       live.lastPromptOwnerText = null;
     }
-    // Companion Trust Window: pin the turn's authenticated sender id the SAME way — undefined/null for
-    // every non-group-companion caller, so activeTurnSenderId stays null exactly like activeTurnOwnerText
-    // does for a non-owner-authored turn. lastPromptSenderId mirrors lastPromptOwnerText for replay.
+    // Companion Trust Window: pin whatever real sender id this submit carries (see Live.activeTurnSenderId's
+    // own doc — card e01687ea correction: this is now populated for ANY caller threading a real senderId
+    // through enqueueStdin, not just a group-companion route; the "authenticated GROUP-companion turn" fact
+    // that field used to guarantee alone now needs pairing with activeTurnOwnerText/Primitive A). Undefined
+    // for every caller that omits it, exactly like activeTurnOwnerText for a non-owner-authored turn.
+    // lastPromptSenderId mirrors lastPromptOwnerText for replay.
     live.activeTurnSenderId = senderId ?? null;
     live.lastPromptSenderId = senderId ?? null;
     // Loom Companion (proactive event-line producer): pin whether THIS turn is a daemon-driven proactive

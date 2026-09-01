@@ -1,5 +1,6 @@
-// Regression guard for card eac3464d DoD-1/DoD-2/DoD-3/DoD-4 — SAME-SENDER coalescing for agent-kind
-// queued messages (pty/host.ts's drainPending same-sender branch + enqueueStdin's reorder-on-enqueue).
+// Regression guard for card eac3464d DoD-1/DoD-2/DoD-3/DoD-4, EXTENDED by card e01687ea DoD-3 (scenario
+// (I) below) — SAME-SENDER coalescing for agent-kind queued messages (pty/host.ts's drainPending
+// same-sender branch + enqueueStdin's reorder-on-enqueue + its per-entry leapfrog fairness cap).
 //
 // Card eac3464d's own DoD-0 measured that 65.8% of worker-report deliveries and 64% of merge-rejection
 // deliveries in a real production log window went through drainPending's one-per-turn "agent"-kind path
@@ -21,6 +22,9 @@
 //       AGENT_COALESCE_MAX_BYTES do NOT coalesce, even though they're adjacent and same-sender.
 //   (H) card 438973ce: EVERY coalesced member's ownerText is attributed (getRecentOwnerTurns), not just
 //       drained[0]'s — the regression this specific file was extended for.
+//   (I) card e01687ea DoD-3: the reorder's fairness cap is REAL — a quiet entry can be leapfrogged at most
+//       AGENT_COALESCE_MAX_COUNT times (via a per-entry `leapfrogCount`), not the unbounded leapfrogging
+//       the old (false) "lookback window ages it out" comment claimed prevented this.
 //
 // give-up/re-mint (giveUpGen-tagged) EXCLUSION from both the coalescing and the reorder is covered
 // separately in pty-agent-coalesce-giveup-exclusion.mjs — it needs the real (slow, verify-timeout-driven)
@@ -337,12 +341,95 @@ try {
     check("(H) FIX: getActiveTurnOwnerText reflects the LAST drained member (msg two), not just the head",
       host.getActiveTurnOwnerText(SID) === "owner said msg two");
   }
+  // ===================== (I) card e01687ea: the reorder's FAIRNESS CAP is real, not just a lookback window =====================
+  // The FAIRNESS BOUND comment above the reorder (host.ts) used to claim the AGENT_COALESCE_MAX_COUNT
+  // lookback window itself capped how many times a quiet OTHER-sender entry could be leapfrogged. MEASURED
+  // FALSE (card e01687ea): the reorder always inserts immediately in front of whatever already sits after
+  // the sender's last entry, so a quiet entry's absolute index grows in lockstep with the window and it
+  // NEVER ages out — reproduced here with MAX_COUNT pinned to 3 (env above): a naive scan would let
+  // sender-fair-a leapfrog the quiet entry unboundedly. This proves the REAL fix — a per-entry
+  // `leapfrogCount` that freezes an entry once it's been displaced AGENT_COALESCE_MAX_COUNT times.
+  {
+    const SID = "sess-fairness-cap";
+    spawnReady(SID);
+    primeBusy(SID);
+    await sleep(250);
+
+    host.enqueueStdin(SID, "FAIR_A1", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-a");
+    host.enqueueStdin(SID, "FAIR_QUIET", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-quiet");
+    check("(I) setup: [A1, QUIET]", JSON.stringify(host.getPending(SID)) === JSON.stringify(["FAIR_A1", "FAIR_QUIET"]));
+
+    // sender-fair-a bursts A2..A4 — MAX_COUNT (3) worth of leapfrogs over the quiet entry. Each one must
+    // still land right in front of QUIET (the reorder itself is unaffected below the cap).
+    for (const n of [2, 3, 4]) {
+      host.enqueueStdin(SID, `FAIR_A${n}`, "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-a");
+    }
+    check("(I) below cap: QUIET leapfrogged exactly 3 times, still sitting at the tail",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FAIR_A1", "FAIR_A2", "FAIR_A3", "FAIR_A4", "FAIR_QUIET"]));
+
+    // A5: QUIET has now been displaced AGENT_COALESCE_MAX_COUNT (3) times — the cap must refuse a 4th
+    // leapfrog. A5 lands at the true FIFO tail, BEHIND QUIET, instead of leapfrogging it again.
+    const rA5 = host.enqueueStdin(SID, "FAIR_A5", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-a");
+    check("(I) AT CAP: A5 does NOT leapfrog QUIET a 4th time — QUIET is frozen in place",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FAIR_A1", "FAIR_A2", "FAIR_A3", "FAIR_A4", "FAIR_QUIET", "FAIR_A5"]));
+    check("(I) AT CAP: A5's reported position is the true tail (6), not a leapfrog onto A4 (5)", rA5.position === 6);
+
+    // A6/A7: once QUIET is frozen, further same-sender arrivals coalesce onto the new tail (A5/A6) exactly
+    // as usual — QUIET stays permanently parked, never displaced again, never blocking new same-sender
+    // coalescing either.
+    host.enqueueStdin(SID, "FAIR_A6", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-a");
+    host.enqueueStdin(SID, "FAIR_A7", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-fair-a");
+    check("(I) AFTER CAP: QUIET stays frozen at its position; new arrivals pile up after it, not before",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FAIR_A1", "FAIR_A2", "FAIR_A3", "FAIR_A4", "FAIR_QUIET", "FAIR_A5", "FAIR_A6", "FAIR_A7"]));
+  }
+  // ===================== (J) card e01687ea code-review follow-up: a FROZEN entry is still a legitimate MATCH target for its OWN sender =====================
+  // Code Review finding: the leapfrogCount freeze check used to run BEFORE the same-sender match check, so
+  // an entry that had reached the cap (by sitting right after a DIFFERENT sender's growing chain and being
+  // repeatedly leapfrogged by it) would `break` the scan before ever getting a chance to match a LATER
+  // arrival from its OWN sender+route — even though matching it is always safe (a match inserts strictly
+  // AFTER the matched entry's own index, so it can never displace the entry it matches). This reproduces
+  // exactly that shape: sender-X's X1 sits right after sender-J's chain and gets frozen by J's own bursts,
+  // then sender-X sends X2 — which MUST still land right after X1, not fall back to the FIFO tail.
+  {
+    const SID = "sess-frozen-still-matches-own-sender";
+    spawnReady(SID);
+    primeBusy(SID);
+    await sleep(250);
+
+    host.enqueueStdin(SID, "FROZEN_J1", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-frozen-j");
+    host.enqueueStdin(SID, "FROZEN_X1", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-frozen-x");
+    check("(J) setup: [J1, X1] — X1 sits right after J1, the only spot a J arrival can leapfrog it from",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FROZEN_J1", "FROZEN_X1"]));
+
+    // Each subsequent J arrival matches the PRIOR J entry and reorders onto it — which sits right before
+    // X1, so every one of these leapfrogs X1 by exactly one. Three of them drive X1's leapfrogCount to
+    // exactly the cap (3).
+    for (const n of [2, 3, 4]) {
+      host.enqueueStdin(SID, `FROZEN_J${n}`, "system", undefined, undefined, "agent", undefined, undefined, false, "sender-frozen-j");
+    }
+    check("(J) setup: X1 has been leapfrogged to the cap (3) by sender-J's own chain",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FROZEN_J1", "FROZEN_J2", "FROZEN_J3", "FROZEN_J4", "FROZEN_X1"]));
+
+    // A 5th J message: X1 is now frozen (cap reached) — this must NOT leapfrog it again, so J5 falls back
+    // to the FIFO tail, mirroring scenario (I)'s own AT-CAP behavior.
+    host.enqueueStdin(SID, "FROZEN_J5", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-frozen-j");
+    check("(J) setup: J5 does NOT leapfrog the frozen X1 — falls back to the tail",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FROZEN_J1", "FROZEN_J2", "FROZEN_J3", "FROZEN_J4", "FROZEN_X1", "FROZEN_J5"]));
+
+    // THE FIX: sender-X sends X2. X1 is frozen, but it is STILL X2's correct, safe match (X2 lands strictly
+    // AFTER X1's own index, so matching it never displaces X1 further) — X2 must reorder onto X1, not fall
+    // back to the tail behind J5.
+    const rX2 = host.enqueueStdin(SID, "FROZEN_X2", "system", undefined, undefined, "agent", undefined, undefined, false, "sender-frozen-x");
+    check("(J) FIX: X2 reorders onto its OWN frozen sender X1 — [J1..J4, X1, X2, J5], not [..., J5, X2]",
+      JSON.stringify(host.getPending(SID)) === JSON.stringify(["FROZEN_J1", "FROZEN_J2", "FROZEN_J3", "FROZEN_J4", "FROZEN_X1", "FROZEN_X2", "FROZEN_J5"]));
+    check("(J) FIX: X2's reported position (6) reflects landing right after X1, not the FIFO tail (7)", rX2.position === 6);
+  }
 } finally {
   for (const fake of fakes) { try { fake.kill(); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — same-sender agent-kind messages coalesce (bounded by count+bytes, reordered ahead of other senders on enqueue); different senders still drain one-per-turn."
+  ? "\n✅ ALL PASS — same-sender agent-kind messages coalesce (bounded by count+bytes, reordered ahead of other senders on enqueue, with a REAL per-entry leapfrog cap on how much a quiet entry can be delayed); different senders still drain one-per-turn."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

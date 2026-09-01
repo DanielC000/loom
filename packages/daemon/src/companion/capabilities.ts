@@ -331,8 +331,12 @@ function scopeDenialMessage(
 export interface GrantPty {
   getActiveTurnOrigin(sessionId: string): CompanionRoute | null;
   /** Companion Trust Window: the authenticated sender id of the in-flight turn, for a GROUP-scope route
-   *  only (null for DM — see pty/host.ts's `getActiveTurnSenderId`). Used to key a group route's trust
-   *  window per-sender so one member's confirm never covers another's acts. */
+   *  (null for DM). ⚠️ Card e01687ea CORRECTION: this is no longer exclusively a companion-route signal —
+   *  see `pty/host.ts`'s `Live.activeTurnSenderId` doc for why a non-companion agent message can now also
+   *  set it, and pair it with `getActiveTurnOwnerText`/Primitive A (companion/capabilities.ts's
+   *  TRANSCRIPT_READ doc) wherever the narrower "authenticated group-companion turn" fact is actually
+   *  needed. Used to key a group route's trust window per-sender so one member's confirm never covers
+   *  another's acts. */
   getActiveTurnSenderId(sessionId: string): string | null;
   enqueueStdin(
     sessionId: string,
@@ -2222,19 +2226,30 @@ const TRANSCRIPT_READ_NOT_FOUND = "no such session in your granted scope";
  * turn never even triggers a session lookup):
  *   - **Primitive A (owner-authored turn)**: `ctx.attest.getActiveTurnOwnerText` must be non-null,
  *     mirroring `session-steer`'s own `resolveControlTarget` (this file, ~L1294). This is NOT redundant
- *     with the DM-only check below — `ctx.pty.getActiveTurnSenderId` is null for EVERY
- *     non-companion-inbound turn, not just a DM (see `pty/host.ts`'s own doc): a PROACTIVE/heartbeat/
- *     reminder/memory-recall turn also has a null senderId. Without Primitive A, an injected instruction
- *     ("read session X and relay it later") that a GROUP turn refuses (non-null senderId) could still
- *     succeed on the companion's OWN next proactive turn (null senderId, no owner text) — reading the
- *     transcript into context with no owner ever having asked for it, ready to be relayed on a later
- *     group turn. Requiring owner authorship closes that: the owner asking "read session X" in a DM is
- *     owner-authored and still passes; a self-initiated proactive read is blocked.
+ *     with the DM-only check below.
+ *     ⚠️ Card e01687ea CORRECTION: it is no longer true in general that `ctx.pty.getActiveTurnSenderId` is
+ *     null for every non-companion-inbound turn — since that card, a non-companion agent-kind message
+ *     (worker_message/session_message/redirect/peer-letters/settle-nudges) also threads a real sender id
+ *     into the SAME field (see `pty/host.ts`'s `Live.activeTurnSenderId` doc for the full correction). What
+ *     STILL holds, and is what actually makes Primitive A non-redundant: `ownerText` is set ONLY by the
+ *     companion's own inbound path (Card 0's Trust Window), so a PROACTIVE/heartbeat/reminder/memory-recall
+ *     turn — or any of the newly-senderId-bearing non-companion messages above — has null `ownerText`
+ *     regardless of what `getActiveTurnSenderId` now returns, and Primitive A rejects it on THAT basis. No
+ *     lever outcome changes: Primitive A already fails closed on every turn where the DM-only check's
+ *     premise would otherwise be in question, before that check is even reached. Without Primitive A, an
+ *     injected instruction ("read session X and relay it later") that a GROUP turn refuses (non-null
+ *     senderId) could still succeed on the companion's OWN next proactive turn (no owner text, whatever
+ *     senderId happens to read) — reading the transcript into context with no owner ever having asked for
+ *     it, ready to be relayed on a later group turn. Requiring owner authorship closes that: the owner
+ *     asking "read session X" in a DM is owner-authored and still passes; a self-initiated proactive read
+ *     is blocked.
  *   - **DM-only**: `ctx.pty.getActiveTurnSenderId(ctx.sessionId)` non-null (a GROUP route) fails closed
  *     — transcript text is UNTRUSTED DATA the companion is about to ingest and could relay onward, the
  *     strongest exfiltration surface among the read levers, since a GROUP route would let ANY member
  *     trigger a read whose result the companion might then summarize back into the group.
- * Both gates must pass; neither alone is sufficient (see above).
+ * Both gates must pass; neither alone is sufficient (see above) — and per the correction above, it is the
+ * PAIRING that is load-bearing here, not either gate's individual claim about when `getActiveTurnSenderId`
+ * is null.
  *
  * PER-PROJECT resolve-then-scope (Framework §2, mandatory — §6.3), AFTER both gates: the target session
  * is resolved GLOBALLY (`db.getSession` / id-prefix) — a bare sessionId names no project until resolved
