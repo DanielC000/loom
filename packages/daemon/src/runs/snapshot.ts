@@ -1,7 +1,27 @@
 import fs from "node:fs";
 import path from "node:path";
-import { simpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
 import { RUNS_DIR } from "../paths.js";
+import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
+
+/**
+ * Per-git-op ceiling for this file's read-tree/checkout-index plumbing (card 091de765) — a SEPARATE
+ * constant from GIT_OP_TIMEOUT_MS/GIT_LOCAL_TIMEOUT_MS/VAULT_GIT_OP_TIMEOUT_MS/git/reader.ts's
+ * GIT_READER_TIMEOUT_MS, even though all resolve to the same 15s today (see git/bounded.ts's own doc for
+ * why the call classes deliberately don't share one constant). Local plumbing, no network — same 15s
+ * local-read budget as the rest.
+ */
+const RUN_SNAPSHOT_TIMEOUT_MS = 15_000;
+
+/**
+ * Injectable seam mirroring git/worktrees.ts's `BoundedGitDeps` / git/reader.ts's `ReaderGitDeps` — lets
+ * a test simulate a hanging git child with a tiny budget and assert createRunSnapshot still returns
+ * within the window instead of hanging forever. Real callers never pass this.
+ */
+export interface RunSnapshotGitDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number, env: Record<string, string>) => Pick<SimpleGit, "raw">;
+  timeoutMs?: number;
+}
 
 /**
  * Agent Runs R2 — the disposable, read-only cwd for an ephemeral `run` session.
@@ -40,7 +60,7 @@ function runIndexFile(sessionId: string): string {
  * to be used as the run session's cwd. No `.git`, no branch, no worktree registration. Throws if HEAD
  * can't be read (e.g. an empty repo) — the caller fails the run rather than spawning into a bad cwd.
  */
-export async function createRunSnapshot(repoPath: string, sessionId: string): Promise<string> {
+export async function createRunSnapshot(repoPath: string, sessionId: string, deps: RunSnapshotGitDeps = {}): Promise<string> {
   const dir = runSnapshotDir(sessionId);
   fs.mkdirSync(dir, { recursive: true });
   const indexFile = runIndexFile(sessionId);
@@ -54,13 +74,15 @@ export async function createRunSnapshot(repoPath: string, sessionId: string): Pr
     env[k] = v;
   }
   env.GIT_INDEX_FILE = indexFile;
-  const git = simpleGit(repoPath).env(env);
+  const timeoutMs = deps.timeoutMs ?? RUN_SNAPSHOT_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms, e) => boundedSimpleGit(p, ms, e));
+  const git = makeGit(repoPath, timeoutMs, env);
   try {
-    await git.raw(["read-tree", "HEAD"]); // load HEAD's tree into the throwaway index
+    await withTimeout(git.raw(["read-tree", "HEAD"]), timeoutMs, "git read-tree HEAD"); // load HEAD's tree into the throwaway index
     // checkout-index needs an absolute prefix ending in a separator; forward slashes are accepted by
     // git on every platform, so normalize Windows backslashes to avoid a malformed prefix.
     const prefix = `${dir.replace(/\\/g, "/")}/`;
-    await git.raw(["checkout-index", "-a", "-f", `--prefix=${prefix}`]);
+    await withTimeout(git.raw(["checkout-index", "-a", "-f", `--prefix=${prefix}`]), timeoutMs, "git checkout-index");
   } finally {
     try { fs.rmSync(indexFile, { force: true }); } catch { /* best-effort — throwaway index */ }
   }

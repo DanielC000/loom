@@ -3,7 +3,7 @@ import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
-import { simpleGit, type SimpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME } from "../paths.js";
 import { validateVaultPath } from "../projects/vault-path.js";
@@ -716,12 +716,13 @@ export type VaultGitTargetResult =
  * (`"externally-managed"`) when the resolved repo is Obsidian-Git-managed — a real external
  * auto-committer already owns that history, mirroring `VaultVersioner`'s own backoff.
  */
-export async function resolveVaultGitTarget(vaultPath: string): Promise<VaultGitTargetResult> {
+export async function resolveVaultGitTarget(vaultPath: string, deps: VaultGitDeps = {}): Promise<VaultGitTargetResult> {
   const trimmed = vaultPath?.trim();
   if (!trimmed) return { ok: false, reason: "no-vault" };
-  const ctx = await resolveVaultRepoContext(trimmed);
+  const ctx = await resolveVaultRepoContext(trimmed, deps);
   if (ctx.externallyManaged) return { ok: false, reason: "externally-managed" };
-  const isRepo = await simpleGit(ctx.commitPath).checkIsRepo().catch(() => false);
+  const { git, timeoutMs } = boundedVaultGit(ctx.commitPath, deps);
+  const isRepo = await withTimeout(git.checkIsRepo(), timeoutMs, "git check-is-repo (vault git target)").catch(() => false);
   if (!isRepo) return { ok: false, reason: "no-repo" };
   return { ok: true, repoPath: ctx.commitPath };
 }

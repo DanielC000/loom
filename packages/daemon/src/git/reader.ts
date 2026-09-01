@@ -1,16 +1,50 @@
 import fs from "node:fs";
-import { simpleGit, type SimpleGit } from "simple-git";
+import type { SimpleGit } from "simple-git";
 import { originHost, commitIdentityHostWarning, nonInteractiveEnv } from "./writer.js";
+import { withTimeout, boundedSimpleGit } from "./bounded.js";
+
+/**
+ * Per-git-op ceiling for this file's read-only project-repo-view ops (checkIsRepo/getConfig/revparse/
+ * log/branchLocal/show — card 091de765). A SEPARATE constant from GIT_OP_TIMEOUT_MS (git/worktrees.ts) /
+ * GIT_LOCAL_TIMEOUT_MS (git/writer.ts) / VAULT_GIT_OP_TIMEOUT_MS (vault/versioner.ts), even though all
+ * four resolve to the same 15s today — see git/bounded.ts's own doc for why the call classes deliberately
+ * don't share one constant (so this one can diverge later without moving the others). These are LOCAL
+ * reads (no network), hence the same 15s local-read budget as the rest.
+ */
+const GIT_READER_TIMEOUT_MS = 15_000;
+
+/** Every method this file's bounded git calls need, across isGitRepo/checkCommitIdentity/GitReader. */
+type ReaderGit = Pick<SimpleGit, "checkIsRepo" | "getConfig" | "raw" | "revparse" | "log" | "branchLocal" | "show">;
+
+/**
+ * Injectable seam mirroring git/worktrees.ts's `BoundedGitDeps` / vault/versioner.ts's `VaultGitDeps` —
+ * lets a test simulate a hanging git child with a tiny budget and assert a call returns within the
+ * window instead of hanging forever. Real callers never pass this.
+ */
+export interface ReaderGitDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => ReaderGit;
+  timeoutMs?: number;
+}
+
+/** Build the bounded git instance + resolve the timeout for isGitRepo/checkCommitIdentity — no `.env()`
+ *  (matches their pre-existing behavior; see {@link GitReader}'s constructor for the one site in this
+ *  file that DOES apply one, kept deliberately separate rather than folded in here). */
+function boundedReaderGit(repoPath: string, deps: ReaderGitDeps): { git: ReaderGit; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? GIT_READER_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
+  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
 
 /**
  * Guardrail for AI-driven project creation (Pillar C): is `repoPath` an existing directory that is
  * a git repo? False (never throws) on a missing path, a file, a non-repo dir, or any git error —
  * so project_create can reject before binding a project to a bad repo.
  */
-export async function isGitRepo(repoPath: string): Promise<boolean> {
+export async function isGitRepo(repoPath: string, deps: ReaderGitDeps = {}): Promise<boolean> {
   try {
     if (!repoPath || !fs.existsSync(repoPath) || !fs.statSync(repoPath).isDirectory()) return false;
-    return await simpleGit(repoPath).checkIsRepo();
+    const { git, timeoutMs } = boundedReaderGit(repoPath, deps);
+    return await withTimeout(git.checkIsRepo(), timeoutMs, "git checkIsRepo");
   } catch {
     return false;
   }
@@ -39,14 +73,14 @@ export interface CommitIdentityResult {
  * (NOT a hard reject) mirroring the writer's non-blocking identity posture, so a repo with no configured
  * identity still binds while the gap is made visible up front instead of at the first worker merge.
  */
-export async function checkCommitIdentity(repoPath: string): Promise<CommitIdentityResult> {
+export async function checkCommitIdentity(repoPath: string, deps: ReaderGitDeps = {}): Promise<CommitIdentityResult> {
   try {
-    const git = simpleGit(repoPath);
-    const name = (await git.getConfig("user.name")).value?.trim() || null;
-    const email = (await git.getConfig("user.email")).value?.trim() || null;
+    const { git, timeoutMs } = boundedReaderGit(repoPath, deps);
+    const name = (await withTimeout(git.getConfig("user.name"), timeoutMs, "git config user.name")).value?.trim() || null;
+    const email = (await withTimeout(git.getConfig("user.email"), timeoutMs, "git config user.email")).value?.trim() || null;
     let host: string | null = null;
     try {
-      host = originHost((await git.raw(["remote", "get-url", "origin"])).trim());
+      host = originHost((await withTimeout(git.raw(["remote", "get-url", "origin"]), timeoutMs, "git remote get-url origin")).trim());
     } catch { /* no origin remote — the host rule simply doesn't apply (resolvability still checked) */ }
     if (!name || !email) {
       return {
@@ -79,14 +113,21 @@ function isCommitlessRepoLogError(err: unknown): boolean {
 
 /** Read-only git introspection for the project repo view (§ no commit/checkout/push in phase 1). */
 export class GitReader {
-  private git: SimpleGit;
-  constructor(repoPath: string) {
+  private git: ReaderGit;
+  private timeoutMs: number;
+  constructor(repoPath: string, deps: ReaderGitDeps = {}) {
+    this.timeoutMs = deps.timeoutMs ?? GIT_READER_TIMEOUT_MS;
     // Pin git's locale the SAME way writer.ts's NONINTERACTIVE_ENV does (see its comment at
     // writer.ts:45-49): we machine-read git's stderr below (the commitless-repo fallback match), and on
     // a non-English host an unpinned locale makes that substring match silently miss — the exact 500
     // this class exists to prevent, just reintroduced by locale. LC_ALL=C/LANG=C is a shared convention
-    // across every git invocation in this file that reads stderr, not a one-off copy here.
-    this.git = simpleGit(repoPath).env(nonInteractiveEnv());
+    // across every git invocation in this file that reads stderr, not a one-off copy here. Deliberately
+    // NOT routed through boundedReaderGit (that helper's whole point is NO `.env()`, matching
+    // isGitRepo/checkCommitIdentity) — a test-injected gitFactory skips env entirely (test-only; real
+    // callers never pass one).
+    this.git = deps.gitFactory
+      ? deps.gitFactory(repoPath, this.timeoutMs)
+      : boundedSimpleGit(repoPath, this.timeoutMs).env(nonInteractiveEnv());
   }
 
   async log(limit = 50) {
@@ -95,7 +136,7 @@ export class GitReader {
     // holds regardless of the host's git locale, unlike the message-match fallback below.
     let headResolves = true;
     try {
-      await this.git.revparse(["--quiet", "--verify", "HEAD"]);
+      await withTimeout(this.git.revparse(["--quiet", "--verify", "HEAD"]), this.timeoutMs, "git rev-parse --verify HEAD");
     } catch {
       headResolves = false;
     }
@@ -103,11 +144,11 @@ export class GitReader {
       // HEAD doesn't resolve. Confirm this is still a genuine, valid repo (not e.g. a since-moved or
       // deleted path) before treating it as commitless — a repo that isn't a repo at all must still
       // surface as an error, never be silently treated as an empty log.
-      const stillARepo = await this.git.checkIsRepo().catch(() => false);
+      const stillARepo = await withTimeout(this.git.checkIsRepo(), this.timeoutMs, "git checkIsRepo").catch(() => false);
       if (stillARepo) return [];
     }
     try {
-      const l = await this.git.log({ maxCount: limit });
+      const l = await withTimeout(this.git.log({ maxCount: limit }), this.timeoutMs, "git log");
       return l.all.map((c) => ({ hash: c.hash, date: c.date, message: c.message, author: c.author_name }));
     } catch (err) {
       // A commitless repo is a valid, expected state (e.g. project_init's brand-new `git init` — zero
@@ -120,11 +161,11 @@ export class GitReader {
   }
 
   async branches() {
-    const b = await this.git.branchLocal();
+    const b = await withTimeout(this.git.branchLocal(), this.timeoutMs, "git branch (local)");
     return { current: b.current, all: b.all };
   }
 
   async show(ref: string): Promise<string> {
-    return this.git.show([ref]);
+    return withTimeout(this.git.show([ref]), this.timeoutMs, "git show");
   }
 }
