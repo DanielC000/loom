@@ -188,7 +188,18 @@ try {
   const recon = svc.reconcileRunsOnBoot();
   check("4 reconcileRunsOnBoot failed the interrupted run", recon.failed >= 1 && db.getRun(run3.id).status === "failed" && !!db.getRun(run3.id).error);
   check("4 the interrupted run's session is exited (no zombie)", db.getSession(s3.id).processState === "exited");
-  check("4 the interrupted run's snapshot dir was swept", !fs.existsSync(runSnapshotDir(s3.id)));
+  // card 26c661cd: the boot sweep is now bounded + fire-and-forget (killableRemoveDir, a separate OS
+  // process per removal) rather than a synchronous fs.rmSync loop on the main thread — reconcileRunsOnBoot
+  // must return BEFORE the sweep settles (that's the fix: boot never blocks on a wedged dir), so this
+  // polls briefly for the background removal, mirroring the ALREADY-PRESENT async GC poll in section 3
+  // above (same shape, same bound) rather than guessing a fixed duration.
+  let s3Gone = false;
+  // TIMING-GUARD-SAFE: bounded poll of a real observable condition (fs.existsSync), not a guessed sleep
+  // duration — identical, pre-existing shape to section 3's "disposable snapshot dir is GC'd" poll just
+  // above, which this mirrors for the same async-removal property on the boot-sweep path instead of the
+  // live-teardown path.
+  for (let i = 0; i < 40 && !s3Gone; i++) { if (!fs.existsSync(runSnapshotDir(s3.id))) s3Gone = true; else await sleep(25); }
+  check("4 the interrupted run's snapshot dir was swept (async, backgrounded)", s3Gone);
 
   // ===================== 5. run MCP reachable ONLY for kind==="run" =====================
   const runRouter = new RunMcpRouter(db, svc);

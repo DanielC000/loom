@@ -3,6 +3,7 @@ import path from "node:path";
 import type { SimpleGit } from "simple-git";
 import { RUNS_DIR } from "../paths.js";
 import { withTimeout, boundedSimpleGit } from "../git/bounded.js";
+import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
 
 /**
  * Per-git-op ceiling for this file's read-tree/checkout-index plumbing (card 091de765) — a SEPARATE
@@ -90,19 +91,42 @@ export async function createRunSnapshot(repoPath: string, sessionId: string, dep
 }
 
 /**
- * Best-effort, Windows-safe teardown of a run's snapshot dir. Called AFTER the pty is fully gone (so no
- * file handle in the snapshot is still held), and tolerant of the OS releasing a directory handle a beat
- * late (`fs.rm` maxRetries — the same EBUSY/EPERM lag removeWorktree handles). NEVER throws: a failed
- * cleanup must not wedge teardown or leave the run non-terminal — the run row is already marked terminal
- * before this runs; a lingering dir is swept on the next boot. Logs if it ultimately lingers.
+ * Injectable seam for {@link removeRunSnapshot}/{@link sweepAllRunSnapshots}, mirroring `BoundedGitDeps`'s
+ * `removeDir` in git/worktrees.ts — lets a test simulate a wedged (never-settling) removal and assert the
+ * outer {@link withTimeout} bound still resolves instead of hanging forever. Real callers never pass this.
  */
-export async function removeRunSnapshot(sessionId: string): Promise<void> {
+export interface RunSnapshotRemoveDeps {
+  removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+  timeoutMs?: number;
+}
+
+/**
+ * Best-effort, Windows-safe teardown of a run's snapshot dir. Called AFTER the pty is fully gone (so no
+ * file handle in the snapshot is still held). NEVER throws: a failed cleanup must not wedge teardown or
+ * leave the run non-terminal — the run row is already marked terminal before this runs; a lingering dir
+ * is swept on the next boot.
+ *
+ * card 26c661cd (bd9fc808-shaped fix): the prior implementation retried a hung `fs.promises.rm` up to 40×
+ * — a genuinely WEDGED directory handle never lets that promise settle at all, so the retries never even
+ * start; the call just occupies a libuv threadpool slot (default pool size 4) FOREVER, invisibly, since
+ * this is fire-and-forget (`void removeRunSnapshot(...)` at sessions/service.ts) and the `catch` below was
+ * therefore unreachable in exactly the case that mattered. This now adopts `removeWorktree`'s proven,
+ * already-tested shape (git/worktrees.ts:1281): {@link killableRemoveDir} runs the removal in a SEPARATE OS
+ * process (a wedged handle blocks only that child, never a daemon thread) and force-kills it on timeout;
+ * the outer {@link withTimeout} additionally fails SAFE to `killed:true` if the (real or injected) `removeDir`
+ * seam itself never settles, so a hang is NEVER retried in a loop here — a genuinely wedged dir is simply
+ * left on disk for the next boot sweep, and (since killableRemoveDir always resolves) the warning below is
+ * now reachable even in the wedged case, closing the "unreportable by construction" gap.
+ */
+export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   const dir = runSnapshotDir(sessionId);
-  try {
-    await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 40, retryDelay: 200 });
-  } catch (e) {
+  const timeoutMs = deps.timeoutMs ?? RUN_SNAPSHOT_TIMEOUT_MS;
+  const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  const result = await withTimeout(removeDir(dir, timeoutMs), timeoutMs, "removeDir run snapshot")
+    .catch((): RemoveDirResult => ({ removed: false, killed: true })); // an injected/broken seam that itself never settles ⇒ fail SAFE as WEDGED (never loop a hang)
+  if (!result.removed) {
     // eslint-disable-next-line no-console
-    console.warn(`[run] could not remove snapshot dir ${dir} (left on disk for the next boot sweep): ${(e as Error).message}`);
+    console.warn(`[run] could not remove snapshot dir ${dir} (${result.killed ? "genuinely wedged — killed the removal child" : "clean failure"}; left on disk for the next boot sweep)`);
   }
   try { fs.rmSync(runIndexFile(sessionId), { force: true }); } catch { /* best-effort */ }
 }
@@ -111,11 +135,30 @@ export async function removeRunSnapshot(sessionId: string): Promise<void> {
  * Boot sweep: remove EVERY run-snapshot dir (and stray throwaway index). Runs never resume, so any dir
  * under RUNS_DIR at boot is orphaned by a crash/restart that interrupted a run (those runs are marked
  * failed alongside this). Best-effort + never throws — a stuck handle leaves a dir for the next sweep.
+ *
+ * card 26c661cd: the prior implementation was `fs.rmSync(..., { maxRetries: 10, retryDelay: 100 })` —
+ * SYNCHRONOUS on the main thread, so a single wedged dir at boot blocked the ENTIRE daemon (every request,
+ * every session) for up to its full retry budget before anything could be served. This is now async and
+ * uses the same {@link killableRemoveDir}-backed bound as {@link removeRunSnapshot} (a separate OS process
+ * per removal, force-killed on timeout), and — deliberately — the caller (`reconcileRunsOnBoot`) fires this
+ * WITHOUT awaiting it: boot must never block on a stubborn dir, so a wedge here is simply skipped-and-
+ * deferred to the next boot sweep rather than serialized in front of `app.listen()`. The failure this buys:
+ * a run snapshot dir can still be mid-removal in the background for up to `timeoutMs` after boot reports
+ * ready; this is safe because `runSnapshotDir` is keyed by session id, which is never reused, so a fresh
+ * run can never collide with an orphaned dir still being cleaned up.
  */
-export function sweepAllRunSnapshots(): void {
+export async function sweepAllRunSnapshots(deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   let entries: string[];
   try { entries = fs.readdirSync(RUNS_DIR); } catch { return; } // RUNS_DIR absent → nothing to sweep
-  for (const name of entries) {
-    try { fs.rmSync(path.join(RUNS_DIR, name), { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* best-effort; next boot retries */ }
-  }
+  const timeoutMs = deps.timeoutMs ?? RUN_SNAPSHOT_TIMEOUT_MS;
+  const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  await Promise.all(entries.map(async (name) => {
+    const target = path.join(RUNS_DIR, name);
+    const result = await withTimeout(removeDir(target, timeoutMs), timeoutMs, "removeDir run snapshot sweep")
+      .catch((): RemoveDirResult => ({ removed: false, killed: true })); // fail SAFE as WEDGED, never loop a hang
+    if (!result.removed) {
+      // eslint-disable-next-line no-console
+      console.warn(`[run] boot sweep could not remove ${target} (${result.killed ? "genuinely wedged" : "clean failure"}; left for the next boot sweep)`);
+    }
+  }));
 }

@@ -6309,7 +6309,11 @@ export class SessionService {
     for (const r of interrupted) {
       this.db.failRun(r.id, "daemon restarted mid-run (runs are ephemeral and do not resume)");
     }
-    sweepAllRunSnapshots();
+    // card 26c661cd: sweepAllRunSnapshots is now async + bounded (killableRemoveDir, a separate OS
+    // process per removal) — fire-and-forget so a wedged dir can never block THIS function (which must
+    // stay synchronous: it runs BEFORE app.listen(), see boot-listen-not-blocked.mjs). A wedge is simply
+    // left for the next boot sweep.
+    void sweepAllRunSnapshots().catch((e) => console.warn(`[boot] run snapshot sweep failed: ${(e as Error).message}`));
     return { failed: interrupted.length };
   }
 
