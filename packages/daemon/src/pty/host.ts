@@ -1000,16 +1000,29 @@ function annotateMintStamp(
  * `PASTE_RECOVERY_TAG` so `annotatePasteRecoveryAge` no-ops on it and leaves it untouched for this
  * function to stamp) but composing them regardless keeps this call site correct even if that changes.
  */
+function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
+  const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
+  return annotateMintStamp(
+    annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock),
+    m.giveUpGen, m.mintedAtGen, currentGen, m.mintedAtWallClock,
+  );
+}
+
 function joinSubmittedText(messages: QueuedMessage[], currentGen: number): string {
-  return messages
-    .map((m) => {
-      const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
-      return annotateMintStamp(
-        annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock),
-        m.giveUpGen, m.mintedAtGen, currentGen, m.mintedAtWallClock,
-      );
-    })
-    .join(DRAIN_SEPARATOR);
+  return messages.map((m) => annotatedMessageText(m, currentGen)).join(DRAIN_SEPARATOR);
+}
+
+/**
+ * Card f41d6617: how many chars `m` will actually contribute to a `joinSubmittedText` write — the SAME
+ * `annotatedMessageText` transform that function applies, so this is byte-identical to what `m` adds
+ * once actually drained (including any `annotateMintStamp`/`annotatePasteRecoveryAge` annotation), never
+ * just `m.text.length`. `drainPending`'s same-sender coalesce loop uses this (plus `DRAIN_SEPARATOR`
+ * between members) to bound `AGENT_COALESCE_MAX_BYTES` against what is actually WRITTEN — the pristine
+ * `m.text.length` alone undercounts the real write by `DRAIN_SEPARATOR` per joined member and, when it
+ * applies, the `[loom:mint-time] Originally sent at <ISO>.` annotation.
+ */
+function projectedWrittenLength(m: QueuedMessage, currentGen: number): number {
+  return annotatedMessageText(m, currentGen).length;
 }
 
 /**
@@ -7995,7 +8008,13 @@ export class PtyHost {
       const key = routeKeyOf(head.route);
       const senderKey = head.senderId ?? null;
       let n = 1;
-      let bytes = head.text.length;
+      // Card f41d6617: bound on `projectedWrittenLength` (what `joinSubmittedText` will actually write
+      // for this member), not `m.text.length` — the pristine length undercounts a real write by
+      // `DRAIN_SEPARATOR` per joined member plus, when it applies, the mint-time annotation. `currentGen`
+      // is `live.submitGeneration`, the SAME value the eventual `joinSubmittedText(drained, …)` call below
+      // uses (nothing in this loop advances it), so a candidate's projected length here is byte-identical
+      // to what it will actually contribute once drained.
+      let bytes = projectedWrittenLength(head, live.submitGeneration);
       if (head.giveUpGen === undefined && senderKey !== null) {
         while (
           startIdx + n < live.pending.length
@@ -8005,9 +8024,9 @@ export class PtyHost {
           && live.pending[startIdx + n]!.giveUpGen === undefined
           && routeKeyOf(live.pending[startIdx + n]!.route) === key
           && (live.pending[startIdx + n]!.senderId ?? null) === senderKey
-          && bytes + live.pending[startIdx + n]!.text.length <= AGENT_COALESCE_MAX_BYTES
+          && bytes + DRAIN_SEPARATOR.length + projectedWrittenLength(live.pending[startIdx + n]!, live.submitGeneration) <= AGENT_COALESCE_MAX_BYTES
         ) {
-          bytes += live.pending[startIdx + n]!.text.length;
+          bytes += DRAIN_SEPARATOR.length + projectedWrittenLength(live.pending[startIdx + n]!, live.submitGeneration);
           n++;
         }
       }
@@ -8393,9 +8412,13 @@ export class PtyHost {
     // instead, which re-pastes THIS redelivery's own real body: `text` here is `joinSubmittedText(drained,
     // …)` over the SAME `drained` array passed through as `origin`, so it always CONTAINS this redelivery's
     // own body. (It is not necessarily EXCLUSIVELY this message's body — `drainPending`'s run-collection
-    // can splice several entries into one `drained`/`origin` for a `"warning"`-kind head, or with
-    // `coalesceAgentMessages` on; only the default one-per-turn `"agent"`-kind splice is guaranteed
-    // single-entry. Either way `text` still carries this redelivery's real content, which is what the
+    // can splice several entries into one `drained`/`origin`: for a `"warning"`-kind head, with
+    // `coalesceAgentMessages` on, or — since card `eac3464d`'s same-sender coalescing — for the default
+    // `"agent"`-kind splice too, which can itself run up to `AGENT_COALESCE_MAX_COUNT` entries; no splice
+    // shape here is guaranteed single-entry any more. Still safe: the same-sender branch never extends a
+    // run onto a `giveUpGen`-tagged entry (see `drainPending`'s own comment), so a same-sender batch can
+    // never MIX an already-written member with a fresh one — the specific mixing `every` (vs. `some`)
+    // above guards against. Either way `text` still carries every member's real content, which is what the
     // safety of this fallback actually rests on.) Per this card's own DoD: a correct fallback matters more
     // than avoiding the re-paste — an unnecessary backspace+repaste is cheap; silently fusing or losing
     // another message's content is not.
