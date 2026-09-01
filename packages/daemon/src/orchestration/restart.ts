@@ -553,8 +553,22 @@ export interface SupervisorChangeDeps {
   gitLogSince?: (root: string, sinceIso: string, file: string) => Promise<string>;
 }
 
+/**
+ * Card 469b5e67: deliberately calls {@link boundedSimpleGit} with NO `env` argument — do NOT reintroduce
+ * `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` (the shape this site used to have). Measured against the
+ * installed simple-git: passing an explicit `.env()` object containing an ambient `GIT_EDITOR`/
+ * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` throws `GitPluginError`
+ * (`allowUnsafeEditor`/`allowUnsafePager`) — simple-git's unsafe-operations check inspects only the
+ * object explicitly passed to `.env()`, not the process's real inherited env, so OMITTING `.env()`
+ * entirely (rather than stripping those six keys) sidesteps the check altogether. `git log` performs no
+ * network operation, so `GIT_TERMINAL_PROMPT` (which only governs git's own HTTP(S) credential-prompt
+ * behavior) has no live effect here regardless — the identical reasoning `vault/versioner.ts`'s
+ * `boundedVaultGit` already documents for its own no-`.env()` call (card 54b839c5). See `git/bounded.ts`'s
+ * own doc on {@link boundedSimpleGit} for the full account of why this previously threw and was silently
+ * swallowed into a permanently-false "unchanged" advisory.
+ */
 async function defaultGitLogSince(root: string, sinceIso: string, file: string): Promise<string> {
-  const git = boundedSimpleGit(root, SUPERVISOR_CHECK_TIMEOUT_MS, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
+  const git = boundedSimpleGit(root, SUPERVISOR_CHECK_TIMEOUT_MS);
   return git.raw(["log", `--since=${sinceIso}`, "--format=%H", "--", file]);
 }
 
@@ -568,14 +582,24 @@ async function defaultGitLogSince(root: string, sinceIso: string, file: string):
  * in-memory code on a restart, so "since this process booted" IS "since the last deploy"; no separate
  * last-deployed-SHA bookkeeping is needed. BEST-EFFORT + BOUNDED + NEVER throws: a git failure (no
  * repo, git unavailable, timeout) degrades to `false` — this is an ADVISORY warning only, so an
- * inability to check must never block the restart itself.
+ * inability to check must never block the restart itself. But "checked, unchanged" and "could not check"
+ * must not be indistinguishable to a human: card 469b5e67 found the two folded into one silent `false`
+ * with NO trace of which happened, which is exactly the failure mode that made an env bug in
+ * {@link defaultGitLogSince} invisible for as long as it was. A check failure is now logged (never
+ * thrown — the return value is unchanged) so the daemon's own log carries the "could not check" signal
+ * a reader can actually find, instead of a false result that reads identically to a confirmed negative.
  */
 export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<boolean> {
   try {
     const log = deps.gitLogSince ?? defaultGitLogSince;
     const out = await log(repoRoot(), bootTime.toISOString(), SUPERVISOR_SCRIPT_REL_PATH);
     return out.trim().length > 0;
-  } catch {
+  } catch (e) {
+    console.warn(
+      `[restart] could NOT check whether this deploy touches ${SUPERVISOR_SCRIPT_REL_PATH} — ` +
+      `treating as unchanged, but this is a FAILED CHECK, not a confirmed negative: ` +
+      `${e instanceof Error ? e.message : String(e)}`,
+    );
     return false;
   }
 }
