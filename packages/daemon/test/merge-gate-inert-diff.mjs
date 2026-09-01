@@ -49,6 +49,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `docs/` MUST still full-gate here — the per-repo re-verification (`repoTreeReferencesInertPrefix`,
 //       unit-tested in isolation by `inert-prefix-repo-scan.mjs`) is what makes that true; PRE-card this
 //       would have wrongly skipped exactly like scenario (A).
+//   (L) THE PAIRED-LANGUAGE CONTROL (card 0910531e, Code Review finding on 1c0d4aa4): `repoTreeReferences
+//       InertPrefix`'s read-call/anchor vocabulary is JS/TS-only, so a repo with NO JS/TS files at all made
+//       `git grep`'s "no match" exit code a TAUTOLOGY, not evidence — every non-JS/TS project got its
+//       docs-only merges wrongly certified inert. IDENTICAL to (A) except the repo's baseline file is
+//       Python, not TypeScript — the discriminator is the language, not whether docs/ is referenced. MUST
+//       full-gate post-card. See `inert-prefix-repo-scan.mjs` scenario (6) for the same proof at the scan
+//       level alone.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-inert-diff.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -130,6 +137,31 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgid\n");
+  // Card 0910531e: a baseline JS/TS source file, committed on main alongside README.md, so this fixture
+  // models a genuine JS/TS project — the population `repoTreeReferencesInertPrefix`'s applicability guard
+  // (`repoTreeHasJsTsSourceFile`) is meant to trust, same as Loom itself. Without this, every scenario
+  // below that reaches a fully-docs-only diff (scenario (A)) would fail the applicability check and
+  // full-gate regardless of the docs/ allowlist — which is CORRECT for a non-JS/TS repo, but would wrongly
+  // flip (A)'s own JS/TS-project assertion. Content is inert (never referenced by any scenario's diff, and
+  // never reads docs/) so it can't itself trip the read-call/anchor scan. See scenario (L) below for the
+  // deliberate NON-JS/TS-repo pairing this fixture exists to be contrasted against.
+  mkdirp(path.join(p.repo, "src"));
+  fs.writeFileSync(path.join(p.repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
+  execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+}
+
+/** The NON-JS/TS-repo twin of {@link makeRepo} — a repo whose only tracked file is a Python source file
+ *  (deliberately NOT concatenated the way `kFixtureBody` above is: unlike a JS/TS fixture, Python source
+ *  can never match {@link repoTreeReferencesInertPrefix}'s JS/TS-only vocabulary regardless of how it's
+ *  written, so there is no risk of this fixture tripping the scan on its own committed source). Card
+ *  0910531e's end-to-end pairing: identical shape and identical docs-only branch to scenario (A), differing
+ *  ONLY in which language the repo's baseline file is written in. */
+function makeNonJsTsRepo(p) {
+  fs.mkdirSync(p.repo, { recursive: true });
+  registerForCleanup(p.repo);
+  fs.writeFileSync(path.join(p.repo, "README.md"), "# mgid\n");
+  mkdirp(path.join(p.repo, "src"));
+  fs.writeFileSync(path.join(p.repo, "src", "baseline.py"), "BASELINE = True\n");
   execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
 }
 
@@ -476,6 +508,12 @@ try {
     registerForCleanup(I.repo);
     mkdirp(path.join(I.repo, "docs"));
     fs.writeFileSync(path.join(I.repo, "docs", "note.md"), "shared line\n");
+    // Card 0910531e: a baseline JS/TS file, same reasoning as `makeRepo`'s own — this fixture is built
+    // custom (not via `makeRepo`) because it needs the base commit's docs/note.md to already exist for the
+    // shared-line-conflict setup below, but it still needs to model a genuine JS/TS project so worker2's
+    // PRE-wait `isInertMergeDiff` reaches the repo-guard-only-wait path this scenario exists to test.
+    mkdirp(path.join(I.repo, "src"));
+    fs.writeFileSync(path.join(I.repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
     execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -744,6 +782,37 @@ try {
     check("(K) merged:true", confirm.merged === true);
     check("(K) gateRan:true — the non-Loom case this card exists to protect", confirm.gateRan === true);
   }
+
+  // ── (L) THE PAIRED-LANGUAGE CONTROL (card 0910531e, Code Review finding on `1c0d4aa4`) — IDENTICAL
+  //        shape to scenario (A) (same docs-only branch, same everything) EXCEPT the repo's baseline file
+  //        is Python, not TypeScript. Pre-card, `INERT_MERGE_PATH_PREFIXES`'s per-repo re-verification
+  //        (`repoTreeReferencesInertPrefix`) hunted JS/TS-only read-call names/anchors, so a repo with no
+  //        JS/TS files at all made `git grep` return its "no match" code unconditionally — a docs-only
+  //        diff here would have wrongly skipped the gate exactly like (A), even for a project whose real
+  //        (non-JS/TS) test suite genuinely reads `docs/` at runtime. Post-card this MUST full-gate: the
+  //        scan cannot confirm an absence for a language it has no vocabulary to search. This is the
+  //        end-to-end version of `inert-prefix-repo-scan.mjs` scenario (6), which proves the same thing at
+  //        the low-level scan alone. ─────────────────────────────────────────────────────────────────────
+  {
+    const L = mk("l");
+    makeNonJsTsRepo(L);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);
+    L.worktreePath = worktreePath; L.branch = branch; worktrees.push(worktreePath);
+    mkdirp(path.join(worktreePath, "docs", "investigations"));
+    fs.writeFileSync(path.join(worktreePath, "docs", "investigations", "note.md"), "findings\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    seed(db, L, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(L.mgrId, L.workerId);
+    check("(L) the gate command WAS called — a non-JS/TS repo's docs-only diff must never be certified inert", calls === 1);
+    check("(L) merged:true", confirm.merged === true);
+    check("(L) gateRan:true — the discriminator is the LANGUAGE, not whether docs/ is actually referenced (the whole point of this card)", confirm.gateRan === true);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -751,6 +820,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J), and a repo whose OWN test corpus reads docs/ (unlike Loom's) still full-gates a docs-only diff — the per-repo re-verification, not just the Loom-measured allowlist (K)."
+  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J), a repo whose OWN test corpus reads docs/ (unlike Loom's) still full-gates a docs-only diff — the per-repo re-verification, not just the Loom-measured allowlist (K), and a repo with NO JS/TS files at all (the paired-language control, identical to (A) except the baseline file is Python) still full-gates a docs-only diff too — the scan cannot confirm an absence for a language it has no vocabulary for (L)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

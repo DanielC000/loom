@@ -62,6 +62,15 @@ const worktrees = [];
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gc\n");
+  // Card 0910531e: a baseline JS/TS file, committed alongside README.md, so this fixture models a
+  // genuine JS/TS project — scenario (b) below depends on worker2's docs/-only diff being classified
+  // inert (so it takes the repo-guard-only-wait path this scenario exists to test), which
+  // `repoTreeReferencesInertPrefix`'s applicability guard (`repoTreeHasJsTsSourceFile`) now correctly
+  // refuses to trust for a repo with no JS/TS files at all. Same reasoning as
+  // `merge-gate-inert-diff.mjs`'s own `makeRepo` fix. Content is inert (never referenced by any
+  // scenario's diff, never reads docs/) so it can't itself trip the read-call/anchor scan.
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
   execSync(`git init -q && git config user.email gc@loom && git config user.name gc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 }
 

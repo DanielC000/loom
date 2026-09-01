@@ -2433,8 +2433,18 @@ async function changedPathSetDigest(
  * a top-level `docs/` must not have its gate silently skipped just because Loom's don't. This is why
  * `isInertMergeDiff` does not trust this list alone: it re-verifies PER-REPO, at gate time, via
  * {@link repoTreeReferencesInertPrefix} — this list stays a cheap first-pass allowlist (a path outside it
- * still fails closed immediately, no scan needed), and the per-repo scan is the thing that actually makes
- * a `true` result safe to trust for a project other than Loom.
+ * still fails closed immediately, no scan needed).
+ *
+ * 🔴 CORRECTION (card 0910531e, Code Review finding on `1c0d4aa4`): this doc used to claim the per-repo
+ * scan ALONE "is the thing that actually makes a `true` result safe to trust for a project other than
+ * Loom." That was false — {@link repoTreeReferencesInertPrefix}'s read-call/anchor vocabulary
+ * (`readFileSync`, `__dirname`, `import.meta.url`, …) is JS/TS-only lexically, so it can NEVER match in a
+ * Python/Go/Rust/Ruby repo; `git grep` there always returns its "no match" exit code, which the scan used
+ * to treat as a CONFIRMED absence — a 100% false-negative for every non-JS/TS project, reproduced with a
+ * paired-language control (identical dependency, differing only in language) in that card. The scan is now
+ * safe to trust for a project other than Loom ONLY because it first proves it can even apply to this
+ * repo's language — see {@link repoTreeHasJsTsSourceFile} — before ever treating a "no match" as meaning
+ * anything.
  */
 const INERT_MERGE_PATH_PREFIXES = ["docs/"];
 
@@ -2553,12 +2563,97 @@ const GIT_GREP_NO_MATCH_EXIT_CODE = 1;
  * still preferred here to no check at all, because the asymmetry is the same — a missed reference costs
  * one wrongly-skipped gate (bad), but that is what this whole mechanism already risked pre-card for EVERY
  * non-Loom project.
+ *
+ * ⚠️ A FOURTH gap, NOT one of these three, WAS hidden until card 0910531e: all three above are missed
+ * SHAPES within a JS/TS repo — occasional, and only ever costing one wrongly-skipped gate on an unusual
+ * call shape. The fourth was a whole-LANGUAGE class: this scan's read-call names and anchor tokens are
+ * ALL JS/TS vocabulary, so in a Python/Go/Rust/Ruby repo NEITHER half could ever match — making a "no
+ * match" a 100%, not occasional, false confirmed-absence for every non-JS/TS project this daemon serves.
+ * {@link repoTreeHasJsTsSourceFile} closes exactly that gap (by refusing to trust ANY "no match" result
+ * from a repo the scan's vocabulary could never have matched in the first place) without touching these
+ * three, which remain the accepted residual risk described above.
  */
 const INERT_PREFIX_READ_CALL_NAMES = "(readFileSync|existsSync|readdirSync|createReadStream|readFile|opendirSync|globSync)";
 /** See {@link INERT_PREFIX_READ_CALL_NAMES}'s own doc — the anchor alternation checked on either side of
  *  the token. `import\\.meta\\.dirname` (Node ≥20.11; this repo targets 22) added alongside the original
  *  four (Code Review, card 1c0d4aa4). */
 const INERT_PREFIX_ANCHOR_PATTERN = "(__dirname|__filename|process\\.cwd\\(\\)|import\\.meta\\.url|import\\.meta\\.dirname)";
+
+/**
+ * The COMPLETE extension vocabulary a file must carry for {@link INERT_PREFIX_READ_CALL_NAMES}/{@link
+ * INERT_PREFIX_ANCHOR_PATTERN} to have any chance of matching it — plain JS, its module variants
+ * (`.mjs`/`.cjs`), and TypeScript incl. JSX/TSX and the `.mts`/`.cts` module variants. Deliberately
+ * EXHAUSTIVE rather than a sample: the read-call names and anchor tokens above are Node/JS/TS API surface,
+ * so this list is not a heuristic guess at "what a JS/TS project looks like" — it is the complete set of
+ * extensions any file would need for those literal tokens to be syntactically meaningful in it at all. That
+ * completeness is what lets {@link repoTreeHasJsTsSourceFile} bound its own applicability question (see
+ * that function's doc) without reintroducing the same per-language guessing game this card fixes.
+ */
+const JS_TS_SOURCE_EXTENSION_PATTERN = /\.(?:[cm]?[jt]sx?)$/i;
+
+/**
+ * Whether `treeish` in `repoPath` has ANY tracked path ending in a {@link JS_TS_SOURCE_EXTENSION_PATTERN}
+ * extension — i.e. whether {@link repoTreeReferencesInertPrefix}'s JS/TS-only read-call/anchor scan could
+ * EVER match anything in this repo's tracked tree, independent of the `docs/`-specific token it searches
+ * for. Card 0910531e (Code Review, finding on `1c0d4aa4`): the scan's own vocabulary (`readFileSync`,
+ * `__dirname`, `import.meta.url`, …) is JS/TS-only lexically and can never appear in a Python/Go/Rust/Ruby
+ * file — so in a repo with ZERO files at these extensions, `git grep`'s "no match" exit code is not
+ * evidence of an absence, it is a TAUTOLOGY: the pattern was never capable of matching this repo's
+ * corpus regardless of what that corpus actually reads. Reproduced with a paired-language control
+ * (identical dependency, differing only in language: a Python project with a real `docs/`-reading test
+ * still returned "no match" pre-fix) — see that card for the repro.
+ *
+ * This is a DIFFERENT question from "does this repo reference `docs/`" (what {@link
+ * repoTreeReferencesInertPrefix}'s own grep answers) and is checked FIRST, before that grep's result is
+ * ever trusted: `false` here means the grep result — whatever it is — carries no information, and the
+ * caller must fail closed exactly as it already does for a git error or timeout. `true` here does not
+ * assert the repo has NO other languages too (a mixed-language repo is common); it only asserts the scan
+ * has SOMETHING to apply to, restoring it to the same trust level it already has for Loom itself and every
+ * other JS/TS project.
+ *
+ * Lists the WHOLE tracked tree via `git ls-tree` (no content read, cheap) rather than scoping to the
+ * `docs/`-adjacent paths specifically — deliberately: a project's JS/TS source is typically nowhere near
+ * `docs/` (e.g. `src/`), so a scope restricted to the token's own directory would defeat the very thing
+ * this checks. FAILS CLOSED on any git error/timeout (`applicable:false` ⇒ caller cannot trust an
+ * absence), the identical asymmetry {@link repoTreeReferencesInertPrefix} already applies one level up —
+ * `degradedReason` is set ONLY on that indeterminate path (a spawn error, a bad treeish, a timeout), never
+ * on a genuine confirmed-empty result, so the caller can log an ACCURATE diagnostic instead of always
+ * claiming "no JS/TS file found" even when the real cause was e.g. an unresolvable `treeish` (mirrors
+ * {@link repoTreeReferencesInertPrefix}'s own `warnDegraded` distinguishing a confirmed no-match from
+ * every other outcome).
+ */
+function repoTreeHasJsTsSourceFile(
+  repoPath: string, treeish: string, timeoutMs: number,
+): Promise<{ applicable: boolean; degradedReason?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["ls-tree", "-r", "--name-only", treeish], {
+      cwd: repoPath,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let out = "";
+    child.stdout?.on("data", (d) => { out += d; });
+    let settled = false;
+    const done = (r: { applicable: boolean; degradedReason?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      done({ applicable: false, degradedReason: `git ls-tree exceeded ${timeoutMs}ms (killed)` });
+    }, timeoutMs);
+    child.on("error", (e) => { done({ applicable: false, degradedReason: `spawn failed (${e.message})` }); });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        done({ applicable: false, degradedReason: `git ls-tree exited ${code ?? "null"} (likely an unresolvable treeish)` });
+        return;
+      }
+      const found = out.split("\n").some((line) => JS_TS_SOURCE_EXTENSION_PATTERN.test(line.trim()));
+      done({ applicable: found });
+    });
+  });
+}
 
 /**
  * Whether ANY file tracked at `treeish` in `repoPath` contains a call reading a path under `bareToken`
@@ -2607,10 +2702,21 @@ const INERT_PREFIX_ANCHOR_PATTERN = "(__dirname|__filename|process\\.cwd\\(\\)|i
  *
  * Exported (like {@link appendTail}/{@link formatTail}) for direct unit coverage independent of the full
  * {@link isInertMergeDiff}/`confirmWorkerMerge` call chain.
+ *
+ * 🔴 CARD 0910531e ADDITION: before trusting a `git grep` "no match" as a confirmed absence at all, this
+ * now requires {@link repoTreeHasJsTsSourceFile} to have confirmed the scan's own JS/TS vocabulary could
+ * even apply to this repo's tracked tree — see that function's doc for why a bare "no match" is otherwise
+ * a tautology for a non-JS/TS project, never evidence.
  */
-export function repoTreeReferencesInertPrefix(
+export async function repoTreeReferencesInertPrefix(
   repoPath: string, treeish: string, bareToken: string, timeoutMs: number,
 ): Promise<boolean> {
+  const { applicable, degradedReason } = await repoTreeHasJsTsSourceFile(repoPath, treeish, timeoutMs);
+  if (!applicable) {
+    const reason = degradedReason ?? "no JS/TS-extension file found in tracked tree";
+    console.warn(`[git:inert-prefix-scan] ${reason} for ${repoPath}@${treeish} — the read-call/anchor scan is JS/TS vocabulary and cannot confirm an absence for token "${bareToken}" on this repo's language — failing closed, treating as referenced`);
+    return true;
+  }
   return new Promise((resolve) => {
     // Plain capturing groups, NOT `(?:...)` — git grep's -E is POSIX ERE, which has no non-capturing-group
     // syntax at all (measured: git rejects it outright with "Invalid preceding regular expression", exit
@@ -2638,7 +2744,10 @@ export function repoTreeReferencesInertPrefix(
       done(true); // couldn't confirm absence within the bound ⇒ fail closed
     }, timeoutMs);
     child.on("error", (e) => { warnDegraded(`spawn failed (${e.message})`); done(true); }); // fail closed, cannot confirm absence
-    child.on("exit", (code) => {
+    // "close" (not "exit" — card 0910531e nitpick): "exit" can fire before piped stderr has fully
+    // flushed, truncating warnDegraded's diagnostic tail on exactly the degraded outcomes it exists to
+    // surface. "close" waits for the stdio streams to end too.
+    child.on("close", (code) => {
       if (code === 0 || code === GIT_GREP_NO_MATCH_EXIT_CODE) { done(code !== GIT_GREP_NO_MATCH_EXIT_CODE); return; }
       warnDegraded(`git grep exited ${code ?? "null"} (neither a confirmed match nor a confirmed no-match)`);
       done(true);

@@ -23,6 +23,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       referenced by this repo's real corpus — must come back referenced (the scan isn't just broken).
 //   (5) TIMEOUT — a near-zero `timeoutMs` fails closed (kills the child, returns `true`) rather than
 //       hanging or silently returning a confirmed absence.
+//   (6) THE PAIRED-LANGUAGE CONTROL (card 0910531e, Code Review finding on `1c0d4aa4`): a repo whose
+//       tracked corpus has ZERO JS/TS-extension files, but whose (Python) test file DOES read `docs/` —
+//       just not in a shape this JS/TS-vocabulary scan could ever recognize. Pre-card this returned
+//       `false` (a wrongly-confirmed absence: the discriminator was the LANGUAGE, not whether the token
+//       was actually referenced). Post-card it must return `true` (fail closed — the scan can't confirm
+//       anything about a repo it has no JS/TS files to apply its vocabulary to).
 //
 // ⚠️ CRITICAL, Code Review card 1c0d4aa4: the fixture bodies below are assembled via string
 // CONCATENATION at runtime (`fixtureBody`, just below), never as one literal template in THIS file's own
@@ -106,12 +112,30 @@ try {
   // ── (5) TIMEOUT — fails closed rather than hanging or confirming a silent absence ───────────────────
   const timedOut = await repoTreeReferencesInertPrefix(referencesDocs.repo, referencesDocs.head, "docs", 1);
   check("(5) a near-zero timeoutMs fails CLOSED (references it), never a silent false", timedOut === true);
+
+  // ── (6) THE PAIRED-LANGUAGE CONTROL — a repo with ZERO JS/TS-extension files must fail CLOSED
+  //        regardless of what its real (non-JS/TS) corpus actually reads (card 0910531e). Python content
+  //        is used directly here, NOT assembled via concatenation like `fixtureBody` above: unlike the
+  //        JS/TS fixtures, a Python read call can never match this scan's JS/TS-only read-call/anchor
+  //        vocabulary regardless of how it's written, so there is no risk of this fixture tripping the
+  //        scan on its own committed source, and no need for that defense here. ──────────────────────────
+  const pyRepo = path.join(os.tmpdir(), `loom-iprs-py-${sfx}`);
+  fs.mkdirSync(path.join(pyRepo, "test"), { recursive: true });
+  registerForCleanup(pyRepo);
+  fs.writeFileSync(
+    path.join(pyRepo, "test", "test_schema.py"),
+    "import os\n\ndef test_schema():\n    root = os.path.dirname(__file__)\n    with open(os.path.join(root, \"docs\", \"schema.md\")) as f:\n        assert \"user_id\" in f.read()\n",
+  );
+  execSync(`git init -q && git config user.email iprs@loom && git config user.name iprs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: pyRepo });
+  const pyHead = execSync(`git rev-parse HEAD`, { cwd: pyRepo }).toString().trim();
+  const pyResult = await repoTreeReferencesInertPrefix(pyRepo, pyHead, "docs", TIMEOUT_MS);
+  check("(6) a repo with ZERO JS/TS files fails CLOSED even though its (Python) corpus genuinely reads docs/ — the scan cannot confirm anything about a language it has no vocabulary for", pyResult === true);
 } catch (err) {
   console.error(err);
   failures++;
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — repoTreeReferencesInertPrefix detects a real docs/-read (positive control), confirms a genuine absence only after that same pattern is proven to fire (never vacuously), fails CLOSED on an unresolvable treeish and on a timeout, and confirms LIVE (against this repo's own real HEAD) that Loom's own docs/ skip still holds."
+  ? "\n✅ ALL PASS — repoTreeReferencesInertPrefix detects a real docs/-read (positive control), confirms a genuine absence only after that same pattern is proven to fire (never vacuously), fails CLOSED on an unresolvable treeish and on a timeout, confirms LIVE (against this repo's own real HEAD) that Loom's own docs/ skip still holds, and fails CLOSED for a non-JS/TS repo regardless of what its real corpus reads (the paired-language control)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
