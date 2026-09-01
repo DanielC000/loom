@@ -9180,19 +9180,45 @@ export class PtyHost {
    * other, unrelated consumer of this same map — still needs the joined shape to keep matching, and this
    * method must keep resolving a resend of the FULL joined text too (a caller who happens to paste back
    * everything the notice showed, joined text included).
+   *
+   * Card 2b73179b — BATCH-PROVENANCE DISCRIMINATION, mirroring `purgeConfirmedGiveUpRequeue`'s own
+   * `batchId` guard (card bc0774c4): this method reads the SAME map for the SAME hazard that guard exists
+   * for — a content match spanning more than one GENUINELY DISTINCT give-up event (two DIFFERENT batchIds)
+   * is NOT attributable by content alone, no hash collision needed, P=1 once two such entries coexist (see
+   * `textSignature`'s own doc). Pre-fix this method returned the FIRST match in `Map` insertion order —
+   * silently performing exactly the oldest-first tie-break `purgeConfirmedGiveUpRequeue`'s own doc records
+   * as CONSIDERED AND REJECTED (refutable by a concrete trace, not merely "usually right" — see that
+   * method's "CARD bc0774c4" doc block for the trace). Now: collect EVERY candidate logicalId that matches
+   * any of the four signature shapes above, then apply the identical single-`batchId` rule — a match
+   * spanning more than one batch resolves to null (refuse to guess) instead of the first hit. A caller with
+   * no guess self-roots a fresh, disconnected chain rather than being silently joined to the wrong one —
+   * this project's own "fail toward a duplicate, never a loss" principle (88f11385), the SAME trade
+   * `purgeConfirmedGiveUpRequeue` already makes. Multiple matches sharing ONE batchId (the ordinary
+   * coalesced-batch case, including every single-member batch) are unaffected: returns that shared id, same
+   * as before.
    */
   hasAmbiguousMatch(sessionId: string, text: string): string | null {
     const live = this.live.get(sessionId);
     if (!live || live.ambiguousDispatches.size === 0) return null;
     const sig = textSignature(text);
+    const matches: string[] = [];
     for (const [logicalId, entry] of live.ambiguousDispatches) {
-      if (entry.len === sig.len && entry.hash === sig.hash) return logicalId;
-      if (entry.memberSig.len === sig.len && entry.memberSig.hash === sig.hash) return logicalId;
       const markedSig = textSignature(framePossibleDuplicate(text, logicalId));
-      if (entry.len === markedSig.len && entry.hash === markedSig.hash) return logicalId;
-      if (entry.memberSig.len === markedSig.len && entry.memberSig.hash === markedSig.hash) return logicalId;
+      const isMatch =
+        (entry.len === sig.len && entry.hash === sig.hash) ||
+        (entry.memberSig.len === sig.len && entry.memberSig.hash === sig.hash) ||
+        (entry.len === markedSig.len && entry.hash === markedSig.hash) ||
+        (entry.memberSig.len === markedSig.len && entry.memberSig.hash === markedSig.hash);
+      if (isMatch) matches.push(logicalId);
     }
-    return null;
+    if (matches.length === 0) return null;
+    const batchIds = new Set(matches.map((id) => live.ambiguousDispatches.get(id)!.batchId));
+    if (batchIds.size > 1) {
+      // eslint-disable-next-line no-console
+      console.log(`[give-up] ${sessionId} AMBIGUOUS content match: ${matches.length} logicalId(s) span ${batchIds.size} distinct give-up batches sharing this signature — cannot attribute a resend by content alone, refusing to guess (fails toward a disconnected chain, never a wrongly-joined one)`);
+      return null;
+    }
+    return matches[0]!;
   }
 
   /**
