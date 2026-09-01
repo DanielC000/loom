@@ -141,6 +141,20 @@ function isNoUpstreamError(e: unknown): boolean {
   return msg.includes("no upstream") || msg.includes("no configured push destination");
 }
 
+/** Every method GitWriter's bounded git calls need, across checkout/createBranch/commit/push/pendingPushSummary. */
+type WriterGit = Pick<SimpleGit, "checkout" | "checkoutLocalBranch" | "branchLocal" | "status" | "raw" | "commit" | "revparse">;
+
+/**
+ * Injectable seam mirroring git/reader.ts's `ReaderGitDeps` / git/worktrees.ts's `BoundedGitDeps` — lets a
+ * test inject a fake whose `branchLocal()` (or any other method) never settles, and assert a call is
+ * bounded instead of hanging forever. Real callers never pass this; `GitWriter` had NO such seam before
+ * card 40a264d3, which is why the two unbounded in-lock calls below could not be hermetically proven
+ * bounded until now.
+ */
+export interface GitWriterDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number, env: Record<string, string | undefined>) => WriterGit;
+}
+
 /** A GitHub noreply commit identity — correct for github.com repos, unroutable anywhere else. */
 const GITHUB_NOREPLY_SUFFIX = "@users.noreply.github.com";
 
@@ -203,20 +217,23 @@ export class GitWriter {
   private repoPath: string;
   private readonly localMs: number;
   private readonly pushMs: number;
+  private readonly gitFactory: NonNullable<GitWriterDeps["gitFactory"]>;
   /**
    * `opts` (the gateway passes the resolved `platform.timeouts.gitLocalMs`/`gitPushMs`) override the
    * module-const defaults; absent → the consts (today's behavior, e.g. the 1-arg test constructor).
    * Each is FLOORED to GIT_TIMEOUT_FLOOR_MS so a sub-second misconfig can't make every git write fail-fast.
+   * `gitFactory` ({@link GitWriterDeps}) is the TEST seam — real callers never pass it.
    */
-  constructor(repoPath: string, opts?: { gitLocalMs?: number; gitPushMs?: number }) {
+  constructor(repoPath: string, opts?: { gitLocalMs?: number; gitPushMs?: number } & GitWriterDeps) {
     this.repoPath = repoPath;
     this.localMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitLocalMs ?? GIT_LOCAL_TIMEOUT_MS);
     this.pushMs = Math.max(GIT_TIMEOUT_FLOOR_MS, opts?.gitPushMs ?? GIT_PUSH_TIMEOUT_MS);
+    this.gitFactory = opts?.gitFactory ?? ((p, ms, env) => boundedSimpleGit(p, ms, env));
   }
 
   /** A simpleGit bound to this repo with a kill-the-hung-child block timeout + the non-interactive env. */
-  private git(blockMs: number): SimpleGit {
-    return boundedSimpleGit(this.repoPath, blockMs, nonInteractiveEnv());
+  private git(blockMs: number): WriterGit {
+    return this.gitFactory(this.repoPath, blockMs, nonInteractiveEnv());
   }
 
   /**
@@ -264,7 +281,7 @@ export class GitWriter {
         try {
           const git = this.git(this.localMs);
           await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
-          const current = (await git.branchLocal()).current;
+          const current = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
           return { ok: true, branch: current };
         } catch (e) {
           return { ok: false, error: gitError(e) };
@@ -347,7 +364,7 @@ export class GitWriter {
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
           const warning = this.oversizedStagedWarning(staged.files, maxFileBytes);
           const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
-          const hash = res.commit || (await git.revparse(["HEAD"])).trim();
+          const hash = res.commit || (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
           return warning ? { ok: true, hash, warning } : { ok: true, hash };
         } catch (e) {
           return { ok: false, error: gitError(e) };
@@ -399,7 +416,12 @@ export class GitWriter {
     return this.withVaultPauseLease(async () => {
       try {
         const git = this.git(this.pushMs);
-        const branch = (await git.branchLocal()).current;
+        // Wrapped for the same reason as checkout()/commit()'s branchLocal()/revparse() calls (card
+        // 40a264d3): `block` only bounds a SILENT child, not a slow-but-talking one. Lower consequence
+        // here than those two — this call sits OUTSIDE withCanonicalIndexLock, so an unsettling promise
+        // would hang only this request, never wedge the shared per-repo lock queue — but it's the same
+        // defect class on the same trust-boundary surface, and wrapping it costs nothing.
+        const branch = (await withTimeout(git.branchLocal(), this.pushMs, "git branch")).current;
         try {
           await withTimeout(git.raw(["push"]), this.pushMs, "git push");
         } catch (e) {
@@ -430,7 +452,7 @@ export class GitWriter {
    * FAIL-SAFE BY CONSTRUCTION: any detection error (no origin, no commits, parse miss) returns
    * `undefined` — never a throw, never blocks the push. Bounded by the local-op timeout like every read here.
    */
-  private async identityWarning(git: SimpleGit): Promise<string | undefined> {
+  private async identityWarning(git: WriterGit): Promise<string | undefined> {
     try {
       const originUrl = (await withTimeout(git.raw(["remote", "get-url", "origin"]), this.localMs, "git remote get-url")).trim();
       const host = originHost(originUrl);
