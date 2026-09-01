@@ -49,9 +49,26 @@ const GIT_ID = "-c user.email=killtest@loom -c user.name=killtest";
 
 const TIMEOUT_MS = 300; // tiny bound under test — our OWN kill-trigger timer.
 const HOOK_TICKS = 50;
-const HOOK_TICK_MS = 100; // hook emits output every 100ms — well under TIMEOUT_MS, so the IDLE `block`
-                           // timer (also configured at TIMEOUT_MS) never independently fires; only a real
-                           // total-elapsed kill can stop this child before it finishes on its own.
+const HOOK_TICK_MS = 100; // hook emits output every 100ms. AS LONG AS real wall-clock ticks keep arriving
+                           // under TIMEOUT_MS apart, the IDLE `block` timer (also configured at TIMEOUT_MS)
+                           // never independently fires — but that is a HOST-SCHEDULING property, not a
+                           // structural guarantee: under genuine starvation the ticking child's own
+                           // setTimeout callbacks are themselves scheduling-delayed, so this margin can
+                           // shrink under load the same way TIMEOUT_MS's own kill-trigger timer can (see
+                           // HOOK_TOTAL_MS's comment below). And "only a real total-elapsed kill can stop
+                           // this child" is FALSE as a general claim: simple-git's `block` idle timer ALSO
+                           // kills the child on expiry — verified at source, node_modules/.pnpm/simple-
+                           // git@3.36.0/node_modules/simple-git/dist/cjs/index.js:1524-1526's
+                           // `timeoutPlugin` (`context.kill(new GitPluginError(..., "timeout", "block
+                           // timeout reached"))`), which routes through the SAME `gitResponse` `kill(reason)`
+                           // handler at index.js:1937 that `abortPlugin` uses for our own controller.abort()
+                           // (see [[simple-git-block-timeout-is-idle-not-elapsed]]). If this tick-margin
+                           // ever breaks and block's OWN idle timer fires instead of (or races) our own
+                           // total-elapsed kill, that is no longer silently assumed away: the [green] check
+                           // below requires the rejection's suffix be specifically "Abort signal received"
+                           // (our own controller.abort()) and goes RED on a "block timeout reached" suffix
+                           // instead (card 963f69ab leg A) — so a broken assumption here surfaces as a real
+                           // test failure, not a silent pass.
 const HOOK_TOTAL_MS = HOOK_TICKS * HOOK_TICK_MS; // ~5000ms — the child's natural (uninterrupted) duration
                                                   // ON AN IDLE HOST, ~16.7x TIMEOUT_MS. This ratio (not
                                                   // TIMEOUT_MS's absolute size) is what has to survive host
@@ -182,6 +199,41 @@ try {
       `NOT path 1 — actual message: "${giveUpMessage}"`, looksLikePathTwo && !looksLikePathOne);
   }
 
+  // [setup] NEGATIVE CONTROL for card 963f69ab leg A — the unanchored `/\(git child killed\)/` regex the
+  // [green] check used to run WAS a real gap, verified at source: `withTimeoutKillingChild` (bounded.ts:
+  // 92-101) sets `timedOut=true` from its OWN killTimer (fired purely because `ms` elapsed — independent
+  // of what actually caused `p` to settle) and, when the wrapped promise `p` REJECTS while `timedOut` is
+  // true, APPENDS `p`'s own rejection message verbatim after "(git child killed): " (bounded.ts:100). That
+  // suffix is NOT necessarily ours: simple-git's OWN idle `block` timer independently kills the child too
+  // (verified at source, node_modules/.pnpm/simple-git@3.36.0/node_modules/simple-git/dist/cjs/index.js:
+  // 1524-1526's `timeoutPlugin`, routing through the SAME `gitResponse` `kill(reason)` handler at :1937
+  // that our own `controller.abort()` reaches via `abortPlugin` at :1160-1183) — so a settlement caused by
+  // BLOCK's idle timer produces `(git child killed): block timeout reached`, a string the old unanchored
+  // regex matched identically to our OWN confirmed kill's `(git child killed): Abort signal received`
+  // (index.js:1168). The old regex could not tell "our total-elapsed kill stopped this commit" from "a
+  // different mechanism (block, or anything else `p` might reject with) settled it" — exactly the
+  // ambiguity the [green] path-1 assertion exists to resolve. Manufacture that block-shaped rejection
+  // directly (no real git child needed — this is purely testing the CLASSIFICATION, not the kill
+  // mechanism) and confirm the [green] check's assertion — anchored to require the specific
+  // "Abort signal received" suffix — correctly does NOT classify it as our confirmed path-1 kill.
+  {
+    const blockTimeoutShapedRejection = new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error("block timeout reached")), 80);
+    });
+    const inertController2 = new AbortController();
+    let blockLikeMessage = null;
+    await withTimeoutKillingChild(blockTimeoutShapedRejection, 50, "negative-control-block-shaped", inertController2, 5000)
+      .catch((e) => { blockLikeMessage = e?.message ?? String(e); });
+    const wouldHaveMatchedOldUnanchoredRegex = /\(git child killed\)/.test(blockLikeMessage ?? "");
+    const matchesNewAnchoredAssertion = /\(git child killed\): Abort signal received$/.test(blockLikeMessage ?? "");
+    check(`[setup] negative control (leg A): a manufactured "(git child killed): block timeout reached" ` +
+      `rejection (simulating simple-git's OWN idle block timer settling p, not our abort) DOES match the ` +
+      `old unanchored regex — proving that regex really was ambiguous — actual message: ` +
+      `"${blockLikeMessage}"`, wouldHaveMatchedOldUnanchoredRegex);
+    check(`[setup] negative control (leg A): the SAME manufactured rejection is correctly classified as ` +
+      `NOT our confirmed path-1 kill by the new anchored assertion`, matchesNewAnchoredAssertion === false);
+  }
+
   // [setup] POSITIVE CONTROL for the [green] hookStarted assertion below (card e083c9b7 leg 2, the
   // VACUOUS-PASS gap): "the commit never lands" can pass for the WRONG reason — the kill fired so early
   // that the pre-commit hook (and thus the commit machinery) never got a genuine chance to run, rather
@@ -240,10 +292,20 @@ try {
       // class this whole discipline exists to catch — reachable specifically under the contention this
       // card is about. So: CHECK which path actually fired before trusting the short window at all,
       // converting the precondition from an assumed comment into something this test actually verifies.
-      const isPathOneKilled = /\(git child killed\)/.test(green.rejectMessage ?? "");
+      // ANCHORED (card 963f69ab leg A) to the SPECIFIC suffix simple-git's abortPlugin attaches when OUR
+      // OWN controller.abort() is what triggers the kill (index.js:1168, "Abort signal received") — not a
+      // bare `/\(git child killed\)/` substring test, which also matches a settlement caused by a
+      // DIFFERENT mechanism (e.g. simple-git's own idle `block` timer independently killing the child,
+      // suffixed "block timeout reached" instead — see the [setup] negative control above, which proves
+      // this exact assertion goes RED against that manufactured shape). Requiring this suffix is what
+      // actually establishes "our total-elapsed kill did this," not just "the wrapper rejected with
+      // something containing the words git child killed."
+      const isPathOneKilled = /\(git child killed\): Abort signal received$/.test(green.rejectMessage ?? "");
       const isPathTwoGaveUp = /giving up \(hung git child\?\)/.test(green.rejectMessage ?? "");
-      check(`[green] settled via PATH 1 ("(git child killed)" — the child-confirmed-dead path), not the ` +
-        `PATH 2 give-up fallback (no child confirmation) — actual message: "${green.rejectMessage}"`,
+      check(`[green] settled via PATH 1, attributed specifically to OUR OWN controller.abort() (suffix ` +
+        `"Abort signal received" — bounded.ts:100 appending simple-git's abortPlugin message, index.js:` +
+        `1168), not the PATH 2 give-up fallback (no child confirmation) and not a same-shaped-but-` +
+        `different-cause settlement — actual message: "${green.rejectMessage}"`,
         isPathOneKilled && !isPathTwoGaveUp);
       // Belt-and-braces second leg (tighter than the elapsed check above, which only rules out a hang):
       // a genuine give-up would fire at TIMEOUT_MS + killGraceMs (both default to TIMEOUT_MS here) — a
