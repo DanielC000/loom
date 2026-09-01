@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
-import { withTimeout, boundedSimpleGit } from "./bounded.js";
+import { withTimeout, withTimeoutKillingChild, boundedSimpleGit } from "./bounded.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
@@ -819,7 +819,7 @@ export async function createWorktree(
 
   // BOUNDED (card c801d688) — same rationale as the rev-parse above: no local catch, so a timeout
   // propagates exactly like any other git failure already did, just bounded instead of unbounded.
-  const { git, timeoutMs } = boundedGit(repoPath, gitDeps);
+  const timeoutMs = gitDeps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   // Card 2fcd5eae: `prune` -> `branch --list` -> `add` is a multi-step read-modify-write against the
   // SHARED `.git/worktrees/` admin state — serialize ONLY this sequence per canonical repo path, via the
@@ -830,15 +830,31 @@ export async function createWorktree(
   // follow a merge's finalize is fire-and-forget, never nested inside the lock's callback. Deliberately
   // does NOT wrap `provisionWorktreeDeps` below (a package-manager install, potentially minutes) — that
   // would serialize every worker spawn on the daemon behind each other's install.
+  //
+  // Card 8e75ee20: unlike every OTHER bounded call in this file, these three calls run INSIDE the lock
+  // above — releasing it on a bare `withTimeout` race (which settles independent of the child) would let
+  // the NEXT queued caller start while THIS call's `git worktree add` may still be alive and still
+  // mutating `.git/worktrees/`, reopening the exact race the lock exists to close (see
+  // [[simple-git-block-timeout-is-idle-not-elapsed]] for why the instance's own `block` idle-timeout does
+  // not already prevent this for a slow-but-talking child). So: the REAL git path (no injected
+  // `gitDeps.gitFactory`) uses {@link withTimeoutKillingChild}, which kills the child on expiry and only
+  // settles once that child is confirmed dead. A test's `gitFactory` fake can't be killed (it ignores the
+  // abort signal entirely — there's no real child behind it), so that path keeps the plain {@link
+  // withTimeout} race, unchanged from before.
+  const boundedLockedRaw = (args: string[], label: string): Promise<string> => {
+    if (gitDeps.gitFactory) return withTimeout(gitDeps.gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
+    const controller = new AbortController();
+    return withTimeoutKillingChild(boundedSimpleGit(repoPath, timeoutMs, undefined, controller.signal).raw(args), timeoutMs, label, controller);
+  };
   const branchExists = await withCanonicalIndexLock(repoPath, async () => {
-    await withTimeout(git.raw(["worktree", "prune"]), timeoutMs, "git worktree prune"); // drop any stale admin record for a since-deleted dir
-    const exists = (await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list")).trim() !== "";
-    await withTimeout(git.raw(exists
+    await boundedLockedRaw(["worktree", "prune"], "git worktree prune"); // drop any stale admin record for a since-deleted dir
+    const exists = (await boundedLockedRaw(["branch", "--list", branch], "git branch --list")).trim() !== "";
+    await boundedLockedRaw(exists
       ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
       : forkFrom
         ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
-        : ["worktree", "add", worktreePath, "-b", branch]),         // fresh task → new branch off current HEAD
-      timeoutMs, "git worktree add");
+        : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
+      "git worktree add");
     return exists;
   });
   let staleBase: StaleBaseInfo | undefined;
