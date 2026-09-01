@@ -117,6 +117,26 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
  */
 const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
+/**
+ * Card 2a79a74c finding #5: matches `test-daemon.mjs`'s own structural `notExecuted` invariant failure —
+ * `console.error(\`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test file(s) were NOT
+ * actually executed — naming them: ...\`)` followed by `process.exit(1)`, fired BEFORE the `FAILURES:`
+ * epilogue ever runs (see that call site's own comment in `scripts/test-daemon.mjs`).
+ *
+ * ⚠️ THE RISK THIS EXISTS TO CLOSE: that early exit does NOT suppress `runLane`'s own per-file wrapper
+ * line ({@link HARNESS_FAIL_WRAPPER_RE}) for whichever file(s) genuinely failed an assertion in the SAME
+ * run — `runLane` prints its `FAIL  <name>  (exit N)` line THE MOMENT that file's own child process
+ * settles, well before the later, separate `notExecuted` bookkeeping check even runs. So a run that BOTH
+ * genuinely fails exactly one test AND, via an unrelated structural bug, silently never executes some
+ * OTHER discovered file(s) still yields `failTierMatchCount() === 1` for the one genuine failure alone —
+ * {@link identifyRetriableTestFile} would otherwise happily identify and retry that ONE file, and a pass
+ * on the isolated `--only=<name>` retry would let the merge proceed while the structural "some selected
+ * files never ran at all" defect is never re-observed (a single-file retry has no way to re-check it).
+ * This regex is the caller's own signal to refuse that retry outright regardless of `failTierMatchCount`
+ * — see {@link identifyRetriableTestFile}'s `harnessNotExecutedDetected` parameter.
+ */
+const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
+
 /** Card 2f0b2e57 (two real merge-gate rejections, both from this daemon's OWN test suite): a line
  *  recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`, optionally
  *  indented — must never be mistaken for a failure, no matter what words the passing assertion's own
@@ -200,6 +220,7 @@ export function createFailingTestTracker(): {
   matchCount(): number;
   failTierResult(): string | undefined;
   failTierMatchCount(): number;
+  harnessNotExecutedDetected(): boolean;
 } {
   const decoder = new TextDecoder("utf-8");
   let carry = "";
@@ -219,6 +240,11 @@ export function createFailingTestTracker(): {
   // own doc for why the retry needs a narrower, differently-anchored match than the diagnostic tiers do.
   let lastHarnessWrapper: string | undefined;
   let harnessWrapperCount = 0;
+  // Card 2a79a74c #5: tracked independently of the harness-wrapper/tier state above — see
+  // HARNESS_NOT_EXECUTED_RE's own doc for why this needs its own flag rather than piggybacking on
+  // failTierMatchCount (the two conditions are DELIBERATELY independent: a run can trip this, the FAIL
+  // tier, both, or neither).
+  let notExecutedSeen = false;
   // A carry flush (the final partial line, scanned once at `result()`/`matchCount()` time — see below) must
   // never run twice: `scanLine` mutates `countByPattern`, and `result()`/`matchCount()` can each be called
   // once per tracker instance in production (one per gate step) — but nothing prevents a caller invoking
@@ -232,6 +258,7 @@ export function createFailingTestTracker(): {
     // harness wrapper line already also satisfies FAILING_TEST_PATTERNS' own FAIL tier (used for `result()`/
     // `matchCount()` diagnostics), and both trackings must see it.
     if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; }
+    if (HARNESS_NOT_EXECUTED_RE.test(line)) notExecutedSeen = true;
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
       if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return; }
     }
@@ -289,6 +316,16 @@ export function createFailingTestTracker(): {
     failTierMatchCount(): number {
       flushCarryOnce();
       return harnessWrapperCount;
+    },
+    /** Card 2a79a74c #5: true iff a line matching {@link HARNESS_NOT_EXECUTED_RE} was seen anywhere in
+     *  this step's output — `test-daemon.mjs`'s own structural "some selected file(s) were never
+     *  executed" failure. {@link identifyRetriableTestFile} refuses to identify ANY retry candidate when
+     *  this is true, regardless of `failTierMatchCount()` — see that regex's own doc for why a
+     *  co-occurring genuine test failure's own wrapper line is not by itself a sufficient signal that
+     *  this run is safe to retry piecemeal. */
+    harnessNotExecutedDetected(): boolean {
+      flushCarryOnce();
+      return notExecutedSeen;
     },
   };
 }
@@ -438,6 +475,11 @@ export interface GateStepResult {
    *  count {@link identifyRetriableTestFile} actually gates its `=== 1` check on. `undefined` iff
    *  `failTierTest` is `undefined`. */
   failTierTestCount?: number;
+  /** See {@link createFailingTestTracker.harnessNotExecutedDetected} — forwarded verbatim. `undefined`/
+   *  `false` on every ordinary run; `true` only when `test-daemon.mjs`'s own structural `notExecuted`
+   *  invariant line was seen in this step's output. {@link identifyRetriableTestFile} reads this to
+   *  refuse a single-file retry outright — see `HARNESS_NOT_EXECUTED_RE`'s own doc for why. */
+  harnessNotExecutedDetected?: boolean;
   decidedAt?: number;
   /** Card 8d585277: true ONLY when this step's settle followed a `cancelSignal` abort AND the step's own
    *  `close`/`error` event actually fired afterward (i.e. the kill was VERIFIED, not merely issued — see
@@ -580,12 +622,13 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // the verification: it can only ever be attached to a genuinely observed close/error, never to the bare
   // act of asking for one.
   let cancelling = false;
-  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "failTierTest" | "failTierTestCount" | "decidedAt">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "failTierTest" | "failTierTestCount" | "harnessNotExecutedDetected" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
     const failingTest = failingTestTracker.result();
     const failTierTest = failingTestTracker.failTierResult();
+    const harnessNotExecutedDetected = failingTestTracker.harnessNotExecutedDetected();
     // Card 6ffee3e2: content-selected retention only for a GENUINE failure, matching this step's own
     // pass/fail determination (`result.status`/`error`) — never for a cancel (a killed-mid-run step has no
     // "failure" to select content for; it keeps the plain positional tail, unchanged from before this card).
@@ -597,6 +640,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       outputTail: isGenuineFailure ? resolveOutputTail() : tail(),
       failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
       failTierTest, failTierTestCount: failTierTest ? failingTestTracker.failTierMatchCount() : undefined,
+      harnessNotExecutedDetected,
       decidedAt: performance.now(),
     });
   };
@@ -656,6 +700,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         : " (no extend: extend unavailable for this run)";
     const timeoutFailingTest = failingTestTracker.result();
     const timeoutFailTierTest = failingTestTracker.failTierResult();
+    const timeoutHarnessNotExecutedDetected = failingTestTracker.harnessNotExecutedDetected();
     void killGateProcessTree(child).finally(() => {
       resolve({
         status: null,
@@ -678,6 +723,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         // plain positional tail here too, matching `done()` exactly.
         outputTail: cancelling ? tail() : resolveOutputTail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
         failTierTest: timeoutFailTierTest, failTierTestCount: timeoutFailTierTest ? failingTestTracker.failTierMatchCount() : undefined,
+        harnessNotExecutedDetected: timeoutHarnessNotExecutedDetected,
         decidedAt,
       });
     });
@@ -762,6 +808,9 @@ export interface GateSequentialResult {
   failTierTest?: string;
   /** See {@link GateStepResult.failTierTestCount} — forwarded verbatim alongside `failTierTest`. */
   failTierTestCount?: number;
+  /** See {@link GateStepResult.harnessNotExecutedDetected} — forwarded verbatim from the failing step's
+   *  own result. */
+  harnessNotExecutedDetected?: boolean;
   /** Card 8d585277: forwarded from the cancelled step's own VERIFIED {@link GateStepResult.cancelled} — a
    *  distinct "no verdict" outcome a caller must never fold into `passed:false`'s ordinary failure
    *  handling (no retry, no failure classification, no "gate failed" nudge). */
@@ -994,7 +1043,8 @@ export async function runGateSequential(
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
         failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
-        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, steps,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
+        harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
     }
     const passed = res.status === 0 && !res.error;
@@ -1002,7 +1052,8 @@ export async function runGateSequential(
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
         failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
-        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, steps,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
+        harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
     }
   }
@@ -1159,10 +1210,28 @@ export interface RetriableTestFile {
  * (the epilogue's own indented echo) and why. Under that anchoring, over-counting (`> 1`) now means what it
  * always should have: genuinely multiple distinct failing files, each producing their own real wrapper
  * line — the correct case to fail closed on — never an assertion failure's own output being counted twice.
+ *
+ * 🎯 CARD 2a79a74c FINDING #5 — DECISION: this retry REFUSES outright (returns `undefined`) whenever
+ * `harnessNotExecutedDetected` is true, REGARDLESS of `failTierTestCount === 1` — see
+ * `HARNESS_NOT_EXECUTED_RE`'s own doc for the exact masking mechanism this closes (a co-occurring genuine
+ * failure's own wrapper line survives test-daemon.mjs's early `notExecuted` exit untouched, so
+ * `failTierTestCount` alone cannot see that OTHER discovered files were structurally never run at all).
+ * `harnessNotExecutedDetected` is REQUIRED (not optional), same posture as `failTierTestCount` above and
+ * for the identical reason: a caller/test-double that doesn't supply it must fail closed to "not detected"
+ * (`false`/`undefined`), never silently skip the check.
+ * ⚠️ THE TRADEOFF BEING BOUGHT HERE, STATED (the card's DoD asked for this explicitly — either remedy was
+ * acceptable): this is remedy (b), NOT remedy (a). `test-daemon.mjs`'s early `process.exit(1)` on the
+ * `notExecuted` invariant still fires BEFORE its own `FAILURES:` echo — a genuine co-occurring test
+ * failure's full stdout/stderr detail is still absent from attempt 1's raw output on this rare path, so a
+ * human reading that log alone gets a weaker diagnostic than the ordinary failure path. What this DOES
+ * buy: the retry can never silently merge a run that both failed a real test AND lost track of whether
+ * every selected file even ran — the gate simply stays rejected (exactly like today, pre-single-file-retry)
+ * whenever this invariant trips, so the structural defect is never masked by a lucky isolated re-pass.
  */
-export function identifyRetriableTestFile(failTierTest: string | undefined, cwd: string, failTierTestCount: number | undefined): RetriableTestFile | undefined {
+export function identifyRetriableTestFile(failTierTest: string | undefined, cwd: string, failTierTestCount: number | undefined, harnessNotExecutedDetected: boolean): RetriableTestFile | undefined {
   if (!failTierTest) return undefined;
   if (failTierTestCount !== 1) return undefined;
+  if (harnessNotExecutedDetected) return undefined;
   const m = /^FAIL\s+(\S+)/.exec(failTierTest);
   if (!m) return undefined;
   const name = m[1]!;

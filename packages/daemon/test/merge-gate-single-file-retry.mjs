@@ -620,9 +620,50 @@ try {
       check("(E) manager review — count:2 on an otherwise-identical real match is refused (>1 match, not a single failure)", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 2) === undefined);
       check("(E) manager review — count:undefined on an otherwise-identical real match is refused (unknown count fails closed)", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, undefined) === undefined);
       check("(E) manager review — count:0 on an otherwise-identical real match is refused", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 0) === undefined);
+      // (E2) card 2a79a74c #5: harnessNotExecutedDetected REFUSES an otherwise-perfectly-identifiable
+      // candidate, and its absence/false preserves the existing behavior exactly.
+      check("(E2) harnessNotExecutedDetected:true refuses an otherwise-identical real match", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 1, true) === undefined);
+      check("(E2) harnessNotExecutedDetected:false is byte-identical to the pre-#5 (3-arg) behavior", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 1, false)?.name === "real-one");
     } finally {
       fs.rmSync(scratch, { recursive: true, force: true });
     }
+  }
+
+  // ── (L) card 2a79a74c #5, END-TO-END through the REAL confirmWorkerMerge call site: a genuine single-
+  //        file failure that would otherwise retry-and-pass, but the SAME gate attempt ALSO signals
+  //        harnessNotExecutedDetected:true (test-daemon.mjs's own structural "some selected file(s) never
+  //        ran" invariant) — the retry must NEVER fire, so the gate stays rejected exactly as it would
+  //        with no single-file-retry mechanism at all. Mirrors (A) (the ordinary pass-after-retry case)
+  //        as closely as possible so the ONLY variable is this one new flag. ──────────────────────────────
+  {
+    const L = mk("l", "feature-l.txt");
+    makeRepo(L);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => {
+      calls++;
+      // Would ordinarily be IDENTICAL to (A)'s fakeGate — a real, identifiable single-file failure — with
+      // exactly one difference: harnessNotExecutedDetected:true. If this test regresses to calling
+      // identifyRetriableTestFile without this field wired through, `calls` would reach 2 (the retry
+      // would fire) and the second call's `passed:true` would merge — this fakeGate NEVER returns
+      // passed:true, so a regression here would surface as an unhandled rejection, not a silent pass.
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-l", failingTestCount: 1, failTierTest: "FAIL  flaky-l", failTierTestCount: 1, harnessNotExecutedDetected: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);
+    L.worktreePath = worktreePath; L.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "flaky-l");
+    fs.writeFileSync(path.join(worktreePath, L.file), "work for L\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${L.file}"`, { cwd: worktreePath });
+    seed(db, L, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(L.mgrId, L.workerId);
+    check("(L) exactly ONE gate call — harnessNotExecutedDetected:true refuses the retry outright, even though flaky-l is a real, otherwise-identifiable candidate", calls === 1);
+    check("(L) merged:false — the gate stays rejected, never masked by a retry that never ran", confirm.merged === false);
+    check("(L) reason is the flat back-compat string, unchanged", confirm.reason === "build gate failed");
+    check("(L) retriedFile is undefined — the retry mechanism never engaged", confirm.retriedFile === undefined);
+    check("(L) NO build_gate_single_file_retry event fired", eventsOfKind(db, L.mgrId, "build_gate_single_file_retry").length === 0);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

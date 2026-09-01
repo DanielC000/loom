@@ -13893,7 +13893,11 @@ export class SessionService {
       // attempt and the transient-kill retry do. It does NOT mirror that retry's `reunionAtAdmission`
       // call, deliberately — see the callback below for why.
       if (gateRan && !gateResult.passed && classifyGateFailure(gateResult) === "genuine") {
-        const candidate = identifyRetriableTestFile(gateResult.failTierTest, worktreePath, gateResult.failTierTestCount);
+        // Card 2a79a74c #5: pass harnessNotExecutedDetected through unconditionally (?? false — a test
+        // double/legacy shape that never sets it means "not detected", never a silent skip of the check)
+        // so a run that ALSO tripped test-daemon.mjs's own structural notExecuted invariant can never be
+        // retried piecemeal, regardless of failTierTestCount — see identifyRetriableTestFile's own doc.
+        const candidate = identifyRetriableTestFile(gateResult.failTierTest, worktreePath, gateResult.failTierTestCount, gateResult.harnessNotExecutedDetected ?? false);
         if (candidate) {
           retriedFile = candidate.name;
           let singleFileRetryStartedAt = 0;

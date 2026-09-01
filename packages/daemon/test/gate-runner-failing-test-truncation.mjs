@@ -461,6 +461,72 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         check("(K3) so identifyRetriableTestFile never produces a candidate at all — a guard failure can no longer masquerade as a retry into an unrelated file",
           candidate === undefined);
       }
+
+      // (K4) card 2a79a74c finding #5: `test-daemon.mjs`'s own structural `notExecuted` invariant trips
+      // BEFORE its `FAILURES:` echo — but `runLane`'s per-file wrapper line for a co-occurring GENUINE
+      // failure is unaffected (it's printed live, the moment that one file's own child settles, well
+      // before the later notExecuted bookkeeping check even runs). So failTierMatchCount() alone cannot
+      // tell "one real failure, otherwise a clean run" apart from "one real failure PLUS some other
+      // selected file(s) silently never ran at all" — this is exactly the masking risk the card names.
+      {
+        const NOT_EXECUTED_LINE = "❌ test-daemon.mjs: 2 discovered hermetic test file(s) were NOT actually executed — naming them: ghost-one, ghost-two";
+        fs.writeFileSync(path.join(testDirFixture, "real-failure.mjs"), "// fixture\n");
+
+        // (K4a) MUTATION PROOF, ARM 1 (pre-fix shape / RED without the new refusal): the wrapper line for
+        // a genuinely failing file, PLUS the notExecuted marker, in the SAME stream — mirrors a real run
+        // that both failed one test AND lost track of whether every selected file even ran.
+        {
+          const tracker = createFailingTestTracker();
+          tracker.feed(Buffer.from(`FAIL  real-failure  (exit 1)\n${NOT_EXECUTED_LINE}\n`, "utf-8"));
+          check("(K4a) failTierMatchCount() is UNCHANGED at 1 — the co-occurring genuine failure's own wrapper line is not suppressed by the notExecuted line existing elsewhere in the stream",
+            tracker.failTierMatchCount() === 1);
+          check("(K4a) failTierResult() still names the real failing file — the retry's OLD input alone would have identified it",
+            tracker.failTierResult() === "FAIL  real-failure  (exit 1)");
+          check("(K4a) THE NEW SIGNAL: harnessNotExecutedDetected() is true",
+            tracker.harnessNotExecutedDetected() === true);
+
+          // PROVES THE CHECK CAN FAIL (mutation): calling identifyRetriableTestFile the OLD way (3 args,
+          // matching every pre-#5 call site in this repo) still produces a candidate — the bug this card
+          // fixes, reproduced live, not asserted from memory.
+          const oldShapeCandidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
+          check("(K4a) OLD 3-ARG CALL SHAPE (pre-#5 fix): still identifies a retry candidate — this is the exact masking risk card 2a79a74c #5 describes, reproduced here as the RED case the fix must close",
+            oldShapeCandidate !== undefined && oldShapeCandidate.name === "real-failure");
+
+          // THE FIX ITSELF: passing harnessNotExecutedDetected() (true) refuses the retry outright, despite
+          // failTierMatchCount() === 1 and a real, existing candidate file.
+          const fixedCandidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          check("(K4a) THE FIX: passing harnessNotExecutedDetected() through refuses the retry — no candidate, despite a real, otherwise-retriable single failure",
+            fixedCandidate === undefined);
+        }
+
+        // (K4b) NEGATIVE CONTROL — the SAME single genuine failure, with NO notExecuted line anywhere in
+        // the stream, must still retry normally: this card's fix must not become a blanket refusal.
+        {
+          const tracker = createFailingTestTracker();
+          tracker.feed(Buffer.from("FAIL  real-failure  (exit 1)\n", "utf-8"));
+          check("(K4b) harnessNotExecutedDetected() is false on an ordinary run with no structural invariant tripped",
+            tracker.harnessNotExecutedDetected() === false);
+          const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          check("(K4b) an ordinary single-file genuine failure still identifies a working retry target — the #5 fix does not suppress the normal case",
+            candidate !== undefined && candidate.name === "real-failure");
+        }
+
+        // (K4c) the notExecuted line ALONE (no genuine test failure at all — e.g. a pure harness/pool bug
+        // with every selected file that DID run passing) must still refuse: failTierResult() is undefined
+        // in that case (nothing for identifyRetriableTestFile to even parse), so this is really a
+        // tracker-level check that the marker is detected independent of whether any FAIL-tier line exists.
+        {
+          const tracker = createFailingTestTracker();
+          tracker.feed(Buffer.from(`${NOT_EXECUTED_LINE}\n`, "utf-8"));
+          check("(K4c) notExecuted alone (no genuine failure in the stream): harnessNotExecutedDetected() is true",
+            tracker.harnessNotExecutedDetected() === true);
+          check("(K4c) failTierMatchCount() stays 0 — the notExecuted line itself is never mistaken for a FAIL-tier wrapper line",
+            tracker.failTierMatchCount() === 0);
+          const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          check("(K4c) no candidate either way — failTierResult() is undefined, so identifyRetriableTestFile's own first check already refuses",
+            candidate === undefined);
+        }
+      }
     }
   }
 
