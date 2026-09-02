@@ -17,8 +17,16 @@ export interface IdlePty {
    * `purgeQueuedByQuestionIds` path the answer-route push-nudge already uses (card bbc46336) — without
    * this tag a watchdog nudge still sitting queued when the question is pulled survives the purge and
    * drains later as a stale "pull it" message for an already-consumed question.
+   *
+   * The real PtyHost.enqueueStdin returns a richer `EnqueueResult` (see pty/host.ts) with THREE possible
+   * outcomes, collapsed here to the two this watcher needs to distinguish (mirrors ContextPty — card
+   * f6d72db8): `delivered:true` (handed straight to submit() this turn) or `delivered:false, queued:true`
+   * (durably held, lands at the next turn boundary) both mean the nudge was ACCEPTED; `delivered:false`
+   * with `queued` falsy means it was NOT accepted at all (e.g. the target went not-live between our own
+   * `isAlive` check above and this call) — tick()/tickAnsweredStuckQuestions() below must not treat that
+   * as a sent nudge.
    */
-  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string): { delivered: boolean; position?: number };
+  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string): { delivered: boolean; position?: number; queued?: boolean };
 }
 
 export interface IdleWatcherDeps {
@@ -460,7 +468,22 @@ export class IdleWatcher {
       const finalMsg = isPlatform
         ? msg + undocumentedDeferralSuffix + boardDeltaSuffix
         : msg + undocumentedDeferralSuffix + boardDeltaSuffix + IDLE_NUDGE_BOUNDED_HINT;
-      try { pty.enqueueStdin(m.id, finalMsg); } catch { /* manager not live */ }
+      // Card f6d72db8: use the return value instead of discarding it — mirrors ContextWatcher's own fix
+      // (card 49fdcbbc, same enqueueStdin contract). `delivered:true` and `delivered:false, queued:true`
+      // both mean the nudge was ACCEPTED, so both are recorded the same way; anything else (not accepted
+      // — e.g. the manager went not-live between our own isAlive check above and this call — or the call
+      // throws) must NOT stamp the cooldown or increment the escalation counter: an undelivered nudge must
+      // not buy silence, and it must not count a strike toward a human-facing escalation that reads "this
+      // manager has slept through every nudge" when it may never have been told at all.
+      let result: { delivered: boolean; queued?: boolean };
+      let threw = false;
+      try { result = pty.enqueueStdin(m.id, finalMsg); } catch { threw = true; result = { delivered: false, queued: false }; }
+      if (!result.delivered && !result.queued) {
+        // State what was OBSERVED, not an inferred cause (mirrors context-watcher.ts's own wording).
+        // eslint-disable-next-line no-console
+        console.log(`[idle-watcher] nudge to manager ${m.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not recording a sent nudge, not counting a strike`);
+        continue;
+      }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} actionable, unanswered→${state.unanswered + 1})`);
@@ -513,7 +536,22 @@ export class IdleWatcher {
       // Tag with q.id (mirrors the answer-route push-nudge, card bbc46336) so a LATER question_pull that
       // consumes this question purges this exact nudge if it's still queued when it goes stale — otherwise
       // a manager behind on turns sees a "pull it" nudge for a question it already pulled.
-      try { pty.enqueueStdin(m.id, msg, "system", undefined, undefined, "agent", q.id); } catch { /* manager not live */ }
+      // Card f6d72db8, decided-separately per its DoD: this site's discard was the SAME shape as the
+      // manager-nudge path above, but its consequence is materially different — marking a question
+      // "nudged" only suppresses it from `nudgedAnsweredQuestions` (no DB cooldown, no unanswered strike,
+      // so it can never escalate a human on an unsent message). Still worth the same fix: without it, a
+      // genuinely-undelivered "pull it" re-nudge is marked nudged anyway and never re-fires for the rest
+      // of the process lifetime (this Set has no other expiry/cadence) — a real, if lesser, bug. Same
+      // acceptance check as the manager path (and ContextWatcher, card 49fdcbbc): only an ACCEPTED
+      // (delivered or durably queued) attempt marks this question nudged.
+      let result: { delivered: boolean; queued?: boolean };
+      let threw = false;
+      try { result = pty.enqueueStdin(m.id, msg, "system", undefined, undefined, "agent", q.id); } catch { threw = true; result = { delivered: false, queued: false }; }
+      if (!result.delivered && !result.queued) {
+        // eslint-disable-next-line no-console
+        console.log(`[idle-watcher] re-nudge for answered-but-unpulled question ${q.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not marking it nudged`);
+        continue;
+      }
       this.nudgedAnsweredQuestions.add(q.id);
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] re-nudged manager ${m.id} for answered-but-unpulled question ${q.id}`);
