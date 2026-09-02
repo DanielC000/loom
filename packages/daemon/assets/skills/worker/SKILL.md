@@ -125,15 +125,32 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
      parked on this same gate may get reaped too — if you still need it once the nudge lands,
      re-schedule it then.
-   - **Once you've committed and kicked off `run_gate` (above), treat your worktree's build output as OWNED by the gate until
-     it settles — no wiping it, no manual rebuild, no clearing incremental-build state.** The gate runs
-     IN your own worktree, compiling and importing from the very build artifacts you might reasonably be
-     tempted to clear to debug something; the park-and-wait feel makes the worktree *seem* idle while you
-     wait, but it isn't. Move the ground under a running gate and it can read half-updated artifacts and
-     fail with an error that looks like a real test failure but is collateral from what you touched. If
-     you need to rebuild to debug, do it BEFORE you kick off the gate, or wait for the gate to settle
-     first — and SUSPECT a gate failure that arrives right after you touched build artifacts as collateral
-     before you believe it.
+   - **Once you've committed and kicked off `run_gate` (above), your worktree is an INPUT to that running
+     gate, not a workspace that happens to be nearby — treat everything in it as OWNED by the gate until
+     it settles.** That means the obvious case, **build output** (no wiping it, no manual rebuild, no
+     clearing incremental-build state), but just as much your **source**: no `git merge`/rebase/pull, no
+     `checkout`, no editing a tracked file — even a routine "just forward to latest main" — while a gate
+     on this worktree is outstanding. The gate runs IN your own worktree, reading and compiling from
+     exactly what's sitting there; the park-and-wait feel makes the worktree *seem* idle while you wait,
+     but it isn't. Bringing in new source doesn't feel like the same act as wiping build output — it
+     feels like ordinary source control, not build state — but it has the same effect: move the ground
+     under a running gate, by either path, and it can read a half-updated mix of old and new and fail
+     with an error that looks like a real test failure but is collateral from what you touched — SUSPECT
+     a gate failure that arrives right after you touched the worktree as collateral before you believe
+     it. Two consequences make this self-enforcing, and both are worth knowing before you hit them: the
+     run's result goes **VOID for your current code** (it no longer describes what you're about to
+     report), and the daemon **won't start a genuinely fresh gate** until the in-flight one settles — so
+     a mutation made mid-gate **blocks its own remedy** too, and re-calling `run_gate` just re-attaches to
+     the same stale run instead of starting a clean one. **Having reasoned about this risk while planning
+     is not the same as checking it at the moment you act** — a check written into a plan fires at
+     planning time, but the hazard fires at mutation time, so put the check where the mutation happens:
+     right before you merge/rebase/checkout/edit anything in a worktree with a gate outstanding, call
+     `gate_status(<opId>)` in that same breath and confirm it has actually settled. If you need to rebuild
+     or bring in new source to debug, do it BEFORE you kick off the gate, or wait for it to settle first.
+     **And if you ever do mutate a worktree with a gate still in flight anyway, say so immediately in your
+     next report** — the staleness is invisible from outside (nothing in the gate's own result reveals
+     that the worktree moved under it), so disclosure is the only thing that makes it actionable; never
+     quietly wait it out and report `done` leaning on a result you know is void.
    - **If you're unsure whether a long park means "still queued" or "actually stuck," CHECK before you
      act — don't blind-fire `run_gate` again to find out.** `run_gate` returned an `opId`; pass that same
      `opId` to `gate_status` (also on your tool list) to read its LIVE state — `queued`/`running` plus
