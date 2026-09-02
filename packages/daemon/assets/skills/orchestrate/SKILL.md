@@ -287,11 +287,15 @@ above), not an idle report. (If you go silent and unresponsive, the watchdog its
 human after `maxUnansweredNudges` — that safety net is separate and automatic.)
 
 **Re-read before you park.** Before ANY `idle_report('done')`/`idle_report('waiting')` — or any park,
-`recycle_me`, or stop — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
+`recycle_me`, stop, or irreversible fleet-wide action (a `daemon_restart`/deploy, a force-push, a
+deletion) — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the
 queue is "drained" from an earlier read or from memory. New actionable cards land continuously — owner
 intake drops, Platform dispatches, folded-in escalations, worker-discovered follow-ups — so "drained"
 is only ever a statement about a board you *just* re-read. If that fresh read shows any non-`held`
-actionable card, pick it up and `idle_report('working')` instead of parking.
+actionable card, pick it up and `idle_report('working')` instead of parking. Before an irreversible
+action the question is different — not "is there more work?" but "did anyone answer the objection I
+invited?": a heads-up or hold-request window you broadcast creates an obligation to read the replies
+before you act on the silence.
 
 When you resume from a parked state, `idle_report('working')`: it re-arms normal watching
 **and** clears any `done`/asleep alert you raised (a `working` or `waiting` report
