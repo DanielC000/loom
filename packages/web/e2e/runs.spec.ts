@@ -87,6 +87,7 @@ test.describe("runs", () => {
         createdAt: PAST_ISO, startedAt: PAST_ISO, endedAt: PAST_ISO,
       },
     ]);
+    if (!completedId || !failedId) throw new Error("expected two seeded run ids back");
 
     await pinActiveProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/runs`);
@@ -125,6 +126,7 @@ test.describe("runs", () => {
         createdAt: PAST_ISO, startedAt: PAST_ISO, endedAt: PAST_ISO,
       },
     ]);
+    if (!runId) throw new Error("expected a seeded run id back");
 
     await pinActiveProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/runs`);

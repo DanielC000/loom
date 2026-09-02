@@ -152,8 +152,10 @@ test.describe("Settings responsive layout — wide viewport is not regressed (ca
     }
     const rowTops = boxes.map((b) => Math.round(b.y));
     expect(new Set(rowTops).size, `expected one row, got tops ${rowTops.join(", ")}`).toBe(1);
-    expect(boxes[0].x).toBeLessThan(boxes[1].x);
-    expect(boxes[1].x).toBeLessThan(boxes[2].x);
+    const [box0, box1, box2] = boxes;
+    if (!box0 || !box1 || !box2) throw new Error(`expected 3 Orchestration Caps fields, got ${boxes.length}`);
+    expect(box0.x).toBeLessThan(box1.x);
+    expect(box1.x).toBeLessThan(box2.x);
 
     const measured = await measureOverflow(page);
     expect(measured.offenderCount, report("/settings", measured)).toBe(0);

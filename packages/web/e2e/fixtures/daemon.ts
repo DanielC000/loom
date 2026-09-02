@@ -28,6 +28,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Re-exported so a spec can `import { type Page } from "./fixtures/daemon"` without a second import
+// from "@playwright/test" — several specs already did this even though it was never actually exported.
+export type { Page };
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // packages/web/e2e/fixtures -> repo root is 4 levels up.
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
@@ -77,7 +81,9 @@ function waitForListenLine(child: ChildProcess, getLog: () => string): Promise<s
     }, BOOT_TIMEOUT_MS);
     const onData = () => {
       const m = /listening on (https?:\/\/\S+)/.exec(getLog());
-      if (m) { cleanup(); resolve(m[1]); }
+      // Group 1 is mandatory in the pattern above, so a match always carries it — but
+      // noUncheckedIndexedAccess can't see that from RegExpExecArray's element type.
+      if (m?.[1]) { cleanup(); resolve(m[1]); }
     };
     const onExit = (code: number | null) => {
       cleanup();
@@ -142,6 +148,17 @@ async function apiPost<T>(baseURL: string, url: string, body: unknown): Promise<
   });
   if (!res.ok) throw new Error(`POST ${url} -> ${res.status}: ${await res.text()}`);
   return (await res.json()) as T;
+}
+
+// The /internal/test/seed endpoint always echoes back one id per seeded item, so `arr[0]` on a
+// single-item request is genuinely guaranteed present — but noUncheckedIndexedAccess can't know that
+// from the array's element type alone. Asserting it here (rather than casting or non-null-asserting)
+// means a seed endpoint that ever regressed to returning a short array fails loudly at the fixture
+// boundary instead of handing a spec a silent `undefined`.
+function firstOrThrow<T>(arr: T[], what: string): T {
+  const v = arr[0];
+  if (v === undefined) throw new Error(`e2e fixture: expected a seeded ${what}, got none back`);
+  return v;
 }
 
 export interface SeededProject {
@@ -572,7 +589,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       const res = await apiPost<{ usageSampleIds: string[] }>(baseURL, "/internal/test/seed", {
         usageSamples: [{ sessionId: `e2e-session-${randomUUID()}`, ...sample }],
       });
-      return res.usageSampleIds[0];
+      return firstOrThrow(res.usageSampleIds, "usageSampleId");
     };
 
     const seedCompanion: LoomDaemon["seedCompanion"] = async (opts = {}) => {
@@ -614,9 +631,9 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     };
 
     const seedCompanionConversations: LoomDaemon["seedCompanionConversations"] = async (sessionId, conversations) => {
-      for (let i = 0; i < conversations.length; i++) {
+      for (const [i, conversation] of conversations.entries()) {
         await apiPost(baseURL, "/internal/test/seed", {
-          companionMessages: conversations[i].map((m) => ({ sessionId, ...m })),
+          companionMessages: conversation.map((m) => ({ sessionId, ...m })),
         });
         // Archive every conversation but the last (the last stays open/current = the live chat). Each call is
         // a separate, sequential round trip, so the "/new" boundary reliably lands BETWEEN message batches.
@@ -667,26 +684,26 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       const res = await apiPost<{ enqueued: { delivered: boolean; position?: number }[] }>(baseURL, "/internal/test/seed", {
         enqueue: [{ sessionId: opts.sessionId, text: opts.text, source: opts.source, kind: opts.kind }],
       });
-      return res.enqueued[0];
+      return firstOrThrow(res.enqueued, "enqueue result");
     };
 
     const seedOrchestrationEvent: LoomDaemon["seedOrchestrationEvent"] = async (evt) => {
       const res = await apiPost<{ orchestrationEventIds: string[] }>(baseURL, "/internal/test/seed", {
         orchestrationEvents: [evt],
       });
-      return res.orchestrationEventIds[0];
+      return firstOrThrow(res.orchestrationEventIds, "orchestrationEventId");
     };
 
     const seedScheduleDeferral: LoomDaemon["seedScheduleDeferral"] = async (d) => {
       const res = await apiPost<{ scheduleDeferralIds: string[] }>(baseURL, "/internal/test/seed", {
         scheduleDeferrals: [d],
       });
-      return res.scheduleDeferralIds[0];
+      return firstOrThrow(res.scheduleDeferralIds, "scheduleDeferralId");
     };
 
     const seedQuestion: LoomDaemon["seedQuestion"] = async (q) => {
       const res = await apiPost<{ questionIds: string[] }>(baseURL, "/internal/test/seed", { questions: [q] });
-      const id = res.questionIds[0];
+      const id = firstOrThrow(res.questionIds, "questionId");
       seededQuestionIds.push(id);
       return id;
     };

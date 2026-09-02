@@ -131,6 +131,7 @@ test.describe("git branch-list filter + worker fold (card a044b33b)", () => {
     const branchesPane = page.locator('[data-git-pane="branches"]');
     const filter = branchesPane.getByPlaceholder("filter branches…");
     const target = WORKER_BRANCHES[4]; // loom/000000000005
+    if (!target) throw new Error("WORKER_BRANCHES has fewer than 5 entries");
 
     // BEFORE: folded away, so the target worker branch is not in the DOM.
     await expect(branchesPane.getByRole("button", { name: target })).toHaveCount(0);

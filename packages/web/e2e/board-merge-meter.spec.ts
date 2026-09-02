@@ -95,7 +95,11 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   // The live timer ticks: capture M:SS, wait past a second boundary, and assert it ADVANCED.
   const timer = card.getByText(/^\d+:\d{2}$/);
   await expect(timer).toBeVisible();
-  const toSecs = (t: string) => { const [m, s] = t.split(":").map(Number); return m * 60 + s; };
+  const toSecs = (t: string) => {
+    const [m, s] = t.split(":").map(Number);
+    if (m === undefined || s === undefined) throw new Error(`toSecs: unexpected timer text ${JSON.stringify(t)}`);
+    return m * 60 + s;
+  };
   const t1 = toSecs((await timer.textContent()) ?? "0:00");
   await expect.poll(async () => toSecs((await timer.textContent()) ?? "0:00"), { timeout: 4000 }).toBeGreaterThan(t1);
   await shoot(card, "merge-running.png");
