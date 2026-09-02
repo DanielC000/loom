@@ -65,6 +65,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // checked against the same CRLF-on-this-host policy as everything else, like any other file that never
 // carried a NUL.
 //
+// ⚠️ THE DISCLOSED RESIDUAL (card 5df7bcee) AND WHY IT IS NOT FIXED HERE: this guard's own `containsNul`
+// skip, combined with `fixed-wait-witness-guard.mjs`'s binary-diff handling (card 71231839), means a
+// NUL-bearing file under `packages/daemon/test/*.mjs` was silently unscanned by BOTH guards — neither
+// announcing it. Card `223cb2df` already settled that widening THIS guard's NUL-skip population is the
+// wrong fix (false rejections on a harmless state, and it still misses the real thing) — that
+// conclusion is untouched here. Instead, `fixed-wait-witness-guard.mjs` now asserts the precondition
+// never holds at all for that one shared directory: no file matching `packages/daemon/test/*.mjs` may
+// carry a raw NUL byte (see that guard's own header). This guard's `containsNul` skip stays exactly as
+// designed — for anything outside that directory (e.g. `Companion.tsx`, above) a NUL-bearing file
+// remains a legitimate, deliberate exemption with no sibling assertion backing it, because nothing
+// requires one there.
+//
 // CROSS-HOST CORRECTNESS: `core.autocrlf` is read LIVE (`git config --get core.autocrlf`), not assumed
 // true. On this Windows dev host it is `true`, so an unpinned text=auto file is expected to be CRLF on
 // disk. CI (`.github/workflows/ci.yml`) checks this repo out on `ubuntu-latest` via `actions/checkout`,

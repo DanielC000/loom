@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
-import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles, scanModifiedTrackedTestFiles } from "./fixed-wait-witness-guard.mjs";
+import { parseAddedLineNumbers, scanFileForUnwitnessedHits, isWaitIdiomLine, blockBounds, computeBlockCommentLines, listUntrackedTestFiles, scanModifiedTrackedTestFiles, listNulBearingTestFiles } from "./fixed-wait-witness-guard.mjs";
 import { sleepPast } from "./_wait.mjs";
 import { mkdtempManaged, cleanupPathSync, unregister } from "./_tmp-fixture.mjs";
 
@@ -524,7 +524,57 @@ check(`isWaitIdiomLine: a one-line block comment ("/** ${SLEEP_KW}(20); */") is 
   if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
 }
 
+// ── listNulBearingTestFiles: card 5df7bcee's population-level NUL assertion ────────────────────────────
+// Dependency-injected variants first (deterministic, no real fs directory needed).
+{
+  const found = listNulBearingTestFiles("/fake/test-dir",
+    () => ["clean.mjs", "also-clean.mjs", "not-mjs.txt"],
+    (p) => (p.endsWith("not-mjs.txt") ? (() => { throw new Error("should never be read — not .mjs"); })() : Buffer.from("no nul here\n")));
+  check("listNulBearingTestFiles: a clean population (no NUL; a non-.mjs sibling is never even read) reports zero",
+    JSON.stringify(found) === "[]");
+}
+{
+  const found = listNulBearingTestFiles("/fake/test-dir",
+    () => ["clean.mjs", "nul-bearing.mjs"],
+    (p) => (p.endsWith("nul-bearing.mjs") ? Buffer.from([0x61, 0x00, 0x62]) : Buffer.from("clean\n")));
+  check("listNulBearingTestFiles: a NUL-bearing .mjs file is named, a clean sibling is not",
+    JSON.stringify(found) === JSON.stringify(["nul-bearing.mjs"]));
+}
+{
+  const onReaddirFailure = listNulBearingTestFiles("/fake/test-dir", () => { throw new Error("ENOENT"); });
+  check("listNulBearingTestFiles: a readdir failure returns null (could-not-check, not a false 'found none')", onReaddirFailure === null);
+}
+{
+  // THE REAL RED-PROOF (card 5df7bcee DoD-2): a real, throwaway fixture directory (never the real shared
+  // packages/daemon/test/ dir — this suite runs test files concurrently, same isolation discipline as the
+  // fixture-repo blocks elsewhere in this file), driven at the real fs — introduce a genuinely NUL-bearing
+  // file, confirm the check FAILS, remove it, confirm the check goes clean again. "The expected steady
+  // state is 'no such file exists,' which is exactly what a broken check also reports" (the card's own
+  // words) — so this positive control matters doubly here: a check that always returns [] would pass the
+  // "before" and "after" assertions below for the wrong reason, which is exactly why the RED assertion in
+  // between is the one that actually matters.
+  const fixtureRoot = mkdtempManaged("loom-fwwg-nul-fixture-");
+  fs.writeFileSync(path.join(fixtureRoot, "clean.mjs"), "// clean, no nul\n");
+  const cleanBefore = listNulBearingTestFiles(fixtureRoot);
+  check("listNulBearingTestFiles RED-PROOF (before): a real, clean throwaway directory reports zero",
+    Array.isArray(cleanBefore) && cleanBefore.length === 0);
+
+  const nulPath = path.join(fixtureRoot, "nul-bearing.mjs");
+  fs.writeFileSync(nulPath, Buffer.from([0x2f, 0x2f, 0x00, 0x0a])); // "//\x00\n" — a real raw NUL byte on disk
+  const redResult = listNulBearingTestFiles(fixtureRoot);
+  check("listNulBearingTestFiles RED-PROOF: a real NUL byte introduced on disk IS caught, the clean sibling is not",
+    Array.isArray(redResult) && redResult.includes("nul-bearing.mjs") && !redResult.includes("clean.mjs"));
+
+  fs.rmSync(nulPath);
+  const cleanAfter = listNulBearingTestFiles(fixtureRoot);
+  check("listNulBearingTestFiles RED-PROOF (after removal): the same directory reports zero again once the NUL-bearing file is gone",
+    Array.isArray(cleanAfter) && cleanAfter.length === 0);
+
+  cleanupPathSync(fixtureRoot);
+  if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, does not false-positive on the real 003a1080 specimen, correctly names a REAL untracked file the diff-scan itself cannot see (card 40643460), and correctly catches (or clears) a REAL staged-but-uncommitted tracked-file edit the diff-scan also cannot see (card 21e12d47)."
+  ? "\n✅ ALL PASS — fixed-wait-witness-guard's detection logic goes RED on an unwitnessed hit, GREEN for each of the three witness forms plus the windowMs/positiveControl pairing, is diff-scoped by construction, does not false-positive on the real 003a1080 specimen, correctly names a REAL untracked file the diff-scan itself cannot see (card 40643460), correctly catches (or clears) a REAL staged-but-uncommitted tracked-file edit the diff-scan also cannot see (card 21e12d47), and correctly catches (and clears on removal) a REAL NUL-bearing file that both this guard and working-tree-eol-guard.mjs would otherwise silently skip (card 5df7bcee)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

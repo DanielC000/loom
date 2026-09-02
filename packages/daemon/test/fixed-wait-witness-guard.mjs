@@ -75,6 +75,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // actual target — see the card) always share the canonical repo's `.git`, so `origin/HEAD` and the local
 // mainline branch are always resolvable there; this fallback only ever fires off that path.
 //
+// Card 5df7bcee — THE NUL-BEARING-FILE ASSERTION (`listNulBearingTestFiles`, called from `main` below):
+// a file whose CURRENT content carries a raw NUL byte is content-sniffed as binary by git, which means
+// its diff registers with an EMPTY added-line set (see `parseAddedLineNumbers`'s own header on the
+// `71231839` binary-header fix) — this guard then has no line info to scan it with. The SAME file is
+// ALSO skipped by `working-tree-eol-guard.mjs`, by explicit, good-reason design (see that guard's own
+// header) — so a NUL-bearing file inside this guard's scan population was silently unscanned by BOTH
+// guards, with neither announcing it (disclosed at merge, not discovered later — see card `5df7bcee`).
+// Rather than try to scan such a file's content (structurally impossible from a diff that conveys zero
+// line-level information), `listNulBearingTestFiles` asserts the PRECONDITION never holds at all: no
+// file currently matching `TEST_GLOB` may carry a raw NUL byte, full stop. This is checked against
+// on-disk state, not a diff, so a transition commit that REMOVES a NUL (like `71231839`'s own fix) is
+// unaffected — by the time this runs, that file's current content has no NUL and this check stays
+// silent; only a file that STILL or NEWLY carries one fails, pointing its author at the same escaped
+// `\x00` pattern `71231839` already established as this project's way of representing that byte in a
+// test fixture without tripping git's content-sniffing. `working-tree-eol-guard.mjs`'s own NUL-skip is
+// deliberately left untouched (card `223cb2df` — widening it adds false rejections on a harmless state
+// AND still misses the real thing); this assertion closes the gap at its source instead, for the one
+// directory both guards actually share.
+//
 // Run: node packages/daemon/test/fixed-wait-witness-guard.mjs (needs a build — imports dist/git/worktrees.js)
 import fs from "node:fs";
 import path from "node:path";
@@ -84,6 +103,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 const TEST_GLOB = "packages/daemon/test/*.mjs";
+const TEST_DIR = path.join(REPO_ROOT, "packages", "daemon", "test");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -354,6 +374,36 @@ export function listUntrackedTestFiles(repoRoot, testGlob, execFileSyncFn = exec
 }
 
 /**
+ * Card 5df7bcee — THE NUL-BEARING-FILE ASSERTION. See this file's own header for the full rationale
+ * (why a NUL-bearing file is unscannable by both this guard and `working-tree-eol-guard.mjs`, and why
+ * asserting the precondition never holds is the right shape rather than trying to scan such a file).
+ * Enumerates the CURRENT top-level `.mjs` files directly under `testDir` (never a recursive walk — the
+ * same scope `TEST_GLOB` names) and flags any whose raw on-disk bytes contain a NUL. Deliberately reads
+ * the WORKING-TREE bytes, not a diff — a transition commit that removes a NUL is judged by what the file
+ * looks like now, not by what its diff happened to render. `readdirSyncFn`/`readFileSyncFn` are
+ * injectable (same DI shape as `listUntrackedTestFiles` above) so the self-test can drive this against a
+ * throwaway directory with no real git/repo involved. Returns `null` (not `[]`) if the directory can't be
+ * listed at all — a listing failure is "could not check", never a false "found none" (same null-vs-empty
+ * contract as `listUntrackedTestFiles`/`scanModifiedTrackedTestFiles`).
+ */
+export function listNulBearingTestFiles(testDir, readdirSyncFn = fs.readdirSync, readFileSyncFn = fs.readFileSync) {
+  let names;
+  try {
+    names = readdirSyncFn(testDir).filter((n) => n.endsWith(".mjs"));
+  } catch {
+    return null;
+  }
+  const found = [];
+  for (const name of names) {
+    let buf;
+    try { buf = readFileSyncFn(path.join(testDir, name)); }
+    catch { continue; } // gone from the working tree since the listing (a race, not a violation)
+    if (buf.includes(0)) found.push(name);
+  }
+  return found;
+}
+
+/**
  * Card 21e12d47 — THE MODIFIED-TRACKED-FILE SCAN, the OTHER half of the blind spot `40643460` (above)
  * doesn't cover. `listUntrackedTestFiles` only ever sees a file that was NEVER `git add`ed. A file that
  * IS tracked but has been changed since `HEAD` — staged, unstaged, or both — is neither untracked (so
@@ -493,6 +543,23 @@ async function main() {
         (modifiedScan.files.length > 0 ? ` (${modifiedScan.files.join(", ")})` : "") +
         `, found ${modifiedScan.hits.length}`,
       modifiedScan.hits.length === 0
+    );
+  }
+
+  // Card 5df7bcee — THE NUL-BEARING-FILE ASSERTION (see this file's own header for the full rationale).
+  // Checked against the CURRENT on-disk population, not a diff — a listing failure is a visibility-check
+  // hiccup (same fail-safe posture as the untracked/modified checks above), not evidence either way.
+  const nulBearingTestFiles = listNulBearingTestFiles(TEST_DIR);
+  if (nulBearingTestFiles === null) {
+    console.log(`[fixed-wait-witness-guard] could not enumerate ${TEST_GLOB} to check for NUL-bearing files (readdir failed) — skipping the NUL-bearing-file assertion this run`);
+  } else {
+    check(
+      `no file matching ${TEST_GLOB} carries a raw NUL byte (found ${nulBearingTestFiles.length}` +
+        (nulBearingTestFiles.length > 0
+          ? `: ${nulBearingTestFiles.join(", ")} — a NUL-bearing file is content-sniffed as binary by git and is invisible to BOTH this guard's diff-scoped scan and working-tree-eol-guard.mjs's EOL check (card 5df7bcee); escape the byte as \\x00 instead (see card 71231839)`
+          : "") +
+        ")",
+      nulBearingTestFiles.length === 0
     );
   }
 
