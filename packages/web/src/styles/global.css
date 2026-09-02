@@ -121,6 +121,50 @@ body {
   }
 }
 
+/* ── Settings field grids ────────────────────────────────────────────────────────
+   Groups of labelled form fields (Orchestration Caps, Rate Limits, Watcher Cadences, Timeouts,
+   Memory, the connection guard, the poll-job form). Two separate things have to be true for these to
+   survive a phone width, and the fixed inline `1fr 1fr 1fr` track lists these replace had NEITHER:
+     1. The COLUMN COUNT has to drop — a fixed track list holds three fields side by side at 420px.
+     2. The items have to be ABLE to shrink. Each field is a <label> wrapping an <input>, and an
+        <input>'s intrinsic width (its default `size`) is that grid item's min-content floor. Under
+        the grid item's default `min-width: auto`, a `1fr` track therefore silently FLOORS at that
+        width instead of dividing the container — three tracks resolved to 200px each and overflowed
+        a ~300px panel, even though `1fr` "should" have fitted by construction.
+   `min-width: 0` on the items is what actually removes the overflow (the inputs then stretch to
+   whatever track they are given, at any width); the breakpoints keep the result READABLE rather than
+   three slivers. 560px is the same phone breakpoint the board grid above uses; 760px is where three
+   numeric fields plus their uppercase labels stop being legible three-up in this page's 820px column. */
+.loom-field-grid {
+  display: grid;
+  gap: 12px;
+}
+.loom-field-grid > * {
+  min-width: 0;
+}
+.loom-field-grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+.loom-field-grid-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+/* A narrow leading control (e.g. an HTTP-method <select>) beside a wide one (a path <input>). */
+.loom-field-grid-aside {
+  grid-template-columns: 120px 1fr;
+}
+@media (max-width: 760px) {
+  .loom-field-grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .loom-field-grid-2,
+  .loom-field-grid-3,
+  .loom-field-grid-aside {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Skeleton shimmer for the board's first-load placeholder — a faint breathing pulse (dropped under
    prefers-reduced-motion below). Beats a spinner: the lane layout is already in place as it loads. */
 @keyframes loom-skeleton-pulse {

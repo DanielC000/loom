@@ -439,7 +439,7 @@ function ConfigEditor({ project }: { project: Project }) {
 
       <Panel>
         <SectionLabel>Orchestration Caps</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        <div className="loom-field-grid loom-field-grid-3">
           <NumField label="Max workers / manager" value={maxWorkers} set={setMaxWorkers} effective={resolved.orchestration.maxConcurrentWorkers} def={defaults.orchestration.maxConcurrentWorkers} />
           <NumField label="Max managers (no scheduler effect)" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} note="The cron Scheduler is one fleet-wide service; its manager cap is set under Settings → Global → Scheduler, not per-project here." />
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
@@ -462,7 +462,7 @@ function ConfigEditor({ project }: { project: Project }) {
             <Hint>run in this project's repo by the `deploy` manager tool · host-exec, human-set only · {effHint(resolved.orchestration.deployCommand || "none")}</Hint>
           </label>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+        <div className="loom-field-grid loom-field-grid-2" style={{ marginTop: 12 }}>
           <MsField label="Gate command timeout (s)" value={gateTimeout} set={setGateTimeout} effectiveMs={resolved.orchestration.gateCommandTimeoutMs} defMs={defaults.orchestration.gateCommandTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs} />
           <MsField label="Deploy command timeout (s)" value={deployTimeout} set={setDeployTimeout} effectiveMs={resolved.orchestration.deployCommandTimeoutMs} defMs={defaults.orchestration.deployCommandTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs} />
           <MsField label="Alert webhook timeout (s)" value={webhookTimeout} set={setWebhookTimeout} effectiveMs={resolved.orchestration.alertWebhookTimeoutMs} defMs={defaults.orchestration.alertWebhookTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs} />
@@ -544,7 +544,7 @@ function ConfigEditor({ project }: { project: Project }) {
       <Panel>
         <SectionLabel>Memory</SectionLabel>
         <Hint>Shared project-notes tuning for the FTS5 kickoff-injection budget (card 2fd9abf9).</Hint>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 8 }}>
+        <div className="loom-field-grid loom-field-grid-3" style={{ marginTop: 8 }}>
           <NumField label="Budget (tokens)" value={memoryBudgetTokens} set={setMemoryBudgetTokens}
             effective={resolved.memory.budgetTokens} def={defaults.memory.budgetTokens} note="0-8000" />
           <NumField label="Related notes (top K)" value={memoryTopK} set={setMemoryTopK}
@@ -942,7 +942,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
 
       <Panel>
         <SectionLabel>Rate Limits</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        <div className="loom-field-grid loom-field-grid-3">
           {group("rateLimit").map(renderField)}
           <NumField label="Exhausted threshold (%)" value={exhaustedThresholdPct} set={setExhaustedThresholdPct}
             effective={resolved.rateLimit.exhaustedThresholdPct} def={defaults.rateLimit.exhaustedThresholdPct}
@@ -952,14 +952,14 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
 
       <Panel>
         <SectionLabel>Watcher Cadences</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        <div className="loom-field-grid loom-field-grid-3">
           {group("watchers").map(renderField)}
         </div>
       </Panel>
 
       <Panel>
         <SectionLabel>Timeouts</SectionLabel>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        <div className="loom-field-grid loom-field-grid-3">
           {group("timeouts").map(renderField)}
         </div>
       </Panel>
@@ -971,7 +971,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           response-size cap, and per-connection rate limit that keep a hung/huge upstream response, or a
           runaway agent loop, from wedging the daemon or burning through a connection&apos;s quota.
         </Hint>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+        <div className="loom-field-grid loom-field-grid-2" style={{ marginTop: 12 }}>
           <MsField label="Request timeout (s)" value={connRequestTimeoutS} set={setConnRequestTimeoutS}
             effectiveMs={resolved.connections.requestTimeoutMs} defMs={defaults.connections.requestTimeoutMs} unit="s" />
           <NumField label="Max response bytes" value={connMaxResponseBytes} set={setConnMaxResponseBytes}
@@ -1972,7 +1972,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
           )}
       </label>
 
-      <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 10 }}>
+      <div className="loom-field-grid loom-field-grid-aside" style={{ gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Method</span>
           <Select value={method} onChange={(e) => setMethod(e.target.value)}>
@@ -1992,7 +1992,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
         {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
       </label>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+      <div className="loom-field-grid loom-field-grid-2" style={{ gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Items path</span>
           <Input value={itemsPath} onChange={(e) => setItemsPath(e.target.value)} placeholder="(root array)" spellCheck={false} />
@@ -2110,13 +2110,16 @@ function CapabilitiesPanel() {
           {rows.length === 0 && !adding && !isLoading && (
             <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No capabilities yet.</span>
           )}
+          {/* flexWrap + the description's minWidth:0 keep each row inside the panel at phone width: a
+              nowrap ellipsised flex item defaults to `min-width: auto`, so it refuses to shrink below
+              its FULL text width and pushes the row (and the page) sideways instead of ellipsising. */}
           {rows.map((c) => (
-            <div key={c.slug} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+            <div key={c.slug} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
               <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>{c.kind}</span>
               {c.builtin && <Badge tone="muted">builtin</Badge>}
               {c.requiresConnection && <Badge tone="cyan">needs connection</Badge>}
-              <span style={{ flex: 1, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
+              <span style={{ flex: 1, minWidth: 0, color: color.textMuted, fontSize: 12, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.description}</span>
               {!c.builtin && c.id && (
                 <Button variant="danger" disabled={remove.isPending}
                   onClick={() => { if (window.confirm(`Delete capability "${c.name}"? Any Profile granting it will simply skip mounting it.`)) remove.mutate(c.id!); }}>
