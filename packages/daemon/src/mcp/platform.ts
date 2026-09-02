@@ -4,7 +4,7 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
 import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig, ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
@@ -52,6 +52,8 @@ const EVENT_SEARCH_VALID_KINDS_SET = new Set<string>(ALL_ORCHESTRATION_EVENT_KIN
 const EVENT_SEARCH_VALID_KINDS_LIST = [...ALL_ORCHESTRATION_EVENT_KINDS].sort().join(", ");
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
+import { resolvePlatformLeadResumeDocPath, lineageRootId } from "../sessions/platform-lead-prompt.js";
+import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, type TaskWithMerged, type TaskCounts } from "./tasks.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
@@ -149,6 +151,26 @@ const resumeDocFilenameSchema = z
  *  (which restates it in the field's own display unit). */
 const msBounded = (b: MsBounds) => z.number().int().min(b.min).max(b.max).optional();
 
+// Card 1069c8e1 — one entry of a seat's `orchestration.rotationMarkers` (see RotationMarker in
+// @loom/shared). Benign (a plain text token, no host-exec/exfil capability), so — like
+// resumeDocFilenameSchema above — it stays on the agent path too; see mergeConfigOverride's
+// additiveOnlyRotationGuard for the write-time asymmetry that keeps an agent from silently WEAKENING
+// this list even though it can freely EXTEND it.
+const rotationMarkerSchema = z
+  .object({
+    token: z.string().trim().min(1).max(500),
+    caseSensitive: z.boolean().optional(),
+    note: z.string().max(2000).optional(),
+  })
+  .strict();
+// Code review (card 1069c8e1, MAJOR): the ONE place this cap lives — read by the schema below AND by
+// additiveMergeRotationMarkers' post-union re-clamp, so the two can never drift. Before the union-merge
+// existed, a schema max alone was sufficient (each patch replaced the whole array, so the schema bounded
+// every stored value). The union merge broke that: successive additive patches can each individually
+// satisfy the schema's per-patch max while the STORED result grows past it, so the cap must also be
+// re-checked against the MERGED result, not just each incoming patch.
+const ROTATION_MARKERS_MAX_LEN = 200;
+
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
@@ -221,6 +243,16 @@ const orchestrationOverride = z.object({
   // on the agent path too (not omitted in agentOrchestrationOverride below), unlike gateCommand/
   // alertWebhook — but see resumeDocFilenameSchema's own doc for why it still needs strict validation.
   resumeDocFilename: resumeDocFilenameSchema.optional(),
+  // Card 1069c8e1 — per-seat rotation-integrity data for `resume_doc_check`. All three are benign
+  // (plain text/counts, no host-exec/exfil capability), so they stay on the agent path too — but see
+  // mergeConfigOverride's additiveOnlyRotationGuard: on every AGENT-facing config-write path
+  // (manager project_update, setup project_configure) rotationMarkers only ever GROWS and
+  // rotationLiveCommitmentsFloor only ever RISES; only THIS platform route's project_configure (P3,
+  // human-equivalent) and the human REST PATCH can shrink either one. A generous cap on the array
+  // guards a fat-fingered/pasted value from bloating every kickoff's config payload.
+  rotationMarkers: z.array(rotationMarkerSchema).max(ROTATION_MARKERS_MAX_LEN).optional(),
+  rotationLiveCommitmentsHeading: z.string().trim().max(500).optional(),
+  rotationLiveCommitmentsFloor: z.number().int().min(0).max(10000).optional(),
 }).strict();
 // Obsidian auto-start. `autoStart` (boolean, OS-default install location) is benign and stays on the
 // agent path; `path` is an arbitrary host EXECUTABLE the daemon-spawned preflight launches — host-launch
@@ -438,13 +470,121 @@ function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, un
   }
   return out;
 }
+export interface MergeConfigOverrideOptions {
+  /**
+   * Card 1069c8e1, manager review (Q3, hardened by a code-review CRITICAL finding): when true, all
+   * THREE rotation-protection fields — `orchestration.rotationMarkers`, `rotationLiveCommitmentsFloor`,
+   * AND `rotationLiveCommitmentsHeading` — are merged ADDITIVE-ONLY instead of the plain replace-
+   * wholesale every other array/scalar gets. An existing protected marker can never be REMOVED, the
+   * floor can never be LOWERED, and — once a heading is configured — it can neither be CLEARED nor
+   * RE-POINTED to a different section (only the initial "unset -> some heading" transition is allowed);
+   * all three only ever move in the direction that ADDS protection, never the direction that removes it.
+   * (The code review that caught the missing heading leg found the exact hazard this whole guard exists
+   * for: clearing the heading leaves `configured` true — via non-empty markers — while the floor check
+   * silently goes inert, and re-pointing it can satisfy the floor against unrelated content, the same
+   * fail-open shape card `a681aed5` fixed in code, reintroduced here through config.)
+   *
+   * WHY: these two fields are the daemon's own copy of the "which markers/floor protect this seat's
+   * resume doc" decision — the exact thing card `1069c8e1` exists to protect. The Loom Orchestrator's
+   * historical marker-list edits (cards `bcd3f690`/`a681aed5`) went through a board card, a dispatched
+   * worker, a reviewed diff, and a full merge gate — a heavyweight, externally-reviewed path. A single
+   * unreviewed agent config-write call is the SAME authority at a fraction of that friction, and the
+   * friction was doing real work: under context pressure mid-rotation, hitting a refusal naming a marker
+   * it doesn't want to deal with, the cheapest path back to green for an agent is deleting the marker
+   * rather than restoring the rule it names — the guard itself becoming the casualty of the exact
+   * failure ("the rotation is where rules die") it exists to catch. Adding a marker only ever
+   * STRENGTHENS the guard (always safe); removing one WEAKENS it (the dangerous direction) — so only
+   * ADDING is left on the low-friction agent path.
+   *
+   * Set `true` on every AGENT-facing config-write call site (manager `project_update`, setup
+   * `project_configure`/`project_create`). Leave it unset (default false, plain replace) on the
+   * human-equivalent Platform Lead `project_configure` (this file, P3-elevated) and the human REST
+   * PATCH path — a deliberate retirement of a commitment marker (e.g. the ceremony cut in
+   * `bcd3f690`/`a681aed5`) is exactly the class of decision that should reach a human, and under
+   * additive-only that legitimate case still works: it just goes through the human, which is where it
+   * already went.
+   */
+  additiveOnlyRotationGuard?: boolean;
+}
+
+/**
+ * Merges `patch.orchestration.rotationMarkers` onto `existing`'s by TOKEN UNION: every marker already
+ * present survives UNCHANGED (its fields are not updated even if the patch names the same token with
+ * different `caseSensitive`/`note` — the simplest rule that can't be used to quietly weaken an existing
+ * marker, e.g. by flipping caseSensitive from false to true and making a previously-passing text fail to
+ * match); a patch entry whose token is not already present is APPENDED. Returns undefined (no change)
+ * when the patch didn't touch this field at all.
+ */
+function additiveMergeRotationMarkers(
+  existingMarkers: readonly RotationMarker[] | undefined,
+  patchMarkers: readonly RotationMarker[] | undefined,
+): RotationMarker[] | undefined {
+  if (patchMarkers === undefined) return undefined;
+  const existingTokens = new Set((existingMarkers ?? []).map((m) => m.token));
+  return [...(existingMarkers ?? []), ...patchMarkers.filter((m) => !existingTokens.has(m.token))];
+}
+
+function applyAdditiveOnlyRotationGuard(
+  existing: ProjectConfigOverride, patch: ProjectConfigOverride, merged: Record<string, unknown>,
+): Record<string, unknown> {
+  const existingOrch = existing?.orchestration as Record<string, unknown> | undefined;
+  const patchOrch = patch?.orchestration as Record<string, unknown> | undefined;
+  if (!patchOrch) return merged; // patch never touched orchestration at all — nothing to guard
+  const mergedOrch = { ...(merged.orchestration as Record<string, unknown>) };
+
+  const additiveMarkers = additiveMergeRotationMarkers(
+    existingOrch?.rotationMarkers as RotationMarker[] | undefined,
+    patchOrch.rotationMarkers as RotationMarker[] | undefined,
+  );
+  if (additiveMarkers !== undefined) {
+    // Code review (MAJOR): the union above can exceed the schema's per-PATCH cap even though every
+    // individual patch stays within it (each patch is validated alone, before this merge ever runs) —
+    // clamp the MERGED result too, so successive additive patches can't grow the stored array without
+    // bound. Truncating (not refusing the whole patch) keeps this consistent with "additive-only never
+    // hard-fails a legitimate add" — the earliest-added markers (existing, then patch order) win, so a
+    // caller pushed past the cap loses only its newest, lowest-priority entries.
+    mergedOrch.rotationMarkers = additiveMarkers.length > ROTATION_MARKERS_MAX_LEN
+      ? additiveMarkers.slice(0, ROTATION_MARKERS_MAX_LEN)
+      : additiveMarkers;
+  }
+
+  if (patchOrch.rotationLiveCommitmentsFloor !== undefined) {
+    const existingFloor = (existingOrch?.rotationLiveCommitmentsFloor as number | undefined) ?? 0;
+    mergedOrch.rotationLiveCommitmentsFloor = Math.max(existingFloor, patchOrch.rotationLiveCommitmentsFloor as number);
+  }
+
+  // Code review (CRITICAL): rotationLiveCommitmentsHeading is the THIRD leg of this guard, not just the
+  // two above — it was missing entirely, and it is NOT a "grow only" field the way markers/floor are (a
+  // single string has no notion of monotonic growth). Two agent-reachable attacks if left unguarded:
+  // (1) clear it to "" — the floor check silently goes DISABLED while `configured` stays true (markers
+  //     are still non-empty), so the response reads as a fully-configured pass with the floor never
+  //     applied at all; (2) RE-POINT it to a DIFFERENT non-empty heading whose section happens to carry
+  //     enough numbered items to satisfy the floor against UNRELATED content — the exact fail-open shape
+  //     card `a681aed5` fixed in the CODE, reintroduced here through CONFIG (rotation-check.ts's
+  //     findHeadingLine matches ANY heading line containing the configured token as a substring, so it
+  //     has no way to know the re-pointed heading is "the wrong one" — that distinction only exists at
+  //     the human decision to point it there in the first place).
+  // FIX: once a seat has ANY heading configured (existing non-empty), an agent patch can neither clear
+  // nor re-point it — only the ONE-TIME "" -> non-empty transition (turning the floor check on for the
+  // first time) is additive in the sense this guard protects. A patch that re-submits the SAME value is
+  // an inert no-op either way.
+  if (patchOrch.rotationLiveCommitmentsHeading !== undefined) {
+    const existingHeading = (existingOrch?.rotationLiveCommitmentsHeading as string | undefined) ?? "";
+    mergedOrch.rotationLiveCommitmentsHeading = existingHeading === "" ? patchOrch.rotationLiveCommitmentsHeading : existingHeading;
+  }
+
+  return { ...merged, orchestration: mergedOrch };
+}
+
 export function mergeConfigOverride(
-  existing: ProjectConfigOverride, patch: ProjectConfigOverride,
+  existing: ProjectConfigOverride, patch: ProjectConfigOverride, options?: MergeConfigOverrideOptions,
 ): ProjectConfigOverride {
-  return deepMergeRecord(
+  const merged = deepMergeRecord(
     (existing ?? {}) as Record<string, unknown>,
     (patch ?? {}) as Record<string, unknown>,
-  ) as ProjectConfigOverride;
+  );
+  const guarded = options?.additiveOnlyRotationGuard ? applyAdditiveOnlyRotationGuard(existing, patch, merged) : merged;
+  return guarded as ProjectConfigOverride;
 }
 
 /**
@@ -1748,6 +1888,83 @@ export class PlatformMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // resume_doc_check — the Lead-surface twin of the manager's orchestration.ts `resume_doc_check`
+    // (card 1069c8e1). Before this the Platform Lead's resume doc had NO rotation protection at all
+    // (unlike the Loom Orchestrator's committed rotation-gate.mjs) — this is the first time the Lead
+    // gains it. Resolves the Lead's OWN lineage-scoped doc via the SAME resolvePlatformLeadResumeDocPath
+    // spawn-time uses, so it can never check a different file than the one it was actually told about.
+    server.registerTool(
+      "resume_doc_check",
+      {
+        description:
+          "Card 1069c8e1: check YOUR OWN resume doc's rotation integrity against the Platform project's " +
+          "configured protected-marker set (orchestration.rotationMarkers) and, if configured, its " +
+          "LIVE-COMMITMENTS-style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
+          "rotationLiveCommitmentsFloor). Resolves and reads your lineage's ACTIVE resume doc ITSELF — " +
+          "there is NO path argument for it, so you can never check the wrong file (the optional " +
+          "`archivePath` below IS a path argument, for a DIFFERENT file — see its own note). Call with no arguments any time " +
+          "(lint-mode: markers + floor only, no rotation implied). ⚠️ `configured:false` means this seat " +
+          "has NOT set up any protection yet — an unconfigured seat's `ok:true` is VACUOUS (nothing was " +
+          "actually checked), never mistake it for 'checked and passed.' You (as the human-equivalent " +
+          "elevated role) can freely add, remove, or re-point ANY of rotationMarkers/" +
+          "rotationLiveCommitmentsHeading/rotationLiveCommitmentsFloor via project_configure on the " +
+          "Platform project — unlike a manager's project_update, which can only GROW its own project's " +
+          "set (see project_configure's own note on the asymmetry). ⚠️ HONEST LIMIT: every check here is an " +
+          "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
+          "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
+          "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
+          "lost) the idea. At an actual ROTATION: pass `archivePath` to also verify the archive file this " +
+          "rotation is producing exists and is non-empty — it must resolve INSIDE this project's " +
+          "vaultPath (refused otherwise), mirroring where the rotation doctrine already puts an archive " +
+          "(a `<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count " +
+          "YOU measured before editing) to verify the doc actually shrank — this is CUT-scoped, not " +
+          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation).",
+        inputSchema: strictShape({
+          archivePath: z.string().optional(),
+          preEditBytes: z.number().int().positive().optional(),
+        }),
+      },
+      async ({ archivePath, preEditBytes }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        const session = db.getSession(callerSessionId);
+        const project = session?.projectId ? db.getProject(session.projectId) : undefined;
+        if (!session || !project) return ok({ error: "no project bound to this session" });
+        // Code review (MINOR — mirror the manager twin's guard, orchestration.ts): an empty vaultPath
+        // would resolve to the BARE basename "PLATFORM-LEAD-RESUME.md" — RELATIVE to the daemon
+        // process's own cwd, which under self-hosting is a repo working tree. resolvePlatformLeadResumeDocPath
+        // is documented IMPURE (it can copyFileSync a seed onto a non-primary lineage's path), so an
+        // unguarded empty vaultPath here could write a stray file into that cwd. Refuse before resolving.
+        if (!project.vaultPath) return ok({ error: "this project has no vaultPath — no resume doc to check" });
+        const resolved = resolveConfig(project.config, db.getPlatformConfig());
+        // Code review (🟡, noted not fixed — near-unreachable in practice): resolvePlatformLeadResumeDocPath
+        // is IMPURE (first-ever-lineage db.setMeta claim, best-effort copyFileSync seed for a later
+        // lineage) even though this is a read-mostly "check" tool. In practice this is idempotent by the
+        // time a session can call an MCP tool: spawn-time composePlatformLeadStartupPrompt already
+        // resolved (and thus claimed/seeded) this exact lineage's path before the session's first turn,
+        // so this call re-resolves the SAME already-settled path rather than performing the side effect
+        // fresh. Left as-is rather than duplicating resolution logic to avoid it.
+        const resumeDocPath = resolvePlatformLeadResumeDocPath(db, project.vaultPath, lineageRootId(db, session));
+        // Code review (🟡): contain a caller-supplied archivePath under this project's own vaultPath —
+        // see containUnderVault's own doc for why (it's a real host path reaching fs.statSync).
+        let containedArchivePath: string | null = null;
+        if (archivePath) {
+          const contained = containUnderVault(project.vaultPath, archivePath);
+          if (!contained.ok) return ok({ error: contained.error });
+          containedArchivePath = contained.value;
+        }
+        return ok(
+          runResumeDocCheck({
+            resumeDocPath,
+            markers: resolved.orchestration.rotationMarkers,
+            commitmentsHeading: resolved.orchestration.rotationLiveCommitmentsHeading,
+            commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
+            archivePath: containedArchivePath,
+            preEditBytes: preEditBytes ?? null,
+          }),
+        );
       },
     );
 

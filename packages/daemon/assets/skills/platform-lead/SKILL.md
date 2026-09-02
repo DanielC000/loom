@@ -215,7 +215,17 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    trim-and-lose:** (1) move the current doc to a dated archive sibling — `<name>.archive/<YYYY-MM-DD>-NN.md`
    — old notes preserved intact, nothing deleted; (2) start a FRESH active doc holding only the live state
    plus a one-line pointer ("older provenance in `<name>.archive/`, newest first"). A successor always reads
-   the small active doc; history stays retrievable in the archive. **On boot, if the injected lineage doc's
+   the small active doc; history stays retrievable in the archive. **"The rotation is where rules die":** a
+   rewrite can silently drop a durable rule carried only as a line in this doc, and nobody notices until a
+   successor needs it. If your Platform project's config has a protected-marker set
+   (`orchestration.rotationMarkers`, and optionally `rotationLiveCommitmentsHeading`/
+   `rotationLiveCommitmentsFloor`), call the **`resume_doc_check`** MCP tool before promoting a rotated
+   doc — it resolves and reads YOUR OWN lineage's doc itself (no path to get wrong) and refuses
+   (`ok:false`, naming the missing token) if the rotation silently dropped one. `configured:false` means
+   nothing is set up yet — not a pass, nothing checked. Its own `honestLimitNote` is the honest limit: an
+   exact-substring grep proves literal text survived, never that no meaning survived a rewording. You (as
+   the human-equivalent elevated role) can both add AND remove markers via `project_configure` on the
+   Platform project. **On boot, if the injected lineage doc's
    "Last updated" materially lags the board/git, inherit the freshest sibling handoff** via a DIRECTED
    listing (never a broad Glob — a home-dir Glob hits the search timeout), then rewrite from it. Use
    **plain-ASCII section headers** — no emoji or other unicode in headings, which break the exact-string

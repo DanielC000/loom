@@ -12022,7 +12022,10 @@ export class SessionService {
       // whole is deliberately NOT re-validated — re-running the agent validator over a result that
       // legitimately preserves a pre-existing human-set key (e.g. gateCommand) would falsely reject it.
       // Validate the patch, merge, store — see mergeConfigOverride's own doc comment for the full reasoning.
-      const merged = mergeConfigOverride(project.config, v.value);
+      // additiveOnlyRotationGuard (card 1069c8e1): this is an AGENT-facing config-write call site, so a
+      // manager's own patch can GROW its rotationMarkers/rotationLiveCommitmentsFloor but never shrink
+      // them — see MergeConfigOverrideOptions' own doc for why.
+      const merged = mergeConfigOverride(project.config, v.value, { additiveOnlyRotationGuard: true });
       // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned cards
       // to the landing lane instead of orphaning them on a non-existent column; a non-column patch stays
       // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path,

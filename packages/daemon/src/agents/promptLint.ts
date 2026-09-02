@@ -45,7 +45,7 @@ export const PLATFORM_TOOLS: readonly string[] = [
   "profile_get", "profile_update", "project_archive", "project_configure", "project_create",
   "project_get", "project_init", "project_task_create", "project_task_get", "project_task_update",
   "project_update", "question_ask", "question_cancel", "question_pull", "question_resolve",
-  "recycle_me", "schedule_create", "schedule_delete", "schedule_get", "schedule_update",
+  "recycle_me", "resume_doc_check", "schedule_create", "schedule_delete", "schedule_get", "schedule_update",
   "session_message", "session_reap", "session_spawn", "session_stop", "session_transcript", "skill_edit",
   "skill_list", "skill_write", "template_apply", "template_list", "vault_write",
 ];
@@ -82,7 +82,7 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "gate_queue", "gate_status", "idle_report", "inbox_pull", "my_context",
   "platform_escalate", "profile_delete", "project_archive", "project_update", "question_ask",
   "question_cancel", "question_pull", "question_resolve", "recycle_me", "requests_list",
-  "schedule_create", "schedule_update", "served_status", "worker_flush", "worker_list", "worker_merge",
+  "resume_doc_check", "schedule_create", "schedule_update", "served_status", "worker_flush", "worker_list", "worker_merge",
   "worker_merge_confirm", "worker_message", "worker_reap", "worker_recycle", "worker_redirect",
   "worker_relink", "worker_report_get", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop",
   "worker_transcript",

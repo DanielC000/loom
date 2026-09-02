@@ -265,6 +265,20 @@ export interface AlertWebhook {
 }
 
 /**
+ * Card 1069c8e1 — one durable marker a resume-doc rotation must not silently drop. `token` matches as an
+ * EXACT SUBSTRING (see `resume_doc_check`'s own honest-limit note — this proves literal text survived,
+ * never that no meaning was lost to rewording). `caseSensitive` defaults to false (a concept token like
+ * "LIVE COMMITMENTS" should survive rotation regardless of exact casing); set it true only for a literal
+ * that must match verbatim (e.g. a response field name a successor greps for). `note` is free-text
+ * context for a human/agent reading the marker list, never consulted by the check itself.
+ */
+export interface RotationMarker {
+  token: string;
+  caseSensitive?: boolean;
+  note?: string;
+}
+
+/**
  * Sweep G3: merge-gate retry policy (promoted from gate-runner.ts's module-load
  * `GATE_RETRY_ENABLED`/`GATE_RETRY_SETTLE_MS` constants, card bcba83a1's env-overridable knob) — whether
  * the merge gate auto-retries ONCE on a transient-kill classification (see `classifyGateFailure` in
@@ -484,6 +498,39 @@ export interface OrchestrationConfig {
    * vault-containment check in `resolveResumeDocPath`.
    */
   resumeDocFilename: string;
+  /**
+   * Card 1069c8e1 — this seat's PROTECTED-MARKER SET for `resume_doc_check`: durable tokens a rotation of
+   * THIS resume doc must not silently drop. PER-SEAT DATA, never baked into the daemon (same pattern as
+   * `resumeDocFilename` and, outside config, a project's own "Commit scopes"/vault-taxonomy conventions) —
+   * an empty array (the default) means this seat has not yet been protected; `resume_doc_check` reports
+   * that as `configured:false`, distinct from `ok:true`, so an unconfigured seat can never read as
+   * "checked and passed." Benign (no host-exec/exfil capability) — stays on the agent-facing config path
+   * like `resumeDocFilename`, but see `mergeConfigOverride`'s `additiveOnlyRotationGuard`: on every
+   * AGENT-facing config-write path this field only ever GROWS (an agent patch can add a new marker but
+   * can never remove an existing one) — only the human-equivalent Platform Lead `project_configure` path
+   * (and the human REST PATCH) can shrink it. See that function's own doc for why.
+   */
+  rotationMarkers: RotationMarker[];
+  /**
+   * Card 1069c8e1 — the markdown HEADING (matched case-insensitively, as a real heading line — not a
+   * prose mention) that opens this seat's protected NUMBERED-LIST section (mirrors
+   * `rotation-gate.mjs`'s "LIVE COMMITMENTS" section for the Loom Orchestrator). Empty string (the
+   * default) disables the floor check entirely for this seat — not every seat protects a numbered list,
+   * only a marker-presence check applies then. The section's END boundary is anchored STRUCTURALLY by
+   * markdown heading DEPTH (the next heading at the same level or shallower), never by a heading's name —
+   * see `rotation-check.ts`'s own doc for why (card `a681aed5`'s fail-open regression is what a
+   * name-anchor produces).
+   */
+  rotationLiveCommitmentsHeading: string;
+  /**
+   * Card 1069c8e1 — the FLOOR (never an exact count — see card `34a6f07e`'s equality-bug regression) on
+   * how many `/^\d+\. /` numbered items must survive inside `rotationLiveCommitmentsHeading`'s section.
+   * Meaningless (never checked) while `rotationLiveCommitmentsHeading` is empty. Default 0. Like
+   * `rotationMarkers`, this only ever RISES on an agent-facing config-write path (see
+   * `mergeConfigOverride`'s `additiveOnlyRotationGuard`) — an agent patch can raise the floor but never
+   * lower it; only the human-equivalent Platform Lead / REST path can lower it.
+   */
+  rotationLiveCommitmentsFloor: number;
 }
 
 /**
@@ -1041,7 +1088,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1546,6 +1593,14 @@ export function resolveConfig(
       // Resume-doc basename (card c1f2f095). `??` so an explicit override survives; an empty string is
       // treated as "unset" by the resolver (resolveResumeDocPath), not by this merge.
       resumeDocFilename: override.orchestration?.resumeDocFilename ?? d.orchestration.resumeDocFilename,
+      // Card 1069c8e1 — per-seat rotation-integrity data. Plain `??` here (a normal per-project override
+      // fully replaces the default, same as every other field in this block): the ADDITIVE-ONLY
+      // asymmetry (agent patches may only grow these, never shrink them) is a config-WRITE-time guard
+      // (see mergeConfigOverride's additiveOnlyRotationGuard), not a read-time resolution rule — by the
+      // time resolveConfig runs, the stored override already reflects whatever write-time policy applied.
+      rotationMarkers: override.orchestration?.rotationMarkers ?? d.orchestration.rotationMarkers,
+      rotationLiveCommitmentsHeading: override.orchestration?.rotationLiveCommitmentsHeading ?? d.orchestration.rotationLiveCommitmentsHeading,
+      rotationLiveCommitmentsFloor: override.orchestration?.rotationLiveCommitmentsFloor ?? d.orchestration.rotationLiveCommitmentsFloor,
     },
     // Daemon-global (no per-project override): platform override (2nd arg) ?? env ?? default, mirroring
     // resolvePlatform's watcher-cadence precedence. `??` (not `||`) so an explicit 0 is preserved (0

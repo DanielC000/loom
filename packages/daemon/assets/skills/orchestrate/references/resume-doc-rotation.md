@@ -19,3 +19,18 @@ current doc to a dated archive sibling — `<name>.archive/<YYYY-MM-DD>-NN.md` �
 intact, nothing deleted; (2) start a FRESH active doc holding only the live state plus a one-line
 pointer ("older provenance in `<name>.archive/`, newest first"). A successor always reads the small
 active doc; the history stays retrievable in the archive.
+
+**"The rotation is where rules die."** A rewrite can silently drop a durable rule that was only ever
+carried as a line in this doc — nobody notices until a successor needs it and it's gone. If your project
+has configured a protected-marker set (`orchestration.rotationMarkers`, and optionally
+`rotationLiveCommitmentsHeading`/`rotationLiveCommitmentsFloor` on a numbered "live commitments"-style
+section), call the **`resume_doc_check`** MCP tool before promoting a rotated doc — it resolves and
+reads YOUR resume doc itself (no path to get wrong) and refuses (`ok:false`, naming the missing token)
+if the new doc silently dropped one. Call it with no arguments any time, not just at a rotation. **Read
+its response before trusting a green:** `configured:false` means this project hasn't set up any
+protection yet — that's not a pass, it's nothing having been checked at all. And even a real pass is a
+narrow one — its own `honestLimitNote` says why: every check is an exact-substring grep, proving a
+token's literal text survived, never that no meaning survived a rewording. If nothing is configured yet
+and you want this protection, add markers via your own project's config (additive-only from a manager
+session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
+daemon capability, not a doc convention — you don't need to build anything to use it.

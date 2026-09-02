@@ -28,6 +28,8 @@ import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { buildServedStatus } from "../served-status.js";
 import { lineageRootId } from "../sessions/platform-lead-prompt.js";
+import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
+import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import {
   authorCompanionSkill,
   listCompanionSkills,
@@ -4174,6 +4176,63 @@ export class OrchestrationMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    server.registerTool(
+      "resume_doc_check",
+      {
+        description:
+          "Card 1069c8e1: check YOUR OWN resume doc's rotation integrity against this project's " +
+          "configured protected-marker set (orchestration.rotationMarkers) and, if configured, its " +
+          "LIVE-COMMITMENTS-style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
+          "rotationLiveCommitmentsFloor). Resolves and reads your ACTIVE resume doc ITSELF — there is NO " +
+          "path argument for it, so you can never check the wrong file (the optional `archivePath` below " +
+          "IS a path argument, for a DIFFERENT file — see its own note). Call with no arguments any time (lint-mode: " +
+          "markers + floor only, no rotation implied). ⚠️ `configured:false` means this seat has NOT set " +
+          "up any protection yet — an unconfigured seat's `ok:true` is VACUOUS (nothing was actually " +
+          "checked), never mistake it for 'checked and passed.' Add markers with project_update's " +
+          "orchestration.rotationMarkers (additive-only from this session — you can add a marker but not " +
+          "remove one; ask a human/Lead to remove one). ⚠️ HONEST LIMIT: every check here is an " +
+          "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
+          "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
+          "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
+          "lost) the idea. At an actual ROTATION: pass `archivePath` to also verify the archive file this " +
+          "rotation is producing exists and is non-empty — it must resolve INSIDE this project's " +
+          "vaultPath (refused otherwise), mirroring where the rotation doctrine already puts an archive " +
+          "(a `<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count " +
+          "YOU measured before editing) to verify the doc actually shrank — this is CUT-scoped, not " +
+          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation).",
+        inputSchema: strictShape({
+          archivePath: z.string().optional(),
+          preEditBytes: z.number().int().positive().optional(),
+        }),
+      },
+      async ({ archivePath, preEditBytes }) => {
+        const managerProjectId = db.getSession(managerSessionId)?.projectId;
+        const project = managerProjectId ? db.getProject(managerProjectId) : undefined;
+        if (!project) return ok({ error: "no project bound to this session" });
+        const resolved = resolveConfig(project.config, db.getPlatformConfig());
+        const resumeDocPath = resolveResumeDocPath(project.vaultPath ?? "", resolved.orchestration.resumeDocFilename);
+        if (!resumeDocPath) return ok({ error: "this project has no vaultPath — no resume doc to check" });
+        // Code review (🟡): contain a caller-supplied archivePath under this project's own vaultPath —
+        // see containUnderVault's own doc for why (it's a real host path reaching fs.statSync).
+        let containedArchivePath: string | null = null;
+        if (archivePath) {
+          const contained = containUnderVault(project.vaultPath ?? "", archivePath);
+          if (!contained.ok) return ok({ error: contained.error });
+          containedArchivePath = contained.value;
+        }
+        return ok(
+          runResumeDocCheck({
+            resumeDocPath,
+            markers: resolved.orchestration.rotationMarkers,
+            commitmentsHeading: resolved.orchestration.rotationLiveCommitmentsHeading,
+            commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
+            archivePath: containedArchivePath,
+            preEditBytes: preEditBytes ?? null,
+          }),
+        );
       },
     );
 
