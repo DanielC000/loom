@@ -225,12 +225,22 @@ try {
   check("(3e) the size-warning note names the doc's own absolute path", noteOversized.includes(sizeResumeDoc));
   check("(3e) the size-warning note precedes the 'Where things live' pointer block", noteOversized.indexOf("[loom:resume-doc-size]") < noteOversized.indexOf("Where things live"));
   check("(3e) the agent's own doctrine still rides along after everything", noteOversized.includes("BODY"));
-  // Card 96c4b245 (write-guard rotation trap): the size note must teach the NO-READ rotation recipe —
-  // a cap-truncated Read doesn't satisfy the Write tool's read-first guard, so the note must steer the
-  // agent to a plain unread file move + a fresh Write at the vacated path, not a Read-then-rewrite.
-  check("(3e) the size note tells the agent NOT to Read the file first to rotate it", /do not read this file first/i.test(noteOversized));
+  // Card 96c4b245 (write-guard rotation trap): the size note must teach the write-guard-safe rotation
+  // recipe — a cap-truncated Read doesn't satisfy the Write tool's read-first guard for THAT path, so the
+  // note must steer the agent to a plain unread file move + a fresh Write at the vacated path.
+  // Card 774a9701 refined this: the hazard is Writing back to the SAME path after a cap-truncated Read
+  // of it (verified live against the real harness), not reading per se — so the note now scopes the
+  // warning to that, rather than blanket-discouraging any Read.
+  check("(3e) the size note warns against Writing back to the SAME path after a cap-truncated Read", /write directly back to that same path/i.test(noteOversized));
   check("(3e) the size note names the plain move commands (mv / Move-Item)", noteOversized.includes("mv") && noteOversized.includes("Move-Item"));
   check("(3e) the size note explains a Write to the vacated path needs no prior Read", /needs no prior read/i.test(noteOversized));
+  // Card 774a9701 defect (1): the byte trigger is only a pre-filter — the note must point the agent at
+  // their own last Read's REPORTED TOKEN COUNT (the real cap) rather than implying the KB figure predicts it.
+  check("(3e) the size note points the agent at their last Read's reported token count, not the KB figure", /printed its own token count/i.test(noteOversized) && /token cap|cap 25000|~25k/i.test(noteOversized));
+  // Card 774a9701 defect (2): the rotation recipe must not tell the agent to unconditionally reduce to
+  // "only current state" — a doc that's mostly standing rules must have them carried forward/homed first.
+  check("(3e) the size note conditions rotation on carrying forward/homing standing rules before reducing to state-only", /carried forward or homed/i.test(noteOversized));
+  check("(3e) the size note does NOT unconditionally instruct 'hold only current state'", !/hold only current state/i.test(noteOversized));
   // Card f17c5a76: the note carries a MEASURED-AT stamp (ISO 8601), distinct from send-time — a
   // recipient reading it after a delivery delay must be able to tell how old the measurement is.
   check("(3e) the size note carries a measured-at ISO-8601 timestamp, distinct from send-time", /measured-at/i.test(noteOversized) && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(noteOversized));

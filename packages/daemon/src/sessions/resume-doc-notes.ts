@@ -11,6 +11,14 @@ import path from "node:path";
  * tokens (~2.3 bytes/token for dense markdown) — well under the 256KB byte cap but already past the
  * tighter ~25k-token cap, which is the one that actually bites. That puts the real break point around
  * ~57KB for prose this dense. Warn with real margin below THAT, not just under the byte cap.
+ *
+ * ⚠️ Card 774a9701: this byte number is a COARSE PRE-FILTER for whether the note fires at all, NOT a
+ * predictor of where a given doc sits against the real (token) cap — bytes-per-token swings hard with
+ * markup density (measured as low as ~2.0 bytes/token on an emoji/bold-heavy resume doc, vs. the ~4-5
+ * bytes/token rule of thumb for plain prose, i.e. roughly double the token count for the SAME byte size).
+ * Do NOT add a tokenizer here to make this precise — the harness already reports the real count on every
+ * `Read`, for free; {@link resumeDocSizeWarning}'s message tells the agent to check THAT number instead of
+ * trusting this byte figure.
  */
 export const RESUME_DOC_WARN_BYTES = 45 * 1024;
 
@@ -62,6 +70,21 @@ export function resolveResumeDocPath(vaultPath: string, filenameOverride?: strin
  * suppressed when stale (a silent drop is its own silent decision that loses the signal entirely) —
  * instead the note tells the recipient how to tell staleness apart from a fresh reading and how to
  * recover cheaply (re-check the doc's own current size) rather than trusting the number blindly.
+ *
+ * Card 774a9701 (two independent fixes to the message text, same measured incident):
+ * (1) the byte figure above is only a PRE-FILTER for whether this note fires — it does not predict where
+ *     the doc actually sits against the harness's real (token) cap, so the message now points the agent
+ *     at the token count their own last `Read` of this file already printed, instead of implying the KB
+ *     number itself is the test.
+ * (2) the rotation recipe no longer tells the agent to unconditionally reduce to "only current state" —
+ *     a resume doc can be mostly standing rules/method rather than transient state, and blindly archiving
+ *     that unread would discard it (the exact failure mode `1a1b0670` already identified: "the fix is
+ *     homing discipline, not gate code"). The recipe now conditions on that and gives a safe way to read
+ *     the archived copy first when content needs to be carried forward — reading is not itself the hazard;
+ *     Writing back to the SAME path after a cap-truncated Read of it is (verified live, card 774a9701: a
+ *     Write immediately following such a Read on the same path fails "File has not been read yet", even
+ *     though a Read did occur — reading the archived copy at its own, different, never-Written-to path
+ *     carries no such risk).
  */
 export function resumeDocSizeWarning(absPath: string, now: number = Date.now()): string {
   try {
@@ -74,15 +97,31 @@ export function resumeDocSizeWarning(absPath: string, now: number = Date.now()):
       `(measured-at — NOT this message's send time; a delayed or re-injected delivery can widen the gap ` +
       `between the two, so don't assume the two are close together). If you rotated, or otherwise ` +
       `changed this doc, at or after that timestamp, this number is stale — re-check the doc's own ` +
-      `current size yourself (cheap) before acting on it. Otherwise, treat it as current: it's nearing ` +
-      `the harness Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
-      `your doctrine's size budget. **Do NOT Read this file first to rotate it** — a Read that gets ` +
-      `cap-truncated does not satisfy the Write tool's "read it first" guard, and you'll be stuck (don't ` +
-      `fall into a delete-then-rewrite or scratchpad-copy workaround to get around that). Instead: ` +
-      `(1) move the file AS-IS, unread — a plain shell \`mv\` (or PowerShell \`Move-Item\`) to ` +
-      `\`<name>.archive/<YYYY-MM-DD>-NN.md\` needs no Read of its content at all; (2) then Write a ` +
-      `fresh, small active doc at the now-vacant original path — a Write to a path that no longer ` +
-      `exists needs no prior Read either. Hold only current state in the fresh doc.`
+      `current size yourself (cheap) before acting on it. Otherwise, treat it as a heads-up, not a ` +
+      `verdict: this KB figure only decides whether this note fires at all — the harness caps are a hard ` +
+      `~256KB byte cap, and a tighter ~25k-token cap that bites first, and bytes-per-token swings a lot ` +
+      `with markup density (as low as ~2 bytes/token for emoji/bold-heavy prose, vs. ~4-5 for plain ` +
+      `prose), so this byte number cannot tell you how close you actually are. **The real test: your ` +
+      `last full \`Read\` of this file already printed its own token count** (the harness reports it ` +
+      `automatically, e.g. "NNNNN tokens, cap 25000") — check THAT number against ~25k, not this KB figure. ` +
+      `If you haven't read it recently and don't recall the count, treat this note as reason enough to ` +
+      `rotate soon rather than guessing.\n\n` +
+      `Rotate per your doctrine's size budget — but deal with the doc's CONTENT first, not just its size: ` +
+      `if it holds mostly standing rules/method rather than transient state (common for a resume doc ` +
+      `written in this genre), those must be CARRIED FORWARD or HOMED (project memory, a design doc, ` +
+      `wherever they actually belong) before you reduce to a state-only doc — a doc that's mostly rules ` +
+      `has no "small fresh doc holding only current state" that stays true, and archiving the old one ` +
+      `unread would discard them silently. Only jump straight to a state-only rewrite if this doc ` +
+      `genuinely holds nothing but transient state.\n\n` +
+      `**Do NOT Read this file and then Write directly back to that SAME path** — a Read that gets ` +
+      `cap-truncated does not satisfy the Write tool's "read it first" guard for that path, and you'll be ` +
+      `stuck (don't fall into a delete-then-rewrite or scratchpad-copy workaround to get around that). ` +
+      `Safe recipe: (1) move the file AS-IS, unread — a plain shell \`mv\` (or PowerShell \`Move-Item\`) ` +
+      `to \`<name>.archive/<YYYY-MM-DD>-NN.md\` needs no Read of its content at all; (2) if you need to ` +
+      `see the old content to decide what must be carried forward, Read the ARCHIVED copy instead (page ` +
+      `with offset/limit if it's large) — that's a different path you will never Write back to, so it's ` +
+      `safe; (3) Write your doc — content carried forward as decided above — at the now-vacant original ` +
+      `path; a Write to a path that no longer exists needs no prior Read either.`
     );
   } catch {
     return "";
