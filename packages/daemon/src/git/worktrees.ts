@@ -1976,9 +1976,12 @@ export interface CanonicalDirtyOverlap {
  * These three checks run ONLY over the small overlap-candidate set (dirty ∩ branch-changed), never over
  * the whole repo, so the extra git calls stay cheap regardless of repo size.
  *
- * Only UNSTAGED overlap is checked here — a STAGED-dirty canonical repo is checked by a SEPARATE sibling,
- * {@link detectCanonicalStagedDirt} (also called from the SAME admission preflight, card 4b7ff996 CR
- * follow-up — see that function's own doc for why it needed its own admission-time hoist too).
+ * Only UNSTAGED TRACKED overlap is checked here — a STAGED-dirty canonical repo is checked by a SEPARATE
+ * sibling, {@link detectCanonicalStagedDirt} (also called from the SAME admission preflight, card 4b7ff996
+ * CR follow-up — see that function's own doc for why it needed its own admission-time hoist too), and an
+ * UNTRACKED collision (this probe's `--untracked-files=no` is deliberately blind to it — see the comment
+ * on `dirtyUnstaged` below) is checked by another separate sibling, {@link detectCanonicalUntrackedOverlap}
+ * (card 98d6264d).
  *
  * FAILS SAFE like {@link detectStrandedWork}: any git error/timeout returns `{overlap:false,
  * probeFailed:true}` — a flaky probe must never itself block a legitimate merge; the branch simply
@@ -2051,6 +2054,110 @@ export async function detectCanonicalDirtyOverlap(
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[git] detectCanonicalDirtyOverlap: probe failed for branch ${branch} in ${repoPath} — ` +
+      `falling through to the real gate/squash instead of pre-refusing: ${(e as Error).message}`);
+    return { overlap: false, probeFailed: true }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
+  }
+}
+
+export interface CanonicalUntrackedOverlap {
+  /** AFFIRMATIVE only: true ⇒ the canonical repo has an UNTRACKED file on a path this branch's own commits
+   *  also touch, AND the branch's tip still carries that path — this is the shape `git merge --squash`
+   *  actually refuses on ("The following untracked working tree files would be overwritten by merge"). */
+  overlap: boolean;
+  /** the overlapping paths — present only when overlap:true. */
+  paths?: string[];
+  /** true ONLY when the probe itself errored/timed out (mirrors {@link CanonicalDirtyOverlap.probeFailed}). */
+  probeFailed?: boolean;
+}
+
+/**
+ * Sibling admission-time preflight to {@link detectCanonicalDirtyOverlap} (card 98d6264d): that function's
+ * probe is `git status --porcelain --untracked-files=no`, DELIBERATELY blind to untracked paths (see its
+ * own comment on `dirtyUnstaged` — `--untracked-files=no` there is load-bearing against a DIFFERENT false
+ * refusal, so it cannot simply be widened). `git merge --squash` refuses on an untracked collision too,
+ * with a DIFFERENT git wording ("The following untracked working tree files would be overwritten by
+ * merge") — {@link mergeBranchLocked} already catches this late, via the SAME `/would be overwritten by
+ * merge/i` classifier that also matches the tracked wording (see that function's own doc), but only AFTER
+ * a full build/DoD gate has already run. This hoists the untracked case to admission time too, the
+ * identical "ask cheaply, up front" move `detectCanonicalDirtyOverlap` already makes for the tracked case.
+ *
+ * 🔴 CARD PREMISE REFUTED BY DIRECT REPRO (card 98d6264d's own DoD-3 claimed a "byte-identical untracked
+ * collision does not refuse" counter-case, mirroring `detectCanonicalDirtyOverlap`'s narrowing (i) for the
+ * TRACKED case — that claim is FALSE for the UNTRACKED case): verified directly against real git
+ * `2.47.0.windows.2`, `git merge --squash` refuses on an untracked path collision REGARDLESS of whether the
+ * on-disk content is byte-identical to what would be checked out — "error: The following untracked working
+ * tree files would be overwritten by merge" fires unconditionally on path presence (both with
+ * `core.autocrlf` true and explicitly false, ruling out a line-ending artifact). Unlike the tracked case,
+ * git does NOT special-case identical untracked content — the tracked narrowing (i) does not transfer here,
+ * and a content-identity check would have been WORSE than a no-op: it would have produced a FALSE NEGATIVE
+ * (excluding a path git actually refuses on), reintroducing the exact late-failure gap this card exists to
+ * close, just for the identical-content subcase. So NO content comparison is performed below.
+ *
+ * ⚠️ THE NARROWING THAT DOES APPLY (verified by a second, separate repro): a candidate the branch's OWN TIP
+ * no longer carries — added then removed within the branch's own history, or deleted relative to the merge
+ * base — is NOT a genuine collision: the squash writes NOTHING at that path in that case (confirmed: "Squash
+ * commit -- not updating HEAD / Automatic merge went well", 0 refusal), so an untracked file merely sitting
+ * at that path is never at risk. This mirrors `detectCanonicalDirtyOverlap`'s own reasoning for excluding a
+ * path the squash never actually writes to, just via an EXISTENCE check (`git cat-file -e branch:path`)
+ * rather than a content comparison, since existence — not content — is what determines whether git refuses
+ * here.
+ *
+ * Only paths the branch's own commits actually touch (`mergeBase..branch`) are ever candidates — an
+ * untracked file elsewhere in the canonical repo is never at risk, matching the tracked-path sibling's own
+ * scoping.
+ *
+ * FAILS SAFE like {@link detectCanonicalDirtyOverlap}: any git error or timeout returns
+ * `{overlap:false, probeFailed:true}` — a flaky probe must never itself block a legitimate merge; the
+ * branch simply proceeds to the real gate/squash, which still catches (and explains) the genuine case via
+ * the existing backstop if it's still there by then.
+ */
+export async function detectCanonicalUntrackedOverlap(
+  repoPath: string,
+  branch: string,
+  deps: BoundedGitDeps = {},
+): Promise<CanonicalUntrackedOverlap> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const statusRaw = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"]),
+      timeoutMs, "git status --porcelain (canonical, untracked-overlap preflight)",
+    );
+    // "?? path" — `--untracked-files=all` (NOT the default "normal") lists individual files rather than
+    // collapsing a wholly-untracked directory into one "?? dir/" entry, so every surviving line here names
+    // one real untracked FILE, matching what `changedPathsBetween` below also returns (individual file
+    // paths, never a directory).
+    const untracked = new Set<string>();
+    for (const line of statusRaw.split("\n")) {
+      if (line.length < 4) continue;
+      if (line[0] !== "?" || line[1] !== "?") continue;
+      untracked.add(line.slice(3));
+    }
+    if (untracked.size === 0) return { overlap: false };
+
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, untracked-overlap preflight)")).trim();
+    const changed = await changedPathsBetween(git, mergeBase, branch, timeoutMs);
+    const candidates = changed.filter((p) => untracked.has(p));
+    if (candidates.length === 0) return { overlap: false };
+
+    // Narrowing: drop any candidate the branch's tip no longer carries — see this function's own doc for
+    // the direct repro proving the squash writes nothing there (a genuine no-op, never a refusal).
+    const overlapping: string[] = [];
+    for (const p of candidates) {
+      try {
+        await withTimeout(
+          git.raw(["cat-file", "-e", `${branch}:${p}`]), timeoutMs, "git cat-file -e branch:path (canonical, untracked-overlap existence check)",
+        );
+        overlapping.push(p);
+      } catch {
+        // the branch tip doesn't carry this path — nothing for squash to write here
+      }
+    }
+    if (overlapping.length === 0) return { overlap: false };
+
+    return { overlap: true, paths: overlapping };
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] detectCanonicalUntrackedOverlap: probe failed for branch ${branch} in ${repoPath} — ` +
       `falling through to the real gate/squash instead of pre-refusing: ${(e as Error).message}`);
     return { overlap: false, probeFailed: true }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
   }

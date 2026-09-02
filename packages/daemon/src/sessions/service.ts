@@ -16,7 +16,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
@@ -12963,6 +12963,26 @@ export class SessionService {
       const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: dirtyOverlap.paths, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
+    }
+
+    // BACKSTOP (BEFORE the gate/merge) — card 98d6264d: the SAME defense as the tracked-path check just
+    // above, for an UNTRACKED collision — `detectCanonicalDirtyOverlap`'s own probe (`--untracked-files=no`)
+    // is deliberately blind to untracked paths (a different false-refusal it must stay narrow against — see
+    // that function's own doc), so `git merge --squash`'s OTHER "would be overwritten by merge" wording (the
+    // untracked-file variant) used to be caught only late, by `mergeBranchLocked`'s own backstop, after a
+    // full build/DoD gate had already burned the lane. See `detectCanonicalUntrackedOverlap`'s own doc for
+    // why NO content comparison is done here (verified against real git: unlike the tracked case, an
+    // untracked collision refuses REGARDLESS of content match — only whether the branch's tip still carries
+    // the path is narrowed on). Fail-safe like its sibling: any probe error/timeout returns
+    // `{overlap:false}`, falling through to the real gate, which still (diagnosably) catches the genuine
+    // case via the same `/would be overwritten by merge/i` backstop.
+    const untrackedOverlap = await detectCanonicalUntrackedOverlap(repoPath, branch, { timeoutMs: this.gitOpMs });
+    if (untrackedOverlap.overlap) {
+      const paths = (untrackedOverlap.paths ?? []).join(", ");
+      const detailText = `CANONICAL CHECKOUT HAS AN UNTRACKED FILE ON A PATH THIS BRANCH ALSO TOUCHES: ${paths}. The canonical repo has an untracked file at this path — 'git merge --squash' refuses to overwrite an untracked file it doesn't recognize (regardless of whether its content already matches), so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (move or remove the untracked path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
+      const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: untrackedOverlap.paths, untracked: true, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: `canonical repo has an untracked file on a path '${branch}' also adds (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.

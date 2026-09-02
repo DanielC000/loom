@@ -979,6 +979,7 @@ const TEST_TIMEOUT_OVERRIDES = {
   "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention
   "merge-gate-reuse": 360_000, // measured 52-58s x6 + one 130s outlier (7 standalone runs, quiet host); heaviest of these by git+merge-call volume and the one that actually timed out in production (card 2bb7a114) — ~6.7x the steady median / ~2.8x the observed outlier
   "merge-canonical-dirty-overlap-backstop": 300_000, // 1x Db/SessionService boot, 4x createWorktree + 2 real submodule clones across 6 scenarios (A/E/S/U/D/G); measured 16.8s standalone (quiet host) — well under the blanket ceiling on its own, but ISOLATED_REAL_SPAWN_BASENAMES membership below is the actual reason (real git subprocess volume comparable to merge-stranded-backstop), so this carries the SAME override for consistency with that model rather than a demonstrated near-cap risk
+  "merge-canonical-untracked-overlap-backstop": 300_000, // card 98d6264d, sibling of merge-canonical-dirty-overlap-backstop above: 1x Db/SessionService boot, 4x createWorktree across 5 scenarios (A/B/U/I/C); measured 12.6s standalone (quiet host) — well under the blanket ceiling on its own, but ISOLATED_REAL_SPAWN_BASENAMES membership below is the actual reason (comparable real-git-subprocess volume to its sibling), so this carries the SAME override for consistency with that model rather than a demonstrated near-cap risk
 };
 
 // Card 0f0816e2: a JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames that run FIRST and
@@ -1034,6 +1035,13 @@ const TEST_TIMEOUT_OVERRIDES = {
 //                                      real OS git spawns competing with pool-sized siblings" reasoning.
 //                                      Not itself observed to flake yet; added proactively rather than
 //                                      waiting for a specimen, since the shape is already established here.
+//   merge-canonical-untracked-overlap-backstop — ADDED (card 98d6264d, sibling of the dirty-overlap entry
+//                                      just above, same reasoning): 1x Db/SessionService boot, 4x real
+//                                      createWorktree across 5 confirmWorkerMerge/mergeBranch-driven
+//                                      scenarios (A/B/U/I/C) — comparable real-git-subprocess volume to
+//                                      merge-canonical-dirty-overlap-backstop. Not itself observed to flake
+//                                      yet; added proactively for the same "in-process daemon boot + real OS
+//                                      git spawns competing with pool-sized siblings" reasoning.
 // Exported (not just module-local) so a test that depends on two specific basenames landing on the SAME
 // side of this split — e.g. test-daemon-gate-timing-sigkill.mjs's FAST/SLOW race, which needs both to run
 // in the SAME phase for its `--concurrency=1` ordering assumption to hold — can assert that at import time
@@ -1054,6 +1062,7 @@ export const ISOLATED_REAL_SPAWN_BASENAMES = [
   "merge-stranded-backstop",
   "merge-gate-reuse",
   "merge-canonical-dirty-overlap-backstop",
+  "merge-canonical-untracked-overlap-backstop",
 ];
 export const ISOLATED_REAL_SPAWN_SET = new Set(ISOLATED_REAL_SPAWN_BASENAMES);
 // Fixed at 1, deliberately NOT an env-tunable dial — out of scope per the card: this changes scheduling
