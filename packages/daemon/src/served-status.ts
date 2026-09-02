@@ -6,6 +6,12 @@ import { resolveWebDistDir } from "./paths.js";
 import { loomVersion } from "./version.js";
 import { computeDeployStaleness, readBuildInfo, type DeployStalenessResult } from "./deploy-staleness.js";
 import { skillStoreStaleness, type SkillStoreStaleness } from "./skills/store.js";
+import {
+  skillAssetsGitStatus,
+  deriveSkillAssetsSyncState,
+  type SkillAssetsGitStatus,
+  type SkillAssetsSyncState,
+} from "./skills/assets-git-status.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +81,13 @@ export interface ServedStatus {
   liveSessionCount: number;
   deployStaleness: DeployStalenessResult;
   skillStoreStaleness: SkillStoreStaleness;
+  /** Card bb76b8d8 — the missing git-aware half `skillStoreStaleness` can't give you: does the shipped
+   *  asset it compared the store against actually match git HEAD? See `skills/assets-git-status.ts`'s own
+   *  module doc for the exact blind spot this closes. */
+  skillAssetsGitStatus: SkillAssetsGitStatus;
+  /** The three-plus-one legible verdict combining both skill signals above — see
+   *  `deriveSkillAssetsSyncState`'s own doc for what each value means. */
+  skillAssetsSyncState: SkillAssetsSyncState;
 }
 
 /**
@@ -94,6 +107,8 @@ export function buildServedStatus(db: Db): ServedStatus {
     webBundle = fs.readdirSync(assetsDir).find((f) => /^index-.*\.js$/.test(f)) ?? null;
   } catch { /* dist not built / no assets dir — webBundle stays null */ }
   const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
+  const storeStaleness = skillStoreStaleness();
+  const assetsGitStatus = skillAssetsGitStatus();
   return {
     version: loomVersion(),
     webBundle,
@@ -102,6 +117,9 @@ export function buildServedStatus(db: Db): ServedStatus {
     // Card f26339d7, AMENDMENT 1 / card 062fa934 — `currentDeployStaleness()` reads the SAME
     // module-level, captured-ONCE `processBuiltSha`/`processBuiltDirty` above; see its own doc.
     deployStaleness: currentDeployStaleness(),
-    skillStoreStaleness: skillStoreStaleness(),
+    skillStoreStaleness: storeStaleness,
+    // Card bb76b8d8 — both fresh, uncached reads (same discipline as every other field here).
+    skillAssetsGitStatus: assetsGitStatus,
+    skillAssetsSyncState: deriveSkillAssetsSyncState(storeStaleness, assetsGitStatus),
   };
 }

@@ -4209,7 +4209,21 @@ export class OrchestrationMcpRouter {
           "these. `pendingAdopt` names every CUSTOMIZED bundled skill (the user has edited their store copy) " +
           "with a shipped update — a restart will NOT advance these by design (protecting the user's edit); " +
           "each needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`) regardless of restarts. " +
-          "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached.",
+          "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached. " +
+          "Card bb76b8d8: `skillStoreStaleness` itself never consults git — it compares the store against " +
+          "the shipped asset's WORKING-TREE content, so a live, UNCOMMITTED edit to a shipped SKILL.md " +
+          "(synced into the store some other way — a manual copy, a publish) makes store/base/shipped all " +
+          "agree and reads as a fully clean bill, even though the edit exists in no commit and would be " +
+          "silently destroyed by a `git checkout -- .` / clean clone. `skillAssetsGitStatus` " +
+          "{available, uncommitted, uncommittedPaths, reason?, reasonKind?} is that missing git-aware half: " +
+          "`uncommitted:true` means `packages/daemon/assets/skills` has a staged/unstaged change (or a new " +
+          "untracked file) relative to HEAD, right now. `available:false` (a packaged `loomctl` install, or " +
+          "a git failure) never fabricates `uncommitted:false` as a clean claim — check `reasonKind` the " +
+          "same way as `deployStaleness`'s. VISIBILITY ONLY — never a blocking check. `skillAssetsSyncState` " +
+          "collapses both signals into one legible verdict: `\"stale\"` (skillStoreStaleness.stale — the " +
+          "store itself needs a restart/adopt, checked first), `\"uncommitted\"` (store is in sync but the " +
+          "shipped asset it synced from is NOT committed — the exact gap this card closes), `\"clean\"` (in " +
+          "sync and committed), or `\"undetermined\"` (git status couldn't be read — never read as clean).",
         inputSchema: strictShape({}),
       },
       async () => ok(buildServedStatus(db)),
