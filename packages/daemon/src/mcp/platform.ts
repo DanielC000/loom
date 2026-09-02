@@ -248,7 +248,8 @@ const orchestrationOverride = z.object({
   // mergeConfigOverride's additiveOnlyRotationGuard: on every AGENT-facing config-write path
   // (manager project_update, setup project_configure) rotationMarkers only ever GROWS and
   // rotationLiveCommitmentsFloor only ever RISES; only THIS platform route's project_configure (P3,
-  // human-equivalent) and the human REST PATCH can shrink either one. A generous cap on the array
+  // human-equivalent) and the human REST PATCH — the route behind the web UI's Settings › Resume Doc
+  // Rotation panel (card 2830748c) — can shrink either one. A generous cap on the array
   // guards a fat-fingered/pasted value from bloating every kickoff's config payload.
   rotationMarkers: z.array(rotationMarkerSchema).max(ROTATION_MARKERS_MAX_LEN).optional(),
   rotationLiveCommitmentsHeading: z.string().trim().max(500).optional(),
@@ -513,7 +514,9 @@ export interface MergeConfigOverrideOptions {
    * Set `true` on every AGENT-facing config-write call site (manager `project_update`, setup
    * `project_configure`/`project_create`). Leave it unset (default false, plain replace) on the
    * human-equivalent Platform Lead `project_configure` (this file, P3-elevated) and the human REST
-   * PATCH path — a deliberate retirement of a commitment marker (e.g. the ceremony cut in
+   * PATCH path — the latter being what the web UI's Settings › Resume Doc Rotation panel drives (card
+   * 2830748c), so the release valve below is a real control the owner can reach, not only a curl — a
+   * deliberate retirement of a commitment marker (e.g. the ceremony cut in
    * `bcd3f690`/`a681aed5`) is exactly the class of decision that should reach a human, and under
    * additive-only that legitimate case still works: it just goes through the human, which is where it
    * already went.

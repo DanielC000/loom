@@ -8,6 +8,7 @@ import {
   type OrchestrationConfig,
   type OrchestrationEventKind,
   type MemoryConfig,
+  type RotationMarker,
   type PlatformConfig,
   type PlatformConfigOverride,
   type PlatformConfigPatch,
@@ -248,6 +249,18 @@ function ConfigEditor({ project }: { project: Project }) {
   const [memoryBudgetTokens, setMemoryBudgetTokens] = useState(numStr(ov.memory?.budgetTokens));
   const [memoryTopK, setMemoryTopK] = useState(numStr(ov.memory?.topK));
   const [memoryMaxNotes, setMemoryMaxNotes] = useState(numStr(ov.memory?.maxNotes));
+  // Resume-doc rotation integrity (card 1069c8e1) — the three fields `resume_doc_check` reads. Modeled
+  // here because THIS surface is the human-symmetric one: on every AGENT-facing config-write path
+  // (manager project_update, setup project_configure) mergeConfigOverride's additiveOnlyRotationGuard
+  // makes rotationMarkers grow-only and the floor rise-only, so an agent can never undo its own marker
+  // write. This PATCH validates with validateProjectConfigOverride and stores via setProjectConfigSafe —
+  // neither goes near that guard — so SHRINKING and CLEARING are reachable only from here (and the
+  // Lead's human-equivalent project_configure). This panel is the documented escape hatch's real route.
+  const [rotationMarkers, setRotationMarkers] = useState<RotationMarker[]>(
+    () => structuredClone(ov.orchestration?.rotationMarkers ?? []),
+  );
+  const [rotationHeading, setRotationHeading] = useState(ov.orchestration?.rotationLiveCommitmentsHeading ?? "");
+  const [rotationFloor, setRotationFloor] = useState(numStr(ov.orchestration?.rotationLiveCommitmentsFloor));
 
   // Build the OVERRIDE from the current form. CRITICAL: the PATCH REPLACES the whole override, so we
   // start from a clone of the stored one and apply only the fields this UI models — preserving keys it
@@ -297,6 +310,25 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNum(orch, "stuckWorkerMinutes", stuckWorker);
     applyNum(orch, "maxUnansweredNudges", maxUnanswered);
     applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze);
+    // rotationMarkers: trimmed; a row blank in BOTH token and note is dropped (an accidental empty add).
+    // A row carrying a note but no token is KEPT so it round-trips to the server's readable "token: String
+    // must contain at least 1 character" 400 instead of vanishing — same reasoning as the partial
+    // alertWebhook entry above. `caseSensitive` is emitted only when true (false is the schema default);
+    // the mount-time baseline normalizes identically, so that never reads as a spurious dirty edit.
+    // An EMPTY list DELETES the key — the clear half of the escape hatch.
+    const markers: RotationMarker[] = rotationMarkers
+      .map((m) => {
+        const out: RotationMarker = { token: m.token.trim() };
+        if (m.caseSensitive) out.caseSensitive = true;
+        const note = m.note?.trim();
+        if (note) out.note = note;
+        return out;
+      })
+      .filter((m) => m.token !== "" || m.note !== undefined);
+    if (markers.length) orch.rotationMarkers = markers; else delete orch.rotationMarkers;
+    if (rotationHeading.trim()) orch.rotationLiveCommitmentsHeading = rotationHeading.trim();
+    else delete orch.rotationLiveCommitmentsHeading;
+    applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor);
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
     if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
@@ -327,6 +359,27 @@ function ConfigEditor({ project }: { project: Project }) {
   const builtJson = JSON.stringify(built);
   const baseline = useRef(builtJson);
   const dirty = builtJson !== baseline.current;
+
+  // What this save would take AWAY from the rotation guard, diffed STORED -> BUILT. Surfaced because these
+  // three edits are the ones no agent can make: an agent's patch can only grow the marker set and raise
+  // the floor, so a human shrinking either is doing the irreversible-for-agents thing and deserves to see
+  // exactly what it costs before pressing Save. An EDITED token counts as a drop of the old one — the old
+  // string genuinely stops being protected, so calling it anything else would understate the change.
+  const storedMarkers = ov.orchestration?.rotationMarkers ?? [];
+  const builtMarkerTokens = new Set((built.orchestration?.rotationMarkers ?? []).map((m) => m.token));
+  const droppedMarkers = storedMarkers.filter((m) => !builtMarkerTokens.has(m.token.trim()));
+  // Floor/heading compare against the PLATFORM DEFAULT when a side is absent — an omitted key inherits
+  // that default, so it is the honest stand-in (never a hardcoded 0 / "").
+  const storedFloor = ov.orchestration?.rotationLiveCommitmentsFloor ?? defaults.orchestration.rotationLiveCommitmentsFloor;
+  const builtFloor = built.orchestration?.rotationLiveCommitmentsFloor ?? defaults.orchestration.rotationLiveCommitmentsFloor;
+  const storedHeading = ov.orchestration?.rotationLiveCommitmentsHeading ?? defaults.orchestration.rotationLiveCommitmentsHeading;
+  const builtHeading = built.orchestration?.rotationLiveCommitmentsHeading ?? defaults.orchestration.rotationLiveCommitmentsHeading;
+  const rotationWeakenings: string[] = [
+    ...droppedMarkers.map((m) => `marker "${m.token}" removed`),
+    Number.isFinite(builtFloor) && builtFloor < storedFloor ? `floor lowered ${storedFloor} to ${builtFloor}` : null,
+    storedHeading && !builtHeading ? "live-commitments section check disabled" : null,
+    storedHeading && builtHeading && storedHeading !== builtHeading ? `section heading repointed "${storedHeading}" to "${builtHeading}"` : null,
+  ].filter((w): w is string => w !== null);
 
   // The three seconds-labelled timeout fields, validated against the SHARED canonical-ms bounds before
   // submit (card 48365fda) — an out-of-range entry blocks Save rather than round-tripping to a server
@@ -428,6 +481,45 @@ function ConfigEditor({ project }: { project: Project }) {
             <Hint>one event kind per line · which orchestration events trigger a POST · both URL and events are required together</Hint>
           </label>
         </div>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Resume Doc Rotation</SectionLabel>
+        {/* Hint renders a <span>, so two as bare siblings would run together on one line — stack them. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <Hint>
+            Durable tokens a rotation of this project's resume doc ({resolved.orchestration.resumeDocFilename}) must not
+            silently drop, checked by the resume_doc_check tool. No markers means unprotected, which that tool reports as
+            <span style={{ color: color.text }}> configured:false</span> — never as a pass.
+          </Hint>
+          {/* The reason this panel exists (card 2830748c). Agents can only ever GROW this set; the human path
+              is symmetric. Stated at the control, because this is the only place the asymmetry is actionable —
+              a reader who does not know it will assume a manager can undo its own marker write. */}
+          <Hint>
+            Agent config writes here are <span style={{ color: color.text }}>additive-only</span> — a manager can add a
+            marker or raise the floor, never remove or lower one. Removing and clearing are possible from this panel only.
+          </Hint>
+        </div>
+        <RotationMarkersEditor markers={rotationMarkers} set={setRotationMarkers} effectiveCount={resolved.orchestration.rotationMarkers.length} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12, marginTop: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+            <span style={fieldLabel}>Live-commitments heading</span>
+            <Input value={rotationHeading} onChange={(e) => setRotationHeading(e.target.value)} spellCheck={false}
+              placeholder="e.g. LIVE COMMITMENTS (blank = no section check)" aria-label="Live-commitments heading" />
+            <Hint>markdown heading opening the protected numbered section · matched case-insensitively · blank disables the floor check · {effHint(resolved.orchestration.rotationLiveCommitmentsHeading || "none")}</Hint>
+          </label>
+          <NumField label="Numbered-item floor" value={rotationFloor} set={setRotationFloor}
+            effective={resolved.orchestration.rotationLiveCommitmentsFloor} def={defaults.orchestration.rotationLiveCommitmentsFloor}
+            note="fewest items that must survive · a floor, never an exact count · ignored while the heading is blank" />
+        </div>
+        {rotationWeakenings.length > 0 && (
+          <div role="status" style={{ marginTop: 12, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: 6, background: color.panel2 }}>
+            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.6 }}>
+              This save weakens the rotation guard: {rotationWeakenings.join(" · ")}. No agent can make this
+              change, and re-adding it later is a fresh decision, not an undo.
+            </span>
+          </div>
+        )}
       </Panel>
 
       <Panel>
@@ -2200,6 +2292,58 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
 }
 
 // --- small presentational helpers ---------------------------------------------------------------
+
+/**
+ * The rotation-marker row list (card 2830748c). Row idiom deliberately mirrors Projects.tsx's registered-repos
+ * editor — Input row + a ghost remove, one "add" button — so the two list editors read as one control, not two.
+ * State is lifted: this component only edits the array; the Save/dirty/weakening logic lives with the rest of
+ * the project-config form in ConfigEditor, which is what actually PATCHes it.
+ *
+ * The remove control is the whole point of the panel, so it is a real per-row button with its own accessible
+ * name, not a hover-revealed affordance — a destructive-but-intended action should not be something you have
+ * to discover.
+ */
+function RotationMarkersEditor({ markers, set, effectiveCount }:
+  { markers: RotationMarker[]; set: (m: RotationMarker[]) => void; effectiveCount: number }) {
+  const edit = (i: number, patch: Partial<RotationMarker>) =>
+    set(markers.map((m, j) => (j === i ? { ...m, ...patch } : m)));
+  const remove = (i: number) => set(markers.filter((_, j) => j !== i));
+  const add = () => set([...markers, { token: "" }]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+      {markers.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+          No protected markers — this seat's resume doc is unchecked.
+        </span>
+      ) : (
+        markers.map((m, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <Input placeholder="token — matched as an exact substring" value={m.token}
+              onChange={(e) => edit(i, { token: e.target.value })} spellCheck={false}
+              aria-label={`Marker ${i + 1} token`} style={{ flex: "2 1 220px", minWidth: 0 }} />
+            <Input placeholder="note (optional, for readers — never checked)" value={m.note ?? ""}
+              onChange={(e) => edit(i, { note: e.target.value })}
+              aria-label={`Marker ${i + 1} note`} style={{ flex: "3 1 220px", minWidth: 0 }} />
+            <label style={{ display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+              fontFamily: font.mono, fontSize: 11, color: m.caseSensitive ? color.text : color.textMuted }}>
+              <input type="checkbox" checked={m.caseSensitive ?? false}
+                onChange={(e) => edit(i, { caseSensitive: e.target.checked })}
+                aria-label={`Marker ${i + 1} case-sensitive`} />
+              case-sensitive
+            </label>
+            <Button variant="ghost" title="Remove this marker" aria-label={`Remove marker ${i + 1}`}
+              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          </div>
+        ))
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
+        <Button onClick={add}>＋ Add marker</Button>
+        <Hint>{effHint(`${effectiveCount} marker(s)`)}</Hint>
+      </div>
+    </div>
+  );
+}
 
 function Field({ children, hint }: { children: ReactNode; hint?: string }) {
   return (

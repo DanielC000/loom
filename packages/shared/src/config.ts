@@ -508,7 +508,9 @@ export interface OrchestrationConfig {
    * like `resumeDocFilename`, but see `mergeConfigOverride`'s `additiveOnlyRotationGuard`: on every
    * AGENT-facing config-write path this field only ever GROWS (an agent patch can add a new marker but
    * can never remove an existing one) — only the human-equivalent Platform Lead `project_configure` path
-   * (and the human REST PATCH) can shrink it. See that function's own doc for why.
+   * and the human REST PATCH can shrink it. See that function's own doc for why. The REST half is what the
+   * web UI's Settings › Resume Doc Rotation panel drives (card 2830748c) — that panel is the owner's actual
+   * route to shrinking/clearing this list, not a hand-rolled PATCH.
    */
   rotationMarkers: RotationMarker[];
   /**
@@ -528,7 +530,8 @@ export interface OrchestrationConfig {
    * Meaningless (never checked) while `rotationLiveCommitmentsHeading` is empty. Default 0. Like
    * `rotationMarkers`, this only ever RISES on an agent-facing config-write path (see
    * `mergeConfigOverride`'s `additiveOnlyRotationGuard`) — an agent patch can raise the floor but never
-   * lower it; only the human-equivalent Platform Lead / REST path can lower it.
+   * lower it; only the human-equivalent Platform Lead / REST path can lower it — in the UI, Settings ›
+   * Resume Doc Rotation (card 2830748c).
    */
   rotationLiveCommitmentsFloor: number;
 }
