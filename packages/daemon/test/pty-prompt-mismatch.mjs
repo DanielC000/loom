@@ -684,6 +684,34 @@ try {
       /possible LOSS/.test(noticeWrite));
   }
 
+  // ===== 7h. Card 41950a38 — a real specimen (Platform Lead session, gen=1, a daemon_restart resume
+  // boundary): `reported` was not truncated/spliced Loom content — it was byte-for-byte Claude Code's OWN
+  // engine-generated `<task-notification>...</task-notification>` block, racing ahead of Loom's own
+  // resume write. This must be recognized STRUCTURALLY (isEngineTaskNotificationReport) and take PRIORITY
+  // over the generic "no earlier write recorded" gen=1 wording (7f) — it is a strictly more informative,
+  // verifiable fact about `reported` itself — while still NOT suppressing the alarm (card 41950a38 DoD-4
+  // forbids suppression/retry: this daemon cannot confirm the intended text actually arrived elsewhere,
+  // only that `reported` itself isn't evidence it didn't). =====
+  {
+    const sid = newSession("TaskNotificationRace"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE. Continue.";
+    const taskNotification = "<task-notification>\n<task-id>bowdt6pzw</task-id>\n<tool-use-id>toolu_01MWUetRFC9SbTwczyMoyAhs</tool-use-id>\n<status>stopped</status>\n<summary>No completion record was found for this background shell command from the previous session.</summary>\n</task-notification>";
+    host.enqueueStdin(sid, intended); // gen=1 — the FIRST submission on this (resumed) session
+    const writesBeforeMismatch = fake.writes.length;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: taskNotification }); // byteIdentical=false, no ring match, structurally a CLI task-notification
+    const enqueued7h = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("7h: the notice still enqueues (this is NOT a suppression)", enqueued7h);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("7h: the notice names the engine's report as a CLI-generated <task-notification> block",
+      /CLI-generated <task-notification> block/.test(noticeWrite));
+    check("7h: it does NOT fall back to the generic gen=1 \"no earlier write recorded\" wording (this is a strictly more specific fact)",
+      !/no earlier write recorded for this session/.test(noticeWrite));
+    check("7h: it still keeps the cautious 'possible LOSS' framing — recognizing the SHAPE never confirms the content arrived",
+      /possible LOSS/.test(noticeWrite));
+  }
+
   // ===== 7b. Card 201d0d95 Q1 — the FALLBACK wording when no exact match is found in recentWrittenTurns
   // (e.g. the replayed content isn't from this session's own recent writes at all, or fell outside the
   // ring's window) still gives the reader the same measured guidance — check the immediately preceding

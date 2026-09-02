@@ -507,6 +507,36 @@ function detectAnsiEscapeStripDeficit(reported: string, intended: string): { str
 }
 
 /**
+ * Card 41950a38 — specimen: Platform Lead session, gen=1, a `daemon_restart` resume boundary
+ * (2026-09-02T10:12:43Z), `reportedLen=519 intendedLen=30646 divergesAtChar=0`. Traced past this file
+ * entirely, to the engine's own transcript: `reported` was NOT truncated/spliced Loom content at all — it
+ * was byte-for-byte Claude Code's OWN engine-generated `<task-notification>...</task-notification>` block
+ * (a background-task-status notice the CLI itself synthesizes on resume, reporting a stale shell command
+ * from the prior process with no completion record — entirely independent of anything Loom wrote to the
+ * pty for this generation). The transcript's own `queue-operation` records show Loom's actual gen=1 write
+ * was queued by the CLI's own internal input queue at this same moment and delivered as a later turn
+ * moments after — nothing was lost in that one specimen.
+ *
+ * Deliberately NOT a suppression, unlike `detectAnsiEscapeStripDeficit`/`detectPossibleDuplicateWrapperDeficit`
+ * above (both prove RECONCILIATION — stripping the recognized wrapper leaves the remainder byte-identical
+ * to `intended`): there is no byte-level relationship between a task-notification and `intended` to
+ * reconcile against, and this daemon has no visibility into the CLI's own internal turn/queue state (see
+ * this file's own "never assert a CLI-internal CAUSE" doctrine at the `[loom:prompt-mismatch]` notice
+ * site, below) — so this cannot CONFIRM the intended text arrived, only that `reported` itself is not
+ * evidence it didn't. Structural, not heuristic: the whole (trimmed) `reported` string is bounded by the
+ * CLI's own fixed wrapper tags, a shape Loom itself never writes (Loom's own frames are all
+ * `[loom:...]`-tagged). This only ever ENRICHES the notice's wording (mirroring `unmatchedRecognized`'s
+ * own cautious, non-suppressing posture below) — the "possible LOSS" alarm still fires unchanged.
+ *
+ * ⛔ n=1 (one specimen) — classifies THIS byte-pattern only. See memory `the-qualifier-dies-in-the-
+ * summary-label`.
+ */
+function isEngineTaskNotificationReport(reported: string): boolean {
+  const trimmed = reported.trim();
+  return trimmed.startsWith("<task-notification>") && trimmed.endsWith("</task-notification>");
+}
+
+/**
  * Card 4af5aefa: a real, live false positive showed a paste-recovery notice minted CORRECTLY (its
  * resent content genuinely was the most recent inbound at the moment of detection) but delivered
  * ~293s and TWO genuine intervening turns later — by which point a newer message had already arrived
@@ -6034,6 +6064,14 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-ansi-strip] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedAnsiLen=${ansiStripDeficit.strippedAnsiLen} — the engine's report matches EXACTLY this generation's own intended text with all ANSI/CSI escape sequences stripped (byte-for-byte). Card a640c110 (measured, not a guess): the engine's own echo strips ANSI/CSI styling — NOT corruption, NOT content loss.`);
               }
+              // Card 41950a38 — see isEngineTaskNotificationReport's own doc. Logged unconditionally here,
+              // same posture as every other diagnostic in this block; does NOT suppress anything below —
+              // only the [loom:prompt-mismatch] notice's own `replayNote` wording (further down) reads it.
+              const taskNotificationReport = isEngineTaskNotificationReport(reported);
+              if (taskNotificationReport) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-task-notification] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — the engine's reported submission is itself a CLI-generated <task-notification> block (Claude Code's own resume-time background-task-status notice), not content Loom wrote for this generation. Does NOT establish what happened to Loom's own intended write — see card 41950a38's own specimen, where it was queued by the engine and delivered on a later turn instead of being lost.`);
+              }
               // Card c23e2869 (d005f55b candidate #3, arithmetically confirmed on a real specimen:
               // `9,709 + 1,640 = 11,349` and `1,680 − 40 = 1,640`, both exact — session daf64e68, gen=10):
               // sibling diagnostic to `wrapperDeficit` just above, but for the FUSED shape that detector
@@ -6127,7 +6165,13 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-unmatched-remainder] ${sessionId} gen=${live.submitGeneration} recognizedGen=${unmatchedRecognized.gen} matchedLen=${unmatchedRecognized.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${unmatchedRecognized.leadingRemainder.length} trailingRemainderLen=${unmatchedRecognized.trailingRemainder.length} leadingRemainder=${excerpt(unmatchedRecognized.leadingRemainder)} trailingRemainder=${excerpt(unmatchedRecognized.trailingRemainder)} — card d005f55b DoD-3: otherwise-unmatched, but reported CONTAINS generation ${unmatchedRecognized.gen}'s own recorded write as a substring; the remainder(s) above are NOT accounted for. No mechanism or confirmation is claimed by this alone.`);
               }
-              const replayNote = replayedEntry
+              const replayNote = taskNotificationReport
+                // Card 41950a38 — checked FIRST: a CLI-generated task-notification never byte-matches
+                // anything Loom itself wrote, so this is mutually exclusive with every ring-based check
+                // below in practice: see isEngineTaskNotificationReport's own doc for why this only
+                // enriches the wording rather than suppressing the "possible LOSS" framing that follows.
+                ? "The engine's reported submission for this turn is Claude Code's OWN CLI-generated <task-notification> block (a background-task-status notice synthesized on resume), not content Loom wrote for this generation. This does not confirm the intended text was lost — it may simply have been queued behind this engine-generated notification and delivered as a later turn instead. Check this session's subsequent turns for whether the intended content arrived; Loom's own daemon cannot see the engine's internal turn ordering to confirm this directly."
+                : replayedEntry
                 ? isImmediatePrior
                   ? `The submitted content exactly matches what this session itself wrote for the IMMEDIATELY PRECEDING generation (gen=${replayedEntry.gen}) — the shape every measured occurrence of this class of mismatch has shown so far. If that generation's own turn already ran, this is likely a DUPLICATE re-delivery of it, not new content — check the message sent just before this one.`
                   : `The submitted content exactly matches what this session itself wrote for an EARLIER generation (gen=${replayedEntry.gen}, not the immediately preceding one) — if that generation's own turn already ran, this may be a DUPLICATE re-delivery of it, not new content. This is an unusual shape: every measured occurrence of this class of mismatch so far replayed only the immediately preceding generation.`
