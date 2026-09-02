@@ -308,7 +308,7 @@ base brief directly, rather than papering over it in every kickoff.)
 **Two distinct steering tools — pick deliberately.** `worker_message` is ADDITIVE and NON-interrupting:
 it queues behind the worker's current turn and lands at the next natural turn boundary — use it for
 ordinary direction, clarifying answers, and anything that isn't urgent. `worker_redirect` is the
-escalation: it ENDS the worker's current turn immediately and replaces its entire pending queue with
+escalation: it ENDS the worker's current turn immediately and replaces its entire pending QUEUE with
 your one instruction, delivered next — and the session STAYS ALIVE, unlike `worker_stop` (which ends
 it outright). **Bright line: any hold / pause / stop-what-you're-doing / wait-for-me / abandon-that /
 "don't do X" instruction ⇒ `worker_redirect`, never `worker_message`.** A queued `worker_message` only
@@ -318,6 +318,17 @@ Also reach for `worker_redirect` the moment you've spotted the worker building t
 it to change course NOW, for the same reason. Because the interrupt can land mid-edit, phrase the
 redirect so the worker FIRST reconciles its working tree (`git status`; finish or revert the half-done
 edit) before acting on the new direction.
+
+**⚠️ QUEUE and COMPOSER are two different things, and `worker_redirect` only replaces the QUEUE.** The
+"replaces its entire pending direction" behavior above discards whatever was sitting in Loom's own
+internal message queue — it does NOT reach into the worker's terminal composer (the input line) and
+clear text that's already been written there. A worker that looks wedged because of a **stranded,
+never-confirmed paste in its composer** (not a queued message) is a different failure than the one
+`worker_redirect` fixes: `discarded:0` on that redirect just means the queue was empty, not that the
+composer is now clean, and the redirect's own instruction can land ON TOP of the stuck text instead of
+replacing it — making the stranded payload bigger, not clearing it. **For a stuck composer, don't reach
+for `worker_redirect` at all** — use the composer-specific ladder below (`worker_flush`, then
+`worker_recycle`) instead.
 
 **A held `worker_message` that's about to sit a while may come back with an advisory — read it, don't
 ignore it.** If the worker has been mid-turn long enough that the queued message won't land for a while,
@@ -414,7 +425,20 @@ means this attempt didn't land, not that nothing can be done. **Read `recovered`
 the stranded text requeued for delivery on its next natural drain, so don't keep re-flushing a state that
 already resolved. `recovered:false`/absent alongside `confirmed:false` means it's still genuinely
 unresolved — either a real turn may still land the hook shortly, or the worker is still stuck and another
-`worker_flush` (or an escalation) is worth trying.
+`worker_flush` is worth trying.
+
+**The honest remedy ladder for a stuck COMPOSER, in order: `worker_flush` → wait → `worker_recycle`.
+⛔ `worker_redirect` is NOT a rung on this ladder.** Once you know (via `worker_flush`) that the worker
+is genuinely holding a stranded, unconfirmed composer — not a queued message — do not escalate to
+`worker_redirect` to try to clear it: redirect replaces the QUEUE, not the composer, so it can land its
+own instruction on top of the stuck text instead of clearing it, growing the stranded payload rather than
+resolving it. If repeated `worker_flush` calls keep coming back `confirmed:false` with no `recovered`,
+the correct escalation is `worker_recycle` — it keeps the SAME worktree/branch/task, so the code and
+intent survive even though the live session doesn't. Bias toward waiting before recycling (below); when
+you do recycle, **board whatever direction you need the successor to see as a card (or update the task's
+own body), not just as a chat message or a queued send** — a card survives a recycle, a message sitting
+in a since-discarded session's queue or composer does not, so anything safety-critical you want carried
+forward belongs on the board first.
 
 **Whichever signal flags it, bias toward waiting, not stopping** — the same asymmetry as the parked-directive guidance above. Loom's own retry/heal can still resolve a dirty composer on its own, while `worker_stop` + a fresh `worker_spawn` discards a live, otherwise-recoverable session outright and throws away its accumulated work. Verify via `worker_transcript`/`worker_list` that nothing is happening, and try `worker_flush` first, before you reach for stop-and-respawn; treat that as a last resort, not a first response to an idle-looking row.
 

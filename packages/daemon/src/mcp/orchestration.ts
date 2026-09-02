@@ -3341,7 +3341,16 @@ export class OrchestrationMcpRouter {
           "CAUTION: the interrupt may land MID-EDIT, leaving the worker's working tree partly changed — so " +
           "phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. `git status`, finish " +
           "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +
-          "the worker are discarded (superseded by this one). Returns {delivered} — true if it went out as a " +
+          "the worker are discarded (superseded by this one) — but 'queued' means Loom's own internal pending " +
+          "FIFO, NOT the worker's terminal composer. This tool cancels the in-flight turn (a single Esc) and " +
+          "replaces the QUEUE; it does not read back or forcibly clear whatever text is already sitting in the " +
+          "composer. If the worker is wedged because a PASTE got stranded there (unconfirmed, non-zero " +
+          "`composerDirtyLen`) rather than because a message was queued, `discarded:0` here just means the " +
+          "queue was already empty — it is not evidence the composer is now clean, and this redirect's own text " +
+          "can land ON TOP of whatever is already stranded instead of replacing it. For a stuck COMPOSER, use " +
+          "`worker_flush` first (a disambiguator and a real remedy — it presses Enter on the existing composer, " +
+          "writing nothing new), and if it doesn't confirm after repeated tries, escalate to `worker_recycle` " +
+          "(keeps the worktree/branch/task) rather than this tool. Returns {delivered} — true if it went out as a " +
           "turn immediately (worker was idle), false if queued to land right after the interrupt clears. " +
           "UNLIKE worker_message, a `delivered:false` here does NOT mean a plain FIFO hold: it carries " +
           "`interrupting:true` and `landsAt:\"after-interrupt\"` (not `worker_message`'s `\"next-turn-boundary\"`) " +
