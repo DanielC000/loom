@@ -9,7 +9,7 @@ import type { WakeService } from "../orchestration/wake.js";
 import {
   listProjectTasks, getProjectTask, createProjectTaskChecked, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
   listProjectTaskRequests, getProjectTaskRequest, deferTaskItem, updateDeferredItemStatus, countProjectTasks,
-  spillableTaskGet,
+  spillableTaskGet, spillableTaskUpdateResult,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
@@ -277,7 +277,13 @@ export class TaskMcpRouter {
             allowDuplicate: z.boolean().optional(), supersedes: z.string().optional(), relatedTo: z.string().optional(),
           }),
         },
-        async ({ allowDuplicate, supersedes, relatedTo, ...args }) => ok(createProjectTaskChecked(db, projectId, args, { allowDuplicate, supersedes, relatedTo })),
+        async ({ allowDuplicate, supersedes, relatedTo, ...args }) => {
+          const created = createProjectTaskChecked(db, projectId, args, { allowDuplicate, supersedes, relatedTo });
+          // Card f651aff0: same oversized-body gap as tasks_get (card 7aeea78b) — createProjectTaskChecked
+          // returns the full Task (title+body) on success, unbounded. spillableTaskGet is a no-op below the
+          // cap (byte-identical to before).
+          return ok("error" in created ? created : spillableTaskGet(sessionId, "tasks-create-spills", created.id, created));
+        },
       );
       server.registerTool(
         "tasks_update",
@@ -307,7 +313,12 @@ export class TaskMcpRouter {
           // role threaded for the repoKey authority guard (code-review ruling): a worker on this SAME
           // router can reach tasks_update, but must not be able to set repoKey (a dispatch decision) —
           // see updateProjectTask's own doc.
-          return ok(await updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }, baseVersion, allowTruncate, appendBody));
+          const result = await updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }, baseVersion, allowTruncate, appendBody);
+          // Card f651aff0: same oversized-body gap as tasks_get (card 7aeea78b) — a body/appendBody write
+          // (or the `current` a conflict/truncation refusal hands back) returns the full unbounded Task.
+          // spillableTaskUpdateResult is a no-op below the cap and for the trimmed TaskUpdateAck/bare-error
+          // shapes, which carry no body at all — byte-identical to before in both cases.
+          return ok(spillableTaskUpdateResult(sessionId, "tasks-update-spills", result));
         },
       );
       server.registerTool(

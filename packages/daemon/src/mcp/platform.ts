@@ -54,7 +54,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { resolvePlatformLeadResumeDocPath, lineageRootId } from "../sessions/platform-lead-prompt.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
-import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, type TaskWithMerged, type TaskCounts } from "./tasks.js";
+import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, spillableTaskUpdateResult, type TaskWithMerged, type TaskCounts } from "./tasks.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -2371,17 +2371,25 @@ export class PlatformMcpRouter {
         // so a caller that reaches this handler at all is ALWAYS a platform session; this satisfies
         // updateProjectTask's repoKey authority guard (manager/platform only) the same way question_ask does.
         const actor = callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined;
+        // Card f651aff0: same oversized-body gap as project_task_get (card 7aeea78b) — updateProjectTask
+        // can return the full unbounded Task (a body/appendBody write, or the `current` a conflict/
+        // truncation refusal hands back). spillableTaskUpdateResult is a no-op below the cap and for the
+        // trimmed TaskUpdateAck/bare-error shapes; no callerSessionId (should not happen on a real request
+        // path) skips spilling rather than pass an undefined recipient into spillTextIfLarge (mirrors
+        // project_task_get's own !callerSessionId guard).
+        const spillable = (res: Awaited<ReturnType<typeof updateProjectTask>>) =>
+          callerSessionId ? spillableTaskUpdateResult(callerSessionId, "project-task-update-spills", res) : res;
         if (taskIds) {
           if (patch.title !== undefined || patch.body !== undefined || appendBody !== undefined) {
             return ok({ error: "taskIds batch move does not support title/body/appendBody — apply those one card at a time via taskId" });
           }
           const results = await Promise.all(taskIds.map(async (id) => {
-            const res = await updateProjectTask(db, project.id, id, patch, actor);
+            const res = spillable(await updateProjectTask(db, project.id, id, patch, actor));
             return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
           }));
           return ok(results);
         }
-        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody));
+        return ok(spillable(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody)));
       },
     );
 

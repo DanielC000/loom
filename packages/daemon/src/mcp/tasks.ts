@@ -682,6 +682,43 @@ export function spillableTaskGet<T extends { title: string; body: string }>(
   return { ...rest, bodyFile: spill.file, bodyChars: spill.chars, note };
 }
 
+/**
+ * Card f651aff0 — {@link spillableTaskGet}'s sibling for a WRITE result, applied to whatever
+ * {@link updateProjectTask} returned. Shared by both writers of THAT function's return shape — the
+ * in-project `tasks_update` (mcp/server.ts) and the cross-project `project_task_update` (mcp/
+ * platform.ts) — so the two callers that share `updateProjectTask` also share this one spill wiring
+ * rather than growing two independently-drifting copies (the shared-unit-divergence rule card 7aeea78b
+ * was built to satisfy, and the exact reason THIS card exists: `7aeea78b`'s own sweep was scoped to
+ * `*_get` tools and could never have found a write-path gap by construction).
+ *
+ * `updateProjectTask` returns FIVE shapes, and only two of them carry an unbounded body:
+ *  - `TaskUpdateAck` (a field-only patch that never touched title/body) — no `body` key at all present
+ *    on the type, nothing to spill.
+ *  - a bare `{error}` (e.g. an unknown column, a refused held-clear) — no `current`, nothing to spill.
+ *  - the full `Task` (a successful title/body/appendBody write) — spill IT directly, same as
+ *    `spillableTaskGet` does for a read.
+ *  - `TaskUpdateConflict` / `TaskUpdateTruncationGuard` — both carry `current: Task`, the CURRENT
+ *    on-disk task the caller must reconcile against (returned so a caller can merge its edit into it) —
+ *    spill THAT nested field, never the envelope itself (the envelope has no top-level `body`).
+ *
+ * `createProjectTaskChecked`'s result (a bare `Task | {error}`, no `TaskUpdateAck`/`current` shapes)
+ * does NOT go through this — it already returns a `Task` or an `{error}`, so callers spill it directly
+ * via {@link spillableTaskGet}, same as a `tasks_get`.
+ *
+ * Keyed by the RESOLVED full task id read off `result` itself (`result.id` / `result.current.id`), NOT
+ * a caller-supplied id — the caller's own `taskId` arg may be an unambiguous 8-char PREFIX
+ * (`tasks_update`/`project_task_update` both accept one), and two different prefixes naming the SAME
+ * task must land on the SAME scratch path (`spillTextIfLarge`'s "same content overwrites" contract) —
+ * mirrors {@link listProjectTaskRequests}'s identical discipline for the exact same reason.
+ */
+export function spillableTaskUpdateResult<
+  T extends Task | TaskUpdateAck | { error: string } | TaskUpdateConflict | TaskUpdateTruncationGuard,
+>(sessionId: string, subdir: string, result: T) {
+  if ("current" in result) return { ...result, current: spillableTaskGet(sessionId, subdir, result.current.id, result.current) };
+  if ("body" in result) return spillableTaskGet(sessionId, subdir, result.id, result);
+  return result;
+}
+
 /** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not
  *  the full body/answer (use {@link getProjectTaskRequest} for that). */
 export interface TaskRequestSummaryRow {
