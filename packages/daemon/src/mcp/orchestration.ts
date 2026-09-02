@@ -378,7 +378,18 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "is the TRUE max-over-run figure and OVERSTATES a brief overlap as full contention — it can't tell " +
       "\"contended the whole run\" from \"joined for the last few minutes\". Read them as two different, " +
       "imperfect lenses on the same question, never as a single settled answer — and never derive a combined " +
-      "\"contention score\" from them, which would hide exactly that span ambiguity. Same `undefined`-for-" +
+      "\"contention score\" from them, which would hide exactly that span ambiguity. ⚠️ ON A NON-NULL " +
+      "`retriedFile` (below) this triple describes the RETRY's OWN admission, not the FIRST attempt's — " +
+      "DELIBERATELY (card b9e07a4a): a single-file or transient-kill retry re-admits through the SAME " +
+      "semaphore, so this triple always reflects whichever admission actually produced this row's verdict, " +
+      "never the first attempt once a retry has genuinely run (same exception as `gate_history`'s identical " +
+      "caveat: the card 318ac7b2 cancelled-retry shape, where the retry's own admission never happened at " +
+      "all, leaves this triple describing attempt 1's admission after all). A live `gate_queue` read taken " +
+      "WHILE the first attempt was still running can show real contention this settled triple will not " +
+      "reflect, if a later retry then ran uncontended — that is NOT the two tools disagreeing, it's two " +
+      "different admissions of the SAME op. Cross-check `retriedFile` before comparing a settled " +
+      "`concurrentGates`/`concurrentGatesMax` against an earlier live `gate_queue` observation of this op. " +
+      "Same `undefined`-for-" +
       "no-gate-spawned discipline as `steps`/`outputTail` above. `admittedAt` (ISO, when the op was MINTED — " +
       "present whenever a row exists at all, live or settled) READS as \"when this op was admitted past " +
       "the gate concurrency cap\" but is NOT that: a queued op can sit for minutes before it's actually " +
