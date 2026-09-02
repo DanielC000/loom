@@ -1091,6 +1091,9 @@ export class CodescapeSupervisor {
     const res = await probeAdvertisedTools(`http://127.0.0.1:${port}/mcp/${projectId}`, this.toolsProbeTimeoutMs);
     if (this.stopped) return; // stop() may have raced this in-flight probe — abandon silently
     if (!res.ok || !res.tools) return; // couldn't check this tick — leave prior persisted state as-is
+    // Card 76a57ff3: res.tools is already normalized to the mcp__codescape__-prefixed namespace by
+    // probeAdvertisedTools (see its own doc / CODESCAPE_TOOL_PREFIX) — the SAME namespace
+    // CODESCAPE_TOOL_ALLOW/CODESCAPE_WRITE_TOOLS store, so no re-normalization belongs here.
     const unclassified = codescapeUnclassifiedTools(res.tools);
     writeToolDriftState(this.homeDir, { checkedAt: new Date().toISOString(), unclassified, advertisedCount: res.tools.length });
     const changed = JSON.stringify(unclassified) !== JSON.stringify(this.lastToolDriftUnclassified);

@@ -2233,6 +2233,34 @@ export function codescapeUnclassifiedTools(advertised: readonly string[]): strin
 }
 
 /**
+ * Card `76a57ff3`: the `mcp__<mount-name>__` prefix Claude Code applies to every tool a mounted MCP
+ * server advertises. {@link CODESCAPE_TOOL_ALLOW}/{@link CODESCAPE_WRITE_TOOLS} above store names in
+ * THIS form because `--allowedTools`/`--disallowedTools` require it, and the mount name is fixed to
+ * `"codescape"` at the one place this project ever mounts it (`mcpServers["codescape"] = cs` above). A
+ * live `tools/list` probe against the real server (`codescape/tools-probe.ts`'s `probeAdvertisedTools`)
+ * gets the server's OWN, BARE names back instead — a server has no way to know the mount name a CLIENT
+ * will choose for it, so it can never advertise this prefix itself. Feeding those bare names straight
+ * into {@link codescapeUnclassifiedTools} (which compares against the two PREFIXED arrays above) used to
+ * report the server's entire advertised set as "unclassified" on every probe, forever — this constant
+ * (and {@link toPrefixedCodescapeToolNames}) is the fix: normalize at the boundary, never widen the
+ * arrays with unvalidated bare entries.
+ */
+export const CODESCAPE_TOOL_PREFIX = "mcp__codescape__";
+
+/**
+ * Card `76a57ff3`: normalize a live probe's BARE advertised tool names (see {@link CODESCAPE_TOOL_PREFIX})
+ * into the same `mcp__codescape__`-prefixed namespace {@link CODESCAPE_TOOL_ALLOW}/
+ * {@link CODESCAPE_WRITE_TOOLS} store, so {@link codescapeUnclassifiedTools} compares like with like.
+ * The ONLY production caller is `codescape/tools-probe.ts`'s `probeAdvertisedTools`, at the exact
+ * boundary where a real `tools/list` result first enters this codebase (see that function's own doc) —
+ * exported (rather than inlined there) so a test exercising that same boundary can reuse this instead of
+ * re-deriving the transform by hand.
+ */
+export function toPrefixedCodescapeToolNames(bare: readonly string[]): string[] {
+  return bare.map((t) => `${CODESCAPE_TOOL_PREFIX}${t}`);
+}
+
+/**
  * Security hardening (card 7159466a): `browserTesting`'s `--allowedTools` grant is the WHOLE
  * `mcp__playwright` server (a wildcard — see {@link capabilityToolAllowlist}'s "browser-testing" slug and
  * the direct browserTesting allow at the createPty chokepoint), which includes `browser_run_code_unsafe` —

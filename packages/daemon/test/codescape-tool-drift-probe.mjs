@@ -27,7 +27,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     wired into the health-probe cycle: port + a resolvable project id (test-seeded, mirroring the
 //     class's existing `port` seam) -> a real probe against the SDK fixture server -> persisted state
 //     -> getUnclassifiedTools() latch. Fail-soft (DoD-3): no live port, and no registered project id,
-//     both clean-skip rather than throw or persist anything.
+//     both clean-skip rather than throw or persist anything. Also proves DoD-5: a pre-seeded STALE,
+//     pre-fix-shaped persisted state (the old bogus all-tools-unclassified finding) is overwritten by
+//     the very next successful probe — no manual clearing needed.
+//
+// Card `76a57ff3`: every fixture in this file registers BARE tool names (`bareToolNames`), not the
+// PREFIXED names `CODESCAPE_TOOL_ALLOW`/`CODESCAPE_WRITE_TOOLS` store — a real Codescape MCP server has
+// no way to know the "codescape" mount name THIS client chooses for it, so it can only ever advertise
+// bare names. The PRIOR version of this file registered fixtures under the prefixed array names
+// directly, which made every negative/positive control CIRCULAR: it reproduced the arrays' own naming
+// convention rather than a real server's, so it could never observe the real bug (probeAdvertisedTools
+// comparing bare probe names against a prefixed known-set, reporting the entire advertised set as
+// unclassified forever). probeAdvertisedTools itself now normalizes at the boundary
+// (`toPrefixedCodescapeToolNames`, `pty/host.ts`) — this file's fixtures matching real-server shape is
+// what makes that normalization actually get exercised, rather than silently never engaging.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codescape-tool-drift-probe.mjs
 import fs from "node:fs";
@@ -46,12 +59,19 @@ process.env.LOOM_HOME = tmpHome;
 const { probeAdvertisedTools } = await import("../dist/codescape/tools-probe.js");
 const { writeToolDriftState, readCodescapeToolDriftNote, toolDriftStatePath, TOOL_DRIFT_STATE_BASENAME } = await import("../dist/codescape/drift-notice.js");
 const { CodescapeSupervisor } = await import("../dist/codescape/supervisor.js");
-const { CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS, codescapeUnclassifiedTools } = await import("../dist/pty/host.js");
+const { CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS, CODESCAPE_TOOL_PREFIX, codescapeUnclassifiedTools } = await import("../dist/pty/host.js");
 const { composeResumeDocOperationalNotes } = await import("../dist/sessions/platform-lead-prompt.js");
 const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
 const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
 
 const fullyKnownTools = [...CODESCAPE_TOOL_ALLOW, ...CODESCAPE_WRITE_TOOLS];
+// Card 76a57ff3: a REAL Codescape MCP server advertises its OWN, BARE tool names — it has no way to know
+// the "codescape" mount name THIS client chooses for it, so it can never advertise the mcp__codescape__
+// prefix itself. Every fixture below registers BARE names for exactly this reason. The prior version of
+// this file registered fixtures under the PREFIXED names taken straight from CODESCAPE_TOOL_ALLOW/
+// CODESCAPE_WRITE_TOOLS — which made every negative/positive control CIRCULAR: it could never observe the
+// real bug, since it reproduced the ARRAYS' own naming convention rather than a real server's.
+const bareToolNames = fullyKnownTools.map((t) => t.slice(CODESCAPE_TOOL_PREFIX.length));
 
 function pickPort() {
   return new Promise((resolve, reject) => {
@@ -110,22 +130,23 @@ function startFixtureMcpServer(toolNames) {
 
 // ===================== probeAdvertisedTools: real handshake, real server, both polarities =====================
 {
-  const fixture = await startFixtureMcpServer(fullyKnownTools);
+  // Fixture registers BARE names — what a real Codescape MCP server actually advertises.
+  const fixture = await startFixtureMcpServer(bareToolNames);
   try {
     const res = await probeAdvertisedTools(`http://127.0.0.1:${fixture.port}/mcp/fake-id`, 5000);
     check("(probe, e2e) a real round-trip against a real SDK server succeeds", res.ok === true);
-    check("(probe, e2e) it returns exactly the registered tool names",
+    check("(probe, e2e) it returns the registered BARE names NORMALIZED to the mcp__codescape__-prefixed form",
       Array.isArray(res.tools) && res.tools.length === fullyKnownTools.length && fullyKnownTools.every((t) => res.tools.includes(t)));
-    check("(probe, e2e, negative control) codescapeUnclassifiedTools on a clean server finds nothing",
+    check("(probe, e2e, negative control) codescapeUnclassifiedTools on a clean (bare-advertising) server finds nothing",
       codescapeUnclassifiedTools(res.tools).length === 0);
   } finally {
     await fixture.close();
   }
 }
 {
-  // POSITIVE CONTROL (DoD-5): a server genuinely advertising ONE extra, unclassified name — proves the
-  // check can fail, wired against a real protocol round-trip, not just the in-memory arrays.
-  const drifted = [...fullyKnownTools, "mcp__codescape__mystery_tool"];
+  // POSITIVE CONTROL (DoD-5): a server genuinely advertising ONE extra, unclassified BARE name — proves
+  // the check can fail, wired against a real protocol round-trip, not just the in-memory arrays.
+  const drifted = [...bareToolNames, "mystery_tool"];
   const fixture = await startFixtureMcpServer(drifted);
   try {
     const res = await probeAdvertisedTools(`http://127.0.0.1:${fixture.port}/mcp/fake-id`, 5000);
@@ -196,12 +217,23 @@ function startFixtureMcpServer(toolNames) {
 
 // ===================== CodescapeSupervisor.checkToolDrift (via the test seam): the ACTUAL call site =====================
 {
-  const fixture = await startFixtureMcpServer([...fullyKnownTools, "mcp__codescape__wired_e2e_drift"]);
+  // Fixture registers BARE names, exactly like a real Codescape MCP server would — this is the
+  // production call site, so it's the one place a stale, pre-fix all-unclassified persisted state
+  // (DoD-5) can be proven to self-heal on the very next successful probe.
+  const fixture = await startFixtureMcpServer([...bareToolNames, "wired_e2e_drift"]);
   // Mirrors the real relationship (paths.ts's CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape")):
   // `homeLoomC` is the LOOM_HOME equivalent readCodescapeToolDriftNote expects, `homeCodescapeC` is what
   // the supervisor's own `homeDir` opt takes (it operates in terms of ITS OWN home, one level down).
   const homeLoomC = path.join(tmpHome, "home-c");
   const homeCodescapeC = path.join(homeLoomC, "codescape");
+  // DoD-5: simulate the exact stale residue the PRE-FIX bug would have left behind — every advertised
+  // tool (all 16, including the genuinely-drifted one) reported unclassified — written under an old
+  // timestamp, as if by a probe tick that ran before this fix went live.
+  writeToolDriftState(homeCodescapeC, {
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    unclassified: [...fullyKnownTools, "mcp__codescape__wired_e2e_drift"],
+    advertisedCount: fullyKnownTools.length + 1,
+  });
   try {
     const sup = new CodescapeSupervisor({
       homeDir: homeCodescapeC,
@@ -209,12 +241,20 @@ function startFixtureMcpServer(toolNames) {
       seedProjectId: { repoRoot: path.join(tmpHome, "repo-c"), projectId: "fixture-project-id" },
       toolsProbeTimeoutMs: 5000,
     });
-    check("(wired) getUnclassifiedTools() is null before any probe has run", sup.getUnclassifiedTools() === null);
+    check("(wired) getUnclassifiedTools() is null before any probe has run (in-memory latch, independent of the pre-seeded stale file)",
+      sup.getUnclassifiedTools() === null);
+    check("(wired, DoD-5 setup) the pre-seeded STALE state still reads back as the old bogus all-16 finding",
+      readCodescapeToolDriftNote(homeLoomC).includes("mcp__codescape__list_flows") && readCodescapeToolDriftNote(homeLoomC).includes("2026-01-01"));
     await sup.runToolDriftProbeForTest();
-    check("(wired) after one probe pass, getUnclassifiedTools() reflects the drifted server",
+    check("(wired) after one probe pass, getUnclassifiedTools() reflects EXACTLY the one genuinely-drifted (prefixed) tool — not the whole advertised set",
       JSON.stringify(sup.getUnclassifiedTools()) === JSON.stringify(["mcp__codescape__wired_e2e_drift"]));
+    const noteAfter = readCodescapeToolDriftNote(homeLoomC);
     check("(wired) it ALSO persisted the same finding to the state file checkToolDrift owns",
-      readCodescapeToolDriftNote(homeLoomC).includes("mcp__codescape__wired_e2e_drift"));
+      noteAfter.includes("mcp__codescape__wired_e2e_drift"));
+    check("(wired, DoD-5) the stale all-16 finding is GONE — a genuinely-known tool like list_flows is no longer reported",
+      !noteAfter.includes("mcp__codescape__list_flows"));
+    check("(wired, DoD-5) the stale checkedAt timestamp is GONE — the fresh probe's own timestamp replaced it",
+      !noteAfter.includes("2026-01-01"));
   } finally {
     await fixture.close();
   }
@@ -244,6 +284,6 @@ function startFixtureMcpServer(toolNames) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape tool-drift live-wiring (card 350bc307): probeAdvertisedTools speaks a REAL MCP handshake (via @modelcontextprotocol/sdk) against a genuinely spec-compliant SDK-built fixture server, catches a clean set as clean AND a one-tool drift over the wire (positive control), and never throws against an unreachable server; writeToolDriftState/readCodescapeToolDriftNote round-trip correctly (absent/clean/corrupt all read back empty, fail-soft); the note lands in composeResumeDocOperationalNotes — the SAME [loom:*] channel already injected into every Platform Lead kickoff, the ADDRESSED signal DoD-2 requires, not a log line; and CodescapeSupervisor.checkToolDrift (via its runToolDriftProbeForTest seam) is the real call site — wired end to end against a live server AND fail-soft (no port, or no registered project id) in both negative cases, never persisting or throwing."
+  ? "\n✅ ALL PASS — Codescape tool-drift live-wiring (card 350bc307, naming fix card 76a57ff3): every fixture below registers BARE tool names (what a real server actually advertises — it cannot know the \"codescape\" mount-name prefix a client will choose), so probeAdvertisedTools's own boundary normalization (toPrefixedCodescapeToolNames) is exercised for real, not against a circular fixture built from the arrays under test; catches a clean set as clean AND a one-tool drift over the wire (positive control), and never throws against an unreachable server; writeToolDriftState/readCodescapeToolDriftNote round-trip correctly (absent/clean/corrupt all read back empty, fail-soft); the note lands in composeResumeDocOperationalNotes — the SAME [loom:*] channel already injected into every Platform Lead kickoff, the ADDRESSED signal DoD-2 requires, not a log line; and CodescapeSupervisor.checkToolDrift (via its runToolDriftProbeForTest seam) is the real call site — wired end to end against a live server (including DoD-5: a pre-seeded STALE pre-fix all-unclassified state file is overwritten by the very next successful probe, no manual clearing needed) AND fail-soft (no port, or no registered project id) in both negative cases, never persisting or throwing."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { toPrefixedCodescapeToolNames } from "../pty/host.js";
 
 /**
  * Card `350bc307`: wire `codescapeUnclassifiedTools` (`pty/host.ts`) to the REAL mounted Codescape MCP
@@ -19,7 +20,17 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
  */
 export interface AdvertisedToolsProbeResult {
   ok: boolean;
-  /** Every tool name the server advertised, present iff `ok`. */
+  /**
+   * Every tool name the server advertised, present iff `ok` — NORMALIZED to the `mcp__codescape__`-
+   * prefixed namespace {@link CODESCAPE_TOOL_ALLOW}/{@link CODESCAPE_WRITE_TOOLS} (`pty/host.ts`) store,
+   * NOT the server's own raw (bare) registration names (card `76a57ff3`: a server has no way to know the
+   * "codescape" mount name this codebase's client chooses for it, so it can never advertise that prefix
+   * itself — see {@link toPrefixedCodescapeToolNames}'s doc). Feeding bare names straight into
+   * `codescapeUnclassifiedTools` used to report the server's ENTIRE advertised set as unclassified, on
+   * every probe, forever; normalizing HERE — at the one place a real `tools/list` result first enters this
+   * codebase — means every caller (the live drift check, any test) sees one consistent namespace and
+   * never has to know this transform exists.
+   */
   tools?: string[];
   error?: string;
   /** True only when THIS probe's own `timeoutMs` bound elapsed before the round-trip finished — mirrors
@@ -43,7 +54,7 @@ export async function probeAdvertisedTools(url: string, timeoutMs: number): Prom
     const transport = new StreamableHTTPClientTransport(new URL(url));
     await client.connect(transport, { signal: controller.signal });
     const res = await client.listTools(undefined, { signal: controller.signal });
-    return { ok: true, tools: res.tools.map((t) => t.name) };
+    return { ok: true, tools: toPrefixedCodescapeToolNames(res.tools.map((t) => t.name)) };
   } catch (err) {
     return { ok: false, error: (err as Error).message, timedOut: controller.signal.aborted };
   } finally {
