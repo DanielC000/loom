@@ -4097,8 +4097,12 @@ export class SessionService {
    * gets the SAME spread, via `deriveMergeGateVerdict` (`confirmWorkerMergeTracked`'s own `onSettle`) —
    * `gate_status(opId)` on a rejected merge DOES carry `gateDetail.failingTest`/`gateDetail.stderrTail`/
    * `outputTail` today. This is the surface `gate_history`'s own `opId` field (card 3aec1df6) exists to let
-   * a caller reach — `gate_history` itself intentionally still reads `failingTest: null` for every merge
-   * row (see `GateHistoryRow.failingTest`'s own doc for why), by design: it is the index, this is the detail.
+   * a caller reach for the FULL diagnostic — `stderrTail`/`outputTail`/`phase`/`exitCode`/`signal`/
+   * `timedOut` still live only here, never on a `gate_history` row. ⚠️ CORRECTED (card eb9348b0):
+   * `gate_history`'s own `failingTest` is NO LONGER unconditionally `null` for a merge row — its mapper
+   * now also reads THIS SAME settled verdict payload (already joined in for `emitCompareReduced`) as a
+   * fallback, so the common "has this test failed before" scan doesn't need this pivot at all; see
+   * `GateHistoryRow.failingTest`'s own doc for the recovery rate and the cases still requiring it.
    *
    * FOUR TERMINAL "not live, not found" outcomes now, not three — `never_existed` alone is not enough
    * once a scoped caller exists (see below): `"never_existed"` is a POSITIVE assertion the id was NEVER

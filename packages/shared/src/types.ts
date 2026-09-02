@@ -1622,14 +1622,28 @@ export interface GateHistoryRow {
   durationMs: number | null;
   /** ISO timestamp the run settled. */
   endedAt: string;
-  /** ⚠️ Card 3aec1df6: for a `gateType:"merge"` row this is `failingTest: null` BY CONSTRUCTION, on EVERY
-   *  row, pass or fail — a merge gate's own `build_gate`/`build_gate_retry` event never carries a failing
-   *  test/output tail at all (that diagnostic is written to a separate `merge_rejected` event this history
-   *  read doesn't include). This is NOT a data-quality gap to fix here: `gate_history` is the settled-run
-   *  INDEX (outcome/duration/concurrency trend across many rows); the full diagnostic — `failingTest` AND
-   *  `phase`/`stderrTail`/`outputTail` — lives behind `gate_status(opId)`, using THIS row's own `opId`
-   *  field (below), and IS populated there for a settled merge op. Populated (non-null) for a `"worker"`
-   *  row's failure — a worker self-check's own event embeds `failingTest` directly, so no pivot is needed. */
+  /** ⚠️ Card 3aec1df6 (ORIGINAL DESIGN, PARTIALLY SUPERSEDED by card eb9348b0 — read the correction
+   *  below before trusting the first half of this doc): a merge gate's own `build_gate`/`build_gate_retry`
+   *  event never carries a failing test inline — that diagnostic is written to a separate
+   *  `merge_rejected` event this history read doesn't include, and this remains true: `gate_history` is
+   *  still the settled-run INDEX (outcome/duration/concurrency trend across many rows), never the raw
+   *  event's own detail store for this field. The RAW-EVENT split above was deliberate and stays as-is —
+   *  do not read the correction below as reversing it.
+   *  ⭐ CARD eb9348b0 CORRECTION: for a `gateType:"merge"` row, this field is no longer unconditionally
+   *  `null`. Card 6ca4b1a0 already LEFT JOINs `pending_gate_ops.verdict_payload_json` into this same query
+   *  (for `emitCompareReduced`, below) — the mapper now ALSO reads that already-joined payload's
+   *  `gateDetail.failingTest` as a fallback whenever the raw event itself has none, at ZERO extra JOIN/
+   *  column cost (measured: recovers ~70% of recent merge-rejection rows this way, vs ~10% for rows
+   *  recorded before the opId-stamping/verdict-widening cards landed). Still `null` when the fallback has
+   *  nothing to offer: a `"worker"`/`"deploy"` row whose own event lacks `failingTest` (rare — a worker
+   *  self-check embeds it inline on failure), a row/op predating opId-stamping (card 78214063) or the
+   *  merge-verdict-payload widening (card 9f6598dd), a `"pass"`/`"cancelled"`/`"skipped"` verdict
+   *  (`gateDetail` is fail-only), or a genuine rejection whose output carried no recognizable marker
+   *  (`gateDetail` present but its own `failingTest` absent — see `PendingGateOpVerdict.gateDetail`'s doc).
+   *  For any of those remaining gaps, `opId` (below) is still the reachability key to `gate_status(opId)`
+   *  for the FULL diagnostic (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`) — this
+   *  field alone was never meant to replace that pivot, only to make the common case (an aggregate scan
+   *  for "has test X failed before" across many rows) not need it. */
   failingTest: string | null;
   /** Card 3aec1df6 — the reachability key `gate_history` was missing entirely: feed this to `gate_status`
    *  for the full diagnostic (`gateDetail.failingTest`/`gateDetail.stderrTail`/`outputTail`) a null

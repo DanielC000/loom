@@ -12,16 +12,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           project's rows are never returned at all (stronger than gate_queue's own field-level
 //           redaction: there is nothing to redact because there is nothing foreign in the payload), and
 //           the foreign project's task title never appears anywhere in the JSON.
-//   (card 3aec1df6) a merge row's `failingTest` reads `null` BY CONSTRUCTION (a real `build_gate` event
-//           never carries it — the diagnostic lives on the separate, excluded `merge_rejected` event and,
-//           since 9f6598dd, on `pending_gate_ops`) — and the row now carries `opId`, the reachability key
-//           to that detail. The (unit)/(e2e) blocks above prove the MAPPER against a synthetic fixture;
-//           the (e2e, REAL WRITE PATH) block below drives an ACTUAL rejected merge through the REAL
-//           `confirmWorkerMergeTracked` — the only way to prove the production `evt("build_gate", {opId:
-//           thisOpId, ...})` call site itself stamps it (a synthetic-fixture test would stay green even
-//           if that call site were reverted — caught live: removing `opId: thisOpId` from the real code
-//           and rerunning left every fixture-driven check above GREEN, since seed() writes detail_json
-//           directly and never calls the production code at all).
+//   (card 3aec1df6, CORRECTED by card eb9348b0) a real `build_gate` event's own detail_json never carries
+//           `failingTest` — that stays true, and the row now carries `opId`, the reachability key to the
+//           FULLER diagnostic (`phase`/`stderrTail`/`outputTail`/`exitCode`) that still lives only behind
+//           `gate_status(opId)`. But the row's own `failingTest` is NO LONGER unconditionally `null`: the
+//           mapper also reads the `pending_gate_ops.verdict_payload_json` this tool ALREADY LEFT JOINs in
+//           (card 6ca4b1a0, for `emitCompareReduced`) — `gateDetail.failingTest`, when a "fail" verdict
+//           settled with one — at zero extra JOIN cost, so a caller scanning `gate_history` pages for
+//           "has this test failed before" gets a real answer for the majority of merge rejections without
+//           a per-row pivot. The (unit)/(e2e) blocks above prove the MAPPER against a synthetic fixture,
+//           including the NEGATIVE CONTROLS (a pass verdict, a row with no matching tombstone at all) that
+//           prove this never fabricates a value; the (e2e, REAL WRITE PATH) block below drives an ACTUAL
+//           rejected merge through the REAL `confirmWorkerMergeTracked` — the only way to prove the
+//           production `evt("build_gate", {opId: thisOpId, ...})` call site AND the real `onSettle`
+//           verdict-payload write both actually happen (a synthetic-fixture test would stay green even if
+//           either broke — caught live: removing `opId: thisOpId` from the real code and rerunning left
+//           every fixture-driven check above GREEN, since seed() writes detail_json directly and never
+//           calls the production code at all).
 //   (card 3a6f04cc) a CANCELLED worker-gate op used to be misreported as `outcome:"reject"` — the two
 //           disagreed with `gate_status`, which correctly reported `outcome:"cancelled"`. Fixed at the
 //           mapper (`gateOutcomeFromDetail` now checks `detail.cancelled` FIRST) and widened with a new
@@ -187,10 +194,11 @@ function seed(db) {
     check("(unit) the rejected row has passed:false (boolean derived from outcome)", rejected?.passed === false);
     check("(unit) the rejected row STILL carries durationMs (recorded unconditionally, not passed-only)", rejected?.durationMs === 84567);
     check("(unit) the rejected row carries gateCap/concurrentGates/concurrentGatesMax too", rejected?.gateCap === 2 && rejected?.concurrentGates === 2 && rejected?.concurrentGatesMax === 2);
-    // Card 3aec1df6: `failingTest` reads NULL on a merge row BY CONSTRUCTION — a real `build_gate` event
-    // never carries it (see the fixture's own comment above). This is the card's original complaint,
-    // reproduced here as the expected (documented) shape, not a bug this test is catching.
-    check("(unit) the rejected row's OWN failingTest is null on a merge row — by design, see GateHistoryRow's own doc", rejected?.failingTest === null);
+    // Card eb9348b0 (supersedes 3aec1df6's original "always null" shape): the raw `build_gate` event
+    // still never carries `failingTest` inline (see the fixture's own comment above), but the mapper now
+    // ALSO reads the already-joined `pending_gate_ops.verdict_payload_json` this fixture seeds below with
+    // `gateDetail.failingTest: "gate-history.mjs"` — so the row recovers it for free.
+    check("(unit) the rejected row's failingTest IS recovered from the joined verdict payload (card eb9348b0)", rejected?.failingTest === "gate-history.mjs");
     check("(unit) the rejected row carries opId — the reachability key to gate_status (card 3aec1df6)", rejected?.opId === rejectedOpId);
     check("(unit) a row whose detail never stamped opId reads back opId:null (the passed row)", passed?.opId === null);
     check("(unit) the passed row has passed:true and its own durationMs/gateCap/concurrentGates/concurrentGatesMax", passed?.passed === true && passed?.durationMs === 61234 && passed?.gateCap === 2 && passed?.concurrentGates === 1 && passed?.concurrentGatesMax === 1);
@@ -354,17 +362,18 @@ function seed(db) {
     check("(e2e, MCP) gate_history: the rejected row IS returned, passed:false, durationMs intact", !!rejectedRow && rejectedRow.passed === false && rejectedRow.durationMs === 84567);
     check("(e2e, MCP) gate_history: nextOffset is null (nothing more to page)", result.nextOffset === null);
 
-    // ── Card 3aec1df6: the reachability chain, both directions, over the REAL tool pair ──────────────────
-    // BEFORE the pivot: gate_history's own row reads failingTest:null for this merge rejection — this IS
-    // the card's original complaint, reproduced here as the documented (expected) shape.
-    check("(e2e, MCP) BEFORE the pivot: gate_history's own row reads failingTest:null for a merge rejection (by design — see GateHistoryRow's own doc)", rejectedRow.failingTest === null);
-    check("(e2e, MCP) BEFORE the pivot: the opId IS present on the row (the reachability key gate_history was missing)", rejectedRow.opId === rejectedOpId);
-    // AFTER the pivot: feeding that exact opId to the REAL gate_status tool resolves the SAME op and
-    // returns the full diagnostic gate_history's own row could not carry.
+    // ── Card 3aec1df6 (reachability), corrected by card eb9348b0 (failingTest itself is now recovered) ──
+    // gate_history's own row now recovers failingTest for free (card eb9348b0), from the SAME joined
+    // verdict payload the fixture seeded via insertPendingGateOp/settlePendingGateOp above — no pivot
+    // needed for THIS field any more.
+    check("(e2e, MCP) gate_history's own row recovers failingTest from the joined verdict payload (card eb9348b0)", rejectedRow.failingTest === "gate-history.mjs");
+    check("(e2e, MCP) the opId IS still present on the row (the reachability key to the FULLER diagnostic)", rejectedRow.opId === rejectedOpId);
+    // The FULLER diagnostic (phase/stderrTail/outputTail/exitCode/etc.) still lives only behind
+    // gate_status(opId) — feeding that exact opId to the REAL gate_status tool resolves the SAME op.
     const statusResult = await mgr.call("gate_status", { opId: rejectedRow.opId });
     check("(e2e, MCP) AFTER the pivot: gate_status(opId) resolves the SAME op — state:settled, gateType:merge, passed:false", statusResult.state === "settled" && statusResult.gateType === "merge" && statusResult.passed === false);
-    check("(e2e, MCP) AFTER the pivot: gate_status(opId) carries the failing test gate_history's own row cannot", statusResult.gateDetail?.failingTest === "gate-history.mjs");
-    check("(e2e, MCP) AFTER the pivot: gate_status(opId) also carries the output tail", statusResult.gateDetail?.stderrTail === "--- gate output tail ---\nExpected 1 to equal 2" && statusResult.outputTail === "--- gate output tail ---\nExpected 1 to equal 2");
+    check("(e2e, MCP) gate_status(opId) carries the SAME failing test gate_history's row now also recovers", statusResult.gateDetail?.failingTest === "gate-history.mjs");
+    check("(e2e, MCP) gate_status(opId) carries the output tail — the fuller diagnostic gate_history's row still cannot", statusResult.gateDetail?.stderrTail === "--- gate output tail ---\nExpected 1 to equal 2" && statusResult.outputTail === "--- gate output tail ---\nExpected 1 to equal 2");
     check("(e2e, MCP CROSS-PROJECT CHECK) the foreign project's id/name/task title never appear anywhere in the response", !JSON.stringify(result).includes(P2) && !JSON.stringify(result).includes("Foreign Project") && !JSON.stringify(result).includes("Foreign project task title"));
 
     // DIRECTIVE #4, over the REAL MCP tool: the historical row (no concurrentGatesMax stamped) comes back
@@ -448,11 +457,15 @@ function seed(db) {
     const row = page.items.find((x) => x.outcome === "reject");
     check("(e2e, REAL WRITE PATH) the REAL confirmWorkerMergeTracked call produced a rejected gate_history row", !!row);
     check("(e2e, REAL WRITE PATH — THE ACTUAL FIX) that row's opId, read back through the REAL db.listGateEvents, equals the REAL op's opId", row?.opId === opId);
-    check("(e2e, REAL WRITE PATH) that row's own failingTest is still null (index, not detail — by design, same as the fixture-driven proof above)", row?.failingTest === null);
+    // Card eb9348b0: proves the RECOVERY, not just the mapper, against PRODUCTION code — the same real
+    // `confirmWorkerMergeTracked` call that writes the raw `build_gate` event (with no inline failingTest)
+    // also settles the `pending_gate_ops` tombstone (via `deriveMergeGateVerdict`'s `onSettle`) with a real
+    // `gateDetail.failingTest`, so by the time this read runs, the row already recovers it.
+    check("(e2e, REAL WRITE PATH) that row's failingTest IS recovered from the REAL settled verdict payload (card eb9348b0)", row?.failingTest === "real_path_test.mjs");
 
     const status = sessions.gateStatus(opId);
     check("(e2e, REAL WRITE PATH) feeding gate_history's REAL opId to the REAL gate_status resolves the SAME op", status.state === "settled" && status.gateType === "merge" && status.passed === false);
-    check("(e2e, REAL WRITE PATH) gate_status(opId) carries the REAL failing test this row's own failingTest could not", status.gateDetail?.failingTest === "real_path_test.mjs");
+    check("(e2e, REAL WRITE PATH) gate_status(opId) carries the SAME REAL failing test this row's own failingTest now also recovers", status.gateDetail?.failingTest === "real_path_test.mjs");
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
     for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -748,6 +761,12 @@ function seed(db) {
     check("(unit, card 6ca4b1a0 — NEVER FABRICATE false) (4) a row with no matching pending_gate_ops tombstone reads emitCompareReduced:null, NOT false", noPayloadRow?.emitCompareReduced === null);
     check("(unit, card 6ca4b1a0) (4) no-payload row's identicalCount/testFiles are also null", noPayloadRow?.emitCompareIdenticalCount === null && noPayloadRow?.emitCompareTestFiles === null);
 
+    // Card eb9348b0 — NEGATIVE CONTROLS for `failingTest`'s new verdict-payload fallback, riding the SAME
+    // fixtures above: a `"pass"` verdict never carries `gateDetail` (fail-only), so all three genuinely-
+    // settled rows must read `failingTest:null`, same as the never-fabricated `emitCompareReduced` case.
+    check("(unit, card eb9348b0 — NEVER FABRICATE) a settled PASS verdict's row reads failingTest:null (gateDetail is fail-only)", testFilesArmRow?.failingTest === null && identityArmRow?.failingTest === null && falseRow?.failingTest === null);
+    check("(unit, card eb9348b0 — NEVER FABRICATE) a row with no matching pending_gate_ops tombstone reads failingTest:null, NOT a stale/guessed value", noPayloadRow?.failingTest === null);
+
     // Cross-check against the FIRST block's own pre-existing fixtures (seed()) — a row from BEFORE this
     // card shipped (no pending_gate_ops row at all, same shape as fixture (4) above) must ALSO read null,
     // proving the historical/legacy case is not special-cased differently from the synthetic "no tombstone"
@@ -756,6 +775,7 @@ function seed(db) {
     const legacyPage = db.listGateEvents({ projectId: P1, limit: 100, offset: 0 });
     const legacyPassed = legacyPage.items.find((r) => r.durationMs === 61234);
     check("(unit, card 6ca4b1a0) a PRE-EXISTING (seed()) row with no opId/tombstone also reads emitCompareReduced:null", legacyPassed?.emitCompareReduced === null && legacyPassed?.emitCompareIdenticalCount === null && legacyPassed?.emitCompareTestFiles === null);
+    check("(unit, card eb9348b0) that SAME pre-existing row also reads failingTest:null (no opId to join through at all)", legacyPassed?.failingTest === null);
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   }
@@ -763,5 +783,6 @@ function seed(db) {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code. Since card 6ca4b1a0, a row also carries emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles sourced from pending_gate_ops (never the raw event alone), correctly distinguishing both reduction arms, an explicit proven-not-reduced false, and a never-fabricated null."
+  + " Since card eb9348b0, a merge row's own failingTest is recovered from that SAME joined verdict payload (gateDetail.failingTest) as a fallback whenever the raw event has none, proven against both a synthetic fixture and a REAL confirmWorkerMergeTracked write — with negative controls proving a pass verdict, a no-tombstone row, and a pre-existing legacy row all still read null, never a fabricated value."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

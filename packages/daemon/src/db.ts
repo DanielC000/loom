@@ -7716,7 +7716,26 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     try { detail = JSON.parse(r.detailJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
   }
   const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
-  const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
+  // Card 6ca4b1a0's JOIN, parsed early so `failingTest` below can read it too — see that field's own
+  // doc for why `pending_gate_ops.verdict_payload_json` (not the raw event's own `detail`) is the one
+  // place a merge op's real diagnostic survives.
+  let verdictPayload: Record<string, unknown> = {};
+  if (r.verdictPayloadJson) {
+    try { verdictPayload = JSON.parse(r.verdictPayloadJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
+  }
+  const verdictGateDetail = verdictPayload.gateDetail as Record<string, unknown> | undefined;
+  const verdictFailingTest = verdictGateDetail && typeof verdictGateDetail.failingTest === "string"
+    ? verdictGateDetail.failingTest : null;
+  // Card eb9348b0: a real `build_gate`/`build_gate_retry` event's OWN `detail` never carries
+  // `failingTest` (by construction — see this field's own doc), but the ALREADY-JOINED
+  // `verdict_payload_json` (fetched above for `emitCompareReduced`, not previously mined any further)
+  // carries the SAME `gateDetail.failingTest` `gate_status(opId)` would show, whenever a "fail" verdict
+  // was settled with one — so falling back to it here costs no new JOIN/column, only recovers what a
+  // caller could already reach one `gate_status` hop away. Still `null` when neither source has it: a
+  // `"worker"`/`"deploy"` row with no inline `failingTest`, an older row that predates opId-stamping or
+  // the merge-verdict-payload widening, a pass/cancelled/skipped verdict (`gateDetail` is fail-only), or
+  // a genuine reject whose output carried no recognizable marker.
+  const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : verdictFailingTest;
   // Card 3aec1df6 — the reachability key: at the time this comment was first written, `worker_gate`
   // detail_json never carried an opId, and adding it there was named as card 78214063's separate scope.
   // CORRECTED (card 78214063, 2026-08-24): that gap is now closed — card 7d492f8b's `evt` closure in
@@ -7751,13 +7770,10 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // Card 6ca4b1a0: deliberately NOT read from `detail` above — the raw `build_gate` event only ever stamps
   // `emitCompareReduced` when `true` (a conditional spread at the producer, see service.ts's `evt("build_gate",
   // ...)` call site), never an explicit `false`, so `detail` alone can't tell "genuinely full run" from
-  // "reduction never computed". `pending_gate_ops.verdict_payload_json` (joined in as `verdictPayloadJson`)
-  // is the one place `deriveMergeGateVerdict` persists the real tri-state — see GateHistoryRow.emitCompareReduced's
-  // own doc (shared/types.ts) for the full discipline this projects.
-  let verdictPayload: Record<string, unknown> = {};
-  if (r.verdictPayloadJson) {
-    try { verdictPayload = JSON.parse(r.verdictPayloadJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
-  }
+  // "reduction never computed". `pending_gate_ops.verdict_payload_json` (joined in as `verdictPayloadJson`,
+  // parsed above into `verdictPayload` — shared with `failingTest`'s own fallback) is the one place
+  // `deriveMergeGateVerdict` persists the real tri-state — see GateHistoryRow.emitCompareReduced's own doc
+  // (shared/types.ts) for the full discipline this projects.
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean" ? verdictPayload.emitCompareReduced : null;
   // Both gated on `emitCompareReduced === true` (never merely "present in the payload") — the producer
   // only ever stamps these two alongside a `true` reduced flag, so this mirrors that pairing defensively

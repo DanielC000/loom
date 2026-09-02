@@ -4092,15 +4092,22 @@ export class OrchestrationMcpRouter {
           "`durationMs` presence) — admission is not proof a process spawned (a cancel landing between " +
           "admission and the gate runner's own first-step check settles with zero steps despite a real " +
           "`durationMs`), so treat that fallback case as reliable, not guaranteed. " +
-          "⚠️ THIS TOOL IS THE INDEX, NOT THE DETAIL SURFACE (card 3aec1df6): a `gateType:\"merge\"` row's " +
-          "`failingTest` is `null` on EVERY row, pass or fail — a merge run's failure diagnostic " +
-          "(`failingTest`/`phase`/`stderrTail`/`outputTail`) is never carried on the event this history " +
-          "reads, by construction. To diagnose a rejected merge, take that row's `opId` and call " +
-          "`gate_status(opId)` — it DOES carry the full `gateDetail`/`outputTail` for a settled merge op. A " +
-          "`\"worker\"` row's `failingTest` IS populated directly (a worker self-check embeds it inline), so " +
-          "no pivot is needed there; its `opId` is `null` for the identical reason. `opId` is also `null` " +
-          "for a `\"deploy\"` row (no `pending_gate_ops` op) and for any row recorded before this field " +
-          "shipped. " +
+          "⚠️ THIS TOOL IS THE INDEX, NOT THE FULL-DETAIL SURFACE (card 3aec1df6, corrected by card " +
+          "eb9348b0): a `gateType:\"merge\"` row's own `build_gate`/`build_gate_retry` event never carries " +
+          "`failingTest` inline, by construction — but this row's `failingTest` is NOT unconditionally " +
+          "`null` any more. The mapper also reads the SAME `pending_gate_ops.verdict_payload_json` this " +
+          "tool already LEFT JOINs in for `emitCompareReduced` (below), pulling its `gateDetail.failingTest` " +
+          "as a fallback — so \"has test X failed before\" is answerable by scanning `gate_history` pages " +
+          "alone for a real majority of merge rejections, no per-row `gate_status(opId)` pivot required. " +
+          "Still `null` when that payload has nothing to offer (an older row/op predating opId-stamping or " +
+          "the merge-verdict-payload widening, a pass/cancelled/skipped verdict, or a genuine rejection " +
+          "whose output carried no recognizable marker) — for THOSE, and for the fuller diagnostic this " +
+          "field alone never carries (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`), " +
+          "take the row's `opId` and call `gate_status(opId)`, which DOES carry the full `gateDetail`/" +
+          "`outputTail` for a settled merge op. A `\"worker\"` row's `failingTest` IS populated directly (a " +
+          "worker self-check embeds it inline), so no pivot is needed there; its `opId` is `null` for the " +
+          "identical reason. `opId` is also `null` for a `\"deploy\"` row (no `pending_gate_ops` op) and " +
+          "for any row recorded before this field shipped. " +
           "⚠️ `concurrentGates` vs `concurrentGatesMax` — DO NOT CONFUSE THESE, they answer DIFFERENT " +
           "questions: `concurrentGates` is a SNAPSHOT AT ADMISSION ONLY — \"how many gates were admitted " +
           "together the instant this one started\" — and says NOTHING about a second gate joining 30s " +
