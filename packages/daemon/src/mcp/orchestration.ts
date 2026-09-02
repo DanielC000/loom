@@ -498,6 +498,9 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "renders for this exact op — one shared formatter, so a caller who only ever reads `gate_status` gets " +
       "the identical warning, never a paraphrase. Same \"the concurrency triple beside this note describes " +
       "the RETRY's own admission, not attempt 1's\" caveat the live nudge's wording already carries. " +
+      "⚠️ `gate_history[].transientRetried` means something DIFFERENT: there it names which ROW IS the " +
+      "retry's own row (true on a pass OR a rejection), never a weaker-verdict signal — don't carry this " +
+      "field's meaning across surfaces. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +
       "ever delivered for it, treat it like `settled` for planning purposes and just re-run " +
@@ -4059,6 +4062,9 @@ export class OrchestrationMcpRouter {
           "the pairing above. Mutually exclusive with a non-null `retriedFile` on the SAME row (a first " +
           "attempt is classified either \"genuine\", eligible for the single-file retry, or \"kill\"/" +
           "\"timeout\", eligible for THIS retry, never both) — never both truthy on one row. " +
+          "⚠️ `gate_status(opId).transientRetried` means something DIFFERENT: there `true` DOES mean the " +
+          "op's merged verdict was reached via the retry (a weaker pass) — don't carry this field's " +
+          "meaning across surfaces. " +
           "⚠️ CARD db9b0130 — `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
           "\"merge\"` row whose branch's ENTIRE changed-path set was proven inert (docs-only) never spawns a " +
           "gate at all — the row still stamps `detail.passed:true` (so the merge could proceed to squash), " +
