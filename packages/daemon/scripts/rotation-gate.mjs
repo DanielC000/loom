@@ -21,8 +21,21 @@
 // below was copied verbatim from that section (relayed through card 8e2a4252's kickoff, itself already
 // a copy) and MUST be re-checked against the live vault section by whoever next edits this file —
 // this local copy can drift silently, same as any other copied-not-pointed-at value.
-// Re-verified against the live vault section 2026-08-28 (card d78a6d5d): the 14-item marker list still
-// matches §ROTATION-GATE verbatim — no drift found.
+//
+// CUT 2026-09-02 (card `bcd3f690`, step 1 of the owner's "cleanup all bad ceremonies" directive
+// 2026-09-01): three markers retired because the rules they protected were retired in the SAME cut —
+// `MY-PEER-SEND-LEDGER` (the per-send ledger is deleted outright), `ANNOUNCE-CANNOT-CARRY-A-SHA`
+// (retired with the merge-announce obligation it qualified), `MGR122-FLOOR` (a floor on an announced
+// number that no longer gets announced). This local copy now holds 11 markers — it is the lead's job
+// (not this card's) to land the matching cut in `Orchestrator Rules.md` §ROTATION-GATE and
+// `Orchestrator Log.md`; this script intentionally lands FIRST so the next rotation's gate doesn't
+// refuse the doc the vault edit is about to produce. See the card for the two markers kept despite
+// looking like ceremony — `NO-CLEARANCE-FROM-SILENCE` (protects the repo against inferring
+// authorization from silence, not etiquette) and `QUIET-LANE` (a measurement-honesty rule backing the
+// gate-queue-read-at-fire interlock) — both still required below.
+// Prior verification history (now superseded by the cut above, kept for provenance): re-verified against
+// the live vault section 2026-08-28 (card `d78a6d5d`), the marker list then held 14 entries and matched
+// §ROTATION-GATE verbatim with no drift found.
 //
 // ⭐ LIVE_COMMITMENTS_FLOOR IS A FLOOR, NOT AN EXACT COUNT (card 34a6f07e, 2026-08-28). It used to be
 // `REQUIRED_LIVE_COMMITMENTS_COUNT`, checked with EQUALITY (`!==`). That was a bug, not a feature: a
@@ -35,19 +48,19 @@
 // SHRINKS the LIVE COMMITMENTS list") — equality was never that. The fix: assert a FLOOR (`>=`) instead.
 // Growing the list can never fail this check again; only shrinking below the floor can.
 //
-// A floor only protects what it counts. `LIVE_COMMITMENTS_FLOOR` is bumped here from 14 to 20 — the 14
-// re-verified 2026-08-28 (card d78a6d5d) plus 6 new terms card 34a6f07e names as newly agreed and
-// currently sitting, unprotected, in prose in the live vault doc (the card's own prose FIRST miscounted
-// this as 5, omitting "DISCLOSE A LIVE-WORKER-COUNT CHANGE ON THE CHANGE, not at the next natural letter"
-// — corrected 2026-08-28 after the filer recounted the real doc; named here so the arithmetic is
-// auditable, not just trusted). This is DELIBERATE and lands ahead of the matching vault edit: it makes
-// `--lint`/rotation REFUSE the live doc (14 numbered items) until those 6 terms are moved from prose into
-// the numbered LIVE COMMITMENTS list as items 15–20 — the "fail loudly and get updated" behavior the
-// fixed-arity bug was denying. See card 34a6f07e's worker report for the exact hand-off. Whoever performs
-// that vault edit must bump this constant to match the new true count IN
-// THE SAME EDIT — never lower it, and never let it silently drift behind the vault content the way the
-// prior count itself drifted (see the header note above): this remains the ONE place the number lives,
-// mirroring the vault the same way the marker list already does.
+// A floor only protects what it counts, and it moves when the underlying doc's own commitments genuinely
+// shrink — not just when they grow. `LIVE_COMMITMENTS_FLOOR` was raised 14 → 20 by card `34a6f07e`
+// (2026-08-28, to protect 6 terms then sitting unprotected in prose — see that card's own history if it
+// still matters to a reader) and is now LOWERED 20 → 12 by card `bcd3f690` (2026-09-02): the owner's
+// ceremony cut removes real numbered LIVE COMMITMENTS items along with the 3 markers above, and 12 is
+// this script's floor on what the lead's post-cut doc will still carry (the lead independently counted
+// at least 12 surviving items before naming this number — see the card). This is DELIBERATE and lands
+// ahead of the matching vault edit, same ordering rationale as always: a `>=` floor is safe to lower
+// ahead of the doc shrinking, because a lower floor can only ever be MORE permissive, never refuse a doc
+// that would have passed the old higher floor. Whoever next changes the vault's real commitment count
+// must update this constant to match IN THE SAME EDIT — never let it silently drift behind the vault
+// content the way the marker list itself has already been shown to drift (see the header note above):
+// this remains the ONE place the number lives, mirroring the vault the same way the marker list does.
 //
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
@@ -126,20 +139,29 @@ const MARKERS = [
   { token: "Orchestrator Rules", caseSensitive: false, note: "THE POINTER — losing it orphans the whole rules file" },
   { token: "THE FOUR-LEG VERIFY", caseSensitive: false },
   { token: "LIVE COMMITMENTS", caseSensitive: false },
-  { token: "MY-PEER-SEND-LEDGER", caseSensitive: false },
   { token: "OWNER-GATED", caseSensitive: false },
   { token: "ROTATE AT 40 KB", caseSensitive: false },
   { token: "THE SAFE-WRITE", caseSensitive: false },
   { token: "MULTI-HARNESS EPIC", caseSensitive: false },
-  { token: "ANNOUNCE-CANNOT-CARRY-A-SHA", caseSensitive: false },
-  { token: "NO-CLEARANCE-FROM-SILENCE", caseSensitive: false },
-  { token: "MGR122-FLOOR", caseSensitive: false },
+  { token: "NO-CLEARANCE-FROM-SILENCE", caseSensitive: false, note: "protects the REPO (forbids inferring authorization from a peer's silence), not etiquette — kept by card bcd3f690" },
   { token: "capQueued", caseSensitive: true, note: "a literal response FIELD NAME — must match casing exactly" },
   { token: "in-memory", caseSensitive: false },
-  { token: "QUIET-LANE", caseSensitive: false },
+  { token: "QUIET-LANE", caseSensitive: false, note: "a measurement-honesty rule backing the gate-queue-read-at-fire interlock — kept by card bcd3f690" },
 ];
 
-const LIVE_COMMITMENTS_FLOOR = 20;
+// Retired 2026-09-02 by card `bcd3f690` (owner's ceremony cut): "MY-PEER-SEND-LEDGER" (the per-send
+// ledger is deleted outright), "ANNOUNCE-CANNOT-CARRY-A-SHA" (retired with the merge-announce
+// obligation), "MGR122-FLOOR" (a floor on an announced number that is no longer announced). None of the
+// three are required above any more — see the file header for the full reasoning.
+//
+// ⚠️ COUPLING NOTE, flagged not fixed by this cut: `countLiveCommitments` below still anchors the END of
+// the LIVE COMMITMENTS section to a heading literally containing "my-peer-send-ledger" (falling back to
+// end-of-file when absent — proven safe by this card's own RED-baseline run, see the worker report). That
+// anchor is independent of this MARKERS array and is UNCHANGED by this cut. If a future vault edit removes
+// the §MY-PEER-SEND-LEDGER heading from the resume doc entirely, the section will simply be measured to
+// end-of-file instead — a strict superset, never a false refusal, but worth knowing before touching this
+// function again.
+const LIVE_COMMITMENTS_FLOOR = 12;
 
 const HELP = `rotation-gate.mjs — refuse to promote a resume-doc rotation that silently drops a durable marker or shrinks the LIVE COMMITMENTS list.
 

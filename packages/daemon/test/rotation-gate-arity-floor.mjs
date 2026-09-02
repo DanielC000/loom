@@ -56,8 +56,12 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The 14 marker tokens rotation-gate.mjs requires, independent of this card's fix (kept as a local
+// The marker tokens rotation-gate.mjs requires, independent of this card's fix (kept as a local
 // literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is that).
+// Card bcd3f690 (2026-09-02) retired 3 of the original 14 markers (MY-PEER-SEND-LEDGER,
+// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR) — this list holds the 10 that survive that cut, unrelated to
+// this test's own subject (the floor-vs-equality fix), so the fixtures below still satisfy the current
+// marker check.
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -65,9 +69,7 @@ const ALL_MARKER_TOKENS = [
   "ROTATE AT 40 KB",
   "THE SAFE-WRITE",
   "MULTI-HARNESS EPIC",
-  "ANNOUNCE-CANNOT-CARRY-A-SHA",
   "NO-CLEARANCE-FROM-SILENCE",
-  "MGR122-FLOOR",
   "capQueued",
   "in-memory",
   "QUIET-LANE",
@@ -179,30 +181,32 @@ if (oldScriptPath && oldScriptIsPreFix) {
 }
 
 // ── (b) THE FIXED (floor) GATE: must REFUSE the exact drop the old gate could not see, and PASS the
-// doc where the 6 terms are properly protected as real numbered items. ─────────────────────────────────
+// doc where the 6 terms are properly protected as real numbered items. The floor itself is 12 as of card
+// bcd3f690 (2026-09-02, lowered from 20 by the owner's ceremony cut — see rotation-gate.mjs's own header)
+// — item counts below are chosen relative to THAT floor, not the original 14/20 this test was authored
+// against. ──────────────────────────────────────────────────────────────────────────────────────────────
 {
-  // Same content as (a3) above, run through the CURRENT (fixed) script instead of the extracted old one.
-  const droppedDoc = docWith({ items: 14, extraProse: null });
+  // Below the current floor (12) regardless of the historical 14/20 story this fixture is modeling.
+  const droppedDoc = docWith({ items: 10, extraProse: null });
   const droppedPath = writeFixture("fixed-prose-dropped.md", droppedDoc);
   const r = runFixed(["--active", droppedPath, "--archive", archivePath]);
-  check("FIXED (floor) gate REFUSES the doc once shrunk back to 14 items", r.status === 1);
-  check("FIXED gate: names it against the new floor of 20, not the old 14", /fewer than the required floor of 20/.test(r.stderr));
+  check("FIXED (floor) gate REFUSES a doc shrunk to 10 items (below the current floor)", r.status === 1);
+  check("FIXED gate: names it against the current floor of 12", /fewer than the required floor of 12/.test(r.stderr));
 }
 {
-  // Same content as (a2) above (14 counted + 6 in prose) — the floor fix alone does not make this doc
-  // pass, because the 6 terms are still not counted; the floor only protects what is actually numbered.
-  const withProseDoc = docWith({ items: 14, extraProse: SIX_TERMS_PROSE });
+  // 10 counted + 6 in prose — the floor fix alone does not make this doc pass, because the 6 terms are
+  // still not counted; the floor only protects what is actually numbered.
+  const withProseDoc = docWith({ items: 10, extraProse: SIX_TERMS_PROSE });
   const withProsePath = writeFixture("fixed-with-prose.md", withProseDoc);
   const r = runFixed(["--active", withProsePath, "--archive", archivePath]);
-  check("FIXED gate ALSO REFUSES 14 counted + 6 in prose — the floor protects only what's counted, not prose", r.status === 1);
+  check("FIXED gate ALSO REFUSES 10 counted + 6 in prose — the floor protects only what's counted, not prose", r.status === 1);
 }
 {
-  // The properly-protected doc: the 6 terms promoted to real numbered items 15–20 (total 20). This is
-  // what the vault edit named in this card's hand-off must produce.
+  // The properly-protected doc: well above the current floor of 12.
   const protectedDoc = docWith({ items: 20, extraProse: null });
   const protectedPath = writeFixture("fixed-protected.md", protectedDoc);
   const r = runFixed(["--active", protectedPath, "--archive", archivePath]);
-  check("FIXED gate PASSES once the 6 terms are real numbered items (20 total)", r.status === 0);
+  check("FIXED gate PASSES once the terms are real numbered items (20 total, above the floor of 12)", r.status === 0);
 }
 {
   // Negative control on the floor's OTHER direction: growth beyond the floor must never be punished —

@@ -28,8 +28,9 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The exact 14 marker tokens rotation-gate.mjs requires, as of card 9a5837b2 (kept as a local literal —
-// this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is that).
+// The marker tokens rotation-gate.mjs requires, as of card 9a5837b2 and subsequently narrowed by card
+// bcd3f690 (2026-09-02, which retired MY-PEER-SEND-LEDGER, ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR —
+// kept as a local literal here; rotation-gate.mjs's own MARKERS array is the source of truth).
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -37,9 +38,7 @@ const ALL_MARKER_TOKENS = [
   "ROTATE AT 40 KB",
   "THE SAFE-WRITE",
   "MULTI-HARNESS EPIC",
-  "ANNOUNCE-CANNOT-CARRY-A-SHA",
   "NO-CLEARANCE-FROM-SILENCE",
-  "MGR122-FLOOR",
   "capQueued",
   "in-memory",
   "QUIET-LANE",
@@ -53,8 +52,9 @@ function commitmentsList(n) {
 
 // `markers` are the non-heading tokens present as prose (LIVE COMMITMENTS / MY-PEER-SEND-LEDGER are
 // always present via the real section headings below, independent of this list).
-// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
-// rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 20 items.
+// LIVE_COMMITMENTS_FLOOR is 12 as of card bcd3f690 (2026-09-02, lowered from 20 by the owner's ceremony
+// cut — see rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 12 items; the
+// default here (20) is simply well above that floor.
 function docWith({ markers = ALL_MARKER_TOKENS, items = 20 } = {}) {
   return [
     "# Loom — Orchestrator Log (fixture)",
@@ -103,13 +103,13 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
   check("control (a): names 'Orchestrator Rules' as missing", /Orchestrator Rules/.test(r.stderr));
 }
 
-// ── Positive control (b): one numbered commitment deleted (18 instead of the 20-item floor). ────────────
+// ── Positive control (b): commitments below the current floor of 12 (11 instead of 12). ─────────────────
 // (Card DoD-5b: "delete one numbered commitment from another COPY ⇒ expect exit 1".)
 {
-  const p = writeFixture("short-commitments.md", docWith({ items: 18 }));
+  const p = writeFixture("short-commitments.md", docWith({ items: 11 }));
   const r = runGate(["--active", p, "--archive", archivePath]);
-  check("control (b) 18/20 commitments: exits 1", r.status === 1);
-  check("control (b): reports the real count", /holds 18 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
+  check("control (b) 11/12 commitments: exits 1", r.status === 1);
+  check("control (b): reports the real count", /holds 11 numbered item\(s\), fewer than the required floor of 12/.test(r.stderr));
 }
 
 // ── Positive control (c): the archive leg — nonexistent path, then an empty file. ───────────────────────
@@ -168,11 +168,11 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
 
 // ── --lint still enforces the marker check — a doc missing a marker fails lint the same as rotation. ───
 {
-  const markers = ALL_MARKER_TOKENS.filter((t) => t !== "MGR122-FLOOR");
+  const markers = ALL_MARKER_TOKENS.filter((t) => t !== "NO-CLEARANCE-FROM-SILENCE");
   const p = writeFixture("lint-missing-marker.md", docWith({ markers, items: 20 }));
   const r = runGate(["--active", p, "--lint"]);
   check("lint: missing marker still refused: exits 1", r.status === 1);
-  check("lint: names the missing marker", /MGR122-FLOOR/.test(r.stderr));
+  check("lint: names the missing marker", /NO-CLEARANCE-FROM-SILENCE/.test(r.stderr));
 }
 
 // ── --lint still enforces the LIVE COMMITMENTS count. ────────────────────────────────────────────────
@@ -180,7 +180,7 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
   const p = writeFixture("lint-short-commitments.md", docWith({ items: 5 }));
   const r = runGate(["--active", p, "--lint"]);
   check("lint: short commitments section still refused: exits 1", r.status === 1);
-  check("lint: reports the real count", /holds 5 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
+  check("lint: reports the real count", /holds 5 numbered item\(s\), fewer than the required floor of 12/.test(r.stderr));
 }
 
 // ── --lint combined with --rules: the union still applies under lint mode. ──────────────────────────────

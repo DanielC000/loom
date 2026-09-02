@@ -42,9 +42,11 @@ function writeFixture(name, content) {
 
 // Every marker rotation-gate.mjs requires, present as plain prose text — none of these lines are headings
 // (no leading `#`), so they satisfy the presence check without ever opening/closing the commitments span.
+// Card bcd3f690 (2026-09-02) retired 3 of the original 14 markers (MY-PEER-SEND-LEDGER,
+// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR) — this list holds the 10 that survive that cut.
 const ALL_MARKERS_PROSE = [
   "Orchestrator Rules · THE FOUR-LEG VERIFY · OWNER-GATED · ROTATE AT 40 KB · THE SAFE-WRITE ·",
-  "MULTI-HARNESS EPIC · ANNOUNCE-CANNOT-CARRY-A-SHA · NO-CLEARANCE-FROM-SILENCE · MGR122-FLOOR ·",
+  "MULTI-HARNESS EPIC · NO-CLEARANCE-FROM-SILENCE ·",
   "capQueued · in-memory · QUIET-LANE",
 ].join("\n");
 
@@ -54,8 +56,9 @@ function commitmentsList(n) {
   return lines.join("\n");
 }
 
-// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
-// rotation-gate.mjs's own header). A "clean"/well-formed doc in this file must carry >= 20 items.
+// LIVE_COMMITMENTS_FLOOR is 12 as of card bcd3f690 (2026-09-02, lowered from 20 by the owner's ceremony
+// cut — see rotation-gate.mjs's own header). A "clean"/well-formed doc in this file must carry >= 12
+// items; the default here (20) is simply well above that floor.
 function docWith({ preface = "", items = 20 } = {}) {
   return [
     "# Loom — Orchestrator Log (fixture)",
@@ -113,7 +116,7 @@ const archivePath = writeFixture("archive.md", "archive contents\n");
   const p = writeFixture("short-section.md", docWith({ items: 3 }));
   const r = runGate(p, archivePath);
   check("genuinely short (3-item) commitments section: exits 1", r.status === 1);
-  check("genuinely short section: reports the real count (3, not 0)", /holds 3 numbered item\(s\), fewer than the required floor of 20/.test(r.stderr));
+  check("genuinely short section: reports the real count (3, not 0)", /holds 3 numbered item\(s\), fewer than the required floor of 12/.test(r.stderr));
 }
 
 // ── Case 4: self-diagnosing failure message (card d78a6d5d DoD-3) — a count mismatch must name WHERE the

@@ -30,8 +30,9 @@ function writeFixture(name, content) {
   return { path: p, bytes: fs.statSync(p).size };
 }
 
-// The exact 14 marker tokens rotation-gate.mjs requires (kept as a local literal — this file is a TEST,
-// not the source of truth; rotation-gate.mjs's own MARKERS array is that).
+// The marker tokens rotation-gate.mjs requires, after card bcd3f690 (2026-09-02) retired
+// MY-PEER-SEND-LEDGER, ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR (kept as a local literal — this file is
+// a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is that).
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -39,9 +40,7 @@ const ALL_MARKER_TOKENS = [
   "ROTATE AT 40 KB",
   "THE SAFE-WRITE",
   "MULTI-HARNESS EPIC",
-  "ANNOUNCE-CANNOT-CARRY-A-SHA",
   "NO-CLEARANCE-FROM-SILENCE",
-  "MGR122-FLOOR",
   "capQueued",
   "in-memory",
   "QUIET-LANE",
@@ -53,8 +52,9 @@ function commitmentsList(n) {
   return lines.join("\n");
 }
 
-// LIVE_COMMITMENTS_FLOOR is 20 as of card 34a6f07e (was a fixed count of 14, now a floor — see
-// rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 20 items.
+// LIVE_COMMITMENTS_FLOOR is 12 as of card bcd3f690 (2026-09-02, lowered from 20 by the owner's ceremony
+// cut — see rotation-gate.mjs's own header). A well-formed doc in this file must carry >= 12 items; the
+// default here (20) is simply well above that floor.
 function docWith({ items = 20, titleSuffix = "" } = {}) {
   return [
     `# Loom — Orchestrator Log (fixture)${titleSuffix}`,
