@@ -45,15 +45,11 @@ import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function sleepUntil(t0, targetMs) {
-  const remaining = targetMs - (Date.now() - t0);
-  if (remaining > 0) await sleep(remaining);
-}
-/** Spin-wait (short poll, not a computed deadline) until `getCount()` reaches `target` — used instead of
- *  `sleepUntil` where a scenario needs to react to an OBSERVED write, not a guessed arrival time. A fixed
- *  absolute deadline (ENTER_DELAY + pasteSettleExtraMs + N*VERIFY_TIMEOUT, chained across N setTimeouts)
- *  has only tens of ms of slack under host load — CR-caught: this suite already had 6 timing-margin
- *  regressions today; this helper removes the coupling entirely instead of widening the margin. */
+/** Spin-wait (short poll, not a computed deadline) until `getCount()` reaches `target` — reacts to an
+ *  OBSERVED write instead of a guessed arrival time. A fixed absolute deadline (ENTER_DELAY +
+ *  pasteSettleExtraMs + N*VERIFY_TIMEOUT, chained across N setTimeouts) has only tens of ms of slack under
+ *  host load — CR-caught: this suite already had 6 timing-margin regressions today; this helper removes
+ *  the coupling entirely instead of widening the margin. */
 async function waitForCount(getCount, target, timeoutMs = 5000) {
   const t0 = Date.now();
   while (getCount() < target) {
@@ -104,11 +100,9 @@ const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 // Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
 // settle BEFORE writing Enter — see host.ts's REASSERT_SETTLE_POLL_MS/REASSERT_SETTLE_MAX_POLLS. Nothing
-// in scenarios (2)/(3) below emits output during that window, so it always maxes out its bound; giveUpAt()
-// must account for it or `sleepUntil(t0, giveUpAt() + …)` under-shoots the ACTUAL (now-later) give-up point.
+// in scenarios (2)/(3) below emits output during that window, so it always maxes out its bound.
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
-const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 // Card 3ce3fa39: the deferred clear rides the requeued entry's own next redrain, HELD from drain for
 // GIVE_UP_HOLD_MS pending a confirming hook (card 73d5c34a) — pinned small for this hermetic suite.
 const HOLD_MS = 10;
@@ -119,8 +113,21 @@ process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
-const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
+// Card 2ea7de01: scenarios (1)/(4) used to gate their "GIVE-UP SUPPRESSED" checks on `sleepUntil(t0,
+// giveUpAt() + VERIFY_TIMEOUT / 2)` — a hand-computed deadline summing every earlier hop (enter delay, two
+// verify-timeouts, the reassert-settle burst) from t0, the exact "sum of constants used as a wait" shape
+// card 259c15fa removed elsewhere in this suite. It was worse than merely guessed: at production defaults
+// (host.ts's GIVE_UP_CONFIRM_SETTLE_POLL_MS/_MAX_POLLS, never shrunk by this file, 15*20=300ms) that
+// margin (VERIFY_TIMEOUT/2 === 300ms here) lands on the EXACT SAME nominal instant as
+// `awaitGiveUpConfirmSettle`'s own exhaustion — the point at which, absent a confirming hook, host.ts
+// commits to real GIVE-UP RECOVERY and clears busy. Two independently-scheduled setTimeout chains racing
+// the same nominal deadline with zero designed margin is exactly the overshoot exposure 259c15fa measured
+// (setTimeout guarantees only a MINIMUM delay per hop). `GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS` below
+// replaces the t0-relative sum with an anchor off the OBSERVED final Enter write (`fake.enterWriteTimes`,
+// already captured for `awaitClockPast` above) plus ONE remaining nominal hop (VERIFY_TIMEOUT) and a small
+// margin — collapsing the accumulated multi-hop uncertainty down to a single hop's worth, and landing
+// comfortably inside the 300ms confirm-settle window instead of racing its edge.
+const GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS = 60;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -184,7 +191,6 @@ try {
     const SID = "sess-suppress";
     const TEXT = "REAL_TURN_JUST_SLOW_TO_CONFIRM";
     const { fake, backspaceCount, entryCount } = spawnReady(SID);
-    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(1) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
@@ -199,8 +205,10 @@ try {
     await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
     fake.emitOutput("spinner-tick-after-final-enter");
 
-    // Cross the give-up deadline. Assert give-up was SUPPRESSED: busy stays true, composer untouched.
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    // Cross the give-up deadline, anchored off the OBSERVED final Enter write (not a t0-relative sum — see
+    // GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS's doc above). Assert give-up was SUPPRESSED: busy stays true,
+    // composer untouched.
+    await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1] + VERIFY_TIMEOUT + GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS);
     check("(1) GIVE-UP SUPPRESSED: busy is STILL true (never falsely cleared into the live turn)",
       busyLog[SID].at(-1) === true);
     check("(1) NO backspace clear was written (the composer/injection was never touched)",
@@ -224,7 +232,6 @@ try {
     const SID = "sess-genuine-drop";
     const TEXT = "TRULY_NEVER_REGISTERED";
     const { backspaceCount, entryCount } = spawnReady(SID);
-    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(2) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
@@ -288,15 +295,15 @@ try {
     const TEXT = "STRANDED_LIKE_SPECIMEN_B";
     const SECOND_TEXT = "A_LATER_UNRELATED_MESSAGE";
     const { fake, written, backspaceCount, entryCount } = spawnReady(SID);
-    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(4) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    // Force the SAME fooled discriminator as scenario (1).
+    // Force the SAME fooled discriminator as scenario (1) — same observed-anchor margin, see
+    // GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS's doc above.
     await waitForCount(entryCount, MAX_ATTEMPTS);
     await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
     fake.emitOutput("spinner-tick-after-final-enter");
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1] + VERIFY_TIMEOUT + GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS);
     check("(4) GIVE-UP SUPPRESSED (same fooled discriminator as scenario 1)", busyLog[SID].at(-1) === true);
     check("(4) no backspace at suppression time itself", backspaceCount() === 0);
 
