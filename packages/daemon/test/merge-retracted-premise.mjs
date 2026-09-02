@@ -98,6 +98,60 @@ check("matcher: FP1's prose PLUS a real standalone marker line elsewhere -> matc
 check("matcher: FP2's prose PLUS a real standalone marker line elsewhere -> matches (control isn't vacuous)",
   matchRetractedPremiseTitle("fix(daemon): thing", `${FP2_66D91A11}\n\nRETRACTED\n\nExplanation.`) === "retracted");
 
+// ── card 299a33ae: WIDENED "retracted"/"premise retracted" phrasings ─────────────────────────────────────
+// Real specimens read from the live board's corpus (a29ee2a6's ~78-card blind spot, re-read for phrasing by
+// 299a33ae) that the OLD whole-line-only regex missed and the widened `lineStartMarker` now catches:
+// decorated/emoji-prefixed headings, a trailing date, and a same-line trailing explanation. RED-PROOF: each
+// of these was verified (by reverting worktrees.ts to its pre-299a33ae content, rebuilding, and re-running
+// this file) to FAIL under the old regex and PASS under the new one — see the card's worker_report for the
+// before/after transcript; these assertions describe the POST-widening (shipped) behavior only.
+check("matcher: emoji-prefixed 'RETRACTED BY THE MANAGER:' heading -> matches (real specimen, card e076d2a2)",
+  matchRetractedPremiseTitle("fix(git): serialize squash merges per repo and verify landed content",
+    '## ❌ RETRACTED BY THE MANAGER: the "false `ALREADY_MERGED` via trailer mismatch" explanation was WRONG.') === "retracted");
+check("matcher: trailing date + reason 'RETRACTED 2026-06-26 — DUPLICATE.' -> matches (real specimen, card ffe2352e)",
+  matchRetractedPremiseTitle("fix(sessions): context-watcher should persist + re-nudge + escalate",
+    "**RETRACTED 2026-06-26 — DUPLICATE.** Superseded by the manager's own card.") === "retracted");
+check("matcher: colon-explanation 'RETRACTED: this card previously called...' -> matches (real specimen, card 63a57893)",
+  matchRetractedPremiseTitle("fix(config): stop the test-suite mkdtemp leak with an acquire-and-release temp helper",
+    '🔴 **RETRACTED: this card previously called 8.3 collision "a candidate amplifier of aa5365c5\'s teardown race." It is not.**') === "retracted");
+check("matcher: em-dash explanation 'RETRACTED — the card's WARRANT, not its numbers' -> matches (real specimen, card 0cbbeaf0)",
+  matchRetractedPremiseTitle("fix(ui): the offender is ONE legend key, NOT the --line token",
+    "## RETRACTED — the card's WARRANT, not its numbers") === "retracted");
+check("matcher: 'PREMISE RETRACTED' + timestamp heading -> matches, label 'premise retracted' (real specimen, card d4f60cc1)",
+  matchRetractedPremiseTitle("fix(pty): GIVE-UP RECOVERY logs message text into the durable daemon log",
+    "## 🔴 PREMISE RETRACTED 2026-07-30 ~22:0xZ — RETITLED BY MGR #80 BEFORE MERGE") === "premise retracted");
+check("matcher: 'PREMISE PARTLY RETRACTED' with backtick timestamp -> matches, label 'premise retracted' (real specimen, card 00664526)",
+  matchRetractedPremiseTitle("fix(config): surface skipped/cancelled/todo counts and name skipped tests",
+    "## 🔴🔴 PREMISE PARTLY RETRACTED `06:20Z` 2026-08-28 by mgr `fb8d49ee` — MEASURED BY WORKER 0aef7139") === "premise retracted");
+
+// NEGATIVE — the widening must NOT start matching mid-sentence prose (the exact class `637558ca` narrowed
+// this predicate to avoid in the first place); "premise retracted" buried in an ordinary sentence, not at
+// a true line start, must stay null.
+check("matcher: mid-sentence 'the premise retracted here was...' (not at line start) -> null",
+  matchRetractedPremiseTitle("fix(daemon): thing",
+    "We discussed whether the premise retracted here was actually correct, and decided it was.") === null);
+
+// NEGATIVE — REGRESSION test for a false positive this widening's own corpus measurement found and fixed:
+// card `637558ca` (which discusses this very predicate) quotes this file's own warning template verbatim,
+// "RETRACTED-PREMISE: ...", at a true line start — an unguarded widening matched that quote. The `-premise`
+// exclusion in `lineStartMarker`'s "retracted" call exists specifically to keep this null.
+check("matcher: quoted warning template 'RETRACTED-PREMISE: ...' (self-referential, not a declaration) -> null",
+  matchRetractedPremiseTitle("fix(orchestration): scope the RETRACTED-PREMISE merge warning to a real retraction marker",
+    '> `RETRACTED-PREMISE: this card\'s body carries a retraction marker ("retracted") but its title still claims fix(…) — retitle before confirming.`') === null);
+check("matcher: the SAME quoted-template body, PLUS a real standalone marker elsewhere -> matches (exclusion isn't overly broad)",
+  matchRetractedPremiseTitle("fix(daemon): thing",
+    '> `RETRACTED-PREMISE: this card\'s body carries a retraction marker...`\n\nRETRACTED\n\nExplanation.') === "retracted");
+
+// NEGATIVE — the DECLINED lever, documented: a bare "RETRACTION" checklist verdict meaning the premise
+// HELD (not retracted) must never match — this is real corpus phrasing (`d6a4b09b`/`e0ea4d58`/others) and
+// is exactly why `RETRACTION_MARKER_RES` does not add a bare "retraction" noun marker.
+check("matcher: 'RETRACTION checked and did NOT fire' checklist verdict (premise HELD) -> null",
+  matchRetractedPremiseTitle("fix(mcp): describe the local-state axes scenario_space already returns",
+    "- **RETRACTION checked and did NOT fire:** the premise survived intact and in full.") === null);
+check("matcher: 'RETRACTION ✅ — premise held' checklist verdict -> null",
+  matchRetractedPremiseTitle("fix(live): make the worktreeIndexCache push-confirmation assertion hold under load",
+    "**RETRACTION ✅** — the premise survived in full.") === null);
+
 const db = new Db();
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());

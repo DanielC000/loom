@@ -2549,19 +2549,69 @@ function lineAnchoredMarker(phrase: string): RegExp {
 }
 
 /**
+ * Leading "declaration" decoration for {@link lineStartMarker} — the ASCII markdown/list/quote/emphasis
+ * set {@link lineAnchoredMarker} uses, WIDENED (card 299a33ae) to any run of non-alphanumeric symbols a
+ * human prefixes a heading with — a corpus read of the unmatched population (see that card's doc comment
+ * below) found real "emoji-prefixed heading" retractions (e.g. `❌ RETRACTED BY THE MANAGER:`, `🔴🔴
+ * RETRACTION —`) the old fixed ASCII class rejected.
+ */
+const LEADING_DECORATION = "[^\\p{L}\\p{N}\\n]{0,16}";
+
+/**
+ * Widened sibling of {@link lineAnchoredMarker}, for the "retracted" family only (card 299a33ae — see
+ * `matchRetractedPremiseTitle`'s own doc comment for the corpus measurement this derives from). Still
+ * anchored at the true START of a line — preceded by nothing but decoration, never by ordinary prose —
+ * which is exactly what excludes both live false positives `637558ca` narrowed against (both bury the
+ * word deep inside a sentence, nowhere near a line start: "...categorically different from the retracted
+ * count-floor idea..." and "...and retracted before I'd checked."). But unlike `lineAnchoredMarker`, it no
+ * longer requires the phrase to BE the whole line: reading the corpus's unmatched retraction bodies found
+ * the overwhelming majority of real, deliberate declarations continue on the SAME line with an
+ * explanation — "RETRACTED 2026-06-26 — DUPLICATE.", "RETRACTED: this card previously called...",
+ * "RETRACTED — the card's WARRANT, not its numbers" — which the old whole-line-only shape rejected right
+ * alongside the false positives it was built to reject.
+ *
+ * `excludeAfter` (optional) is a NEGATIVE-lookahead guard for a specific glued continuation that isn't a
+ * declaration at all — found while measuring this widening (card 299a33ae) against card `637558ca`
+ * (which discusses this very predicate): it quotes this file's own warning template verbatim, `` `RETRACTED
+ * -PREMISE: this card's body carries…` ``, and an unconstrained trailing matched it as a false positive.
+ * The glue is the tell — every genuine declaration in the corpus separates any qualifier from "retracted"
+ * with a SPACE ("PREMISE RETRACTED", "RETRACTED BY THE MANAGER"), never a bare hyphen immediately after.
+ */
+function lineStartMarker(phrase: string, excludeAfter?: string): RegExp {
+  const guard = excludeAfter ? `(?!${excludeAfter})` : "";
+  return new RegExp(`^${LEADING_DECORATION}${phrase}${guard}`, "imu");
+}
+
+/**
  * Deliberate markers a human writes to declare a card's premise dead — each must appear as its OWN
- * line in the body (see {@link lineAnchoredMarker}), NOT merely be mentioned anywhere in prose. This was
- * originally a bare `\bretracted\b` substring match over the whole body; two live false positives (card
- * `e7bcb0df`'s "the retracted count-floor idea", a discarded design option, and card `66d91a11`'s "...and
- * retracted before I'd checked", a person retracting a belief) proved that "retraction" is an open
- * vocabulary no keyword list converges on. Line-anchoring converts it to a closed one: a human declaring
- * a card's premise dead writes a dedicated line (e.g. a `RETRACTED` heading), they don't rely on the word
- * merely appearing somewhere in the body. Kept narrow on purpose (card cf60a32a, narrowed `637558ca`): a
- * heuristic here is only acceptable because it keys on a deliberate declaration a human chose to write,
- * never on inferred intent.
+ * line in the body (see {@link lineAnchoredMarker}/{@link lineStartMarker}), NOT merely be mentioned
+ * anywhere in prose. This was originally a bare `\bretracted\b` substring match over the whole body; two
+ * live false positives (card `e7bcb0df`'s "the retracted count-floor idea", a discarded design option, and
+ * card `66d91a11`'s "...and retracted before I'd checked", a person retracting a belief) proved that
+ * "retraction" is an open vocabulary no keyword list converges on. Line-anchoring converts it to a closed
+ * one: a human declaring a card's premise dead writes a dedicated line (e.g. a `RETRACTED` heading), they
+ * don't rely on the word merely appearing somewhere in the body. Kept narrow on purpose (card cf60a32a,
+ * narrowed `637558ca`): a heuristic here is only acceptable because it keys on a deliberate declaration a
+ * human chose to write, never on inferred intent.
+ *
+ * `retracted`/`premise retracted` use {@link lineStartMarker} (card 299a33ae widened these — see above);
+ * `won't-do`/`not a bug` stay on the original whole-line-only {@link lineAnchoredMarker}, unchanged — the
+ * corpus read that justified widening the "retracted" family found no comparable unmatched specimens for
+ * these two, so there is nothing to derive a widening FROM for them (widening without a corpus specimen is
+ * exactly the "manufactured phrasing" this card's DoD forbids).
+ *
+ * DECLINED LEVER, same corpus read (card 299a33ae): the bare noun "RETRACTION" (vs. the participle
+ * "retracted") is deliberately NOT added as its own marker. In this exact corpus, "RETRACTION" at a true
+ * line start is used AT LEAST as often as a title-check CHECKLIST LABEL whose verdict is the OPPOSITE of a
+ * retraction — "RETRACTION checked and did NOT fire", "RETRACTION ✅ — premise held", "RETRACTION — n/a,
+ * the premise held" — as it is for a genuine declaration ("RETRACTION — A 'CARD DEFECT' I ACCEPTED THAT
+ * WAS NEVER REAL"). Widening to it would trade the mid-sentence false-positive class this predicate was
+ * built to avoid for an equally real line-start one, in the same corpus that justifies the rest of this
+ * widening — so it stays out.
  */
 const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
-  { label: "retracted", re: lineAnchoredMarker("retracted") },
+  { label: "retracted", re: lineStartMarker("retracted", "-premise\\b") },
+  { label: "premise retracted", re: lineStartMarker("premise\\s+(?:partly\\s+|fully\\s+)?retracted") },
   { label: "won't-do", re: lineAnchoredMarker("won'?t-do") },
   { label: "not a bug", re: lineAnchoredMarker("not a bug") },
 ];
@@ -2580,16 +2630,28 @@ const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
  * one confirmed real specimen of that exact shape (`c7bf65aa` itself) never actually merged, so it caused
  * no harm. But transcript-only silence turned out to be the RARE case, not the common one: of 314 tasks
  * (all projects on this daemon) whose title or body mentions "retract", 87 had a title currently starting
- * `fix(`; of THOSE, only 9 (~10%) matched this exact regex and 78 (~90%) did not. Manually reading ~20 of
- * those 78 found the large majority ARE genuine premise-retraction narratives written into the body — just
- * phrased as free-form prose or a decorated heading ("PREMISE RETRACTED", "RETRACTED BY THE AUTHOR/
- * MANAGER", an emoji-prefixed heading, or "retraction" rather than "retracted") that this deliberately
- * narrow regex does not match. Of that same ~20-specimen sample, every one that had actually merged either
- * matched this regex anyway or had its title corrected before merge by human discipline (the
- * retitle-before-merge doctrine, `0fa32321`/`514da7cf`) — no false `fix(...)` subject was observed to have
- * landed on mainline history in that sample, despite the regex missing most of it. Widening this function
- * to read transcripts is NOT supported by that measurement; loosening the regex to catch more of the
- * body's own existing free-form phrasing is the more promising, still-unexplored lever.
+ * `fix(`; of THOSE, only 9 (~10%) matched the then-current regex and 78 (~90%) did not. Widening the input
+ * surface to read transcripts is NOT supported by that measurement — see `a29ee2a6`.
+ *
+ * WIDENED (card `299a33ae`, measured 2026-09-02 against the SAME live `loom.db`, read-only): the
+ * population had grown to 377 tasks mentioning "retract" / 110 `fix(`-titled among them by this date (the
+ * board keeps moving; this is a later snapshot, not a re-run of `a29ee2a6`'s own count). Reading all ~100
+ * bodies the regex still missed found the gap was PHRASING, not surface — free-form prose (left alone, on
+ * purpose: widening to catch that would start matching mid-sentence mentions, the exact false-positive
+ * class `637558ca` narrowed this predicate to avoid), decorated/emoji-prefixed headings ("❌ RETRACTED BY
+ * THE MANAGER:", "🔴🔴 PREMISE PARTLY RETRACTED"), and a same-line trailing explanation the old
+ * whole-line-only shape rejected ("RETRACTED 2026-06-26 — DUPLICATE.", "RETRACTED: this card previously
+ * called…"). `lineStartMarker` (below `matchRetractedPremiseTitle`'s call site) widens exactly those two
+ * axes for the "retracted"/"premise retracted" markers, while leaving `won't-do`/`not a bug` untouched (no
+ * unmatched specimens were found for either) and deliberately declining to add a bare "retraction" noun
+ * marker (see {@link RETRACTION_MARKER_RES}'s doc comment for why that lever is a net-negative in this
+ * corpus). Measured on that SAME 110-card current population, with the compiled regex (i.e. including the
+ * `-premise` exclusion below, found by this same measurement — see `lineStartMarker`'s doc comment): match
+ * rate rose from 10/110 (~9%, old regex) to 21/110 (~19%, new regex) — both counts against the identical
+ * set of 110 rows, one denominator. All 11 newly-matched rows were read individually and confirmed genuine
+ * standalone declarations, not quoting artifacts. The remaining ~81% miss is overwhelmingly free-form
+ * prose with no standalone declaration line at all — by design still unmatched, not a gap this widening
+ * left behind.
  *
  * Returns the matched marker label when the TITLE still starts with the literal `fix(` (lowercase, this
  * project's Conventional Commits type casing) AND the BODY carries one of {@link RETRACTION_MARKER_RES}
