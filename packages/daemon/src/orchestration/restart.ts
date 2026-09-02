@@ -554,7 +554,13 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
 /** The one file daemon_restart cannot make live itself — see {@link supervisorScriptChangedSince}. */
 export const SUPERVISOR_SCRIPT_REL_PATH = "scripts/daemon-supervisor.mjs";
 
-/** Bound the deploy-time supervisor-diff check so a hung/slow git call can't wedge the restart. */
+/**
+ * Bound the deploy-time supervisor-diff check so a genuinely HUNG git call can't wedge the restart.
+ * ⚠️ `boundedSimpleGit`'s `block` is an IDLE timeout, not a total-elapsed one (card 40a264d3 measured a
+ * still-producing child run to 8.3x its block budget) — this does NOT bound a merely SLOW git log, only
+ * one that stops producing output entirely. Exposure is low in practice: a single-pathspec `git log` is a
+ * quiet child, so a hang here is almost always the idle kind `block` catches.
+ */
 const SUPERVISOR_CHECK_TIMEOUT_MS = 10_000;
 
 /** Injectable git seam for {@link supervisorScriptChangedSince} — a hermetic test swaps in a fake
@@ -604,7 +610,9 @@ export type SupervisorCheckResult =
  * daemon:stable`. Scope: everything committed since `bootTime` — a daemon only ever loses its
  * in-memory code on a restart, so "since this process booted" IS "since the last deploy"; no separate
  * last-deployed-SHA bookkeeping is needed. BEST-EFFORT + BOUNDED + NEVER throws: a git failure (no
- * repo, git unavailable, timeout) resolves to `{status:"could-not-check"}` — this is an ADVISORY
+ * repo, git unavailable, a genuinely HUNG child hitting {@link defaultGitLogSince}'s idle `block`
+ * timeout — NOT a merely slow-but-producing one, see that function's own doc) resolves to
+ * `{status:"could-not-check"}` — this is an ADVISORY
  * warning only, so an inability to check must never block the restart itself. But "checked, unchanged"
  * and "could not check" must not be indistinguishable to a caller: card 469b5e67 found the two folded
  * into one silent `false` with NO trace of which happened, which is exactly the failure mode that made

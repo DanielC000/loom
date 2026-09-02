@@ -25,9 +25,10 @@ import { canonicalRepoLockKey } from "./repo-lock.js";
  * within one repo), under LOOM_HOME alongside the other daemon-stop classifiers (`last-shutdown.json`,
  * `crash.log`, `restart-intent.json`). Written/removed SYNCHRONOUSLY and NEVER throws — same discipline as
  * shutdown-marker.ts's `writeShutdownMarker`, for the same reason: the write happens on the hot path right
- * before the first mutating git call of a real merge, inside the per-repo mutex, so it must never itself
- * become a reason a merge fails, and it must complete before a signal can kill the process (a synchronous
- * write, not queued behind the event loop, is what makes that true).
+ * before `git merge --squash` (NOT literally the attempt's first mutating git call — see
+ * merge-danger-window.ts's own doc on `enterMergeDangerWindow` for why), inside the per-repo mutex, so it
+ * must never itself become a reason a merge fails, and it must complete before a signal can kill the
+ * process (a synchronous write, not queued behind the event loop, is what makes that true).
  */
 export const MERGE_DANGER_LATCH_DIR = path.join(LOOM_HOME, "merge-danger-latches");
 

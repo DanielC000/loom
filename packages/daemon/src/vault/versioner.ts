@@ -125,9 +125,10 @@ export interface VaultGitDeps {
 
 /**
  * **`GIT_TERMINAL_PROMPT=0` is DELIBERATELY NOT SET here — a finding, not an oversight (card 54b839c5).**
- * The obvious shape, `simpleGit(p, {...}).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })` (the SAME
- * shape `restart.ts`'s `defaultGitLogSince` uses), was tried and REVERTED after it broke two real things,
- * verified live rather than assumed:
+ * The obvious shape, `simpleGit(p, {...}).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })` (the shape
+ * `restart.ts`'s `defaultGitLogSince` USED TO use — card 469b5e67 removed it there, and that call site now
+ * points back at this doc for the same reasoning instead of carrying its own copy), was tried and
+ * REVERTED after it broke two real things, verified live rather than assumed:
  *  1. It throws outright the instant an ambient editor/pager var is set (`GitPluginError: Use of
  *     "GIT_EDITOR" is not permitted without enabling allowUnsafeEditor` — reproduced in the very shell
  *     this fix was developed in; this repo's own worker/session spawn recipe additionally sets

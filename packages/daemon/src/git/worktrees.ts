@@ -873,13 +873,19 @@ async function autoForwardStaleBase(
 /** Combines {@link detectStaleBase} + the optional {@link autoForwardStaleBase} for ONE reuse/reattach
  *  path of {@link createWorktree} (card 5150fdc2, parts 1+3). `deps` threads only to {@link
  *  detectStaleBase} — {@link autoForwardStaleBase}'s `mergeMainIntoWorktree` call is a separate,
- *  already-settled bounding question (card c801d688 scope) and is untouched here. */
+ *  already-settled bounding question (card c801d688 scope) and is untouched here.
+ *
+ *  `forwarded` (card 047af53b item 4) is a SEPARATE signal from the returned `staleBase`, because
+ *  `staleBase` is `undefined` on BOTH "never stale" and "successfully forwarded" (see its own doc) — a
+ *  caller that needs to know specifically "did a real file mutation via {@link mergeMainIntoWorktree} just
+ *  happen, possibly bringing in a package.json/lockfile change" cannot derive that from `staleBase` alone. */
 async function resolveStaleBase(
   repoPath: string, worktreePath: string, branch: string, mainSha: string, deps: BoundedGitDeps = {},
-): Promise<StaleBaseInfo | undefined> {
+): Promise<{ staleBase: StaleBaseInfo | undefined; forwarded: boolean }> {
   const info = await detectStaleBase(repoPath, branch, mainSha, deps);
-  if (!info) return undefined;
-  return autoForwardStaleBase(repoPath, worktreePath, info);
+  if (!info) return { staleBase: undefined, forwarded: false };
+  const after = await autoForwardStaleBase(repoPath, worktreePath, info);
+  return { staleBase: after, forwarded: after === undefined };
 }
 
 /**
@@ -969,7 +975,14 @@ export async function createWorktree(
     // detected and, when possible, auto-forwarded — see resolveStaleBase. Runs AFTER the dirty-leftover
     // read above so that read reflects the PRE-merge state (the leftover uncommitted work a manager/
     // worker should see is whatever was there before Loom does anything else to the tree).
-    const staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
+    const { staleBase, forwarded } = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
+    // Card 047af53b item 4: this reused worktree's node_modules normally predates this call and needs no
+    // reinstall ("already provisioned" — true for the ordinary case, unlike the reattach path below, which
+    // always starts from an empty checkout). But a `forwarded` auto-forward is a REAL file mutation that
+    // can bring in a package.json/lockfile change (same reasoning the reattach path's own
+    // provisionWorktreeDeps ordering comment gives) — reinstall in exactly that case, best-effort + bounded
+    // like every other provisionWorktreeDeps call, so a failure here never blocks the worktree return.
+    if (forwarded) await provisionWorktreeDeps(worktreePath, deps);
     return {
       worktreePath, branch, mainSha,
       ...(discardedOnRecut ? { discardedOnRecut } : {}),
@@ -1128,8 +1141,10 @@ export async function createWorktree(
     await recutStaleReusedBranch(repoPath, worktreePath, branch, gitDeps);
     // Card 5150fdc2 parts 1+3 — same detect+auto-forward as the dir-exists reuse path above, BEFORE
     // provisionWorktreeDeps below so a package.json/lockfile change the forward brings in is what
-    // actually gets installed.
-    staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps);
+    // actually gets installed. `forwarded` is unused here (unlike the dir-exists path above) — this
+    // branch's provisionWorktreeDeps call below is already unconditional, since a reattach always starts
+    // from an empty checkout regardless of whether a forward also happened.
+    ({ staleBase } = await resolveStaleBase(repoPath, worktreePath, branch, mainSha, gitDeps));
   }
 
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
@@ -1500,18 +1515,20 @@ export async function removeWorktree(
 
 /**
  * Is `branch` already fully merged into `base` (default: the repo's current HEAD — the canonical
- * branch confirmWorkerMerge's `git merge` lands onto)? Used by the boot-time reconcile to finish a
- * merge whose bookkeeping (worktree/branch/task) never completed (e.g. the daemon died right after
- * the commit). Detected via `git branch --merged <base> --list <branch>` membership — exit-0 with a
+ * branch confirmWorkerMerge's `git merge` lands onto)? ⚠️ Card 9cb0287a (2026-08-29): boot-reconcile
+ * Pass A no longer calls this — under squash it now requires POSITIVE proof of a landed squash via the
+ * `Loom-Worker-Branch` trailer instead (see {@link worktreeHasWork}'s own doc for the full history). This
+ * function currently has ZERO production call sites (test-only); kept for now pending card 0f965ab7's
+ * review of the fail-safe siblings that reference it. Detected via `git branch --merged <base> --list
+ * <branch>` membership — exit-0 with a
  * non-empty line only when the branch both exists AND is fully reachable from `base`. (We deliberately
  * do NOT use `merge-base --is-ancestor`: simple-git's raw doesn't reject on its exit-1 "not-ancestor"
  * signal, so a try/catch around it reads every branch as merged.) Returns false when the branch ref
  * is gone (a completed merge deletes it), which keeps the reconcile idempotent.
  *
- * BOUNDED: this is the FIRST op boot-reconcile Pass A runs per session, so a hang here wedges boot
- * before any removal even starts. The op now runs through the block-timeout + {@link withTimeout}
- * guard; a timeout-throw is caught and read as "not merged" (false) — the SAFE default, since Pass A
- * then skips the session rather than acting on a bad signal. The next boot retries it.
+ * BOUNDED: runs through the block-timeout + {@link withTimeout} guard, same as every other reconcile op;
+ * a timeout-throw is caught and read as "not merged" (false) — the SAFE default a caller can rely on
+ * without itself acting on a bad signal.
  */
 export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<boolean> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
@@ -2681,6 +2698,7 @@ function repoTreeHasJsTsSourceFile(
     const child = spawn("git", ["ls-tree", "-r", "--name-only", treeish], {
       cwd: repoPath,
       stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
     });
     let out = "";
     child.stdout?.on("data", (d) => { out += d; });
@@ -2777,6 +2795,7 @@ export async function repoTreeReferencesInertPrefix(
     const child = spawn("git", ["grep", "-I", "-l", "-E", pattern, treeish], {
       cwd: repoPath,
       stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
     });
     let stderrTail = "";
     child.stderr?.on("data", (d) => { stderrTail = appendTail(stderrTail, d); });
@@ -5052,8 +5071,9 @@ async function mergeBranchLocked(
     }
   }
 
-  // Danger-window tracking (board card 5a7692a4): from HERE — just before the first mutating git
-  // call this attempt makes — through every exit below (success, or a handled
+  // Danger-window tracking (board card 5a7692a4): from HERE — right before `git merge --squash` (NOT
+  // literally the attempt's first mutating git call — see merge-danger-window.ts's own doc on
+  // enterMergeDangerWindow) — through every exit below (success, or a handled
   // conflict/rawError/probe-failure exit, each via its own resetOrSkip cleanup call INSIDE this same
   // try, so the window stays marked active until that cleanup has itself settled, never cleared before
   // it) is the interval a process death can leave the canonical repo with staged, uncommitted residue
