@@ -22,6 +22,10 @@ those in the **agent's base prompt** (or the project's own `CLAUDE.md`), which i
 into a worker. Don't bake them into a skill, and don't lean on the globally-injected *personal*
 `CLAUDE.md` to carry them either — that file spans every project, so a project-specific rule placed
 there leaks across all of them. Skill = generic HOW; prompt / project `CLAUDE.md` = the WHAT.
+**One budget to weigh before routing more content there:** the project's `CLAUDE.md` costs nothing
+against a spawn/command-line ceiling, but it is injected in full into every session on the project —
+manager and worker alike — so it spends every reader's attention, every session, and that budget is
+real and currently unmanaged.
 
 ## Transport
 
