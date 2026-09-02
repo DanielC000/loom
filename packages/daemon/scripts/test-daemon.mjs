@@ -1769,8 +1769,12 @@ if (isMain) {
 
   const pass = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
+  // Card 9a6b1f2b: already computed for the gate-timing run-summary row below (and, by construction, always
+  // equal to SELECTED.length here — the notExecuted guard above exits the process before this line runs on
+  // any divergence).
+  const executedCount = results.filter((r) => !r.skipped).length;
 
-  console.log(`\n${pass}/${SELECTED.length} hermetic daemon test files passed. (pool size ${EFFECTIVE_POOL_SIZE})`);
+  console.log(`\n${pass}/${SELECTED.length} hermetic daemon test files passed — all selected files executed (a skip would have exited above). (pool size ${EFFECTIVE_POOL_SIZE})`);
   // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
   // is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
   // (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
@@ -1815,7 +1819,7 @@ if (isMain) {
       isolatedPhaseFileCount: isolatedNames.length,
       isolatedPhasePoolSize: ISOLATED_REAL_SPAWN_PHASE_ENABLED ? ISOLATED_PHASE_POOL_SIZE : 0,
       testSourceBytes: gateTimingTestSourceBytes,
-      executedCount: results.filter((r) => !r.skipped).length,
+      executedCount,
       failedCount: failed.length,
       failedNames: failed.map((f) => f.name),
       hostBefore: gateTimingHostBefore,
