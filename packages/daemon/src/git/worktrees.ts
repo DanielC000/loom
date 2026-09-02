@@ -3369,22 +3369,54 @@ export interface EmitCompareGateResult {
    *  (a non-modify status on a compiled file, an excluded-dir/underscore/shell-unsafe test path, "no
    *  eligible changed path left to prove inert", an unverified soundness precondition, or a transpile
    *  mismatch) — those are real, informative "ran, not reduced" verdicts.
-   *  `true` (via `notApplicableHere`) on every reason that is NOT a verdict about reducibility: the
-   *  catch-all "path outside emit-compare scope" (every changed path fails
-   *  `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`, exactly what a repo whose sources don't live
-   *  under `packages/daemon/src|test/` hits on its FIRST changed path, always), a failed load of
-   *  `scripts/test-daemon.mjs`'s `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this diff's own worktree (that
-   *  script doesn't exist outside Loom's own layout), an unresolvable `typescript` module (this whole
-   *  mechanism's own dev-dependency, absent on a shipped end-user install), AND — corrected by card
-   *  4def0708 — any OPERATIONAL/mechanism failure (a git error reading the diff/base/branch content, an
-   *  empty diff, an unparseable diff line): a git error proves nothing about reducibility either way, so
-   *  it must never be stamped as a decided "not reduced". ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT
-   *  RE-DERIVED BY A CALLER: a caller must never re-sniff repo layout itself to guess this —
-   *  `computeEmitCompareGate` already knows exactly which reason it returned, and this field is that
-   *  knowledge surfaced, once, at the source. The caller's job is only to treat `notApplicable:true` the
-   *  same way it already treats "the predicate never ran at all" (never report a fabricated `false` for
-   *  it) — see {@link EMIT_COMPARE_SRC_PREFIX}'s own doc / `sessions/service.ts`'s
-   *  `emitCompareNotApplicable`. */
+   *  `true` (via `notApplicableHere`) on every reason that is NOT a verdict about reducibility. ⚠️ CARD
+   *  4e6e1882: read the catch-all below as FIRST-TERMINAL-WINS, never as "any out-of-scope path ⇒
+   *  notApplicable" — the classification loop scans changed paths in git's own emitted order and returns
+   *  on the FIRST path that produces a terminal outcome. {@link isInertMergePath}'s own skip aside (it
+   *  `continue`s past an inert path rather than terminating), a DIFFERENT terminal can fire first and win:
+   *  the loop's `if (status !== "M") return notReducible(...)` on a compiled `.ts` path yields a real,
+   *  informative `false` the moment an EARLIER changed path is a non-modify status on a compiled file,
+   *  even when a LATER path in the very same diff is out of scope. Two real merges in this repo's own
+   *  history make the two outcomes concrete: `fdf1291f` (daemon `src`+`test` paths alongside `shared/` and
+   *  `web/` paths, whose only non-daemon-modify path was an ADDED `.mjs` test — nothing to trip that
+   *  terminal) read `null`; `2d8d2e42` (the same mixed shape, but its added file was a `.ts` under
+   *  `daemon/src`, tripping the non-modify-status terminal first) read `false`.
+   *  The catch-all itself — "path outside emit-compare scope" (every changed path up to and including
+   *  this one has failed `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`) — is reached by TWO
+   *  distinct diff shapes, not one: (1) a repo whose sources don't live under `packages/daemon/src|test/`
+   *  at all, which hits it on its FIRST changed path, always (the whole-repo case); and (2) a Loom-shaped
+   *  diff that ALSO touches a path this predicate simply doesn't cover (e.g. `packages/shared/**`,
+   *  `packages/web/**`) — equally `notApplicable`, for the identical reason (the predicate never had that
+   *  path in its domain) — but only if nothing EARLIER in the diff already tripped a different terminal,
+   *  per the ordering point above. An out-of-scope path that is ALSO inert (e.g. under `docs/`) never
+   *  reaches this catch-all at all: {@link isInertMergePath}'s skip, checked before either prefix test on
+   *  every path, removes it from consideration via `continue`, not a terminal return.
+   *
+   *  📌 OPERATIONAL NOTE (card 4e6e1882 DoD-5): this decline is an ORDINARY commit shape on this repo, not
+   *  an edge case. `INERT_MERGE_PATH_PREFIXES` names only `docs/` as inert, so any other root-level path
+   *  (`CLAUDE.md`, `README.md`, `package.json`, `bin/**`, `.github/**`, …) sorts before `packages/` in
+   *  git's own `--name-status` ordering and, being non-inert, reaches the catch-all on the SAME diff where
+   *  daemon source is also touched — before any daemon-src terminal ever gets a chance to fire. Editing
+   *  `CLAUDE.md` alongside daemon source (routine on this project) declines to `null` regardless of what
+   *  the daemon change is. ⚠️ FRAGILE: inside `packages/`, an in-scope daemon path is only ever visited
+   *  before `packages/shared/**`/`packages/web/**` today because the string `daemon` happens to sort
+   *  first — an alphabetical accident, not a design property. Adding a `packages/api/`, `packages/cli/`,
+   *  or `packages/core/` directory would silently flip today's `false` (e.g. `2d8d2e42` above, which reads
+   *  `false` only because `daemon` sorts before `shared`) to `null` on the same diff shape, with no code
+   *  change and nothing to notice it.
+   *
+   *  The other `notApplicableHere` reasons: a failed load of `scripts/test-daemon.mjs`'s
+   *  `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this diff's own worktree (that script doesn't exist outside
+   *  Loom's own layout), an unresolvable `typescript` module (this whole mechanism's own dev-dependency,
+   *  absent on a shipped end-user install), AND — corrected by card 4def0708 — any OPERATIONAL/mechanism
+   *  failure (a git error reading the diff/base/branch content, an empty diff, an unparseable diff line):
+   *  a git error proves nothing about reducibility either way, so it must never be stamped as a decided
+   *  "not reduced". ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT RE-DERIVED BY A CALLER: a caller must never
+   *  re-sniff repo layout itself to guess this — `computeEmitCompareGate` already knows exactly which
+   *  reason it returned, and this field is that knowledge surfaced, once, at the source. The caller's job
+   *  is only to treat `notApplicable:true` the same way it already treats "the predicate never ran at
+   *  all" (never report a fabricated `false` for it) — see {@link EMIT_COMPARE_SRC_PREFIX}'s own doc /
+   *  `sessions/service.ts`'s `emitCompareNotApplicable`. */
   notApplicable: boolean;
 }
 
