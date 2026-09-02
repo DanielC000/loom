@@ -585,8 +585,11 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
 // cross-project DB access no worker/manager surface grants. This is the ONE-read answer: cap + every
 // running/queued gate run. READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only
 // reads the live GateSemaphore registry (see SessionService.gateQueueForManager's doc for the
-// cross-project scoping: a row from a DIFFERENT project is named by project + kind + age only, never its
-// task title/branch). Privacy is keyed off the CALLER'S PROJECT (derived server-side from `sessionId`,
+// cross-project scoping: card 1cf0ced1 — a row from a DIFFERENT project omits EXACTLY {taskId, branch,
+// workerLabel}; everything else, including `opId` in full, still rides the wire — see the tool
+// description below for the full enumeration; this comment previously undercounted it as "project + kind
+// + age only", the same understatement that card's DoD-1 fixed in the description itself).
+// Privacy is keyed off the CALLER'S PROJECT (derived server-side from `sessionId`,
 // same as every other tool here), never the caller's ROLE — `gateQueueForManager` takes only a
 // `callerProjectId` and redacts by comparing each entry's OWN projectId against it, so a worker sees
 // EXACTLY the same cross-project redaction a manager on the same project would (verified: gate-queue.mjs's
