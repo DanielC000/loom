@@ -154,6 +154,53 @@
 // in reworded, summarized, or reorganized form. A green from this script means "nothing was blatantly
 // deleted" — a CANDIDATE SET that nothing obviously vanished — never a verdict that no meaning was lost.
 // A human still has to read the actual diff for a rewrite that changed words but kept (or lost) the idea.
+//
+// --audit-vault <path> / LOOM_ROTATION_GATE_VAULT_PATH (card d8062fbb, 2026-09-03): a DRIFT DETECTOR for
+// the MARKERS array/LIVE_COMMITMENTS_FLOOR constant above against the vault §ROTATION-GATE section they
+// were copied from — see the DECISION note below for why this exists instead of the alternative design.
+//
+// ⭐ DECISION (card d8062fbb DoD-0): the card's parent proposed making the vault AUTHORITATIVE at runtime
+// (a `--markers <path>` flag that PARSES the vault section into the marker list, replacing this hardcoded
+// array). REJECTED: this file's own history already shows what a runtime parse of a prose section costs —
+// `countLiveCommitments`'s end-boundary broke TWICE from exactly this shape (a name-anchor silently
+// falling back to end-of-file, cards `d78a6d5d` and `a681aed5`), and that was parsing a STRUCTURED
+// numbered list, an easier target than a heading section listing markers in free prose. Making the
+// PRIMARY gate's pass/fail depend on that parse succeeding would trade a known, documented, occasionally-
+// stale copy for a script that can silently mis-gate every real rotation the moment someone reformats a
+// vault heading — worse, not better, since a rotation is time-pressured and this script's whole job is to
+// be reliable exactly then.
+// ✅ INSTEAD: keep the hardcoded copy (unchanged, still the thing --active/--archive are checked against),
+// and add a SEPARATE, OPT-IN, NON-GATING-BY-DEFAULT self-audit that checks the copy against the vault on
+// demand — detectable mechanically, but never able to turn a vault reformat into a blocked rotation.
+// HOW THE MACHINE-SPECIFIC-VAULT-PATH CONSTRAINT IS HANDLED (DoD-1): this cannot be an unconditional repo
+// test (no worktree can read a real vault path, and the path differs per host) — so instead of a test,
+// it's a flag (`--audit-vault <path>`, explicit, one-off) PLUS an ambient env var
+// (`LOOM_ROTATION_GATE_VAULT_PATH`) that, once set ONCE on a host that actually has the vault mounted
+// (e.g. the owner's/lead's own machine), makes the audit run on EVERY future invocation with zero further
+// action — closing the "manual re-check nobody is obliged to run" gap without a human needing to remember
+// per-edit. A host that never sets it (CI, a fresh worktree) sees byte-identical behavior to before this
+// card — the env var is read but never required.
+// WHAT IT ACTUALLY CHECKS: reusing the SAME structural (heading-depth, never name) anchor already proven
+// for LIVE COMMITMENTS, it locates the vault's §ROTATION-GATE heading section and checks (a) every
+// MARKERS[] token is still present there (respecting per-marker case-sensitivity) and (b) the current
+// LIVE_COMMITMENTS_FLOOR value appears in that section as a standalone number — this is DoD-4's coverage:
+// the floor is part of the SAME copy problem and gets the SAME detector, not silently left out. Both
+// checks are the same "exact-substring, proves-presence" style already used for --active/--rules, with the
+// same honest limit: a REWORDED (not removed) rule can still false-negative (audit says "fine" when the
+// prose changed meaning), and the floor check can false-negative too (a coincidental digit elsewhere in
+// the section reads as "confirmed"). Neither direction is claimed to be more than what it is.
+// WHY IT ONLY GATES `--lint`'s EXIT CODE, NEVER a real rotation's (DoD-3, "do not regress what works"):
+// `--lint` is already documented above as the free, run-anytime, no-consequence mode — exactly the safe
+// place to let a NEW, heuristic check affect the exit code. A live rotation stays governed ONLY by the
+// pre-existing --active/--archive/--was checks, unchanged; the vault audit's result is still PRINTED on a
+// rotation run (never silent), it just can't block one. This is a deliberate, named trade-off, not an
+// oversight: making this new heuristic gate the live path would risk exactly the failure mode DoD-0's
+// decision above just rejected for the alternative design, on the one path that can least afford it.
+// UNREADABLE PATH: given explicitly via `--audit-vault`, an unreadable file is a real error (exit 1, same
+// convention as `--rules`/`--active`). Given only via the ambient env var, an unreadable file is a SILENT
+// (well, visibly-noted, never fatal) SKIP — the env var is best-effort ambient state, not a caller
+// asserting "this path must work," so a stale/unmounted vault path must never turn into a spurious
+// rotation refusal.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import fs from "node:fs";
 
@@ -190,6 +237,7 @@ USAGE:
   node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
   node rotation-gate.mjs --active <path> --lint [--rules <path>]
   node rotation-gate.mjs --active <path> [--archive <path> | --lint] --was <bytes>
+  node rotation-gate.mjs --active <path> [...] --audit-vault <path-to-Orchestrator-Rules.md>
   node rotation-gate.mjs --help
 
 Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failure). Exit 2 = usage error.
@@ -231,6 +279,16 @@ Checks run against --archive (skipped entirely under --lint):
 Byte check (only when --was is given — OPTIONAL, independent of everything above):
   4. --active's real on-disk byte count is strictly smaller than --was.
 
+Vault drift audit (card d8062fbb; OPTIONAL, independent of everything above — see the file header's
+DECISION note for the full reasoning):
+  5. --audit-vault <path> (or the ambient LOOM_ROTATION_GATE_VAULT_PATH env var, used only when
+     --audit-vault is not given) checks THIS SCRIPT's own MARKERS list and LIVE_COMMITMENTS_FLOOR
+     against the vault's §ROTATION-GATE heading section, to catch the copy drifting from the source it
+     was copied from. This audit's result is ALWAYS printed, but only affects the exit code under --lint
+     — it can never turn a live rotation into a refusal, only tell you the copy needs a look. An
+     explicitly-given --audit-vault path that can't be read is a real error (exit 1); the ambient env var
+     failing to resolve is a silent, non-fatal skip (it's best-effort, not an assertion the path is good).
+
 Markers (case-INsensitive unless noted):
 ${MARKERS.map((m) => `  - ${m.token}${m.caseSensitive ? " (case-SENSITIVE)" : ""}${m.note ? ` — ${m.note}` : ""}`).join("\n")}
 
@@ -248,7 +306,7 @@ const HONEST_LIMIT_NOTE =
   "not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict.";
 
 function parseArgs(argv) {
-  const out = { active: null, archive: null, rules: null, was: null, lint: false, help: false };
+  const out = { active: null, archive: null, rules: null, was: null, auditVault: null, lint: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -261,6 +319,8 @@ function parseArgs(argv) {
       out.rules = argv[++i];
     } else if (a === "--was") {
       out.was = argv[++i];
+    } else if (a === "--audit-vault") {
+      out.auditVault = argv[++i];
     } else if (a === "--lint") {
       out.lint = true;
     } else if (a.startsWith("--active=")) {
@@ -271,6 +331,8 @@ function parseArgs(argv) {
       out.rules = a.slice("--rules=".length);
     } else if (a.startsWith("--was=")) {
       out.was = a.slice("--was=".length);
+    } else if (a.startsWith("--audit-vault=")) {
+      out.auditVault = a.slice("--audit-vault=".length);
     } else {
       console.error(`[rotation-gate] unrecognized argument: ${a}`);
       process.exit(2);
@@ -416,6 +478,64 @@ function countLiveCommitments(text) {
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
 }
 
+// Card d8062fbb — the drift DETECTOR for this file's own MARKERS/LIVE_COMMITMENTS_FLOOR copy: not a new
+// source of truth (see the file header's DECISION note for why runtime-authoritative parsing was
+// rejected), just a check of the existing hardcoded copy against the vault section it was copied from.
+//
+// Reuses the SAME structural (heading-depth, never name) boundary functions already proven for
+// countLiveCommitments — locates the vault's §ROTATION-GATE heading (a real markdown heading line
+// containing "rotation-gate", case-insensitive; a prose mention that isn't itself a heading line is
+// inert, exactly like every other heading anchor in this file) and measures the text strictly between it
+// and the next heading at the same level or shallower (or EOF).
+//
+// Returns:
+//   sectionFound  — false only when no such heading line exists anywhere in vaultText.
+//   missingTokens — MARKERS[] tokens (respecting each marker's own case-sensitivity) NOT found as a
+//                   substring inside that section's text — i.e. markers whose vault source may have been
+//                   reworded, removed, or renamed since this script's copy was last verified.
+//   floorConfirmed — whether LIVE_COMMITMENTS_FLOOR's current numeric value appears as a standalone
+//                    number (word-boundary, so "12" doesn't spuriously match inside "120") in that
+//                    section. A `false` here is NOT proof of drift — the vault prose may simply not state
+//                    the number in a machine-matchable spot — so this is an honest, best-effort signal,
+//                    documented as such everywhere it's surfaced.
+//   ok            — sectionFound && missingTokens.length === 0 && floorConfirmed. Only ever consulted by
+//                   the caller when --lint is in effect (see the file header's DECISION note) — a real
+//                   rotation is never gated by this.
+function auditVaultSource(vaultText) {
+  const lines = vaultText.split(/\r\n|\r|\n/);
+  const startLine = findHeadingLine(lines, "rotation-gate", 0);
+  if (startLine === -1) {
+    return {
+      sectionFound: false,
+      missingTokens: [],
+      floorConfirmed: false,
+      ok: false,
+      diagnostic: "no heading line matching /^#{1,6}\\s.*rotation-gate/i found in the vault source",
+    };
+  }
+  const startLevel = headingLevel(lines[startLine]);
+  const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
+  const sectionLines = lines.slice(startLine + 1, endLine === -1 ? lines.length : endLine);
+  const sectionText = sectionLines.join("\n");
+
+  const missingTokens = MARKERS.filter((m) => !textIncludes(sectionText, m)).map((m) => m.token);
+  const floorConfirmed = new RegExp(`\\b${LIVE_COMMITMENTS_FLOOR}\\b`).test(sectionText);
+
+  const startDesc = `heading line ${startLine + 1} ("${lines[startLine].trim()}")`;
+  const endDesc =
+    endLine === -1
+      ? `end of file (no heading at level <= ${startLevel} found after it)`
+      : `heading line ${endLine + 1} ("${lines[endLine].trim()}")`;
+
+  return {
+    sectionFound: true,
+    missingTokens,
+    floorConfirmed,
+    ok: missingTokens.length === 0 && floorConfirmed,
+    diagnostic: `measured from ${startDesc} to ${endDesc}`,
+  };
+}
+
 function readRequiredFile(flagName, filePath) {
   if (!filePath) {
     console.error(`[rotation-gate] missing required --${flagName} <path>`);
@@ -500,7 +620,52 @@ function main() {
     }
   }
 
+  // Vault drift audit (card d8062fbb) — --audit-vault, falling back to the ambient
+  // LOOM_ROTATION_GATE_VAULT_PATH env var when the flag itself isn't given. See the file header's
+  // DECISION note for why this only ever gates --lint's exit code, never a real rotation's.
+  const auditVaultExplicit = args.auditVault !== null;
+  const auditVaultPath = args.auditVault ?? (process.env.LOOM_ROTATION_GATE_VAULT_PATH || null);
+  let vaultAuditLine = null;
+  let vaultAuditFailed = false;
+  if (auditVaultPath) {
+    let vaultText = null;
+    try {
+      vaultText = fs.readFileSync(auditVaultPath, "utf8");
+    } catch (err) {
+      if (auditVaultExplicit) {
+        console.error(`[rotation-gate] cannot read --audit-vault ${auditVaultPath}: ${err.message}`);
+        process.exit(1);
+      }
+      vaultAuditLine =
+        `[rotation-gate] vault audit: SKIPPED — LOOM_ROTATION_GATE_VAULT_PATH=${auditVaultPath} is set but unreadable ` +
+        `(${err.message}); this is an ambient, best-effort check and never blocks a rotation`;
+    }
+    if (vaultText !== null) {
+      const audit = auditVaultSource(vaultText);
+      vaultAuditFailed = !audit.ok;
+      if (!audit.sectionFound) {
+        vaultAuditLine = `[rotation-gate] vault audit: COULD NOT VERIFY — ${audit.diagnostic}`;
+      } else if (audit.ok) {
+        vaultAuditLine =
+          `[rotation-gate] vault audit: OK — this script's ${MARKERS.length} markers and its ` +
+          `LIVE_COMMITMENTS_FLOOR (${LIVE_COMMITMENTS_FLOOR}) were all found in the vault §ROTATION-GATE section (${audit.diagnostic})`;
+      } else {
+        const parts = [];
+        if (audit.missingTokens.length > 0) {
+          parts.push(`${audit.missingTokens.length} marker(s) no longer found there: ${audit.missingTokens.join(", ")}`);
+        }
+        if (!audit.floorConfirmed) {
+          parts.push(`LIVE_COMMITMENTS_FLOOR (${LIVE_COMMITMENTS_FLOOR}) not found there as a standalone number (could be prose-only, or could be stale — verify manually)`);
+        }
+        vaultAuditLine = `[rotation-gate] vault audit: DRIFT SUSPECTED — ${parts.join("; ")} (${audit.diagnostic})`;
+      }
+    }
+  }
+
   const failures = [...archiveFailures];
+  if (args.lint && vaultAuditFailed) {
+    failures.push(vaultAuditLine.replace(/^\[rotation-gate\] vault audit: /, "vault audit: "));
+  }
   if (missing.length > 0) {
     const source = rulesText !== null ? "--active or --rules" : "--active";
     failures.push(
@@ -519,6 +684,9 @@ function main() {
     console.error(`[rotation-gate] REFUSED — ${args.lint ? "lint failed for" : "rotation must not promote"} ${args.active}:`);
     for (const f of failures) console.error(`  - ${f}`);
     if (byteCheckFailed) console.error(`  - ${byteCheckLine.replace(/^\[rotation-gate\] byte check: /, "byte check: ")}`);
+    // Printed here only when it did NOT already contribute to `failures` above (lint mode already itemized
+    // it there) — this covers rotation mode (never gating, always still visible) and lint-mode passes.
+    if (vaultAuditLine && !(args.lint && vaultAuditFailed)) console.error(vaultAuditLine);
     console.error(HONEST_LIMIT_NOTE);
     process.exit(1);
   }
@@ -548,6 +716,7 @@ function main() {
     }
   }
   console.log(byteCheckLine);
+  if (vaultAuditLine) console.log(vaultAuditLine);
   console.log(HONEST_LIMIT_NOTE);
   process.exit(0);
 }
