@@ -157,10 +157,12 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import fs from "node:fs";
 
-// Concept tokens match case-INSENSITIVELY (the concept must survive rotation, not its exact casing).
-// `capQueued` matches case-SENSITIVELY: it is a literal response FIELD NAME a successor greps for, not
-// a concept — the split is deliberate and load-bearing (the gate false-positived once when this was
-// uniform); do not unify these into one rule.
+// Concept tokens match case-INSENSITIVELY (the concept must survive rotation, not its exact casing). A
+// LITERAL identifier a successor greps for verbatim — e.g. a response FIELD NAME — should instead be
+// `caseSensitive: true`: the gate false-positived once when every marker was forced uniform, so this per-
+// marker option is deliberate and load-bearing; do not remove it or unify all entries onto one rule. (No
+// current marker below uses it — `capQueued`, the literal-field-name example that motivated the split, was
+// retired 2026-09-02 by card 857aa90e — but a future literal-identifier marker will need it again.)
 const MARKERS = [
   { token: "Orchestrator Rules", caseSensitive: false, note: "THE POINTER — losing it orphans the whole rules file" },
   { token: "THE FOUR-LEG VERIFY", caseSensitive: false },
@@ -170,8 +172,6 @@ const MARKERS = [
   { token: "THE SAFE-WRITE", caseSensitive: false },
   { token: "MULTI-HARNESS EPIC", caseSensitive: false },
   { token: "NO-CLEARANCE-FROM-SILENCE", caseSensitive: false, note: "protects the REPO (forbids inferring authorization from a peer's silence), not etiquette — kept by card bcd3f690" },
-  { token: "capQueued", caseSensitive: true, note: "a literal response FIELD NAME — must match casing exactly" },
-  { token: "in-memory", caseSensitive: false },
   { token: "QUIET-LANE", caseSensitive: false, note: "a measurement-honesty rule backing the gate-queue-read-at-fire interlock — kept by card bcd3f690" },
   { token: "MGR122-FLOOR", caseSensitive: false, note: "a floor on an announced live-worker-count number — RESTORED by card a681aed5 (2026-09-02) after a peer objection: nothing else durably carries this rule once dropped from MARKERS, and a count floor on LIVE COMMITMENTS protects the SECTION SIZE, never this SPECIFIC item — see the file header" },
 ];

@@ -6,17 +6,28 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //
 // UPDATED same day by card `a681aed5`: "MGR122-FLOOR" was RESTORED to MARKERS after a peer objection (see
 // rotation-gate.mjs's own header for the full reasoning) — only "MY-PEER-SEND-LEDGER" and
-// "ANNOUNCE-CANNOT-CARRY-A-SHA" remain retired. This file's fixtures/assertions below reflect that: 11
-// surviving markers (was 10), 2 retired tokens (was 3). It also mutation-tests MGR122-FLOOR's restoration
-// via the same per-token loop as every other surviving marker (card a681aed5 DoD-8) — no parallel test.
+// "ANNOUNCE-CANNOT-CARRY-A-SHA" remained retired at that point: 11 surviving markers, 2 retired tokens.
+// It also mutation-tests MGR122-FLOOR's restoration via the same per-token loop as every other surviving
+// marker (card a681aed5 DoD-8) — no parallel test.
+//
+// UPDATED AGAIN 2026-09-02 (card 857aa90e / owner request 75cc3206): "capQueued" and "in-memory" retired
+// from MARKERS — both were satisfied ONLY by the sentence announcing them (see project memory
+// resume-doc-rotation-integrity-capability), so they guarded nothing real; the sentence itself is being
+// removed from the resume doc separately, LAST, once both checkers (this script and the daemon-native
+// resume_doc_check tool) are clear. This file's fixtures/assertions below reflect that second cut: 9
+// surviving prose markers (was 11), 10 markers total incl. LIVE COMMITMENTS (was 12). The 4 mutation
+// sub-checks that used to exist for "capQueued"/"in-memory" are REMOVED, not re-pointed — they have no
+// surviving purpose (the per-token loop below no longer iterates those tokens at all, since dropping either
+// from a fixture no longer causes — nor should cause — a refusal); every other surviving marker's mutation
+// check is untouched.
 //
 // THIS FILE PROVES BOTH DIRECTIONS, ON THE REAL SCRIPT:
-//   (a) a document carrying only the 11 surviving markers and exactly the new floor (12) of numbered
+//   (a) a document carrying only the 9 surviving markers and exactly the new floor (12) of numbered
 //       LIVE COMMITMENTS items PASSES;
 //   (b) a document missing any ONE surviving marker, or holding fewer than 12 commitments, still FAILS
-//       with exit 1 — the cut narrowed WHAT is required, never weakened the check that runs.
-// It also asserts the 2 retired tokens are no longer required at all (absent from a passing doc), and
-// that the three markers the card explicitly calls out as "looks like ceremony but isn't" —
+//       with exit 1 — each cut narrowed WHAT is required, never weakened the check that runs.
+// It also asserts the 2 retired-by-bcd3f690 tokens are no longer required at all (absent from a passing
+// doc), and that the three markers the card explicitly calls out as "looks like ceremony but isn't" —
 // NO-CLEARANCE-FROM-SILENCE, QUIET-LANE, and (restored) MGR122-FLOOR — are still enforced individually.
 //
 // Run: node packages/daemon/test/rotation-gate-ceremony-cut.mjs
@@ -40,9 +51,10 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The 11 marker tokens rotation-gate.mjs requires AFTER cards bcd3f690 + a681aed5 (kept as a local
-// literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is that).
-// Excludes "LIVE COMMITMENTS", which is satisfied via the real section heading below, not this prose list.
+// The 9 marker tokens rotation-gate.mjs requires AFTER cards bcd3f690 + a681aed5 + 857aa90e (kept as a
+// local literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is
+// that). Excludes "LIVE COMMITMENTS", which is satisfied via the real section heading below, not this
+// prose list — 9 here + that heading = 10, matching rotation-gate.mjs's current MARKERS.length.
 const SURVIVING_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -51,8 +63,6 @@ const SURVIVING_MARKER_TOKENS = [
   "THE SAFE-WRITE",
   "MULTI-HARNESS EPIC",
   "NO-CLEARANCE-FROM-SILENCE",
-  "capQueued",
-  "in-memory",
   "QUIET-LANE",
   "MGR122-FLOOR",
 ];
@@ -91,13 +101,14 @@ function runGate(argsArr) {
   }
 }
 
-// ── (a) THE POST-CUT DOC PASSES: 11 surviving prose markers (+ LIVE COMMITMENTS via the real heading =
-// 12 total in MARKERS), none of the 2 retired tokens, exactly the new floor (12) of numbered commitments.
+// ── (a) THE POST-CUT DOC PASSES: 9 surviving prose markers (+ LIVE COMMITMENTS via the real heading =
+// 10 total in MARKERS), none of the 2 bcd3f690-retired tokens, exactly the new floor (12) of numbered
+// commitments.
 const cleanPath = writeFixture("postcut-clean.md", docWith({ items: 12 }));
 {
   const r = runGate(["--active", cleanPath, "--lint"]);
-  check("post-cut doc (12 markers, 12 commitments, no retired tokens): exits 0", r.status === 0);
-  check("post-cut doc: reports LINT OK with 12 markers and 12 commitments", /LINT OK.*carries all 12 markers and 12/.test(r.stdout));
+  check("post-cut doc (10 markers, 12 commitments, no retired tokens): exits 0", r.status === 0);
+  check("post-cut doc: reports LINT OK with 10 markers and 12 commitments", /LINT OK.*carries all 10 markers and 12/.test(r.stdout));
   for (const token of RETIRED_MARKER_TOKENS) {
     check(`post-cut doc genuinely omits retired token "${token}"`, !docWith({ items: 12 }).includes(token));
   }
@@ -133,9 +144,9 @@ for (const dropped of SURVIVING_MARKER_TOKENS) {
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card bcd3f690's cut (as amended by a681aed5's restore of MGR122-FLOOR): 2 retired " +
-    "markers are no longer required, the 11 surviving prose markers (12 total incl. LIVE COMMITMENTS) " +
-    "are each still individually enforced, the LIVE COMMITMENTS floor is 12 (not 20), and growth above the " +
-    "floor is never punished."
+  ? "\n✅ ALL PASS — card bcd3f690's cut (as amended by a681aed5's restore of MGR122-FLOOR, then narrowed " +
+    "again by 857aa90e's retirement of capQueued/in-memory): the retired markers are no longer required, " +
+    "the 9 surviving prose markers (10 total incl. LIVE COMMITMENTS) are each still individually enforced, " +
+    "the LIVE COMMITMENTS floor is 12 (not 20), and growth above the floor is never punished."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
