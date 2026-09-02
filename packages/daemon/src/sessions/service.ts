@@ -16,7 +16,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
@@ -12787,6 +12787,48 @@ export class SessionService {
       return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
+    // BACKSTOP (BEFORE the gate/merge) — card 4b7ff996 CR follow-up: the STAGED-canonical-dirt case is
+    // ALREADY refused unconditionally by mergeBranchLocked's own entry check (any staged content refuses,
+    // regardless of path overlap — it could be a daemon-restart-interrupted squash for ANY branch) — but
+    // that check runs INSIDE the squash, after a full gate. Hoisted here too, UNCONDITIONALLY (matching
+    // mergeBranchLocked's own scope exactly — this is not path-overlap-gated, unlike the unstaged check
+    // below), so a staged-dirty canonical repo stops burning a gate lane for every merge attempted against
+    // it, not just the ones whose branch happens to touch the staged path. Shares
+    // `stagedCanonicalDirtRefusalMessage`'s wording with mergeBranchLocked's own check so the two call
+    // sites can never drift apart on the identical condition. Fail-safe: any probe error returns
+    // `{staged:false}`, falling through to the real gate/squash, which still refuses via its own check.
+    const stagedDirt = await detectCanonicalStagedDirt(repoPath, { timeoutMs: this.gitOpMs });
+    if (stagedDirt.staged) {
+      const detailText = stagedCanonicalDirtRefusalMessage(branch, stagedDirt.paths ?? "");
+      const { suppressed, sha } = await rejectNotify("canonical_staged_dirt", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "canonical_staged_dirt", sha, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId };
+    }
+
+    // BACKSTOP (BEFORE the gate/merge) — card 4b7ff996: refuse at ADMISSION, before burning a gate lane
+    // (~8-17min observed live on this repo), when the canonical repo already has UNSTAGED tracked changes
+    // on a path this branch also touches AND `git merge --squash` would actually need to write there (see
+    // detectCanonicalDirtyOverlap's own doc for the three narrowing steps a first-round Code Review found
+    // missing — an already-landed-content false refusal, an unstaged-delete false refusal, and a submodule
+    // gitlink false refusal, each now excluded). `git merge --squash` cannot overwrite unstaged local
+    // modifications — it errors instead — so a branch whose own changes overlap that path can NEVER land,
+    // no matter how many times it's re-gated; the branch itself is not the problem (a rebase cannot touch
+    // the canonical repo's own working tree) and only a HUMAN resolving the canonical checkout by hand
+    // fixes it. Canonical-repo git writes are a human-only surface (the Platform Lead, above all
+    // projects) — project managers have none — so the correct next step is escalation, named explicitly
+    // here rather than left for the manager to diagnose (card DoD-3). Fail-safe like the stranded-work
+    // check above: any probe error/timeout returns `{overlap:false}`, so a flaky check never blocks a
+    // legitimate merge — it just proceeds to the real gate, which still (now diagnosably, see
+    // mergeBranchLocked's own dirtyOverlap signature check) catches the genuine case as a backstop.
+    const dirtyOverlap = await detectCanonicalDirtyOverlap(repoPath, branch, { timeoutMs: this.gitOpMs });
+    if (dirtyOverlap.overlap) {
+      const paths = (dirtyOverlap.paths ?? []).join(", ");
+      const detailText = `CANONICAL CHECKOUT DIRTY ON A PATH THIS BRANCH TOUCHES: ${paths}. The canonical repo has unstaged tracked changes on this path — 'git merge --squash' cannot overwrite unstaged local modifications, so this merge cannot land no matter how many times it's retried. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. Squash phase never reached; canonical repo AND worktree untouched. A HUMAN must resolve the canonical checkout by hand (commit or discard the dirty path there) — project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`;
+      const { suppressed, sha } = await rejectNotify("canonical_dirty_overlap", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
+      evt("merge_rejected", { reason: "canonical_dirty_overlap", sha, dirtyPaths: dirtyOverlap.paths, ...(suppressed ? { suppressed: true } : {}) });
+      return { merged: false, reason: `canonical repo has unstaged tracked changes on a path '${branch}' also touches (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
+    }
+
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
     //
     // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN. `gate` is `orchestration.gateCommand` from the project
@@ -14546,11 +14588,36 @@ export class SessionService {
         return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
-      const failReason = merge.conflict ? "conflict" : "merge_failed";
+      // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
+      // the REASON STRING itself, not from a second ad-hoc boolean — `merge.dirtyOverlap` only ever covers
+      // the UNSTAGED-overlap rawError path (set by mergeBranchLocked from git's own error signature). The
+      // STAGED-canonical-dirt refusal (mergeBranchLocked's own entry check, via
+      // `stagedCanonicalDirtRefusalMessage`) sets NO flag at all and was silently falling through to the
+      // generic "Re-task a rebase." suffix below — producing a self-contradicting nudge ("a HUMAN must
+      // resolve this by hand ... Re-task a rebase."), and the squash there was never even attempted.
+      // Testing `why` directly (the exact wording `stagedCanonicalDirtRefusalMessage` always starts with)
+      // catches that shape too, without inventing a second flag just for it.
+      const isStagedCanonicalRefusal = /^MERGE REFUSED — the canonical repo has STAGED, uncommitted changes/.test(why);
+      const failReason = merge.conflict ? "conflict" : (merge.dirtyOverlap ? "canonical_dirty_overlap" : (isStagedCanonicalRefusal ? "canonical_staged_dirt" : "merge_failed"));
       // Card 522cf573 DoD 4: `git merge --squash` was attempted (and, on a conflict, staged) but never
       // reached its commit step — mergeBranchLocked resets/cleans any staged residue before returning, so
-      // no commit ever lands on a rejection here.
-      const detailText = `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
+      // no commit ever lands on a rejection here (the staged-canonical-dirt case is the one exception:
+      // there the squash was never even ATTEMPTED, which is exactly why its own suffix below doesn't
+      // repeat "squash was attempted").
+      // Card 4b7ff996 DoD-2: the remedy is CONDITIONAL on the actual cause — "Re-task a rebase." is
+      // correct for the ordinary failure this branch otherwise handles (a genuine conflict, or a real
+      // rawError unrelated to canonical dirt), but it ACTIVELY MISDIRECTS for either canonical-dirty shape:
+      // no rebase of this branch touches the canonical repo's own working tree, so following the generic
+      // advice burns another worker + gate lane and fails identically. Both of these are defense-in-depth
+      // backstops — confirmWorkerMerge's own admission-time preflights (detectCanonicalStagedDirt,
+      // detectCanonicalDirtyOverlap, both above, before the gate) are the PRIMARY catch for these same two
+      // conditions; this only fires when the canonical repo went dirty IN the race window between those
+      // preflights and this squash (the gate itself can run for minutes in between).
+      const detailText = merge.dirtyOverlap
+        ? `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. This is NOT a stale-base problem — the branch's own base is fine, and rebasing it changes nothing here. The canonical checkout has local content in the way of a path this branch also touches (either unstaged changes to a tracked file, or an untracked file blocking it); a HUMAN must resolve the canonical checkout by hand (commit/discard the change, or move/remove the untracked file). Project managers have no canonical-repo git write access — escalate this to the Platform Lead.`
+        : isStagedCanonicalRefusal
+        ? `${why} This is NOT a stale-base problem either — the branch's own base is fine, and rebasing it changes nothing here; project managers have no canonical-repo git write access, so escalate this to the Platform Lead.`
+        : `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
       const { suppressed, sha } = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, sha, ...(suppressed ? { suppressed: true } : {}) });
       return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended, gateProximity };

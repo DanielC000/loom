@@ -1926,6 +1926,203 @@ export async function detectStrandedWork(
   }
 }
 
+export interface CanonicalDirtyOverlap {
+  /** AFFIRMATIVE only: true ⇒ the canonical repo has UNSTAGED tracked changes on a path this branch also touches, AND `git merge --squash` would actually need to write there. */
+  overlap: boolean;
+  /** the overlapping paths — present only when overlap:true. */
+  paths?: string[];
+  /** Card 4b7ff996 CR follow-up: true ONLY when the probe itself errored/timed out (never set on a clean
+   *  "genuinely no overlap" result) — see the catch below for why this exists: a probe that silently fails
+   *  open forever is indistinguishable from a clean repo without it. */
+  probeFailed?: boolean;
+}
+
+/**
+ * ADMISSION-TIME PREFLIGHT (card 4b7ff996): catches, BEFORE the build/DoD gate ever runs (an ~8-17min cost
+ * observed live on this repo), a branch whose squash can structurally never land — because the CANONICAL
+ * repo already has unstaged tracked changes on a path the branch itself touches. `git merge --squash`
+ * refuses to overwrite unstaged local modifications (it errors instead of silently clobbering them) —
+ * {@link mergeBranchLocked} hits exactly this as a `rawError` deep inside the squash (see its own
+ * `dirtyOverlap` signature-detection there), but only AFTER a full gate run has already paid for the
+ * worktree build/test cost. This is the SAME question asked cheaply, up front.
+ *
+ * ⚠️ CR CORRECTION (card 4b7ff996, first-round review): "any unstaged status on a path in
+ * `merge-base..branch`" is BROADER than what `git merge --squash` actually refuses on
+ * (`ERROR_NOT_UPTODATE_FILE`, raised only for a path the squash must ACTUALLY WRITE whose worktree
+ * content differs from the index) — the first draft's naive path-set intersection produced THREE confirmed
+ * false refusals against real git 2.47, each now excluded by one of the three narrowing steps below:
+ *
+ * (i) ALREADY-LANDED CONTENT (the worst — this card's own `46ebf16e` out-of-band-resolution shape: main
+ *     independently already carries the branch's exact content, canonical is separately re-dirtied on the
+ *     SAME path). `git merge --squash` doesn't touch a path at all when applying the branch's diff would
+ *     be a no-op against CURRENT `HEAD` (verified empirically: "Squash commit — not updating HEAD /
+ *     Automatic merge went well", 0 staged) — so it never hits the unstaged file underneath. Excluded by
+ *     dropping any candidate whose content is IDENTICAL between the CURRENT canonical `HEAD` and the
+ *     branch tip (`changedPathsBetween(git, "HEAD", branch, …)` — deliberately `HEAD`, not `mergeBase`:
+ *     `mergeBase..branch` only proves the branch changed the path RELATIVE TO ITS OWN FORK POINT, which
+ *     says nothing about whether `HEAD` has since independently converged on identical content).
+ * (ii) UNSTAGED DELETE (` D`). A deleted-but-unstaged path is NOT what `--squash` refuses on: git restores
+ *      it from the index and stages the branch's own change cleanly — reproduced against real git.
+ *      Excluded by restricting the dirty-candidate set to worktree status `Y === "M"` (a real content
+ *      MODIFICATION) — the only `Y` value `ERROR_NOT_UPTODATE_FILE` actually fires for.
+ * (iii) SUBMODULE GITLINK (` M`, mode `160000`). card `06b5c47f` already established that a submodule's
+ *       checked-out commit sitting ahead of its recorded pointer is a NORMAL steady state, not residue —
+ *       "could block a legitimately-configured repo's merges PERMANENTLY" (that doc, ~5030-5034) — and
+ *       this preflight would have REINTRODUCED exactly that regression for the narrower "branch also bumps
+ *       the pointer" case. `git merge --squash` does not error on it (proven both standalone and, now,
+ *       specifically for the overlap case by this file's own test). Excluded via a `git ls-files --stage`
+ *       mode check (`160000` = gitlink).
+ *
+ * These three checks run ONLY over the small overlap-candidate set (dirty ∩ branch-changed), never over
+ * the whole repo, so the extra git calls stay cheap regardless of repo size.
+ *
+ * Only UNSTAGED overlap is checked here — a STAGED-dirty canonical repo is checked by a SEPARATE sibling,
+ * {@link detectCanonicalStagedDirt} (also called from the SAME admission preflight, card 4b7ff996 CR
+ * follow-up — see that function's own doc for why it needed its own admission-time hoist too).
+ *
+ * FAILS SAFE like {@link detectStrandedWork}: any git error/timeout returns `{overlap:false,
+ * probeFailed:true}` — a flaky probe must never itself block a legitimate merge; the branch simply
+ * proceeds to the real gate/squash, which still catches (and explains) the genuine case if it's still
+ * there by then. The `probeFailed` flag + the log line in the catch exist so a PERMANENTLY broken probe
+ * (e.g. a git binary issue on this host) is at least observable, rather than silently indistinguishable
+ * from "genuinely never has an overlap" forever.
+ */
+export async function detectCanonicalDirtyOverlap(
+  repoPath: string,
+  branch: string,
+  deps: BoundedGitDeps = {},
+): Promise<CanonicalDirtyOverlap> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const statusRaw = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=no"]),
+      timeoutMs, "git status --porcelain (canonical, dirty-overlap preflight)",
+    );
+    // XY<space>path (a rename/copy is "R  old -> new" / "C  old -> new"): Y (index 1) is the WORKTREE
+    // status. Narrowing (ii): only Y === "M" (a real unstaged MODIFICATION) is a candidate — see this
+    // function's own doc for why an unstaged DELETE (Y === "D") is deliberately excluded here. Untracked
+    // files never appear (--untracked-files=no), so every surviving line is a TRACKED path.
+    const dirtyUnstaged = new Set<string>();
+    for (const line of statusRaw.split("\n")) {
+      if (line.length < 4) continue;
+      if (line[1] !== "M") continue;
+      const rawPath = line.slice(3);
+      // Only a REAL rename/copy line (X === "R"/"C") is "old -> new" — gate on the STATUS CHAR, not a
+      // naive `" -> "` substring search, which would mis-split an ordinary path that legitimately
+      // contains that literal substring (CR follow-up nitpick).
+      const isRenameOrCopy = line[0] === "R" || line[0] === "C";
+      const p = isRenameOrCopy && rawPath.includes(" -> ") ? rawPath.split(" -> ").pop()! : rawPath;
+      dirtyUnstaged.add(p);
+    }
+    if (dirtyUnstaged.size === 0) return { overlap: false };
+
+    const mergeBase = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, dirty-overlap preflight)")).trim();
+    const changed = await changedPathsBetween(git, mergeBase, branch, timeoutMs);
+    let overlapping = changed.filter((p) => dirtyUnstaged.has(p));
+    if (overlapping.length === 0) return { overlap: false };
+
+    // Narrowing (iii): drop any overlap-candidate that is a gitlink (submodule) entry — its "content" is a
+    // recorded commit sha, not the tree content `--squash` can conflict on the way it does for an ordinary
+    // blob. Scoped to just the small candidate set already computed above, not a whole-repo scan.
+    const gitlinkStage = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "ls-files", "--stage", "--", ...overlapping]),
+      timeoutMs, "git ls-files --stage (canonical, dirty-overlap gitlink check)",
+    );
+    const gitlinkPaths = new Set<string>();
+    for (const line of gitlinkStage.split("\n")) {
+      const tab = line.indexOf("\t");
+      if (tab === -1) continue;
+      const mode = line.slice(0, tab).trim().split(/\s+/)[0];
+      if (mode === "160000") gitlinkPaths.add(line.slice(tab + 1));
+    }
+    overlapping = overlapping.filter((p) => !gitlinkPaths.has(p));
+    if (overlapping.length === 0) return { overlap: false };
+
+    // Narrowing (i): drop any remaining candidate whose content is IDENTICAL between canonical HEAD and
+    // the branch tip RIGHT NOW — deliberately re-diffed against `HEAD` here (not the `mergeBase` used
+    // above only to find the branch's OWN candidate set), since this is the question that actually decides
+    // whether `--squash` touches the working tree: has HEAD since independently converged on what the
+    // branch would apply, regardless of what the branch changed relative to its own fork point.
+    const stillDiffersFromHead = new Set(await changedPathsBetween(git, "HEAD", branch, timeoutMs));
+    overlapping = overlapping.filter((p) => stillDiffersFromHead.has(p));
+    if (overlapping.length === 0) return { overlap: false };
+
+    return { overlap: true, paths: overlapping };
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] detectCanonicalDirtyOverlap: probe failed for branch ${branch} in ${repoPath} — ` +
+      `falling through to the real gate/squash instead of pre-refusing: ${(e as Error).message}`);
+    return { overlap: false, probeFailed: true }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
+  }
+}
+
+/**
+ * Sibling admission-time preflight to {@link detectCanonicalDirtyOverlap} (card 4b7ff996 CR follow-up):
+ * the STAGED-canonical-dirt case was already refused UNCONDITIONALLY by {@link mergeBranchLocked}'s own
+ * entry check (see `stagedCanonicalDirtRefusalMessage`'s doc) — but that check runs INSIDE the squash,
+ * which means it only fires AFTER a full build/DoD gate has already run, burning the exact gate lane
+ * DoD-1 exists to save. This is the identical, UNCONDITIONAL check (any staged content refuses, regardless
+ * of path overlap — a staged residue could be a daemon-restart-interrupted squash for ANY branch, not just
+ * this one) hoisted to admission time, sharing `stagedCanonicalDirtRefusalMessage`'s wording so the two
+ * call sites can never say different things about the identical condition.
+ *
+ * FAILS SAFE like its sibling: any git error/timeout returns `{staged:false}` — never blocks a legitimate
+ * merge on a probe failure; `mergeBranchLocked`'s own unconditional check remains the backstop.
+ */
+export interface CanonicalStagedDirt {
+  staged: boolean;
+  /** raw `git diff --cached --name-only` output — present only when staged:true. */
+  paths?: string;
+}
+export async function detectCanonicalStagedDirt(repoPath: string, deps: BoundedGitDeps = {}): Promise<CanonicalStagedDirt> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    // REGRESSION FIX (card 4b7ff996, second-round self-test): an IN-PROGRESS-MERGE residue (a stale
+    // `MERGE_HEAD`, or unmerged/conflicted index entries left after one was deleted) also shows up in
+    // `git diff --cached --name-only` — verified directly: a real conflicted merge with MERGE_HEAD removed
+    // leaves `README.md` in `git status --porcelain` as `UU README.md` AND in `git diff --cached
+    // --name-only`, even though nothing is genuinely staged in the sense this check means to catch.
+    // `mergeBranchLocked` itself CLEARS exactly this residue (`git reset --merge HEAD`) BEFORE its own
+    // staged-entry check ever runs — so checking staged-ness here, at admission, BEFORE that clear has
+    // ever happened, would refuse on residue the real squash goes on to clear and merge successfully.
+    // (Caught by this file's own merge-confirm-idempotent.mjs scenario (d), a PRE-EXISTING test this
+    // card's first draft silently broke — not a new control, but real coverage doing its job.) Mirror
+    // mergeBranchLocked's own two-probe residue signal here and defer entirely (`staged:false`) whenever
+    // it's affirmative — mergeBranchLocked's own post-clear check remains the authoritative one for this
+    // rare combined case (residue AND genuine separate staged work at once); this admission preflight
+    // just doesn't attempt to get ahead of a clear it doesn't perform itself (deliberately read-only).
+    const unmergedAtEntry = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, dirty-overlap preflight, residue check)")).trim() !== "";
+    let mergeHeadAtEntry = false;
+    try {
+      mergeHeadAtEntry = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"]), timeoutMs, "git rev-parse MERGE_HEAD (canonical, dirty-overlap preflight, residue check)")).trim() !== "";
+    } catch { /* no MERGE_HEAD ⇒ that signal is simply false */ }
+    if (unmergedAtEntry || mergeHeadAtEntry) return { staged: false };
+
+    const stagedAtEntry = (await withTimeout(
+      git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, dirty-overlap preflight, staged check)",
+    )).trim();
+    if (stagedAtEntry === "") return { staged: false };
+    return { staged: true, paths: stagedAtEntry };
+  } catch {
+    return { staged: false }; // FAIL SAFE: a check error/timeout must never block a legitimate merge
+  }
+}
+
+/**
+ * Shared wording for the STAGED-canonical-dirt refusal (card `9e77050f`/`06b5c47f`'s original text; card
+ * `4b7ff996` extracted it into one function so {@link mergeBranchLocked}'s own entry check and
+ * {@link detectCanonicalStagedDirt}'s new admission-time caller can never drift apart on the identical
+ * condition — see both call sites).
+ */
+export function stagedCanonicalDirtRefusalMessage(branch: string, stagedPaths: string): string {
+  // The text below is the ONLY part of this refusal a caller (a manager, mid-fleet, who has never read
+  // card 9e77050f/06b5c47f) actually sees — so it has to make the required action unmistakable on its
+  // own, not rely on this comment. It must say, explicitly: this is not the branch's fault (retrying
+  // does nothing); a HUMAN has to act on the canonical checkout, their call how; and the refusal itself
+  // is deliberate, not a bug — auto-clearing was rejected precisely because it could destroy real work.
+  return `MERGE REFUSED — the canonical repo has STAGED, uncommitted changes that predate this merge and are unrelated to branch '${branch}'. This is NOT a problem with '${branch}' or its code: retrying this merge (or any other) against this repo will refuse again identically until a HUMAN resolves the canonical checkout by hand — inspect \`git status\`/\`git diff --cached\` there, then commit, unstage, or discard whatever is staged (your call which). This refusal is DELIBERATE, not a bug: the staged state may be a daemon-restart-interrupted squash (a \`--squash\` commits the INDEX, which is exactly what can corrupt a merge), or it may be someone's real staged work, and Loom cannot tell the two apart from git state alone — auto-clearing it (e.g. \`git reset --hard\`) risks silently destroying that work, so it refuses instead. (Unstaged tracked changes elsewhere in the checkout — ordinary WIP, or a submodule whose checked-out commit differs from its recorded pointer — do NOT block a merge; only staged content does.) Once the canonical repo's index is clean, merges resume normally with no further action needed. Staged state:\n${stagedPaths}`;
+}
+
 /**
  * The worktree's current HEAD commit sha — the gate-timeout circuit breaker's (card 3564fd1e) "did the
  * branch move" signal: a breaker trip must clear once a NEW commit lands (the plausible fix for a hanging
@@ -4794,7 +4991,7 @@ export async function mergeMainIntoWorktree(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -4809,7 +5006,7 @@ export async function mergeBranch(
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
   gateBaseBranchHead?: string, opId?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean; dirtyOverlap?: boolean }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
@@ -5009,15 +5206,10 @@ async function mergeBranchLocked(
     return { ok: false, reason: `failed to inspect canonical repo staged state before merge: ${(e as Error).message}` };
   }
   if (stagedAtEntry !== "") {
-    // The text below is the ONLY part of this refusal a caller (a manager, mid-fleet, who has never read
-    // card 9e77050f/06b5c47f) actually sees — so it has to make the required action unmistakable on its
-    // own, not rely on this comment. It must say, explicitly: this is not the branch's fault (retrying
-    // does nothing); a HUMAN has to act on the canonical checkout, their call how; and the refusal itself
-    // is deliberate, not a bug — auto-clearing was rejected precisely because it could destroy real work.
-    return {
-      ok: false,
-      reason: `MERGE REFUSED — the canonical repo has STAGED, uncommitted changes that predate this merge and are unrelated to branch '${branch}'. This is NOT a problem with '${branch}' or its code: retrying this merge (or any other) against this repo will refuse again identically until a HUMAN resolves the canonical checkout by hand — inspect \`git status\`/\`git diff --cached\` there, then commit, unstage, or discard whatever is staged (your call which). This refusal is DELIBERATE, not a bug: the staged state may be a daemon-restart-interrupted squash (a \`--squash\` commits the INDEX, which is exactly what can corrupt a merge), or it may be someone's real staged work, and Loom cannot tell the two apart from git state alone — auto-clearing it (e.g. \`git reset --hard\`) risks silently destroying that work, so it refuses instead. (Unstaged tracked changes elsewhere in the checkout — ordinary WIP, or a submodule whose checked-out commit differs from its recorded pointer — do NOT block a merge; only staged content does.) Once the canonical repo's index is clean, merges resume normally with no further action needed. Staged state:\n${stagedAtEntry}`,
-    };
+    // Card 4b7ff996: this wording now lives in ONE shared function, `stagedCanonicalDirtRefusalMessage`
+    // (above `detectCanonicalDirtyOverlap`), so this entry check and the new admission-time preflight that
+    // hoists this same condition earlier can never say different things about the identical condition.
+    return { ok: false, reason: stagedCanonicalDirtRefusalMessage(branch, stagedAtEntry) };
   }
   // Broad probe (staged AND unstaged tracked state — untracked files excluded, same rationale as always:
   // `reset --hard` never touches them, so they're not at risk). This does NOT gate the merge — only
@@ -5082,10 +5274,17 @@ async function mergeBranchLocked(
   enterMergeDangerWindow(repoPath, branch, opId);
   try {
     let rawError = false;
+    let rawErrorMessage: string | undefined;
     try {
       await withTimeout(git.raw(["merge", "--squash", squashTarget]), timeoutMs, "git merge --squash (canonical)");
-    } catch {
+    } catch (e) {
       rawError = true; // a conflict OR a real failure — the explicit checks below decide
+      // Card 4b7ff996: captured (not just flagged) so the rawError branch below can tell git's own
+      // "unstaged local changes would be overwritten" signature apart from every other real failure — the
+      // message used to be discarded here entirely, leaving the caller with a generic "git merge --squash
+      // failed" for a class of failure that actually has a specific, diagnosable cause and a specific,
+      // different remedy (see that branch's own doc).
+      rawErrorMessage = (e as Error).message;
     }
     // Conflict? Unmerged index entries are the reliable signal. Under --squash there is no MERGE_HEAD, so
     // `git reset --hard HEAD` (NOT `merge --abort`) restores the canonical repo to its pre-merge state.
@@ -5123,6 +5322,40 @@ async function mergeBranchLocked(
     // anything outside it.
     if (rawError) {
       const cleanupIssue = await resetOrSkip("rawError cleanup");
+      // DIRTY-OVERLAP SIGNATURE (card 4b7ff996): git's own error for "the canonical repo has unstaged
+      // local modifications to a path this squash would overwrite" is distinct and diagnostic — surface
+      // it as its own `dirtyOverlap:true` reason rather than the generic message below, because the
+      // correct remedy here is NOT a rebase (this branch's base is not the problem; no rebase of it
+      // touches the canonical repo's own working tree) — see confirmWorkerMerge's own use of this field
+      // for the caller-facing wording. {@link detectCanonicalDirtyOverlap} is the PRIMARY, cheap defense
+      // against this class (it refuses at admission, before the gate ever runs); this is a defense-in-
+      // depth backstop for the race window between that preflight and this squash — the gate itself can
+      // run for minutes in between, during which the canonical repo can newly go dirty on an overlapping
+      // path.
+      // Card 4b7ff996 CR follow-up: this ONE regex matches BOTH of git's "would be overwritten by merge"
+      // wordings — "Your local changes to the following files..." (an unstaged TRACKED modification, the
+      // case detectCanonicalDirtyOverlap's admission-time preflight actually detects) AND "The following
+      // untracked working tree files..." (an UNTRACKED collision — deliberately NOT detected at admission
+      // yet; card notes it as a follow-up, since `--untracked-files=no` there is load-bearing against a
+      // different false-refusal, see that function's own doc). Both land here as the SAME `dirtyOverlap`
+      // classification, so the wording below is worded generically enough to be true for either — "local
+      // content" / "commit/discard OR move/remove", not "unstaged changes" / "commit or discard" alone,
+      // which would be actively WRONG for the untracked case (an untracked file cannot be "unstaged").
+      const dirtyOverlap = !!rawErrorMessage && /would be overwritten by merge/i.test(rawErrorMessage);
+      if (dirtyOverlap) {
+        // `rawErrorMessage` is ALWAYS included — it's git's own diagnostic and the ONLY place the
+        // specific overwritten path(s) get named — even when `cleanupIssue` is also set (the ordinary
+        // case here: `resetOrSkip` skips its reset whenever unstaged dirt PREDATED this merge attempt,
+        // which is exactly what triggered this branch in the first place, so `cleanupIssue` is populated
+        // on nearly every real hit). An earlier draft of this fix used `cleanupIssue`'s presence to
+        // choose between the two messages and silently DROPPED `rawErrorMessage` — and with it the
+        // path name — whenever cleanup was skipped; caught by this file's own mutation-tested backstop.
+        return {
+          ok: false,
+          dirtyOverlap: true,
+          reason: `canonical repo has local content that would be overwritten by this merge (git refuses to clobber it): ${rawErrorMessage}${cleanupIssue ? ` (${cleanupIssue})` : ""}`,
+        };
+      }
       return { ok: false, reason: cleanupIssue ? `git merge --squash failed (${cleanupIssue})` : "git merge --squash failed" };
     }
     // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
