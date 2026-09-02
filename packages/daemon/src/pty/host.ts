@@ -14,6 +14,7 @@ import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
+import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
@@ -3728,6 +3729,17 @@ export interface PtyHostEvents {
    */
   onPasteLengthLoss?(sessionId: string, candidate: PasteLengthLossCandidate): void;
   /**
+   * Card 2d8d2e42: `PtyHost.recordToolCallArgsHash` (see its own doc) found a consecutive-identical-call
+   * streak that just reached the Nth repeat, or a subsequent multiple of N — `count`/`threshold` are the
+   * raw numbers (`count / threshold` is the escalation level, card `45390f74`'s DoD-3 rides on this rather
+   * than a separate mechanism). PtyHost itself cannot persist a durable event or notify a manager (no DB —
+   * same layering boundary as `onPasteLengthLoss` below); the implementer (sessions/service.ts, via
+   * index.ts) decides how to record + fail loud, reusing `handlePasteLengthLoss`'s established two-
+   * recipient shape rather than inventing a new one. OPTIONAL, same rationale as its siblings: every
+   * existing `PtyHostEvents` test double is unaffected until it opts in.
+   */
+  onRepeatedToolCall?(sessionId: string, info: { tool: string; argsHash: string; count: number; threshold: number }): void;
+  /**
    * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
    * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
    * console.warn (this file's Stop-hook call site) already fires. Distinct from `onPasteLengthLoss` above:
@@ -4959,6 +4971,9 @@ export class PtyHost {
   /** Card 8d158088: the independent SubagentStart/SubagentStop drift cross-check — see
    *  SubagentDriftTracker's own doc in tool-attribution.ts for the mechanism and who reads it. */
   private readonly subagentDrift = new SubagentDriftTracker();
+  /** Card 2d8d2e42: consecutive identical-argsHash-to-the-same-tool tracker, scoped to one turn — see
+   *  repeated-call-tracker.ts's own doc for the mechanism and why the scope is generalized past gate_status. */
+  private readonly repeatedCalls = new RepeatedCallTracker();
   /**
    * M2 tripwire: true ONLY while deliverHook is finalizing a turn (between lowering busy and draining
    * the FIFO). deliverHook is fully synchronous, so an external `enqueueStdin` can NEVER observe this
@@ -5233,6 +5248,9 @@ export class PtyHost {
       // mid-turn, and nothing else would ever access (and thus lazily prune) that queued entry again.
       // Fires on EVERY exit path, same as the cleanup above.
       this.toolAttribution.forget(opts.sessionId);
+      // Card 2d8d2e42: same per-session-cleanup-point discipline — a dead session's repeat-streak bucket
+      // would otherwise linger for the rest of the daemon's process lifetime. Fires on EVERY exit path.
+      this.repeatedCalls.forget(opts.sessionId);
       // eslint-disable-next-line no-console
       console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
       try { live.logStream.end(); } catch { /* ignore */ }
@@ -5348,6 +5366,7 @@ export class PtyHost {
       // Card 7b8a3b25: a shell never mounts the hook relay (hookToken:"" — unreachable, kind!=="claude"),
       // so this is a no-op in practice; called anyway since this IS a per-session live-entry removal.
       this.toolAttribution.forget(opts.id);
+      this.repeatedCalls.forget(opts.id); // card 2d8d2e42: same no-op-in-practice, same-discipline cleanup
       this.live.delete(opts.id);
     });
   }
@@ -5423,6 +5442,7 @@ export class PtyHost {
     // Card 7b8a3b25: a canned entry never mounts the hook relay either — no-op in practice, called
     // anyway since this IS a per-session live-entry removal.
     this.toolAttribution.forget(id);
+    this.repeatedCalls.forget(id); // card 2d8d2e42: same no-op-in-practice, same-discipline cleanup
     this.live.delete(id);
   }
 
@@ -6890,6 +6910,10 @@ export class PtyHost {
       }
       case "Stop":
       case "StopFailure": {
+        // Card 2d8d2e42: a turn just ended — a repeated-identical-call streak (recordToolCallArgsHash)
+        // must never span across a Stop boundary. Synchronous Map op, so this sits safely outside (and
+        // before) the M2 synchronous window below, which guards only the setBusy->drain ordering.
+        this.repeatedCalls.resetTurn(sessionId);
         // ┌─ M2 INVARIANT (busy-gate drain ordering) — DO NOT INTRODUCE AN `await` IN THIS BRANCH ─┐
         // │ From the setBusy(false) below to the drainPending below, execution MUST stay strictly  │
         // │ SYNCHRONOUS. The busy-gate works because once the turn ends we lower busy and IMMEDIATELY│
@@ -7508,6 +7532,27 @@ export class PtyHost {
       console.log(`[subagent-drift] ${sessionId} BLIND: watched tool "${toolName}" resolved "${result.state}" while a sub-agent was LIVE (live=${drift.live}) — agent_id did not arrive on a call made during that live window; NOT proof the call itself was the sub-agent's (card aed28554, measured: a main-turn call CAN land inside this window via parallel tool dispatch — reproduced 1 of 4 attempts; see project memory subagent-drift-blind-false-positive-confirmed). stops=${drift.stops} confirmedSubagent=${drift.confirmedSubagent} blindWhileLive=${drift.blindWhileLive}`);
     }
     return result;
+  }
+
+  /**
+   * Card 2d8d2e42: called once per inbound MCP tool-call request (gateway/server.ts, via
+   * mcp/inbound-log.ts's `logInboundMcpRequest` `onRepeatedCall` param) with the tool name and the SAME
+   * `argsHash` already computed there for the `[mcp]` log line. Tracks consecutive identical calls to the
+   * SAME tool, scoped to ONE TURN — `deliverHook`'s Stop/StopFailure case resets the streak unconditionally
+   * (see repeated-call-tracker.ts's own doc), and every per-session cleanup site calls `forget` alongside
+   * `toolAttribution.forget`/`subagentDrift.evict`. Fires `PtyHostEvents.onRepeatedToolCall` at the Nth
+   * repeat and every subsequent multiple of N (see `RepeatedCallResult.firedAtThreshold`'s own doc for why
+   * repeatedly, not just once) — PtyHost itself has no DB/manager lookup (same layering boundary as
+   * `onPasteLengthLoss`), so the implementer (sessions/service.ts, via index.ts) owns the durable event +
+   * the human-attention nudge.
+   */
+  recordToolCallArgsHash(sessionId: string, tool: string, argsHash: string): void {
+    const result = this.repeatedCalls.record(sessionId, tool, argsHash);
+    if (result.firedAtThreshold) {
+      // eslint-disable-next-line no-console
+      console.log(`[repeated-call] ${sessionId} tool=${tool} argsHash=${argsHash} count=${result.count} threshold=${REPEATED_CALL_THRESHOLD}`);
+      this.events.onRepeatedToolCall?.(sessionId, { tool, argsHash, count: result.count, threshold: REPEATED_CALL_THRESHOLD });
+    }
   }
 
   /**

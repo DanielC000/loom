@@ -356,6 +356,11 @@ async function main(): Promise<void> {
     // how to fail loud to the recipient AND the sender. See PtyHostEvents.onPromptMismatchUnresolved's own
     // doc / SessionService.handlePromptMismatchUnresolved's own doc.
     onPromptMismatchUnresolved: (sessionId, info) => sessions.handlePromptMismatchUnresolved(sessionId, info),
+    // Card 2d8d2e42: a repeated-identical-call streak just reached the Nth repeat (or a subsequent
+    // multiple) — `sessions` (forward reference, same pattern as onPasteLengthLoss above) decides how to
+    // record the durable event + fail loud to the recipient AND the sender. See
+    // PtyHostEvents.onRepeatedToolCall's own doc / SessionService.handleRepeatedToolCall's own doc.
+    onRepeatedToolCall: (sessionId, info) => sessions.handleRepeatedToolCall(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

@@ -8650,6 +8650,41 @@ export class SessionService {
   }
 
   /**
+   * Card 2d8d2e42 — consumes `PtyHostEvents.onRepeatedToolCall`: `sessionId` has called `info.tool` with
+   * IDENTICAL arguments `info.count` consecutive times within one turn (no Stop boundary between them) —
+   * fired at the Nth repeat and every subsequent multiple of N (see `RepeatedCallResult.firedAtThreshold`'s
+   * own doc, pty/repeated-call-tracker.ts). Defence in depth behind card `45390f74`'s cheap primary fix (an
+   * anti-poll `note` on `gate_status`'s live reply) — this fires regardless of whether that note was ever
+   * read, and regardless of which tool the streak is on (generalized past `gate_status` — see the tracker's
+   * own doc). Reuses `handlePasteLengthLoss`'s established two-recipient, durable-event shape:
+   *   - RECIPIENT: `sessionId` itself — queued for whenever this turn eventually ends (a live turn-
+   *     interrupt was explicitly REJECTED as this card's option (c) — see the card's own "option choice"),
+   *     so this can't break the loop mid-turn, but it does mean the NEXT turn starts already warned instead
+   *     of silently repeating the same mistake.
+   *   - SENDER (human-attention half of DoD-1): for a worker, that's its manager (`parentSessionId`) — the
+   *     one live party who CAN act on this while the loop is still running (e.g. `worker_recycle`), since
+   *     it is a wholly separate session/turn from the one stuck looping. A session with no `parentSessionId`
+   *     (a manager, a `run`/plain session, the platform lead) has no programmatic party to nudge — the
+   *     durable event below still records the loop for a human auditing the log, the same structural limit
+   *     `handlePasteLengthLoss`'s own doc names.
+   */
+  handleRepeatedToolCall(sessionId: string, info: { tool: string; argsHash: string; count: number; threshold: number }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "repeated_tool_call", detail: { tool: info.tool, argsHash: info.argsHash, count: info.count, threshold: info.threshold },
+    });
+    const level = Math.floor(info.count / info.threshold);
+    const recipientMsg = `[loom:repeated-tool-call] you have called \`${info.tool}\` with IDENTICAL arguments ${info.count} times in a row within this single turn, with no Stop boundary between them${level > 1 ? ` (this is repeat notice #${level})` : ""} — this is very likely a stuck poll loop, not real progress. STOP calling this tool on a timer: if you are waiting on something, end your turn and let the normal completion nudge bring you back instead of re-checking.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:repeated-tool-call] your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} has called \`${info.tool}\` with identical arguments ${info.count} times in a row within one turn — likely a stuck poll loop consuming context with no progress. Consider checking on it.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
    * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
    * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no

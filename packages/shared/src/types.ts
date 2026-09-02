@@ -1386,6 +1386,18 @@ export type OrchestrationEventKind =
   // durable audit trail for a mismatch whose own notice promised a follow-up either way but, until this
   // card, only ever delivered on the SUCCESS half of that promise.
   | "prompt_mismatch_unresolved"
+  // Card 2d8d2e42 — `PtyHostEvents.onRepeatedToolCall` fired: a session called the same MCP tool with
+  // IDENTICAL arguments (same `argsHash` already logged on the `[mcp]` line) `count` consecutive times
+  // within ONE TURN (no Stop boundary between them) — see `pty/repeated-call-tracker.ts`'s own doc for the
+  // mechanism and why it's scoped to consecutive/one-turn rather than a cross-turn volume count. Defence in
+  // depth behind card `45390f74`'s cheap primary fix (an anti-poll `note` on `gate_status`'s live reply) —
+  // this fires regardless of whether that note was ever read, and generalized past `gate_status` to every
+  // tool on every MCP router. Filed under the AFFECTED session (managerSessionId = its parent session's id
+  // if one exists, else its own id — same "notify whoever can act" convention as `paste_length_loss`),
+  // workerSessionId = the affected session itself; `detail` carries { tool, argsHash, count, threshold }.
+  // Fires again at every subsequent multiple of `threshold`, not just the first crossing, so a runaway loop
+  // keeps re-signalling instead of going silent after one shot.
+  | "repeated_tool_call"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1433,6 +1445,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
+  repeated_tool_call: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

@@ -44,6 +44,14 @@ import { createHash } from "node:crypto";
  * specific incident" — there is no periodic reader and no alert. Per
  * `shipping-a-detector-is-not-someone-reading-it`: a card whose last step is an observation isn't closed
  * by merging this — the follow-up enforcement card is what turns this from visible-but-inert into acted-on.
+ *
+ * Card 2d8d2e42's `onRepeatedCall` param piggybacks a SECOND signal onto this SAME per-entry loop, for the
+ * SAME reason `attribute` does: it needs the identical `argsHash` already computed here for the `[mcp]`
+ * line, and adding a second, independent hash computation elsewhere would risk the two silently drifting.
+ * Unlike `attribute` (which is scoped to `WATCHED_TOOL_NAMES`), this fires for EVERY tool call that carries
+ * an `argsHash` — see `pty/repeated-call-tracker.ts`'s own doc for why the wider scope is deliberate and
+ * costs nothing in false positives. This does NOT gate or refuse the call; it is advisory, same posture as
+ * `attribute`.
  */
 
 let mcpLogSeq = 0;
@@ -79,6 +87,7 @@ export function logInboundMcpRequest(
   sessionId: string,
   body: unknown,
   attribute?: (sessionId: string, tool: string) => ToolAttributionLike | null | undefined,
+  onRepeatedCall?: (sessionId: string, tool: string, argsHash: string) => void,
 ): void {
   const at = new Date().toISOString();
   const entries = Array.isArray(body) ? body : [body];
@@ -91,7 +100,9 @@ export function logInboundMcpRequest(
     let shape = "";
     if (rpc?.params?.arguments !== undefined) {
       const argsText = JSON.stringify(rpc.params.arguments);
-      shape = ` argsLen=${argsText.length} argsHash=${shortHash(argsText)}`;
+      const hash = shortHash(argsText);
+      shape = ` argsLen=${argsText.length} argsHash=${hash}`;
+      if (onRepeatedCall && tool !== "-") onRepeatedCall(sessionId, tool, hash);
     }
     let attribution = "";
     if (attribute && tool !== "-") {

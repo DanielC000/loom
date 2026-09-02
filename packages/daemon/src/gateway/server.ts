@@ -758,11 +758,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return map;
   };
 
+  // Card 2d8d2e42: threaded to every `logInboundMcpRequest` call below (all 8 routers), reusing the SAME
+  // argsHash that call already computes for the `[mcp]` log line — see repeated-call-tracker.ts's own doc
+  // for why the scope is generalized past gate_status rather than allowlisted to specific routers/tools.
+  // Optional-chained for the SAME reason as `consumeToolAttribution?.` just above: a minimal test stub for
+  // `deps.pty` without this method stays a harmless no-op rather than a 500.
+  const recordRepeatedCall = (sid: string, tool: string, argsHash: string): void => {
+    deps.pty.recordToolCallArgsHash?.(sid, tool, argsHash);
+  };
+
   // --- Project-scoped task MCP (session id in the path; project resolved server-side) ---
   app.all("/mcp/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
     const attributions = computeAttributions(sessionId, LOOM_TASKS_SERVER_ID, req.body);
-    logInboundMcpRequest("task", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651: identity-only inbound MCP census; cd0c7fee: + sub-agent-call correlation
+    logInboundMcpRequest("task", sessionId, req.body, (sid, tool) => attributions.get(tool), recordRepeatedCall); // card 98c4a651: identity-only inbound MCP census; cd0c7fee: + sub-agent-call correlation; 2d8d2e42: + repeated-call detection
     reply.hijack(); // hand raw req/res to the MCP transport; pass the Fastify-parsed body
     await deps.mcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);
   });
@@ -776,7 +785,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // made, not that this particular call succeeded.
     deps.pty.markMcpSeen(sessionId);
     const attributions = computeAttributions(sessionId, LOOM_ORCHESTRATION_SERVER_ID, req.body);
-    logInboundMcpRequest("orchestration", sessionId, req.body, (sid, tool) => attributions.get(tool)); // card 98c4a651; cd0c7fee
+    logInboundMcpRequest("orchestration", sessionId, req.body, (sid, tool) => attributions.get(tool), recordRepeatedCall); // card 98c4a651; cd0c7fee; 2d8d2e42
     reply.hijack();
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body, attributions);
   });
@@ -784,7 +793,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Platform-lead MCP (role-gated to 'platform'; project/agent creation — Pillar C) ---
   app.all("/mcp-platform/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("platform", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("platform", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.platformMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
@@ -794,7 +803,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // (its resolveRole gates role==="platform") — the load-bearing P5 prompt-injection containment. ---
   app.all("/mcp-audit/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("audit", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("audit", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.auditMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
@@ -806,7 +815,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // session (caller-set only), so a non-workspace-auditor session can never reach here. ---
   app.all("/mcp-user-audit/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("user-audit", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("user-audit", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.userAuditMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
@@ -817,7 +826,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // and no agent/MCP path can mint a 'setup' session, so a non-setup session can never reach here. ---
   app.all("/mcp-setup/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("setup", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("setup", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.setupMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
@@ -829,7 +838,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // startOperator), so a non-operator session can never reach here. ---
   app.all("/mcp-operator/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("operator", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("operator", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.operatorMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
@@ -839,7 +848,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // every other /mcp* route, and buildMcpServers mounts only loom-run for it — not even loom-tasks). ---
   app.all("/mcp-run/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("run", sessionId, req.body); // card 98c4a651
+    logInboundMcpRequest("run", sessionId, req.body, undefined, recordRepeatedCall); // card 98c4a651; 2d8d2e42
     reply.hijack();
     await deps.runMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
