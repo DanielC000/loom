@@ -50,6 +50,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (Code Review follow-up on b97f643d): the skipped docs/ path must also be NAMED in the reduced-gate
 //       warning, same discipline as `notHermeticExcluded` — (N) now asserts the path appears by name, not
 //       just that some "reduced" warning fired.
+//   (O) card 5149c036 — a repo-root `CLAUDE.md` change alongside an otherwise comment-only .ts edit must
+//       still force the FULL gate — same shape as (F), pinned explicitly for the real specimen this card
+//       investigated. See merge-gate-inert-diff.mjs scenario (M) for the CLAUDE.md-ONLY companion.
 // See `emit-compare-gate-scope.mjs` for (H)-(L): the shell-metacharacter defence-in-depth case, the two
 // fixtures/-scope cases, and the branch-blind-at-cap-queue-admission case.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
@@ -391,6 +394,40 @@ try {
     check("(N2) gateRan:true", confirm.gateRan === true);
     check("(N2) captured command IS the full gate — a real behavioral edit alongside a docs/ line still fails closed", capturedGate === FULL_GATE);
   }
+
+  // ── (O) card 5149c036 — THE LITERAL MOTIVATING CASE, PAIRED WITH A REDUCIBLE EDIT: a repo-root
+  //        `CLAUDE.md` change riding alongside an OTHERWISE comment-only .ts edit must still force the FULL
+  //        gate, never reduce — same shape as (F) (an out-of-scope path defeats an otherwise-reducible
+  //        diff), pinned explicitly for the real specimen this card investigated. See
+  //        merge-gate-inert-diff.mjs scenario (M) for the CLAUDE.md-ONLY companion (the full-SKIP question,
+  //        `isInertMergeDiff`) — this one is the REDUCED-gate question (`computeEmitCompareGate`) ─────────
+  {
+    const O = mk("o");
+    makeRepoWithBaseSrcFile(O, BASE_SRC);
+    const baseSha = execSync("git rev-parse HEAD", { cwd: O.repo }).toString().trim();
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(O.repo, O.projId, O.taskId);
+    O.worktreePath = worktreePath; O.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
+    fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + repo-root CLAUDE.md"`, { cwd: worktreePath });
+
+    const direct = await computeEmitCompareGate(O.repo, worktreePath, baseSha, branch);
+    check("(O) direct call: not eligible — CLAUDE.md is outside emit-compare scope", direct.eligible === false);
+    check("(O) direct call: reason IS the out-of-scope catch-all, naming CLAUDE.md", /path outside emit-compare scope: CLAUDE\.md/.test(direct.reason ?? ""));
+    check("(O) direct call: notApplicable:true — a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
+
+    seed(db, O);
+    const confirm = await sessions.confirmWorkerMerge(O.mgrId, O.workerId);
+    check("(O) gateRan:true", confirm.gateRan === true);
+    check("(O) captured command IS the full gate — CLAUDE.md alongside an otherwise-reducible .ts edit still fails closed", capturedGate === FULL_GATE);
+    check("(O) emitCompareReduced OMITTED, not fabricated false", confirm.emitCompareReduced === undefined);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -398,7 +435,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; and a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d). See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); and the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O). See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

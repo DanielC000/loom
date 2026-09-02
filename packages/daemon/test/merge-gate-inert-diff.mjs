@@ -56,6 +56,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Python, not TypeScript — the discriminator is the language, not whether docs/ is referenced. MUST
 //       full-gate post-card. See `inert-prefix-repo-scan.mjs` scenario (6) for the same proof at the scan
 //       level alone.
+//   (M) card 5149c036 — THE LITERAL MOTIVATING CASE: a repo-root `CLAUDE.md`-only diff MUST full-gate too
+//       (a top-level FILE is no more on the `docs/` allowlist than (E)'s unknown top-level DIRECTORY), and
+//       is pinned explicitly as a regression guard against ever widening `INERT_MERGE_PATH_PREFIXES` to
+//       include it — `test/kickoff-real-spawn.mjs` and `test/spawn-command-line-preflight.mjs` both
+//       genuinely read this repo's own real CLAUDE.md content.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-inert-diff.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -813,6 +818,42 @@ try {
     check("(L) merged:true", confirm.merged === true);
     check("(L) gateRan:true — the discriminator is the LANGUAGE, not whether docs/ is actually referenced (the whole point of this card)", confirm.gateRan === true);
   }
+
+  // ── (M) card 5149c036 — THE LITERAL MOTIVATING CASE: a diff confined to the repo-root `CLAUDE.md` file
+  //        MUST full-gate too, exactly like (E)'s unknown-directory case — `isInertMergePath`'s
+  //        `startsWith("docs/")` never matches a top-level FILE any more than an unknown top-level
+  //        DIRECTORY. Pinned explicitly (not just left to (E)'s generic coverage) because this is the real
+  //        specimen two settled `gate_status` records measured (card 5149c036: a CLAUDE.md-only branch ran
+  //        the full ~907s suite while a comment-only .ts edit reduced to ~20s) — AND because `CLAUDE.md` is
+  //        DELIBERATELY NOT a candidate for widening `INERT_MERGE_PATH_PREFIXES`, unlike `docs/`:
+  //        `test/kickoff-real-spawn.mjs` and `test/spawn-command-line-preflight.mjs` both genuinely
+  //        `readFileSync` THIS repo's own real `CLAUDE.md` (anchored via an `import.meta.url`-derived
+  //        `REPO_ROOT`, not a throwaway fixture) and feed its real byte length/content into a real-spawn
+  //        kickoff-payload test — a content edit to CLAUDE.md can change what those tests exercise, so it
+  //        is exactly the kind of "genuinely referenced" prefix `INERT_MERGE_PATH_PREFIXES`'s own doc says
+  //        must stay OFF the allowlist (the same `repoTreeReferencesInertPrefix` re-verification that (K)
+  //        exercises for `docs/` would, if ever asked to certify `CLAUDE.md`, need to find this same
+  //        reference and refuse). This scenario exists to make an accidental future addition of
+  //        `"CLAUDE.md"` to that list fail LOUDLY, not silently ship a wrongly-skipped gate. ─────────────
+  {
+    const M = mk("m");
+    makeRepo(M);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
+    M.worktreePath = worktreePath; M.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add repo-root CLAUDE.md"`, { cwd: worktreePath });
+    seed(db, M, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(M.mgrId, M.workerId);
+    check("(M) the gate command WAS called — a repo-root CLAUDE.md-only diff is NOT on the docs/ allowlist and must full-gate", calls === 1);
+    check("(M) merged:true", confirm.merged === true);
+    check("(M) gateRan:true — CLAUDE.md is a top-level FILE, not under docs/, so isInertMergePath never matches it", confirm.gateRan === true);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -820,6 +861,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J), a repo whose OWN test corpus reads docs/ (unlike Loom's) still full-gates a docs-only diff — the per-repo re-verification, not just the Loom-measured allowlist (K), and a repo with NO JS/TS files at all (the paired-language control, identical to (A) except the baseline file is Python) still full-gates a docs-only diff too — the scan cannot confirm an absence for a language it has no vocabulary for (L)."
+  ? "\n✅ ALL PASS — a branch whose entire diff is under docs/ skips the merge gate (gateRan:false, outcome:\"skipped\", never \"pass\"); a diff touching packages/daemon/assets/skills/**/SKILL.md (the safety case), a mixed docs+src diff, an empty diff, an unrecognized top-level directory, a rename that relocates a source file into docs/ (the whole safety case for --no-renames), and docs-lookalike prefix paths (docs-internal/, docsfoo.md) ALL still force the full gate (gateRan:true); an inert-diff skip waiting on a same-repo sibling's real gate re-derives against the sibling's landed change once granted — landing for real when still provably inert (H), falling through to the ordinary real-gate/reunion path (never a stale skip) when reclassification turns up ambiguous (I), a branch that gains a new non-docs commit DURING the wait — with main never moving at all — is caught too, never riding through on a stale docs-only verdict (J), a repo whose OWN test corpus reads docs/ (unlike Loom's) still full-gates a docs-only diff — the per-repo re-verification, not just the Loom-measured allowlist (K), and a repo with NO JS/TS files at all (the paired-language control, identical to (A) except the baseline file is Python) still full-gates a docs-only diff too — the scan cannot confirm an absence for a language it has no vocabulary for (L); and the literal motivating case (card 5149c036) — a repo-root CLAUDE.md-only diff — also still full-gates, pinned explicitly since CLAUDE.md is genuinely read by real tests and must never be added to the docs/ allowlist (M)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
