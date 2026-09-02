@@ -213,8 +213,12 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "cannot use this to probe another worker's run. `opId` accepts the FULL id OR an unambiguous " +
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
-      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, admittedAt?, passed?, cancelled?, reason?, " +
-      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?, proximity?}. `admittedAt` (ISO, when " +
+      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, note?, admittedAt?, passed?, cancelled?, reason?, " +
+      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?, proximity?}. `note` (card " +
+      "45390f74) is present ONLY while `state` is `queued`/`running` and carries the SAME \"Do NOT poll\" " +
+      "guidance `run_gate`'s own not-settled reply already gives: stop calling this tool on a timer, " +
+      "`worker_report progress` with `awaiting:\"background\"`, and END your turn — the `[loom:gate-done]`/" +
+      "`[loom:gate-failed]` nudge starts your next turn with the result. `admittedAt` (ISO, when " +
       "the op was minted) is present whenever a row exists at all — live or settled — not gated on a " +
       "recorded verdict. ⚠️ IT READS as \"when this op was admitted past the gate concurrency cap\" but is " +
       "NOT that — a queued op can sit for minutes before it's actually admitted, so don't difference it " +
@@ -336,11 +340,14 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
+      "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
       "retriedFile?, retryPassed?, retryWarning?}. `queued`/`running` " +
-      "mean it's still LIVE. `settled` means the op reached a normal terminal " +
+      "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
+      "\"Do NOT poll\" instruction: stop re-calling this tool on a timer, `idle_report({state:\"waiting\"})`, " +
+      "and END your turn — the `[loom:merge-done]`/`[loom:merge-rejected]`/`[loom:merge-failed]` nudge " +
+      "starts your next turn with the result. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge as your PRIMARY, unprompted way to learn the outcome, but a settled op " +
       "now ALSO retains a durable, queryable RECORD you can pull on demand: `outcome` " +
@@ -579,6 +586,19 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
             // Advisory only — an observability read must never turn a real gate_status answer into an
             // error. Fall through and return the plain result below.
           }
+        }
+        // Card 45390f74: `run_gate`'s not-settled reply carries an explicit "Do NOT poll" `note` — this
+        // one, the tool the docs tell a caller to use INSTEAD of re-calling run_gate, carried none, so a
+        // caller that correctly avoided re-calling run_gate landed on the one path with no anti-poll
+        // guardrail at all. Mirror run_gate's own wording (never reworded) rather than inventing new
+        // text, phrased for whichever audience actually holds this scoped instance: a worker checking its
+        // own run_gate self-check reports via `worker_report`, a manager checking a merge/deploy op has no
+        // such tool and uses `idle_report` instead.
+        if (result.state === "queued" || result.state === "running") {
+          const note = forWorker
+            ? `gate still ${result.state}. Do NOT poll or re-call gate_status to check again — worker_report progress with awaiting:"background" and END your turn; the [loom:gate-done]/[loom:gate-failed] nudge starts your next turn with the result.`
+            : `gate still ${result.state}. Do NOT poll or re-call gate_status to check again — idle_report({state:"waiting"}) and END your turn; the [loom:merge-done]/[loom:merge-rejected]/[loom:merge-failed] (or [loom:gate-done]/[loom:gate-failed]) nudge starts your next turn with the result.`;
+          return ok({ ...result, note });
         }
         return ok(result);
       } catch (e) {

@@ -332,6 +332,15 @@ try {
     check("(e2e scope, MCP) gate_status IS registered on the worker's own MCP surface", Object.keys(owner.server._registeredTools).includes("gate_status"));
     const ownToolStatus = await owner.call("gate_status", { opId });
     check("(e2e scope, MCP) the owning worker's gate_status tool call reports its OWN op's real state", ownToolStatus.state === "running" && ownToolStatus.gateType === "worker");
+    // ── card 45390f74 — THE FIX: a `run_gate` not-settled reply has always carried an explicit "Do NOT
+    // poll" `note`; `gate_status` — the tool the docs tell a caller to use INSTEAD of re-calling run_gate —
+    // carried NONE, so a caller that correctly avoided re-calling run_gate landed on the one path with no
+    // anti-poll guardrail at all (the real gap behind the RETRACTED 31d116c5 incident framing — see this
+    // card's body). This is the RED-HALF-FIRST assertion: a `running` gate_status reply must now carry a
+    // `note` mirroring run_gate's own wording (worker_report progress + awaiting:"background", then wait
+    // for the [loom:gate-done]/[loom:gate-failed] nudge) rather than nothing at all.
+    check("(e2e scope, MCP — card 45390f74 THE FIX) a live (running) gate_status reply carries a `note` telling the caller NOT to poll", typeof ownToolStatus.note === "string" && /do not poll/i.test(ownToolStatus.note));
+    check("(e2e scope, MCP — card 45390f74) note says what to do INSTEAD, not just \"don't\" — worker_report + awaiting:\"background\", then wait for the completion nudge", /worker_report/.test(ownToolStatus.note) && /awaiting/.test(ownToolStatus.note) && /gate-done/.test(ownToolStatus.note));
 
     const stranger = await connect(otherWorkerId);
     const strangerToolStatus = await stranger.call("gate_status", { opId });
@@ -388,6 +397,64 @@ try {
     const bogusScoped = sessions.gateStatus(bogusOpId, otherWorkerId);
     check("(e2e scope, unknown-sink) a SCOPED query for a never-minted opId ALSO reads \"unknown\", never \"never_existed\"", bogusScoped.state === "unknown");
     check("(e2e scope, unknown-sink) a stranger querying a REAL foreign op and a stranger querying a BOGUS op get the EXACT SAME answer — no existence leak", afterForeign.state === bogusScoped.state);
+  }
+
+  // ── (e2e merge, card 45390f74 — GATE_STATUS ANTI-POLL NOTE, MANAGER SURFACE) the real 31d116c5 incident
+  // (RETRACTED premise notwithstanding — see this card's body) was a MANAGER polling gate_status for a
+  // MERGE op, not a worker polling its own run_gate self-check. This block proves the fix reaches THAT
+  // audience too: a manager-scoped gate_status(opId) MCP call on a genuinely live merge op must carry the
+  // same anti-poll `note`, phrased for a manager (idle_report, not worker_report — a manager has no
+  // worker_report tool) and naming the merge completion nudges, not the worker self-check ones. ──────────
+  {
+    const P = `gst-antipoll-mgr-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-ANTIPOLL-MGR", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`, mgrId = `${P}-mgr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-ANTIPOLL-MGR-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    // Same blocking-gate pattern as the worker "(e2e gate)" block above, applied to confirmWorkerMergeTracked
+    // instead of runWorkerGate — deterministic, no real timing race (see that block's own comment for why
+    // waiting on gateEnteredP, not a budget, is required).
+    let releaseGate, gateEntered;
+    const gateEnteredP = new Promise((r) => { gateEntered = r; });
+    const fakeGate = () => new Promise((res) => { releaseGate = res; gateEntered(); });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: 300 });
+
+    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    check("(e2e antipoll merge) degrades to pending past the sync-wait budget", r.settled === false);
+    const opId = r.op.opId;
+    await gateEnteredP; // provably entered — the live op is genuinely queryable as running now
+
+    const router = new OrchestrationMcpRouter(db, sessions);
+    const connect = async (sessionId, role) => {
+      const server = router.buildServer(sessionId, role);
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: `gate-status-antipoll-mgr-${sessionId}`, version: "0" });
+      await client.connect(clientT);
+      return { server, client, call: async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text) };
+    };
+
+    const manager = await connect(mgrId, "manager");
+    const mgrStatus = await manager.call("gate_status", { opId });
+    check("(e2e antipoll, manager MCP) the live merge op reads back running (or queued)", mgrStatus.state === "running" || mgrStatus.state === "queued");
+    check("(e2e antipoll, manager MCP — THE FIX) note is present and tells the manager NOT to poll", typeof mgrStatus.note === "string" && /do not poll/i.test(mgrStatus.note));
+    check("(e2e antipoll, manager MCP) note names the manager's OWN instead-of-poll action (idle_report — a manager has no worker_report tool) and the merge completion nudges", /idle_report/.test(mgrStatus.note) && /merge-done/.test(mgrStatus.note));
+    await manager.client.close();
+
+    releaseGate({ passed: true });
+    await waitUntil(() => (sessions.gateStatus(opId).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "antipoll merge op to settle" });
   }
 
   // ── (e2e gate, FAST PATH) card e3e40167's central defect, reproduced directly: a gate that settles
