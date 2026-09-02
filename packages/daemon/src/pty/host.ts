@@ -7265,7 +7265,14 @@ export class PtyHost {
           // an entry can accumulate leapfrogCount from OTHER senders'/routes' insertions scanning past it
           // without matching, then later be the correct match for its own sender+route once that sender
           // sends again — checking the freeze first would wrongly deny that safe, non-displacing match.)
-          if (candidate.kind === "agent" && (candidate.senderId ?? null) === senderKey && routeKeyOf(candidate.route) === routeKeyOf(route)) {
+          // Card a9e4240f: third copy of the same-sender equality set (route/senderId/proactive) — without
+          // `proactive` here, this scan could place a new entry adjacent to a `candidate` whose `proactive`
+          // differs, manufacturing an adjacency `drainPending`'s own equalized run condition (above) then
+          // correctly refuses to coalesce. HARMLESS today (same unreachability as the drainPending sites —
+          // every real proactive producer omits `senderId`, so `senderKey` is null and this whole scan is
+          // skipped by the outer `senderKey !== null` gate), but left uncorrected it's a third site that
+          // would need re-deriving the same fix if that unreachability is ever lifted.
+          if (candidate.kind === "agent" && (candidate.senderId ?? null) === senderKey && routeKeyOf(candidate.route) === routeKeyOf(route) && (candidate.proactive ?? false) === proactive) {
             insertAt = i + 1;
             break;
           }
@@ -8083,15 +8090,24 @@ export class PtyHost {
       // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce). ALSO
       // bounded to non-held entries (card 73d5c34a) — a held entry immediately past the head stops the run
       // rather than being folded into it, same reasoning as `startIdx` above.
+      // Card a9e4240f (MAJOR-2, sibling to card 66b78175's same-sender-branch fix above): `submit()` below
+      // reads `drained[0]!.proactive` HEAD-ONLY here too — this branch is what a `coalesceAgentMessages:true`
+      // agent-kind run actually takes (the `if` above only ever routes agent-kind here when the toggle is
+      // on), so without this equality check a proactive/non-proactive mismatch could silently coalesce and
+      // lose the tail's flag, exactly like the same-sender branch before 66b78175. Equalized unconditionally
+      // (not gated on the toggle) — cheapest, safe-by-construction, and harmless on the untoggled default
+      // path where no `warning`-kind producer sets `proactive` today.
       const key = routeKeyOf(head.route);
+      const proactiveKey = head.proactive ?? false;
       let n = 1;
       while (
         startIdx + n < live.pending.length
         && !this.isGiveUpHeld(live.pending[startIdx + n]!)
         && routeKeyOf(live.pending[startIdx + n]!.route) === key
         && (this.coalesceAgentMessages || live.pending[startIdx + n]!.kind === head.kind)
+        && (live.pending[startIdx + n]!.proactive ?? false) === proactiveKey
       ) n++;
-      drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind, unless toggled) run
+      drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind unless toggled, + same-proactive) run
     }
     // Card 4a0af485 Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired or was
     // purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt — the OLD
@@ -9140,13 +9156,24 @@ export class PtyHost {
   }
 
   /** Card 4a0af485: evict the OLDEST entry until back at `AMBIGUOUS_DISPATCH_CAP` — a count bound, never a
-   *  time bound (see that constant's own doc for why). `Map` iterates insertion order, so `.next().value`
-   *  is always the oldest key. */
+   *  time bound (see that constant's own doc for why).
+   *  Card a9e4240f (MINOR-2): oldest by `writtenAt`, NOT by `Map` iteration order. This doc used to claim
+   *  "`Map` iterates insertion order, so `.next().value` is always the oldest key" — true only while every
+   *  key is set exactly once. `requeueGiveUpOrigin` calls `.set(m.logicalId, ...)` with a fresh `writtenAt`
+   *  on a key that CAN already exist (the auto-join case: a resend carrying an existing `logicalId` that
+   *  itself gives up) — `Map.set` on an existing key updates the value in place without moving it in
+   *  iteration order, so `.next().value` would keep returning that key's OLD position with its NEW
+   *  `writtenAt`, evicting it before entries that are genuinely older. Scanning for the true minimum
+   *  `writtenAt` is what the doc always claimed to do; the cap (20) keeps this scan cheap. */
   private capAmbiguousDispatches(live: Live): void {
     while (live.ambiguousDispatches.size > AMBIGUOUS_DISPATCH_CAP) {
-      const oldest = live.ambiguousDispatches.keys().next().value;
-      if (oldest === undefined) break;
-      live.ambiguousDispatches.delete(oldest);
+      let oldestKey: string | undefined;
+      let oldestWrittenAt = Infinity;
+      for (const [key, entry] of live.ambiguousDispatches) {
+        if (entry.writtenAt < oldestWrittenAt) { oldestWrittenAt = entry.writtenAt; oldestKey = key; }
+      }
+      if (oldestKey === undefined) break;
+      live.ambiguousDispatches.delete(oldestKey);
     }
   }
 
@@ -9589,7 +9616,15 @@ export class PtyHost {
             // re-enqueues the exact duplicate this purge exists to prevent. Idempotent for an entry whose
             // onDeliver ALREADY fired at its own original hand-off (gen 1's own giveUpGen-tagged requeue,
             // say) — `resolveQueuedMessage`'s `isQueuedMessageDelivered` guard makes a repeat call a no-op.
-            dropped!.onDeliver?.("duplicate-of-confirmed-original");
+            // Card a9e4240f (MINOR-1): guarded to match this file's OTHER two `onDeliver` call sites
+            // (`consumePending`, `drainPending`) — both wrap in try/catch with an explicit "never break the
+            // pull/drain" comment; this one didn't, with no stated reason. LATENT, not a live defect: an
+            // unguarded throw here would abort this splice loop mid-way (after the map entries above are
+            // already deleted), leaving some duplicates purged and some not, and skipping the rest of the
+            // UserPromptSubmit handler — but the only production supplier (sessions/service.ts's
+            // `resolveQueuedMessage`) is already wrapped in its own try/catch, so nothing reaches this path
+            // able to throw today. Fixed as consistency, for the next supplier.
+            try { dropped!.onDeliver?.("duplicate-of-confirmed-original"); } catch { /* never break the purge */ }
           }
         }
         return true; // resolved by content — do NOT also run the FIFO-position fallback below for this hook, and tell the caller not to ALSO attribute this hook to the current generation (it just proved this hook is about a DIFFERENT, older one)

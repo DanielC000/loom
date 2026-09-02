@@ -25,6 +25,19 @@
 //   (C) POSITIVE CONTROL: same-sender, same-route, SAME proactive (both true) — still coalesces into ONE
 //       turn, proving the equality check doesn't just blanket-disable same-sender coalescing.
 //
+// Card a9e4240f (MAJOR-2): (A)/(B)/(C) above exercise ONLY the default `coalesceAgentMessages:false`
+// same-sender branch (the one 66b78175/c9d9e496 fixed) — this file never set `coalesceAgentMessages`, which
+// is exactly why the SIBLING legacy route-keyed branch (drainPending's `else`, taken whenever
+// `coalesceAgentMessages:true`) kept reading `proactive` head-only, unnoticed. (D)/(E)/(F) below close that
+// gap, against a SEPARATE host instance constructed with `{ coalesceAgentMessages: true }`:
+//   (D) LEGACY branch, DIFFERING proactive (false head, true tail), NO senderId (mirrors every real
+//       proactive producer, which omits it) — MUST NOT coalesce.
+//   (E) LEGACY branch, DIFFERING proactive, REVERSED (true head, false tail) — same guarantee, non-directional.
+//   (F) LEGACY branch POSITIVE CONTROL: SAME proactive (both true) — still coalesces into ONE turn.
+// (D)/(E)/(F) also stand as the "default" row's own bound proven the other way: since every real proactive
+// producer omits `senderId`, (A)/(B)/(C)'s `senderKey !== null` gate means the AGENT branch's equality check
+// never even runs in production today — (D)/(E)/(F) are what actually exercises the reachable path.
+//
 // RUN (no daemon needed): node test/pty-agent-sender-coalesce-proactive.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon run `pnpm build`.
 import fs from "node:fs";
@@ -65,15 +78,18 @@ const events = {
 };
 
 const host = new TestPtyHost(events);
+// Card a9e4240f: a SEPARATE host constructed with the legacy toggle on, so (D)/(E)/(F) exercise
+// drainPending's route-keyed `else` branch instead of the same-sender `if` branch (A)/(B)/(C) cover.
+const hostLegacy = new TestPtyHost(events, { coalesceAgentMessages: true });
 const PASTE_START = "\x1b[200~";
 
-function spawnReady(sessionId) {
-  host.spawn({
+function spawnReady(sessionId, hostRef = host) {
+  hostRef.spawn({
     sessionId, cwd: tmpHome,
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
     geometry: { cols: 120, rows: 40 }, sessionEnv: {},
   });
-  host.deliverHook(sessionId, { hook_event_name: "SessionStart" });
+  hostRef.deliverHook(sessionId, { hook_event_name: "SessionStart" });
   const fake = fakes[fakes.length - 1];
   return {
     fake,
@@ -84,8 +100,8 @@ function spawnReady(sessionId) {
 
 /** Put the session mid-turn (busy) so subsequent enqueueStdin calls are HELD/queued, not submitted
  *  immediately (mirrors pty-agent-sender-coalesce.mjs's own "PRIMER" setup). */
-function primeBusy(sessionId) {
-  const r = host.enqueueStdin(sessionId, "PRIMER_TURN");
+function primeBusy(sessionId, hostRef = host) {
+  const r = hostRef.enqueueStdin(sessionId, "PRIMER_TURN");
   if (!r.delivered) throw new Error(`primeBusy(${sessionId}): PRIMER was not delivered immediately`);
 }
 
@@ -182,12 +198,118 @@ try {
       host.getActiveTurnIsProactive(SID) === true);
     check("(C) COALESCE: queue fully drained", host.getPending(SID).length === 0);
   }
+
+  // ===================== (D) LEGACY BRANCH: DIFFERING proactive (false head, true tail) MUST NOT coalesce =====================
+  // Card a9e4240f MAJOR-2. `coalesceAgentMessages:true` routes drainPending to the route-keyed `else`
+  // branch regardless of kind — no senderId is set (real proactive producers never set one), so this could
+  // NEVER reach the (A)/(B)/(C) same-sender branch; it is the ONLY branch this scenario actually takes.
+  {
+    const SID = "sess-legacy-proactive-mismatch-ft";
+    const { written, countOf } = spawnReady(SID, hostLegacy);
+    primeBusy(SID, hostLegacy);
+    // TIMING-GUARD-SAFE: sync-early-return — the setup check right below (r1.delivered === false &&
+    // r2.delivered === false) is decided SYNCHRONOUSLY inside primeBusy()'s own enqueueStdin call: M1
+    // (pty-busy-drain.mjs's own doc) arms `live.busy` optimistically before that call even returns, with no
+    // await in between, so r1/r2's queue-not-deliver outcome is already fixed before this sleep starts.
+    // Verified directly: the same setup+assertion with the sleep removed entirely still passes. This sleep
+    // exists only to let PRIMER's own async paste-end + Enter flush land before the LATER Stop-hook-driven
+    // checks below measure the drain (mirrors (A)/(B)/(C)'s identical pre-existing pattern above).
+    await sleep(250);
+
+    const r1 = hostLegacy.enqueueStdin(SID, "LEGACY_MISMATCH_FT_HEAD", "system", undefined, undefined, "agent", undefined, undefined, false);
+    const r2 = hostLegacy.enqueueStdin(SID, "LEGACY_MISMATCH_FT_TAIL", "system", undefined, undefined, "agent", undefined, undefined, true);
+    check("(D) setup: both queued behind busy, adjacent, same route, no senderId, legacy toggle ON",
+      r1.delivered === false && r2.delivered === false &&
+      JSON.stringify(hostLegacy.getPending(SID)) === JSON.stringify(["LEGACY_MISMATCH_FT_HEAD", "LEGACY_MISMATCH_FT_TAIL"]));
+
+    let pasteBefore = countOf(PASTE_START);
+    hostLegacy.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(D) turn 1: exactly ONE submit, for the HEAD (proactive:false) ALONE — the mismatch broke the legacy run",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(D) turn 1: only the head's body is in this turn, the proactive tail is NOT folded in",
+      written().includes("LEGACY_MISMATCH_FT_HEAD") && !written().includes("LEGACY_MISMATCH_FT_TAIL"));
+    check("(D) turn 1: getActiveTurnIsProactive() correctly reads FALSE for the non-proactive head's turn",
+      hostLegacy.getActiveTurnIsProactive(SID) === false);
+    check("(D) turn 1: the proactive tail stays queued, untouched — not dropped, not silently absorbed",
+      JSON.stringify(hostLegacy.getPending(SID)) === JSON.stringify(["LEGACY_MISMATCH_FT_TAIL"]));
+    await sleep(250);
+
+    pasteBefore = countOf(PASTE_START);
+    hostLegacy.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(D) turn 2: exactly ONE submit, for the TAIL (proactive:true) ALONE, as its own turn",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(D) turn 2: getActiveTurnIsProactive() correctly reads TRUE for the proactive tail's own turn",
+      hostLegacy.getActiveTurnIsProactive(SID) === true);
+    check("(D) turn 2: queue now empty", hostLegacy.getPending(SID).length === 0);
+  }
+
+  // ===================== (E) LEGACY BRANCH: DIFFERING proactive, REVERSED (true head, false tail) =====================
+  {
+    const SID = "sess-legacy-proactive-mismatch-tf";
+    const { written, countOf } = spawnReady(SID, hostLegacy);
+    primeBusy(SID, hostLegacy);
+    // TIMING-GUARD-SAFE: sync-early-return — see (D)'s identical site above for the verified reasoning
+    // (M1's synchronous busy-arm decides this setup check's outcome before this sleep starts; removing the
+    // sleep entirely still passes it).
+    await sleep(250);
+
+    const r1 = hostLegacy.enqueueStdin(SID, "LEGACY_MISMATCH_TF_HEAD", "system", undefined, undefined, "agent", undefined, undefined, true);
+    const r2 = hostLegacy.enqueueStdin(SID, "LEGACY_MISMATCH_TF_TAIL", "system", undefined, undefined, "agent", undefined, undefined, false);
+    check("(E) setup: both queued, same route, no senderId, legacy toggle ON",
+      r1.delivered === false && r2.delivered === false &&
+      JSON.stringify(hostLegacy.getPending(SID)) === JSON.stringify(["LEGACY_MISMATCH_TF_HEAD", "LEGACY_MISMATCH_TF_TAIL"]));
+
+    let pasteBefore = countOf(PASTE_START);
+    hostLegacy.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(E) turn 1: exactly ONE submit, for the HEAD (proactive:true) ALONE — the mismatch broke the legacy run",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(E) turn 1: only the head's body is in this turn, the non-proactive tail is NOT folded in",
+      written().includes("LEGACY_MISMATCH_TF_HEAD") && !written().includes("LEGACY_MISMATCH_TF_TAIL"));
+    check("(E) turn 1: getActiveTurnIsProactive() correctly reads TRUE for the proactive head's turn",
+      hostLegacy.getActiveTurnIsProactive(SID) === true);
+    check("(E) turn 1: the non-proactive tail stays queued, untouched",
+      JSON.stringify(hostLegacy.getPending(SID)) === JSON.stringify(["LEGACY_MISMATCH_TF_TAIL"]));
+    await sleep(250);
+
+    pasteBefore = countOf(PASTE_START);
+    hostLegacy.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(E) turn 2: exactly ONE submit, for the TAIL (proactive:false) ALONE, as its own turn",
+      countOf(PASTE_START) - pasteBefore === 1);
+    check("(E) turn 2: getActiveTurnIsProactive() correctly reads FALSE for the non-proactive tail's own turn",
+      hostLegacy.getActiveTurnIsProactive(SID) === false);
+    check("(E) turn 2: queue now empty", hostLegacy.getPending(SID).length === 0);
+  }
+
+  // ===================== (F) LEGACY BRANCH POSITIVE CONTROL: SAME proactive (both true) still coalesces =====================
+  // Proves the new equality check discriminates on a MISMATCH only — it doesn't blanket-disable the legacy
+  // route-keyed branch's coalescing outright, which would make (D)/(E) pass for the wrong reason.
+  {
+    const SID = "sess-legacy-proactive-match";
+    const { written, countOf } = spawnReady(SID, hostLegacy);
+    primeBusy(SID, hostLegacy);
+    await sleep(250);
+
+    const r1 = hostLegacy.enqueueStdin(SID, "LEGACY_MATCH_ONE", "system", undefined, undefined, "agent", undefined, undefined, true);
+    const r2 = hostLegacy.enqueueStdin(SID, "LEGACY_MATCH_TWO", "system", undefined, undefined, "agent", undefined, undefined, true);
+    check("(F) setup: both queued, same route+proactive, legacy toggle ON",
+      r1.delivered === false && r2.delivered === false &&
+      JSON.stringify(hostLegacy.getPending(SID)) === JSON.stringify(["LEGACY_MATCH_ONE", "LEGACY_MATCH_TWO"]));
+
+    const pasteBefore = countOf(PASTE_START);
+    hostLegacy.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(F) COALESCE: exactly ONE submit for both same-proactive messages", countOf(PASTE_START) - pasteBefore === 1);
+    check("(F) COALESCE: both bodies present in the single turn",
+      written().includes("LEGACY_MATCH_ONE") && written().includes("LEGACY_MATCH_TWO"));
+    check("(F) COALESCE: getActiveTurnIsProactive() correctly reads TRUE for the coalesced turn",
+      hostLegacy.getActiveTurnIsProactive(SID) === true);
+    check("(F) COALESCE: queue fully drained", hostLegacy.getPending(SID).length === 0);
+  }
 } finally {
   for (const fake of fakes) { try { fake.kill(); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a same-sender/same-route run with DIFFERING `proactive` breaks instead of silently coalescing (in both head/tail orderings), while a matching-`proactive` run still coalesces as before."
+  ? "\n✅ ALL PASS — a same-sender/same-route run with DIFFERING `proactive` breaks instead of silently coalescing (in both head/tail orderings), while a matching-`proactive` run still coalesces as before. The LEGACY route-keyed branch (coalesceAgentMessages:true) — the branch every real proactive producer's lack of senderId actually routes through — carries the same guarantee."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
