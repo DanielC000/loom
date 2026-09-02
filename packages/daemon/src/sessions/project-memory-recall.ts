@@ -80,6 +80,57 @@ function summarizeDroppedRestKeys(keys: string[], neverDelivered: Set<string>): 
   return keys.map((k) => (neverDelivered.has(k) ? `${k} (never delivered)` : k)).join(", ");
 }
 
+/** Card 71192d47 — the charset a memory key is drawn from (mcp/memory.ts's `KEY_RE`: letters/digits/-/_).
+ *  A boundary check against THIS charset — not JS regex `\b`, which treats `-` as a non-word character —
+ *  is what makes {@link isKeyCitedInText} an EXACT match rather than a fuzzy one: `\bfoo-bar\b` would
+ *  false-positive match INSIDE `foo-bar-baz`, because the `r`→`-` transition already counts as a word
+ *  boundary to the regex engine even though `-` is part of the very next key. These slugs routinely share
+ *  long prefixes, so this distinction is load-bearing, not pedantic. */
+const KEY_CHARSET_RE = /[A-Za-z0-9_-]/;
+
+/** Card 71192d47 — true iff `key` occurs in `text` as a whole citation: an exact, case-sensitive literal
+ *  match whose immediately-surrounding characters (if any — string start/end counts as "outside") are
+ *  OUTSIDE {@link KEY_CHARSET_RE}. Deliberately NOT fuzzy/semantic matching — a false positive here trains
+ *  readers to ignore the signal, which is worse than not having it. Any citation style (backtick `key`,
+ *  `[[key]]`, a bare prose mention) satisfies this for free, since their own delimiters already fall
+ *  outside the key charset — no markup-specific handling needed. */
+export function isKeyCitedInText(text: string, key: string): boolean {
+  if (!key) return false;
+  let from = 0;
+  for (;;) {
+    const i = text.indexOf(key, from);
+    if (i === -1) return false;
+    const before = text.charAt(i - 1); // "" both when i===0 and when out of range — exactly the desired boundary
+    const after = text.charAt(i + key.length); // "" past the string end — same boundary treatment
+    if (!KEY_CHARSET_RE.test(before) && !KEY_CHARSET_RE.test(after)) return true;
+    from = i + 1;
+  }
+}
+
+/** Card 71192d47 — a BOUNDED highlight, unlike {@link summarizeDroppedKeys} (deliberately uncapped because
+ *  IT is the sole record that a dropped key exists at all). This line is always appended immediately after
+ *  that tier's own uncapped drop line, in the SAME section — so capping it never destroys discoverability
+ *  the way card 237aa3a9's bug did (a bound that fires must still leave the reader something USEFUL, not
+ *  an empty list): the full key list sits one line above, unaffected by this cap. */
+export const MAX_LISTED_CITED_DROPPED_KEYS = 15;
+
+function summarizeCitedDroppedKeys(keys: string[]): string {
+  if (keys.length <= MAX_LISTED_CITED_DROPPED_KEYS) return keys.join(", ");
+  const shown = keys.slice(0, MAX_LISTED_CITED_DROPPED_KEYS);
+  return `${shown.join(", ")} (+${keys.length - MAX_LISTED_CITED_DROPPED_KEYS} more — full list above)`;
+}
+
+/** Card 71192d47 — the in-digest line for a note this KICKOFF ITSELF cited by key that then got dropped
+ *  for budget: an ADDRESSED DIRECTIVE naming the exact recovery command, not a passive notice (this
+ *  project's own measured rule: passive notices, 0 acted on; addressed directives with a named actor and
+ *  a checkable command, 4/4). `🔴` is deliberately its own marker, distinct from the routine `⚠️` overflow
+ *  and the broken-guarantee `🚨` alarm above it — this signal is "the text that told you to read this
+ *  ALSO isn't reaching you," which can co-occur with either of those, not replace them. */
+function citedDroppedLine(citedKeys: string[]): string {
+  return `🔴 ${citedKeys.length} note(s) this kickoff cited by key were dropped for budget and did NOT ` +
+    `reach you — run memory_read on each: ${summarizeCitedDroppedKeys(citedKeys)}`;
+}
+
 const SECTION_SEP = "\n\n";
 
 /** Cheap token estimate — no tokenizer, no API call (the v1 "zero metered tokens" constraint applies to
@@ -341,6 +392,14 @@ export function composeProjectMemoryDigest(
    *  passes a callback backed by {@link annotateNote} (linked-Request state + inbound wikilink
    *  backlinks — card e4e180ad). */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
+  /** Card 71192d47 — the SAME text driving the RELATED-tier FTS query one level up (see
+   *  {@link retrieveProjectMemoryForKickoff}), threaded down here ONLY to detect "a key this text itself
+   *  cited got dropped" ({@link isKeyCitedInText}) — read-only, never fed back into selection, ranking, or
+   *  the token budget itself (see {@link citedDroppedLine}'s doc comment for why that stays a strict
+   *  separation). Defaults to `""` (⇒ {@link isKeyCitedInText} can never match anything) so every
+   *  pre-existing call site, incl. every hermetic fixture test with no notion of "kickoff text," stays
+   *  byte-identical. */
+  kickoffText = "",
 ): {
   digest: string | null;
   includedIds: string[];
@@ -429,12 +488,25 @@ export function composeProjectMemoryDigest(
       pinnedSection = pinnedSection
         ? [pinnedSection, alarmLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", alarmLine].join(SECTION_SEP);
+      // Card 71192d47 — a SEPARATE citation-collision line, appended right after the alarm it accompanies.
+      // Never folded into `alarmLine` itself: "a note declared undroppable was dropped" and "the text that
+      // told you to read it also isn't reaching you" are two independently-true, independently-actionable
+      // facts about the SAME key, and a reader scanning past one must not lose the other.
+      const citedFloorKeys = droppedFloorKeys.filter((k) => isKeyCitedInText(kickoffText, k));
+      if (citedFloorKeys.length > 0) {
+        pinnedSection = [pinnedSection as string, citedDroppedLine(citedFloorKeys)].join(SECTION_SEP);
+      }
     }
     if (droppedRestKeys.length > 0) {
       const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedRestKeys(droppedRestKeys, droppedRestNeverDelivered)}`;
       pinnedSection = pinnedSection
         ? [pinnedSection, overflowLine].join(SECTION_SEP)
         : ["## Pinned project memory (always included)", overflowLine].join(SECTION_SEP);
+      // Card 71192d47 — see the floor-tier comment above; same reasoning, REST tier.
+      const citedRestKeys = droppedRestKeys.filter((k) => isKeyCitedInText(kickoffText, k));
+      if (citedRestKeys.length > 0) {
+        pinnedSection = [pinnedSection as string, citedDroppedLine(citedRestKeys)].join(SECTION_SEP);
+      }
     }
   }
   const usedTokens = pinnedSection ? estimateTokens(pinnedSection) : 0;
@@ -463,6 +535,13 @@ export function composeProjectMemoryDigest(
       relatedSection = relatedSection
         ? [relatedSection, overflowLine].join(SECTION_SEP)
         : ["## Related project memory (matched your kickoff)", overflowLine].join(SECTION_SEP);
+      // Card 71192d47 — see the floor-tier comment above; same reasoning, RELATED tier. `relatedSection` is
+      // guaranteed non-null here (the branch above just set it), same as pinnedSection at the equivalent
+      // floor/rest sites.
+      const citedRelatedKeys = droppedRelatedKeys.filter((k) => isKeyCitedInText(kickoffText, k));
+      if (citedRelatedKeys.length > 0) {
+        relatedSection = [relatedSection as string, citedDroppedLine(citedRelatedKeys)].join(SECTION_SEP);
+      }
     }
   }
 
@@ -496,6 +575,7 @@ export function buildFramedProjectMemory(
   related: ProjectMemoryEntry[],
   budgetTokens: number,
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
+  kickoffText = "", // card 71192d47 — threaded through to composeProjectMemoryDigest; see its own doc comment
 ): {
   framed: string | null;
   includedIds: string[];
@@ -504,7 +584,7 @@ export function buildFramedProjectMemory(
   droppedRelatedKeys: string[];
 } {
   const { digest, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
-    composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
+    composeProjectMemoryDigest(pinned, related, budgetTokens, annotate, kickoffText);
   return { framed: digest == null ? null : framedProjectMemory(digest), includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys };
 }
 
@@ -535,7 +615,7 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   // silently diverge on what counts toward a note's rendered/estimated size.
   const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
-    buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
+    buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate, kickoffText);
   if (droppedFloorKeys.length > 0) {
     console.error(
       `[project-memory] ALARM project ${projectId}: ${droppedFloorKeys.length} "${NEVER_DROP_TAG}"-tagged ` +
@@ -553,6 +633,18 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
       `[project-memory] project ${projectId}: ${droppedRelatedKeys.length} of ${related.length} related note(s) ` +
       `dropped for budget: ${summarizeDroppedKeys(droppedRelatedKeys)}`,
     );
+  }
+  // Card 71192d47 — the daemon-log mirror of the in-digest 🔴 line: a key THIS kickoff cited that got
+  // dropped, across all three tiers (disjoint by construction, so no dedup needed). `console.error` iff
+  // any cited-dropped key is ALSO a floor key (co-occurring with the broken-guarantee alarm above);
+  // `console.warn` otherwise — same severity-mirroring convention as the three blocks above.
+  const citedDropped = [...droppedFloorKeys, ...droppedRestKeys, ...droppedRelatedKeys]
+    .filter((k) => isKeyCitedInText(kickoffText, k));
+  if (citedDropped.length > 0) {
+    const line = `[project-memory] project ${projectId}: ${citedDropped.length} note(s) this kickoff cited ` +
+      `by key were dropped for budget: ${summarizeDroppedKeys(citedDropped)}`;
+    if (citedDropped.some((k) => droppedFloorKeys.includes(k))) console.error(line);
+    else console.warn(line);
   }
   if (framed) db.touchProjectMemoryRetrieved(includedIds);
   return framed;
