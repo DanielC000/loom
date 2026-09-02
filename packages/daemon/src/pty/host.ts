@@ -3041,6 +3041,55 @@ interface Live {
   // `sendEnterAndVerify` chain captures the generation it was scheduled under and bails the instant the
   // live value no longer matches, regardless of what `enterConfirmed` currently reads.
   submitGeneration: number;
+  // Card ac7884e3: the generation `flushComposer` (worker_flush) most recently wrote a submit-only Enter
+  // attempt for, while that attempt's own resolution is still OUTSTANDING — stamped the instant the
+  // reassert+Enter write goes out, consumed (cleared to null) by the SAME confirming-hook sites that
+  // resolve `enterConfirmed` (UserPromptSubmit/Stop/StopFailure below), which is also where
+  // `lastFlushAttribution` gets its verdict. null whenever nothing is currently outstanding — either no
+  // flush has ever been issued for this session, or the last one already resolved one way or the other.
+  // THE UNATTRIBUTABILITY THIS CANNOT CLOSE (card ac7884e3's own refusal-or-fix tradeoff, read before
+  // relying on a `true` verdict): `flushComposer` deliberately reuses the SAME `awaitReassertSettle`/
+  // `fireEnterAndVerify` ladder, under the SAME `submitGeneration`, that an ordinary in-flight give-up
+  // retry for that identical generation would also be running — see flushComposer's own doc. Two Enter
+  // keystrokes for the same generation, one from each source, are indistinguishable to the engine and to
+  // this daemon: only ONE hook fires either way (validated against a real engine — see
+  // `sendEnterAndVerify`'s own doc, "a retry firing into a turn that actually already started is
+  // harmless"), so nothing here can tell "the flush's own keystroke is what broke through" from "a
+  // concurrent natural retry for the same generation broke through, and the flush's own keystroke landed
+  // as an inert no-op a moment later." A gen-match verdict below is therefore the best available signal,
+  // not proof of physical causation — it means "this generation's confirmation happened while a flush was
+  // the last action taken FOR it," which is what `lastFlushAttribution`'s own doc states plainly.
+  flushMarkerGen: number | null;
+  // Epoch ms `flushMarkerGen` above was stamped. Diagnostic only (folded into `lastFlushAttribution`'s own
+  // `resolvedAt - flushMarkerWrittenAt` once resolved) — never itself gates anything.
+  flushMarkerWrittenAt: number | null;
+  // Card ac7884e3: the STICKY record (never cleared, only overwritten by a later resolution — same
+  // convention as `lastMismatchReplay`/`lastMismatchFusion`/`lastPasteTripwireGiveUp`) of how the MOST
+  // RECENT `flushMarkerGen` above resolved. This is the actual fix this card ships: before it existed,
+  // "did worker_flush work, and when?" had NO answer for the case that matters most — a confirmation
+  // landing well AFTER `flushComposer`'s own bounded wait (`awaitFlushConfirmSettle`) had already returned
+  // `confirmed:false` to its caller (the measured production case: composerDirtyLen cleared, confirmation
+  // ~60s later) — because that confirmation is invisible to the call that already returned.
+  // `null`: no flush attribution has ever been resolved on this session — either `worker_flush` was never
+  // called, or one was called and its outcome genuinely has not resolved yet (a real, honest "don't know
+  // yet," not conflated with either verdict below).
+  // `{attributable:true, reason:"confirmed-while-flush-marker-live", gen, resolvedAt}`: the confirming hook
+  // that proved `gen` started fired while `flushMarkerGen` still named that SAME generation — no other
+  // generation-bumping event (a fresh submit(), healIfStuck, interruptForRedirect, stop) intervened. Read
+  // this as "worker_flush was the last thing done for this generation, and it went on to confirm" — see
+  // `flushMarkerGen`'s own doc for exactly what this does and does not rule out (a concurrent natural
+  // retry for the same generation cannot be excluded; it CAN be told apart from a flush issued when no
+  // natural retry was racing, because in that case nothing else was outstanding to have caused it).
+  // `{attributable:false, reason:"marker-superseded-before-confirm", gen, resolvedAt}`: a flush marker WAS
+  // outstanding, but the generation it targeted (`gen`, NOT the generation now confirming) was abandoned —
+  // superseded by a newer submit()/heal/redirect/stop — before it ever confirmed. This is a definitive
+  // "not this flush" for `gen`, distinct in kind from the `null` case above: it is not "we don't know",
+  // it is "we know this specific attempt never got the chance to confirm."
+  // Deliberately NEVER touched when `flushMarkerGen` is already null at a confirming hook (the overwhelming
+  // majority of ordinary turns have nothing to do with worker_flush at all) — only the two resolution
+  // branches above ever write here, so a `null` reading is never manufactured by an unrelated turn quietly
+  // clobbering a real prior verdict.
+  lastFlushAttribution: { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null;
   // Card 441499ee: the exact QueuedMessage entry/entries this IN-FLIGHT submit()'s text came from — set
   // in submit(), read ONLY by `fireEnterAndVerify`'s GIVE-UP RECOVERY branch so a give-up can put the
   // ORIGINAL message(s) back on `live.pending` (identity-preserved, never re-derived from text) instead of
@@ -5112,6 +5161,7 @@ export class PtyHost {
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet — nothing has called submit() for this pty at spawn time — see submit()'s reset
       submitGeneration: 0,
+      flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — no worker_flush has ever run against a fresh spawn
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
@@ -5325,6 +5375,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
@@ -5411,6 +5462,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      flushMarkerGen: null, flushMarkerWrittenAt: null, lastFlushAttribution: null, // card ac7884e3 — not applicable (worker_flush never targets a shell/canned kind)
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
@@ -5906,6 +5958,7 @@ export class PtyHost {
         //     words the human typed for some other (possibly never-realized) turn. Discard, don't attribute.
         const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
+        this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc
         // Card 3ce3fa39: GATED reset — only when THIS hook fires while `submitGeneration` still equals the
         // generation that actually issued the clear-prefix (see `composerDirtyLenClearedByGen`'s doc). An
         // ungated reset here would be WRONG: a hook belonging to unrelated engine activity (no submit() of
@@ -6928,6 +6981,7 @@ export class PtyHost {
         // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
         // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
         live.enterConfirmed = true;
+        this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc; synchronous, safe before the M2 window below
         // Card 2521bf51: same "Stop is itself proof" reasoning clears any bounded human-submit hold too
         // (see `humanSubmitHeldUntil`'s own doc) — belt-and-suspenders for the rare path where the
         // UserPromptSubmit rising edge above was the one that got lost, not this Stop.
@@ -8961,6 +9015,40 @@ export class PtyHost {
     }
   }
 
+  /**
+   * Card ac7884e3: resolve any outstanding `worker_flush` attribution marker against the generation
+   * that JUST proved it started (`live.submitGeneration`, current at the moment this runs) — called from
+   * BOTH confirming-hook sites (UserPromptSubmit and Stop/StopFailure), right after each sets
+   * `live.enterConfirmed = true`, mirroring how `composerDirtyLenClearedByGen`'s gated reset is duplicated
+   * at both sites rather than shared. No-ops instantly when no flush marker is outstanding
+   * (`flushMarkerGen === null`) — the overwhelming majority of confirmations have nothing to do with
+   * worker_flush, and this must never manufacture a verdict for those.
+   *
+   * Two outcomes, both consuming (clearing) the marker — see `Live.lastFlushAttribution`'s own doc for
+   * the full reading guide:
+   *  - `flushMarkerGen === live.submitGeneration`: the flush's targeted generation is the SAME one that
+   *    just confirmed — `attributable:true`. Best-available signal, not proof of physical causation (see
+   *    `flushMarkerGen`'s own doc for the concurrent-natural-retry ambiguity this cannot resolve).
+   *  - otherwise (marker set for an OLDER generation): that generation was superseded before it ever
+   *    confirmed — `attributable:false`, `reason:"marker-superseded-before-confirm"`. This confirmation is
+   *    definitively about something else; the flush's own attempt is a separate, already-lost cycle.
+   */
+  private resolveFlushMarker(sessionId: string, live: Live): void {
+    if (live.flushMarkerGen === null) return;
+    const resolvedAt = Date.now();
+    if (live.flushMarkerGen === live.submitGeneration) {
+      live.lastFlushAttribution = { gen: live.flushMarkerGen, attributable: true, reason: "confirmed-while-flush-marker-live", resolvedAt };
+      // eslint-disable-next-line no-console
+      console.log(`[flush-composer] ${sessionId} CONFIRMED-BY-FLUSH gen=${live.flushMarkerGen} markerAgeMs=${resolvedAt - (live.flushMarkerWrittenAt ?? resolvedAt)}`);
+    } else {
+      live.lastFlushAttribution = { gen: live.flushMarkerGen, attributable: false, reason: "marker-superseded-before-confirm", resolvedAt };
+      // eslint-disable-next-line no-console
+      console.log(`[flush-composer] ${sessionId} flush marker STALE — targeted gen=${live.flushMarkerGen}, but generation moved to ${live.submitGeneration} before it ever confirmed; that flush attempt is a separate, already-lost cycle.`);
+    }
+    live.flushMarkerGen = null;
+    live.flushMarkerWrittenAt = null;
+  }
+
   /** Write this attempt's Enter and arm its verify-timeout — the second half of `sendEnterAndVerify`,
    *  split out so the give-up attempt can route through `awaitReassertSettle` first. */
   private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
@@ -9173,8 +9261,19 @@ export class PtyHost {
    * Does NOT generalize into "this always recovers a stranded worker" (DoD-5) — it is exactly the
    * press-Enter remedy, nothing more; a worker whose composer holds genuinely lost/corrupted state is
    * outside what pressing Enter can fix.
+   *
+   * Card ac7884e3: stamps `live.flushMarkerGen = gen` right before writing its own reassert+Enter — see
+   * that field's own doc for exactly what the marker can and cannot establish, and `lastFlushAttribution`'s
+   * doc for how a confirming hook later resolves it. This does NOT change anything about the return shape
+   * or timing documented above (`confirmed`/`recovered` keep their exact existing meanings); it is a
+   * SEPARATE, additive piece of bookkeeping that survives past this call's own return, because the defect
+   * this exists to fix is specifically the case where confirmation arrives AFTER this call already
+   * returned `confirmed:false` — see `lastFlushAttribution`'s own doc for the measured production
+   * specimen. `attributable` on the resolved object below is populated ONLY when this call's own bounded
+   * wait happens to observe the resolution for THIS SAME `gen` before returning; the common late case is
+   * read later via `getLastFlushAttribution`/a subsequent `worker_flush` call, never blocked on here.
    */
-  flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean }> {
+  flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean }> {
     const live = this.live.get(sessionId);
     if (!live?.alive) return Promise.resolve({ ok: false, reason: "session-dead" });
     const stranded = !live.enterConfirmed && (live.busy || live.composerDirtyLen > 0);
@@ -9190,6 +9289,12 @@ export class PtyHost {
     // one attempting to resolve any outstanding dirty residue, so the confirming hook's existing
     // `composerDirtyLenClearedByGen === live.submitGeneration` gate clears it correctly on confirm.
     live.composerDirtyLenClearedByGen = gen;
+    // Card ac7884e3: stamp the attribution marker for THIS generation — see `flushMarkerGen`'s own doc.
+    // Written unconditionally (mirrors `composerDirtyLenClearedByGen` just above): a SECOND flush call for
+    // the same still-unresolved `gen` simply re-stamps the same value with a fresher `flushMarkerWrittenAt`,
+    // which is correct — it IS a fresh attempt for that generation.
+    live.flushMarkerGen = gen;
+    live.flushMarkerWrittenAt = Date.now();
     // eslint-disable-next-line no-console
     console.log(`[flush-composer] ${sessionId} submit-only flush attempted (card 3e76ecad) — busy=${live.busy} composerDirtyLen=${live.composerDirtyLen} gen=${gen}`);
     const reassertWrittenAt = Date.now();
@@ -9207,7 +9312,12 @@ export class PtyHost {
       this.awaitFlushConfirmSettle(sessionId, 0, (confirmed) => {
         const l = this.live.get(sessionId);
         const recovered = !confirmed && wasBusy && !!l?.alive && !l.busy;
-        resolve({ ok: true, confirmed, recovered });
+        // Card ac7884e3: only report `attributable` when THIS call's own generation is the one
+        // `lastFlushAttribution` actually resolved — it's STICKY, so a stale entry from an EARLIER,
+        // already-resolved flush on this same session must never be misread as describing this call.
+        const attribution = l?.lastFlushAttribution;
+        const attributable = attribution && attribution.gen === gen ? attribution.attributable : undefined;
+        resolve({ ok: true, confirmed, recovered, ...(attributable !== undefined ? { attributable } : {}) });
       });
     });
   }
@@ -10963,6 +11073,21 @@ export class PtyHost {
    *  occurrence overwrites rather than accumulates, so this always reflects the LATEST replay only. */
   getLastMismatchReplay(sessionId: string): Live["lastMismatchReplay"] | undefined {
     return this.live.get(sessionId)?.lastMismatchReplay;
+  }
+
+  /** Card ac7884e3: the most recent resolution of a `worker_flush` attribution marker
+   *  (`Live.lastFlushAttribution` — see that field's own doc for the full three-way reading:
+   *  `null`/`{attributable:true,...}`/`{attributable:false, reason:"marker-superseded-before-confirm",...}`),
+   *  or `undefined` if the session isn't live in this process. Same PULL-surface mechanics as
+   *  `getLastMismatchReplay`: never cleared once set, overwritten (not accumulated) by a later resolution
+   *  — exists specifically so a manager can check LATER, after a `flushComposer` call already returned
+   *  `confirmed:false`, whether that flush eventually turned out to be the last action taken before its
+   *  targeted generation confirmed. `flushComposer`'s own return only carries this for the (uncommon) case
+   *  its own bounded wait happens to observe the resolution before returning; this getter is the read for
+   *  every other case, including the measured production specimen (confirmation ~60s after the call
+   *  returned) that motivated this card. */
+  getLastFlushAttribution(sessionId: string): Live["lastFlushAttribution"] | undefined {
+    return this.live.get(sessionId)?.lastFlushAttribution;
   }
 
   /**

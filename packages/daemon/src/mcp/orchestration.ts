@@ -3460,7 +3460,28 @@ export class OrchestrationMcpRouter {
           "Also returns `resumability` (\"dead\"|\"resumable\"|\"unknown\") as a SECOND, independent " +
           "discriminator alongside the flush outcome — a \"dead\" worker's process/transcript is already " +
           "confirmed gone, which makes a submit-only retry moot regardless of what `ok`/`confirmed` say; " +
-          "read the two together, not `confirmed` alone, before deciding what to do next.",
+          "read the two together, not `confirmed` alone, before deciding what to do next. " +
+          "Card ac7884e3 — `lastFlushAttribution` (always present, `null` when nothing has ever resolved) " +
+          "is what makes \"did this flush actually work?\" answerable for the first time: before this, a " +
+          "flush's own effect and Loom's own unrelated late redelivery retry were BYTE-IDENTICAL from the " +
+          "outside, so a confirmation arriving after this call already returned `confirmed:false` (the " +
+          "common case, per the incident that carded this) had no way to be attributed to anything. Once " +
+          "non-null it is `{gen, attributable, reason, resolvedAt}`: `attributable:true` " +
+          "(`reason:\"confirmed-while-flush-marker-live\"`) means this flush's own targeted generation is " +
+          "the one that went on to confirm — the best signal available (it does NOT rule out a concurrent " +
+          "natural retry for the SAME generation having raced in; two Enter keystrokes for one generation " +
+          "produce exactly one hook either way, so that specific ambiguity is structurally irreducible from " +
+          "outside the pty — see it as \"a flush was the last action taken for this generation and it went " +
+          "on to confirm\", not as physical keystroke proof). `attributable:false` " +
+          "(`reason:\"marker-superseded-before-confirm\"`) is a DIFFERENT, definitive verdict: a flush WAS " +
+          "issued but its targeted generation was superseded (a fresh message, a heal, a redirect, a stop) " +
+          "before it ever confirmed — this is NOT the same as \"unknown\", it is \"this specific attempt " +
+          "never got the chance.\" `null` genuinely means no resolution has happened yet (or worker_flush " +
+          "was never called) — never conflate it with the `false` verdict above. STICKY (never cleared, " +
+          "only overwritten by a later resolution): re-calling worker_flush later on an already-recovered " +
+          "worker is a safe, cheap way to read the latest verdict — the call itself no-ops " +
+          "(`{ok:false,reason:\"composer-empty\"}`) on a clean composer, but `lastFlushAttribution` is " +
+          "still populated from whatever resolved most recently.",
         inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {

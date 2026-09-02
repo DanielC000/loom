@@ -8118,8 +8118,19 @@ export class SessionService {
    * running, just slow to confirm" from "was stuck and this flush just cleared it" — `recovered:true`
    * means THIS call's own give-up ladder fell through to GIVE-UP RECOVERY (busy cleared, the original
    * message requeued for redelivery on the next natural drain), so the caller should stop retrying.
+   *
+   * Card ac7884e3 adds `lastFlushAttribution` (always present, `null` when nothing has ever resolved) —
+   * see `Live.lastFlushAttribution`'s own doc (pty/host.ts) for the full reading guide. Read fresh from
+   * `pty.getLastFlushAttribution` AFTER the flush call resolves, not taken from `result` itself: it is
+   * STICKY (survives past any one call's own bounded wait), so this is the read that answers "did an
+   * EARLIER flush on this worker eventually turn out to be attributable" — the case `result.attributable`
+   * (see `flushComposer`'s own doc) cannot cover, because that field only ever reflects THIS call's own
+   * generation resolving within THIS call's own window.
    */
-  async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; resumability: string }> {
+  async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{
+    ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean; resumability: string;
+    lastFlushAttribution: { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null;
+  }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const result = await this.pty.flushComposer(workerSessionId);
@@ -8128,7 +8139,7 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "flush_worker_composer",
       detail: { ...result },
     });
-    return { ...result, resumability: worker.resumability };
+    return { ...result, resumability: worker.resumability, lastFlushAttribution: this.pty.getLastFlushAttribution(workerSessionId) ?? null };
   }
 
   /**

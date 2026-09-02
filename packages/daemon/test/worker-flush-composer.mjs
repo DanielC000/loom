@@ -198,6 +198,14 @@ try {
       result.ok === true && result.confirmed === true);
     check("(2) composerDirtyLen clears to 0 through the SAME gated path submit() uses",
       host.getComposerDirtyLen(SID) === 0);
+    // Card ac7884e3 — THE MARKED ARM: the confirming hook fired while flushComposer's own marker was
+    // still live for this exact generation, so both the call's own return AND the sticky getter must
+    // report attributable:true.
+    check("(2) THE FIX: flushComposer's own return reports attributable:true (resolved within its own window)",
+      result.attributable === true);
+    const attr2 = host.getLastFlushAttribution(SID);
+    check("(2) THE FIX: lastFlushAttribution records CONFIRMED-BY-FLUSH for this generation",
+      attr2 != null && attr2.attributable === true && attr2.reason === "confirmed-while-flush-marker-live");
   }
 
   // ===================== (3) HONEST FAILURE (DoD-4): the Enter never confirms — flushComposer reports ====
@@ -258,8 +266,57 @@ try {
     check("(4) busy is in fact false now (the transition recovered claims actually happened)",
       busyLog[SID].at(-1) === false);
   }
+
+  // ===================== (5) THE OTHER POLARITY (card ac7884e3): a flush marker that goes STALE because ===
+  // ===================== its OWN targeted generation is superseded before ever confirming — must resolve ==
+  // ===================== attributable:false, not be left silently ambiguous or wrongly credited to a ======
+  // ===================== later, unrelated confirmation =======================================================
+  {
+    const SID = "sess-flush-marker-stale";
+    const TEXT1 = "STRANDED_PAYLOAD_MARKER_GOES_STALE";
+    const TEXT2 = "A_LATER_UNRELATED_MESSAGE";
+    spawnReady(SID);
+    const r0 = host.enqueueStdin(SID, TEXT1);
+    check("(5) setup: idle-submit delivered, busy armed", r0.delivered === true && busyLog[SID].at(-1) === true);
+
+    {
+      const t0 = Date.now();
+      // TIMING-GUARD-SAFE: this is the SAME observed-condition polling loop scenarios (2)/(3)/(4) above
+      // use (card 259c15fa) — it polls for the OBSERVED busy===false transition, bounded by
+      // GIVE_UP_POLL_TIMEOUT_MS, never a fixed sleep asserting completion; give-up's real completion is a
+      // chain of setTimeout hops that routinely overshoots a hand-computed sum, which is exactly why this
+      // polls the real signal instead of guessing a duration.
+      while (busyLog[SID].at(-1) !== false && Date.now() - t0 < GIVE_UP_POLL_TIMEOUT_MS) await sleep(GIVE_UP_POLL_MS);
+    }
+    check("(5) setup: GIVE-UP RECOVERY landed — busy fell back to false", busyLog[SID].at(-1) === false);
+
+    // flushComposer's own attempt for THIS (already-given-up) generation also never confirms — leaves its
+    // marker outstanding (flushMarkerGen set, unresolved), exactly like scenario (3).
+    const flushResult = await host.flushComposer(SID);
+    check("(5) setup: flushComposer honestly reports confirmed:false, leaving its marker outstanding",
+      flushResult.ok === true && flushResult.confirmed === false);
+    check("(5) setup: no attribution has resolved yet — the marker is outstanding, not yet superseded",
+      host.getLastFlushAttribution(SID) === null);
+
+    // Something ELSE now bumps the generation: a fresh, unrelated message delivers as a new turn (the
+    // idle-submit gate only checks THIS call's own giveUpHeldUntil, not whether anything else is pending —
+    // see enqueueStdin's own gate), superseding the flush's own targeted generation before it ever got a
+    // confirming hook of its own.
+    const r1 = host.enqueueStdin(SID, TEXT2);
+    check("(5) a fresh, unrelated message delivers as a NEW turn, superseding the flush's own target generation",
+      r1.delivered === true);
+
+    // Deliver a confirming hook for THIS new turn — this is what proves the OLD marker is now stale.
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit", prompt: TEXT2 });
+
+    const attribution = host.getLastFlushAttribution(SID);
+    check("(5) THE OTHER ARM: the stale marker resolves to attributable:false, reason "
+      + "marker-superseded-before-confirm — a definitive verdict, not silent ambiguity, and not wrongly "
+      + "credited to the new, unrelated confirmation",
+      attribution != null && attribution.attributable === false && attribution.reason === "marker-superseded-before-confirm");
+  }
 } finally {
-  for (const sid of ["sess-flush-empty", "sess-flush-confirms", "sess-flush-never-confirms", "sess-flush-was-busy"]) {
+  for (const sid of ["sess-flush-empty", "sess-flush-confirms", "sess-flush-never-confirms", "sess-flush-was-busy", "sess-flush-marker-stale"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
