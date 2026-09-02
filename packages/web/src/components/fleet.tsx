@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
@@ -170,14 +171,47 @@ function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
   );
 }
 
+// Context consumption for ONE session: occupancy of the model's window. Loom drives the subscription
+// CLI, so this is token CONSUMPTION (% of context window), never a dollar bill — the figure that
+// signals "this agent needs recycling soon", with the absolute token count for scale.
+//
+// This is the SINGLE renderer behind every surface that shows a session's context usage (Mission
+// Control / Overview fleet rows, and the Archive page's session cards), so those surfaces can never
+// drift on HOW it is computed: `ctxInputTokens` against `contextWindowForModel(model)`, hot at
+// CONTEXT_WARN_RATIO. Two surfaces computing it two ways would disagree, and the quiet one is the one
+// nobody notices is wrong.
+//
+// `unmeasured` is what renders when there is NO measurement at all (`ctxInputTokens == null` — a
+// session that never completed a turn). An ABSENT measurement is not a measured zero, and must never
+// render as an empty meter or `0%`. Live fleet rows pass nothing (a live session that hasn't reported
+// yet is just noise on a dense row); the Archive passes an explicit dash, because an archived session
+// is final, so "never measured" is real information there. A MEASURED zero still renders as a real 0%
+// meter under both policies, so the two states stay distinguishable on screen — and measured zeros do
+// occur in practice, they are not a hypothetical.
+export function ContextUsage({ ctxInputTokens, model, unmeasured = null }: {
+  ctxInputTokens?: number | null;
+  model?: string | null;
+  unmeasured?: ReactNode;
+}) {
+  if (ctxInputTokens == null) return <>{unmeasured}</>;
+  const ctx = ctxInputTokens;
+  const win = contextWindowForModel(model);
+  const hot = ctx > win * CONTEXT_WARN_RATIO;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / win) * 100)}% of the ${(win / 1000).toFixed(0)}k window`}>
+      <Meter value={ctx} max={win} tone={hot ? "amber" : "phosphor"} width={60} />
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / win) * 100)}%</span>
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
+    </span>
+  );
+}
+
 export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const openRequest = useOpenRequest();
   const decisions = usePendingDecisionsBySession();
   const decision = decisions.get(s.id);
   const st = sessionStatus(s);
   const ctx = s.ctxInputTokens ?? 0;
-  const window = contextWindowForModel(s.model);
-  const hot = ctx > window * CONTEXT_WARN_RATIO;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
@@ -197,16 +231,9 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
       )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
       {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
-      {ctx > 0 && (
-        // Context consumption: occupancy of the model's window. Loom drives the subscription CLI, so this
-        // is token CONSUMPTION (% of context window), never a dollar bill — the figure that signals
-        // "this agent needs recycling soon", with the absolute token count for scale.
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / window) * 100)}% of the ${(window / 1000).toFixed(0)}k window`}>
-          <Meter value={ctx} max={window} tone={hot ? "amber" : "phosphor"} width={60} />
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / window) * 100)}%</span>
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
-        </span>
-      )}
+      {/* A LIVE row hides both "no reading yet" AND a measured zero — neither is worth the width on a
+          dense, fast-moving row (the Archive, where a session is final, treats them differently). */}
+      {ctx > 0 && <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model} />}
     </div>
   );
 }

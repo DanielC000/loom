@@ -4,6 +4,7 @@ import type { ArchivedSessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
+import { ContextUsage } from "../components/fleet";
 import { Panel, Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
 import { color, font, tone } from "../theme";
 import { roleDisplay } from "../lib/roleDisplay";
@@ -254,6 +255,14 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
         <Chip label="agent" value={s.agentName} />
         {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} tone="cyan" />}
         {s.branch && <Chip label="branch" value={s.branch} tone="cyan" />}
+        {/* How much context this session had consumed when it exited — the SAME renderer the live fleet
+            rows use (components/fleet's ContextUsage), so the two can never drift on how it's computed.
+            A session that never completed a turn has NO reading at all: that renders as an explicit "—",
+            never as an empty meter or 0%, so "never measured" stays distinguishable from a measured 0%. */}
+        <Chip label="context" value={
+          <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model}
+            unmeasured={<span title="Never measured — this session completed no turn, so no context reading was ever recorded. Not the same as 0%." style={{ color: color.textMuted }}>—</span>} />
+        } />
         <Chip label="created" value={ts(s.createdAt)} />
         <Chip label="exited" value={ts(s.lastActivity)} />
         <Chip label="archived" value={ts(s.archivedAt)} />
