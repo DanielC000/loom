@@ -4,7 +4,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
@@ -45,6 +45,7 @@ import { createOwnerAttestation, OwnerConfirmStore, AuthoredContentGrantStore } 
 import { CompanionTrustWindow } from "../companion/trust-window.js";
 import { GitWriter } from "../git/writer.js";
 import type { FreshMintInfo, PendingOpView, CacheHitInfo } from "../orchestration/pending-ops.js";
+import { INTENT_MAX_LEAD_MS } from "../orchestration/gate-intent.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -633,7 +634,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "~47% coverage of node processes in the one measured sample, see its own header for what it " +
         "structurally cannot see). Returns {cap, " +
         "activeCount, queuedCount, running: " +
-        "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
+        "GateQueueEntry[], queued: GateQueueEntry[], repoGuardOnly: RepoGuardOnlyQueueEntry[], " +
+        "declarations: GateIntentEntry[]} — `queued` is already in real admission order (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
         "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
         "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
@@ -675,9 +677,15 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
         "DIFFERENT project omits those three fields entirely (never redacted-to-null) and instead carries " +
         "`redacted: true` (card 80d54122) so the omission reads as deliberate rather than an ambiguous " +
-        "gap — named only by " +
-        "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
-        "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
+        "gap. Card 1cf0ced1: WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel} — " +
+        "everything else in the enumeration above (`opId` in FULL, chainable into `gate_status` same as " +
+        "for an own-project entry; `gateType`/`projectId`/`projectName`; the phase-scoped `since`/" +
+        "`elapsedMs`/`idleMs`/`extended`; `queuePosition`/`repoContended`; and, on its own separate " +
+        "has-a-branch condition unrelated to project ownership, `recentTimeoutStreak`) still rides the " +
+        "wire cross-project, un-redacted. That three-field omission — not 'project + gate kind + age', " +
+        "which undercounted what a foreign entry actually carries — is enough to tell 'someone else " +
+        "legitimately holds the slot' apart from 'this looks leaked' without exposing another project's " +
+        "task/branch identity. " +
         "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`-kind entry whose target " +
         "repo is currently held by another RUNNING merge gate (card 92e960d1's per-repo merge-admission " +
         "guard — at most one merge gate per canonical repo runs at once, so two same-repo merges never " +
@@ -711,6 +719,30 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "disclosed cross-project). Explains a queued `merge`-kind entry above reporting " +
         "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
         "contending holder is here, not there. " +
+        "ALSO returns `declarations` (card a5d1ae04) — a THIRD, independent array: a manager's own " +
+        "structured \"I intend to fire a gate at ~T\" advisory, declared via `gate_intent_declare` and " +
+        "withdrawn via `gate_intent_withdraw`. ⛔ ADVISORY DISCLOSURE ONLY — nothing here was ever admitted " +
+        "through, or even seen by, the GateSemaphore that governs `running`/`queued`/`repoGuardOnly` above; " +
+        "a declaration can NEVER block, delay, or gate an actual fire, and nothing in `run_gate`/" +
+        "`worker_merge_confirm`/deploy ever reads this array — see `gate_intent_declare`'s own doc for the " +
+        "full rationale. Each entry is {projectId, projectName, declaredAt, firesAt, ageMs, msUntilFire, " +
+        "gateType?, repoKey?, note?, declaredBy?} (ISO timestamps; `declaredAt`/`firesAt` are server-" +
+        "stamped, never client-supplied, so there's no clock-skew question). `msUntilFire` (`firesAt - now`) " +
+        "is deliberately NEVER clamped to 0 — it goes NEGATIVE once the declared time passes, which is the " +
+        "self-describing signal that the intent likely already fired (a manager SHOULD `gate_intent_withdraw` " +
+        "once it does — a courtesy, never enforced) rather than the row silently vanishing exactly on " +
+        "`firesAt` and leaving no way to tell 'it fired' from 'it just expired'. A row self-expires — see " +
+        "`gate_intent_declare`'s own doc for the exact rule — so a stale declaration from a since-recycled " +
+        "or exited session is gone by the NEXT read, not merely eventually: there is no raw session id on " +
+        "the wire anywhere in this array (own-project OR foreign) — the daemon uses it server-side, before " +
+        "you ever see this array, to decide whether a row is still live at all, which makes a dead seat's " +
+        "residue structurally unobservable rather than something you'd have to notice was stale yourself. " +
+        "SAME cross-project redaction posture as `running`/`queued` above: an entry belonging to YOUR OWN " +
+        "project ALSO carries {repoKey?, note?, declaredBy?} (`declaredBy` is the declaring manager's AGENT " +
+        "name, mirroring `workerLabel`'s own pattern); a foreign-project entry omits those three entirely " +
+        "(never redacted-to-null) and carries `redacted: true` instead — `gateType` stays visible either " +
+        "way, since gate KIND is already part of the sanctioned cross-project set above, this isn't a new " +
+        "boundary. " +
         "⛔ WHAT THIS TOOL STOPS BEING ABLE TO TELL YOU THE MOMENT A ROW LEAVES `queued` (card cffa71e6): " +
         "once an entry is admitted (or has already settled and dropped out of this snapshot entirely), " +
         "NOTHING here recovers how long it actually waited — queue wait is only ever legible from the " +
@@ -738,6 +770,88 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
       if (!projectId) return ok({ error: "no project for this session" });
       return ok(sessions.gateQueueForManager(projectId));
     },
+  );
+}
+
+// gate_intent_declare / gate_intent_withdraw (card a5d1ae04 — the structured replacement for a hand-written
+// peer-channel "I'm about to fire a merge gate" letter, whose measured delivery latency routinely exceeded
+// the coordination window it existed to protect). MANAGER-ONLY: registered only from the manager branch of
+// buildServer below, never from the worker branch — a worker's own gate-firing action is `run_gate` (its
+// own DoD self-check), which has no "I intend to" phase worth declaring, and adding either tool to the
+// worker surface would mean touching that role's tightly pinned depth-1 tool list (see the comment at this
+// file's worker-branch `registerGateQueue` call site) for no actual use case. `gate_queue`'s own
+// `declarations` array (registered on BOTH surfaces, unchanged) is how a WORKER — or a peer manager — reads
+// what a manager declared; only the manager that owns the declaration can create or remove it.
+//
+// ⛔ STRUCTURALLY DECOUPLED FROM EVERY GATE-FIRING PATH, ON PURPOSE (DoD-4: "a declaration must never
+// block, delay, or gate a fire"): neither handler below calls into `runWorkerGate`/`confirmWorkerMerge`/
+// `deployOwnProject`/`GateSemaphore`/`gate-runner.ts` at all — they only ever touch
+// `SessionService.declareGateIntent`/`withdrawGateIntent`, which themselves only ever touch
+// `GateIntentRegistry` (see that class's own file-level doc). `test/gate-intent-no-firing-coupling.mjs`
+// asserts the absence mechanically (a grep over the two files that actually execute/admit a gate,
+// `gate-runner.ts` and `gate-semaphore.ts`, neither of which has any legitimate reason to ever import or
+// reference this feature), with a positive control proving the grep itself has power to catch a planted
+// reference rather than passing vacuously.
+function registerGateIntent(server: McpServer, sessions: SessionService, sessionId: string): void {
+  server.registerTool(
+    "gate_intent_declare",
+    {
+      description:
+        "Declare (replacing any prior declaration of your own) that YOU intend to fire a gate at " +
+        "roughly `Date.now() + inMs` — a structured, server-stamped fact a peer sees on the `gate_queue` " +
+        "read they already make (in its `declarations` array), replacing the hand-written 'I'm about to " +
+        "fire' letter this card's own PROVENANCE measured as routinely arriving AFTER the coordination " +
+        "window it existed to protect. ⛔ ADVISORY DISCLOSURE ONLY, STRUCTURALLY — this call never touches " +
+        "the GateSemaphore, and nothing in `run_gate`/`worker_merge_confirm`/deploy ever reads what you " +
+        "declare here: it cannot block, delay, reorder, or otherwise affect any real gate admission, " +
+        "including your own. Firing a gate WITHOUT ever declaring one, or firing one that contradicts an " +
+        "active declaration, is completely unaffected either way — this tool exists purely so a peer has " +
+        "advance notice, never as a commitment this daemon enforces. " +
+        "`inMs` (required, integer, `0` to " + String(INTENT_MAX_LEAD_MS) + " — " + String(INTENT_MAX_LEAD_MS / 60_000) + " minutes) is a " +
+        "RELATIVE offset, not an absolute timestamp — the daemon stamps `declaredAt`/`firesAt` itself " +
+        "(`firesAt = declaredAt + inMs`), so there is never a clock-skew question between your session and " +
+        "the daemon. An `inMs` outside that range is REJECTED with `{error}` (not clamped) — declare again " +
+        "closer to the actual time instead. " +
+        "`gateType` (optional, one of `merge`/`deploy`/`worker`) is the SAME kind enum `gate_queue`'s own " +
+        "`running`/`queued` entries carry, and stays visible to a peer in a foreign project too (gate KIND " +
+        "is already part of the sanctioned cross-project disclosure set — this doesn't widen it). `repoKey` " +
+        "(optional — `null` for the project's primary repo, a key from your own project's repo registry " +
+        "otherwise) and `note` (optional short freeform text) are BOTH own-project-only when read back via " +
+        "`gate_queue` — a foreign caller never sees either, same redaction tier as `taskId`/`branch` on a " +
+        "`GateQueueEntry`. " +
+        "ONE LIVE DECLARATION PER SESSION — calling this again fully REPLACES your prior declaration " +
+        "(including its `declaredAt`, which is re-stamped to now); it does not merge or extend it. A " +
+        "declaration self-expires — you do not have to withdraw it for hygiene's sake, though " +
+        "`gate_intent_withdraw` right after you actually fire is the courtesy that keeps a peer from seeing " +
+        "a stale, already-fired intent linger (see `gate_queue`'s own `msUntilFire` doc for what a peer " +
+        "reads instead if you don't). Returns `{entry}` (the same shape your OWN `gate_queue` read would " +
+        "show for this row) on success, `{error}` on a bad `inMs` or an unresolvable caller session.",
+      inputSchema: strictShape({
+        inMs: z.number(),
+        gateType: z.enum(["merge", "deploy", "worker"]).optional(),
+        repoKey: z.string().nullable().optional(),
+        note: z.string().optional(),
+      }),
+    },
+    async ({ inMs, gateType, repoKey, note }) => {
+      const result = sessions.declareGateIntent(sessionId, { etaMs: inMs, gateType: gateType as GateType | undefined, repoKey, note });
+      if (!result.ok) return ok({ error: result.error });
+      return ok({ entry: result.entry });
+    },
+  );
+  server.registerTool(
+    "gate_intent_withdraw",
+    {
+      description:
+        "Withdraw YOUR OWN active gate-intent declaration (see `gate_intent_declare`), if any — the " +
+        "courtesy call after you actually fire, so a peer's `gate_queue` read doesn't keep showing an " +
+        "already-fired intent (which self-expires on its own regardless — see that tool's own doc — this " +
+        "just does it immediately instead of waiting out the grace window). Idempotent: `{withdrawn: " +
+        "false}` when you had nothing active is NOT an error, never throws. Takes no arguments — there is " +
+        "at most one live declaration per session to withdraw, so none are needed to disambiguate.",
+      inputSchema: strictShape({}),
+    },
+    async () => ok({ withdrawn: sessions.withdrawGateIntent(sessionId) }),
   );
 }
 
@@ -3771,6 +3885,7 @@ export class OrchestrationMcpRouter {
     );
     registerGateStatus(server, sessions);
     registerGateQueue(server, sessions, db, managerSessionId);
+    registerGateIntent(server, sessions, managerSessionId);
 
     // gate_history (card 753d9911): `listGateEvents` (db.ts) already reads the complete, paginated,
     // JOIN-enriched settled-gate-run series — INCLUDING rejected runs, whose `durationMs`/`gateCap`/

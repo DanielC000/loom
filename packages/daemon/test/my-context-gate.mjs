@@ -358,16 +358,23 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
   // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, now on BOTH surfaces
   // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc),
-  // `gate_cancel` (card 8d585277, MANAGER-ONLY), and `gate_history` (card 753d9911, MANAGER-ONLY) are
-  // DELIBERATE, reviewed exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's
-  // EXISTING gateCommand (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live
-  // GateSemaphore registry by opId, `gate_queue` only READS the same live registry's whole running/queued
-  // snapshot (cap/depth/holder), `gate_cancel` only CANCELS a live gate OP already admitted/queued through
-  // that same registry (project-scoped, refuses cross-project), and `gate_history` only READS the durable
-  // settled-gate-run history (a thin wrapper over `db.listGateEvents`, project-scoped server-side, no
-  // `projectId` argument) — none of the five ever sets/configures `gateCommand` itself, so the trust
-  // boundary this check protects (no agent-writable gateCommand surface) is untouched by any of them.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue" && n !== "gate_cancel" && n !== "gate_history");
+  // `gate_cancel` (card 8d585277, MANAGER-ONLY), `gate_history` (card 753d9911, MANAGER-ONLY), and
+  // `gate_intent_declare`/`gate_intent_withdraw` (card a5d1ae04, MANAGER-ONLY) are DELIBERATE, reviewed
+  // exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand
+  // (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live GateSemaphore registry
+  // by opId, `gate_queue` only READS the same live registry's whole running/queued snapshot (cap/depth/
+  // holder), `gate_cancel` only CANCELS a live gate OP already admitted/queued through that same registry
+  // (project-scoped, refuses cross-project), `gate_history` only READS the durable settled-gate-run
+  // history (a thin wrapper over `db.listGateEvents`, project-scoped server-side, no `projectId`
+  // argument), and `gate_intent_declare`/`gate_intent_withdraw` — despite the mutating verb — set NOTHING
+  // on `gateCommand`/`GateSemaphore` at all: they only write into the SEPARATE, structurally-decoupled
+  // `GateIntentRegistry` (see that class's own file-level doc) an advisory "I intend to fire at ~T" fact
+  // that can never block, delay, or gate an actual run (DoD-4; asserted mechanically, with a positive
+  // control, by `test/gate-intent-no-firing-coupling.mjs` — neither `gate-runner.ts` nor
+  // `gate-semaphore.ts` references this feature at all). None of the seven ever sets/configures
+  // `gateCommand` itself, so the trust boundary this check protects (no agent-writable gateCommand
+  // surface) is untouched by any of them.
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue" && n !== "gate_cancel" && n !== "gate_history" && n !== "gate_intent_declare" && n !== "gate_intent_withdraw");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",

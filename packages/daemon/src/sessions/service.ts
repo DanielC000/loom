@@ -56,6 +56,7 @@ import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
+import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
@@ -240,10 +241,72 @@ export interface RepoGuardOnlyQueueEntry {
   workerLabel?: string | null;
 }
 
+/** One live declaration in {@link GateQueueSnapshot.declarations} (card a5d1ae04) — the read-side shape of
+ *  a {@link GateIntentRow}, with the SAME cross-project redaction posture `GateQueueEntry` already
+ *  establishes (own-project: full detail; foreign-project: `redacted: true` plus a sparse, deliberately
+ *  chosen subset — see the field docs below for exactly which fields fall on which side, by direct analogy
+ *  to `GateQueueEntry.taskId`/`branch`/`workerLabel`).
+ *
+ *  ⚠️ NO `sessionId` FIELD, ON EITHER SIDE OF THE REDACTION BOUNDARY — this is deliberate, not an
+ *  oversight of card a5d1ae04's own DoD-5 ("the declaring session id is on the record, so a peer can tell
+ *  a live declaration from a dead seat's residue"): the session id IS on the record — it's the key
+ *  {@link GateIntentRegistry} stores each row under, and `gateQueueForManager` uses it to run the
+ *  dead-seat check ({@link GateIntentRegistry.snapshot}'s `isSessionLive`) BEFORE this entry is ever
+ *  built — but it never rides the wire. A dead seat's declaration doesn't get *labelled* dead here, it
+ *  simply isn't in the array at all by the next read; a peer never needs the raw id to draw that
+ *  conclusion because the server already drew it for them. This is a STRONGER reading of DoD-5 than
+ *  literally echoing the id back would be (residue becomes structurally unobservable, not merely tagged) —
+ *  flagging the substitution explicitly here so a future reader checking DoD-5 against the wire shape
+ *  alone doesn't conclude it was skipped. */
+export interface GateIntentEntry {
+  projectId: string;
+  projectName: string;
+  /** ISO. Server-stamped at `declare()` time — see {@link GateIntentRow.declaredAt}'s own doc. */
+  declaredAt: string;
+  /** ISO. `declaredAt + etaMs`, computed server-side — see {@link GateIntentRow.firesAt}'s own doc. */
+  firesAt: string;
+  /** `now - declaredAt`, in ms. Always ≥ 0. */
+  ageMs: number;
+  /** `firesAt - now`, in ms. POSITIVE before the declared fire time, ⛔ NEGATIVE (never clamped to 0)
+   *  once it passes — a manager's own design-checkpoint ruling: clamping would make "declared but not yet
+   *  fired" and "declared fire time already passed" indistinguishable from this field alone, which is
+   *  exactly the ambiguity a peer needs to resolve to avoid double-counting an already-fired intent against
+   *  a now-separate `running`/`queued` entry for the same event. A manager SHOULD `gate_intent_withdraw`
+   *  once it actually fires (a courtesy, never enforced, never required) — until then, or until
+   *  `INTENT_EXPIRE_GRACE_MS` after `firesAt` reaps the row regardless, a negative value here is the
+   *  self-describing signal a peer reads instead. */
+  msUntilFire: number;
+  /** Present only when the declaring manager supplied one — an optional hint at what KIND of gate the
+   *  intent is about. Visible cross-project, same as `GateQueueEntry.gateType` — gate KIND is already part
+   *  of the sanctioned cross-project disclosure set (see that field's own doc), this is not a new
+   *  boundary. */
+  gateType?: GateType;
+  /** OWN-PROJECT ONLY (card a5d1ae04's design-checkpoint ruling) — a project-internal identifier into that
+   *  project's own repo registry, same sensitivity class as `GateQueueEntry.taskId`/`branch`. Omitted
+   *  entirely (never redacted-to-null) for a foreign-project entry, mirroring `GateQueueEntry`'s own
+   *  omission convention. `null` means "the project's primary repo" (mirrors `Task.repoKey`); absent means
+   *  the declaring manager didn't specify one at all. */
+  repoKey?: string | null;
+  /** OWN-PROJECT ONLY, same tier as `repoKey` above — a short freeform note the declaring manager
+   *  supplied. */
+  note?: string;
+  /** OWN-PROJECT ONLY, same tier as `repoKey`/`note` above — the declaring manager's AGENT name (mirrors
+   *  `GateQueueEntry.workerLabel`'s own pattern), NOT the raw session id (see this interface's own
+   *  top-of-doc note on why `sessionId` never rides the wire at all). `null` when the declaring session's
+   *  agent couldn't be resolved (same shape `workerLabel` already tolerates). */
+  declaredBy?: string | null;
+  /** Present ONLY on a foreign-project entry (never `false`, and never present at all on the caller's own)
+   *  — mirrors `GateQueueEntry.redacted` exactly, including its "self-evident omission" rationale. */
+  redacted?: true;
+}
+
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
  *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
  *  `repoGuardOnly` (card b9e07a4a) is a SEPARATE array, deliberately not folded into `running`/`queued` —
- *  see {@link RepoGuardOnlyQueueEntry}'s own doc for why it's a genuinely different resource. */
+ *  see {@link RepoGuardOnlyQueueEntry}'s own doc for why it's a genuinely different resource. `declarations`
+ *  (card a5d1ae04) is a THIRD, independent array again — see {@link GateIntentEntry}'s own doc; unlike
+ *  `running`/`queued`/`repoGuardOnly`, nothing in it was ever admitted through (or even seen by) the
+ *  GateSemaphore — it's pure advisory disclosure with no bearing on cap/admission at all. */
 export interface GateQueueSnapshot {
   cap: number;
   activeCount: number;
@@ -251,6 +314,7 @@ export interface GateQueueSnapshot {
   running: GateQueueEntry[];
   queued: GateQueueEntry[];
   repoGuardOnly: RepoGuardOnlyQueueEntry[];
+  declarations: GateIntentEntry[];
 }
 
 /** The near-free identity {@link SessionService.reconcileOrchestrationOnBoot}'s Pass B already has in
@@ -2251,6 +2315,11 @@ export class SessionService {
    * concurrent merges/deploys can no longer pile up host load unbounded. See {@link GateSemaphore}.
    */
   private readonly gateSemaphore = new GateSemaphore();
+  /** Card a5d1ae04 — the advisory-only "I intend to fire at ~T" declaration registry `gate_queue`'s new
+   *  `declarations` array reads from. Deliberately NOT a field on {@link gateSemaphore} — see
+   *  {@link GateIntentRegistry}'s own file-level doc for why this is a separate class with zero
+   *  interaction with cap/admission. */
+  private readonly gateIntents = new GateIntentRegistry();
   /**
    * msgIds of durable queued messages whose RE-DRIVE enqueue is currently HELD in a recipient's pty FIFO
    * — enqueued onto a now-live recipient but not yet drained, so the durable `session_message_queued`
@@ -4351,7 +4420,71 @@ export class SessionService {
       }
       return entry;
     });
-    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly };
+    // Card a5d1ae04: `declarations` is computed independently of everything above it — it never touches
+    // `this.gateSemaphore` at all, only `this.gateIntents`. `snapshot()`'s own `isSessionLive` predicate is
+    // what performs the dead-seat reaping described on `GateIntentEntry`'s own doc: a session row that's
+    // missing entirely, OR present but not `processState:"live"`, is treated as dead — the SAME liveness
+    // signal a caller would read directly off `db.getSession(id)`, not a second, independently-derived one.
+    const nowMs = Date.now();
+    const declarations: GateIntentEntry[] = this.gateIntents
+      .snapshot((sid) => this.db.getSession(sid)?.processState === "live")
+      .map((row) => this.toGateIntentEntry(row, callerProjectId, nowMs));
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, declarations };
+  }
+
+  /** Shapes one {@link GateIntentRow} into its wire form ({@link GateIntentEntry}) — shared by
+   *  {@link gateQueueForManager}'s `declarations` array and {@link declareGateIntent}'s own return value
+   *  (whose caller is always the declaring session itself, so `isOwnProject` is always `true` there). See
+   *  `GateIntentEntry`'s own doc for the full redaction rationale — this method just applies it. */
+  private toGateIntentEntry(row: GateIntentRow, callerProjectId: string, nowMs: number): GateIntentEntry {
+    const isOwnProject = row.projectId === callerProjectId;
+    const project = this.db.getProject(row.projectId);
+    const entry: GateIntentEntry = {
+      projectId: row.projectId,
+      projectName: project?.name ?? row.projectId,
+      declaredAt: new Date(row.declaredAt).toISOString(),
+      firesAt: new Date(row.firesAt).toISOString(),
+      ageMs: nowMs - row.declaredAt,
+      // Deliberately unclamped — see GateIntentEntry.msUntilFire's own doc.
+      msUntilFire: row.firesAt - nowMs,
+      ...(row.gateType ? { gateType: row.gateType } : {}),
+      ...(isOwnProject ? {} : { redacted: true }),
+    };
+    if (isOwnProject) {
+      if (row.repoKey !== undefined) entry.repoKey = row.repoKey;
+      if (row.note !== undefined) entry.note = row.note;
+      const session = this.db.getSession(row.sessionId);
+      const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+      entry.declaredBy = agent?.name ?? null;
+    }
+    return entry;
+  }
+
+  /** Card a5d1ae04: declare (replacing any prior) this CALLING session's own gate-intent-to-fire. Never
+   *  throws — an unknown session or an out-of-range `etaMs` both return `{ok:false, error}`, matching how
+   *  every other tool handler in this codebase shapes its own errors rather than letting a bad caller
+   *  input reach an exception. `etaMs` validation lives HERE, not on {@link GateIntentRegistry.declare}
+   *  itself — see that method's own doc for why. */
+  declareGateIntent(sessionId: string, params: { etaMs: number; gateType?: GateType; repoKey?: string | null; note?: string }): { ok: true; entry: GateIntentEntry } | { ok: false; error: string } {
+    const session = this.db.getSession(sessionId);
+    if (!session) return { ok: false, error: "no session for this caller" };
+    if (!Number.isFinite(params.etaMs) || params.etaMs < 0 || params.etaMs > INTENT_MAX_LEAD_MS) {
+      return { ok: false, error: `etaMs must be an integer between 0 and ${INTENT_MAX_LEAD_MS} (${INTENT_MAX_LEAD_MS / 60_000} minutes)` };
+    }
+    const row = this.gateIntents.declare(
+      { sessionId, projectId: session.projectId, gateType: params.gateType, repoKey: params.repoKey, note: params.note },
+      params.etaMs,
+    );
+    // The declaring session reading its own just-declared row back is always "own project" by construction
+    // (it can only ever declare against its OWN session's projectId above) — full detail, never redacted.
+    return { ok: true, entry: this.toGateIntentEntry(row, session.projectId, Date.now()) };
+  }
+
+  /** Card a5d1ae04: withdraw the CALLING session's own gate-intent-to-fire, if any. Idempotent — a caller
+   *  with nothing to withdraw gets `false` back, never an error (see {@link GateIntentRegistry.withdraw}'s
+   *  own doc). */
+  withdrawGateIntent(sessionId: string): boolean {
+    return this.gateIntents.withdraw(sessionId);
   }
 
   /** Default bound for `gate_cancel`'s own manager-facing response (card 8d585277) — long enough for a
