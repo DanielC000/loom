@@ -21,6 +21,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       agent_get does — the read/write asymmetry that used to yield a silent "agent not found" on write;
 //       ambiguous still errors naming both candidates; full id unchanged; a foreign-project agent's exact
 //       id still gives "outside your project" while its PREFIX never resolves (no cross-project leak).
+//   (8) agent_update's `replaceInStartupPrompt` mode (card 6c411cdf — a mid-document edit that never
+//       retypes the whole prompt as a tool argument): a 0-occurrence `old` is REJECTED with NO write; an
+//       ambiguous (2+ occurrence) `old` is REJECTED with NO write; an empty `old` is REJECTED with NO
+//       write; combining it with `startupPrompt` OR `appendToStartupPrompt` in the same call is REJECTED
+//       with NO write; a genuine single-occurrence match APPLIES and the result is BYTE-IDENTICAL to the
+//       original prompt with only that one clause swapped (every other line untouched) — the red half
+//       proves the occurs-exactly-once assertion actually catches an ambiguous/absent match (the
+//       corruption-detection half a full-body diff would otherwise need), the green half proves a real
+//       edit still goes through cleanly.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-get-append.mjs
 import fs from "node:fs";
@@ -73,6 +82,12 @@ db.insertProfile({
 });
 const ID_BROWSER = "b0000001-0000-4000-8000-000000000007";
 db.insertAgent({ id: ID_BROWSER, projectId: "pMine", name: "Browsy", startupPrompt: "BROWSER PROMPT", position: 4, profileId: "profBrowser" });
+
+// Fixture for section (8) — replaceInStartupPrompt. "LINE" occurs 3 times (ambiguous target); the clause
+// occurs exactly once (the genuine single-occurrence target).
+const ID_REPLACE = "c0ffee01-0000-4000-8000-000000000008";
+const BRIEF_BEFORE = "ALPHA LINE\nBETA CLAUSE TO EDIT\nGAMMA LINE\nDELTA LINE";
+db.insertAgent({ id: ID_REPLACE, projectId: "pMine", name: "Replacer", startupPrompt: BRIEF_BEFORE, position: 5, profileId: null });
 
 db.insertSession({
   id: "M", projectId: "pMine", agentId: ID_SOLO, engineSessionId: null, title: null, cwd: tmpHome,
@@ -128,7 +143,7 @@ try {
   const before = db.getAgent(ID_SOLO).startupPrompt;
   const both = await call("agent_update", { agentId: ID_SOLO, startupPrompt: "X", appendToStartupPrompt: "Y" });
   check("(5) passing BOTH startupPrompt and appendToStartupPrompt is REJECTED",
-    typeof both.error === "string" && both.error.includes("not both"));
+    typeof both.error === "string" && both.error.includes("at most ONE"));
   check("(5) the rejected call made NO write", db.getAgent(ID_SOLO).startupPrompt === before);
 
   // ===================== (6) resolved capability flags on agent_get + agent_list =====================
@@ -180,12 +195,46 @@ try {
     typeof apAmb.error === "string" && apAmb.error.includes("ambiguous") && apAmb.error.includes(ID_DUP_A) && apAmb.error.includes(ID_DUP_B));
   check("(7) agent_assign_profile: the ambiguous call assigned NOTHING to either candidate",
     db.getAgent(ID_DUP_A)?.profileId == null && db.getAgent(ID_DUP_B)?.profileId == null);
+
+  // ===================== (8) RED HALF: replaceInStartupPrompt catches an absent/ambiguous/empty `old` =====
+  const rZero = await call("agent_update", { agentId: ID_REPLACE, replaceInStartupPrompt: { old: "NOT PRESENT ANYWHERE", new: "X" } });
+  check("(8-red) 0 occurrences: REJECTED", typeof rZero.error === "string" && rZero.error.includes("not found") && rZero.error.includes("0 occurrences"));
+  check("(8-red) 0 occurrences: NO write", db.getAgent(ID_REPLACE).startupPrompt === BRIEF_BEFORE);
+
+  const rAmbiguous = await call("agent_update", { agentId: ID_REPLACE, replaceInStartupPrompt: { old: "LINE", new: "X" } });
+  check("(8-red) ambiguous (3 occurrences of 'LINE'): REJECTED",
+    typeof rAmbiguous.error === "string" && rAmbiguous.error.includes("not unique") && rAmbiguous.error.includes("more than once"));
+  check("(8-red) ambiguous: NO write", db.getAgent(ID_REPLACE).startupPrompt === BRIEF_BEFORE);
+
+  const rEmpty = await call("agent_update", { agentId: ID_REPLACE, replaceInStartupPrompt: { old: "", new: "X" } });
+  check("(8-red) empty `old`: REJECTED", typeof rEmpty.error === "string" && rEmpty.error.includes("must not be empty"));
+  check("(8-red) empty `old`: NO write", db.getAgent(ID_REPLACE).startupPrompt === BRIEF_BEFORE);
+
+  const rWithFull = await call("agent_update", { agentId: ID_REPLACE, startupPrompt: "WHOLESALE", replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "X" } });
+  check("(8-red) combined with startupPrompt: REJECTED (mutually exclusive)",
+    typeof rWithFull.error === "string" && rWithFull.error.includes("at most ONE"));
+  check("(8-red) combined with startupPrompt: NO write", db.getAgent(ID_REPLACE).startupPrompt === BRIEF_BEFORE);
+
+  const rWithAppend = await call("agent_update", { agentId: ID_REPLACE, appendToStartupPrompt: "MORE", replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "X" } });
+  check("(8-red) combined with appendToStartupPrompt: REJECTED (mutually exclusive)",
+    typeof rWithAppend.error === "string" && rWithAppend.error.includes("at most ONE"));
+  check("(8-red) combined with appendToStartupPrompt: NO write", db.getAgent(ID_REPLACE).startupPrompt === BRIEF_BEFORE);
+
+  // ===================== (8) GREEN HALF: a genuine single-occurrence match applies byte-exactly =====
+  const rApplied = await call("agent_update", { agentId: ID_REPLACE, replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "BETA CLAUSE HAS BEEN EDITED" } });
+  const expectedAfter = "ALPHA LINE\nBETA CLAUSE HAS BEEN EDITED\nGAMMA LINE\nDELTA LINE";
+  check("(8-green) single-occurrence replace: returned startupPrompt is BYTE-IDENTICAL to the hand-computed expected value",
+    !rApplied.error && rApplied.startupPrompt === expectedAfter);
+  check("(8-green) single-occurrence replace: the STORED value matches too (not just the response)",
+    db.getAgent(ID_REPLACE).startupPrompt === expectedAfter);
+  check("(8-green) single-occurrence replace: every OTHER line is untouched, byte-for-byte",
+    expectedAfter.startsWith("ALPHA LINE\n") && expectedAfter.endsWith("\nGAMMA LINE\nDELTA LINE"));
 } finally {
   db.close();
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags, and agent_update/agent_assign_profile now resolve the same id-prefix agent_get does."
+  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags, agent_update/agent_assign_profile now resolve the same id-prefix agent_get does, and agent_update's replaceInStartupPrompt rejects an absent/ambiguous/empty `old` (or a mode combined with startupPrompt/appendToStartupPrompt) with no write while a genuine single-occurrence match applies byte-exactly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

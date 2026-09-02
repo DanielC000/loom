@@ -12209,21 +12209,47 @@ export class SessionService {
    * `startupPrompt` REPLACES the whole prompt (the original contract, unchanged). `appendToStartupPrompt`
    * is the additive alternative (GAP 1): it CONCATENATES onto the agent's EXISTING prompt (joined with a
    * blank line — or used bare when the existing prompt is empty) so a manager never has to round-trip the
-   * full text for a small addition. Passing BOTH is rejected — mutually exclusive, checked before any write.
+   * full text for a small addition.
+   *
+   * `replaceInStartupPrompt` (card 6c411cdf) is the MID-DOCUMENT alternative: edit one clause of a large
+   * existing prompt without retyping the whole body as a tool argument — the exact hazard named in that
+   * card (a 40 KB `startupPrompt` argument with no diff instrument at the call site, so a dropped clause
+   * or mangled line has no natural detector). `{ old, new }` is applied against the agent's CURRENT
+   * server-side prompt (never a value the caller had to hold/paste): `old` must occur EXACTLY ONCE —
+   * zero occurrences or more than one is REJECTED with no write, so an ambiguous or already-stale `old`
+   * can never silently touch the wrong clause (or the wrong COPY of a repeated one). Only ONE of
+   * `startupPrompt` / `appendToStartupPrompt` / `replaceInStartupPrompt` may be passed per call —
+   * mutually exclusive, checked before any write.
    */
   updateAgentPreset(
     managerSessionId: string, agentId: string,
-    patch: { name?: string; startupPrompt?: string; appendToStartupPrompt?: string },
+    patch: { name?: string; startupPrompt?: string; appendToStartupPrompt?: string; replaceInStartupPrompt?: { old: string; new: string } },
   ): Agent & { promptWarning?: string } {
     this.requireManager(managerSessionId, "agent_update");
     const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
-    if (patch.startupPrompt !== undefined && patch.appendToStartupPrompt !== undefined) {
-      throw new Error("agent_update: pass startupPrompt (full replace) OR appendToStartupPrompt (append), not both");
+    const modesGiven = [patch.startupPrompt !== undefined, patch.appendToStartupPrompt !== undefined, patch.replaceInStartupPrompt !== undefined]
+      .filter(Boolean).length;
+    if (modesGiven > 1) {
+      throw new Error("agent_update: pass at most ONE of startupPrompt (full replace), appendToStartupPrompt (append), or replaceInStartupPrompt (mid-document edit)");
     }
-    const startupPrompt = patch.appendToStartupPrompt !== undefined
-      ? (agent.startupPrompt ? `${agent.startupPrompt}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt)
-      : patch.startupPrompt;
+    let startupPrompt = patch.startupPrompt;
+    if (patch.appendToStartupPrompt !== undefined) {
+      startupPrompt = agent.startupPrompt ? `${agent.startupPrompt}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt;
+    } else if (patch.replaceInStartupPrompt !== undefined) {
+      const { old: oldStr, new: newStr } = patch.replaceInStartupPrompt;
+      if (oldStr === "") throw new Error("agent_update: replaceInStartupPrompt.old must not be empty");
+      const current = agent.startupPrompt ?? "";
+      const firstIdx = current.indexOf(oldStr);
+      if (firstIdx === -1) {
+        throw new Error("agent_update: replaceInStartupPrompt.old was not found in the agent's current startupPrompt (0 occurrences) — no write made");
+      }
+      const secondIdx = current.indexOf(oldStr, firstIdx + oldStr.length);
+      if (secondIdx !== -1) {
+        throw new Error("agent_update: replaceInStartupPrompt.old is not unique — it occurs more than once in the current startupPrompt; supply more surrounding context so it matches exactly once — no write made");
+      }
+      startupPrompt = current.slice(0, firstIdx) + newStr + current.slice(firstIdx + oldStr.length);
+    }
     this.db.updateAgent(agent.id, { name: patch.name, startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId: agent.id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
     const updated = this.db.getAgent(agent.id)!;

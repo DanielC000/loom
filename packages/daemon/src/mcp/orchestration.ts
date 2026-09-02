@@ -4615,7 +4615,8 @@ export class OrchestrationMcpRouter {
           "assigned/default profile — same resolution profile_get/profile_list use; false when profile-less " +
           "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
           "(its appendToStartupPrompt mode lets you add to what you read here without retyping the whole " +
-          "prompt), and to check an agent's real provisioning before assuming it from its prompt. agentId " +
+          "prompt, and its replaceInStartupPrompt mode lets you edit one clause mid-document the same way), " +
+          "and to check an agent's real provisioning before assuming it from its prompt. agentId " +
           "accepts the full id OR an unambiguous 8-char id-prefix (same resolution as worker_spawn/" +
           "agent_list). Your project is derived SERVER-SIDE (you pass no projectId) — an agent outside YOUR " +
           "project resolves as not-found, same scoping as worker_list/agent_list. Error if unknown or an " +
@@ -4676,23 +4677,31 @@ export class OrchestrationMcpRouter {
           "Update an agent's name (title) and/or startupPrompt (the project-specific brief that LEADS the " +
           "opening of its next NEW session — prepended ahead of any dynamic kickoff/handoff; an empty brief " +
           "leaves the opening as the dynamic part alone). Structural edit only — to change the agent's rig use " +
-          "agent_assign_profile. Two ways to touch startupPrompt: `startupPrompt` REPLACES it wholesale (as " +
-          "before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line) " +
-          "so you never have to round-trip the full text for a small addition — read the current prompt first " +
-          "with agent_get. Passing BOTH in the same call is REJECTED (pick one). The target agent must be in " +
-          "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
-          "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
-          "ids, never resolving to an arbitrary match. Omitted fields are left as-is.",
+          "agent_assign_profile. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): " +
+          "`startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the " +
+          "EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause " +
+          "mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT " +
+          "server-side prompt (not a value you have to hold/paste yourself) and REJECTED with no write unless " +
+          "it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Use " +
+          "this instead of a full `startupPrompt` retype whenever you're changing one line/clause of a large " +
+          "brief — a full retype has no diff instrument at the call site, so a dropped clause or mangled line " +
+          "has no natural detector; a single-occurrence replace can't silently lose anything else in the " +
+          "prompt. Read the current prompt first with agent_get. Passing more than one of the three modes in " +
+          "the same call is REJECTED. The target agent must be in YOUR project (an agent outside it is " +
+          "REJECTED). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as " +
+          "agent_get) — an ambiguous prefix errors naming the candidate ids, never resolving to an arbitrary " +
+          "match. Omitted fields are left as-is.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
           startupPrompt: z.string().optional(),
           appendToStartupPrompt: z.string().optional(),
+          replaceInStartupPrompt: z.object({ old: z.string(), new: z.string() }).optional(),
         }),
       },
-      async ({ agentId, name, startupPrompt, appendToStartupPrompt }) => {
+      async ({ agentId, name, startupPrompt, appendToStartupPrompt, replaceInStartupPrompt }) => {
         try {
-          return ok(sessions.updateAgentPreset(managerSessionId, agentId, { name, startupPrompt, appendToStartupPrompt }));
+          return ok(sessions.updateAgentPreset(managerSessionId, agentId, { name, startupPrompt, appendToStartupPrompt, replaceInStartupPrompt }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
