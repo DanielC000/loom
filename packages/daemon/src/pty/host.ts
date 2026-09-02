@@ -1030,8 +1030,26 @@ function annotateMintStamp(
  * `PASTE_RECOVERY_TAG` so `annotatePasteRecoveryAge` no-ops on it and leaves it untouched for this
  * function to stamp) but composing them regardless keeps this call site correct even if that changes.
  */
+/**
+ * Card 8e0d09e8: resolve `m.resolveTailAtDelivery` (if present) HERE — this function runs exactly at the
+ * moment a message's text is assembled for a real write, both on the immediate-submit path and from
+ * `drainPending`, i.e. genuinely at delivery time rather than at the original `enqueueStdin` call. A
+ * throwing or absent resolver contributes nothing; the base text still delivers, unchanged — a live
+ * lookup failing must never drop or delay the message it's attached to (see the field's own doc).
+ */
+function withDeliveryTail(m: QueuedMessage): string {
+  if (!m.resolveTailAtDelivery) return m.text;
+  try {
+    const tail = m.resolveTailAtDelivery();
+    return tail ? `${m.text}${tail}` : m.text;
+  } catch {
+    return m.text;
+  }
+}
+
 function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
-  const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
+  const base = withDeliveryTail(m);
+  const t = m.giveUpGen !== undefined ? framePossibleDuplicate(base, m.logicalId) : base;
   return annotateMintStamp(
     annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock),
     m.giveUpGen, m.mintedAtGen, currentGen, m.mintedAtWallClock,
@@ -2521,7 +2539,31 @@ export type QueuedMessageKind = "warning" | "agent";
  * can impose on a quiet entry instead of accumulating it unboundedly. See the reorder scan's own
  * "FAIRNESS BOUND" comment for the mechanism this enforces.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number };
+/**
+ * `resolveTailAtDelivery` (card 8e0d09e8) — an OPTIONAL caller-supplied closure invoked at the moment
+ * this entry's text is actually assembled for a real write (`annotatedMessageText`, called from both the
+ * immediate-submit path and `drainPending`'s held-queue drain) — i.e. genuinely at delivery time, not at
+ * `enqueueStdin` call time. Its return value (or `""`/`undefined` for "nothing to add") is appended to
+ * `m.text` before any other annotation. Exists so a message whose BODY must stay frozen at enqueue time
+ * (e.g. `platform_escalate`'s notice — the title is a dedupe signature and must never be re-minted, see
+ * `SessionService.platformEscalate`'s own doc) can still carry a small amount of LIVE state read as late
+ * as possible — the escalated card's current column, in that caller's case — without mutating the frozen
+ * part. Called defensively: a throwing resolver is swallowed and contributes nothing (the base text still
+ * delivers unchanged) — a live lookup failing must never drop or delay the message it's attached to.
+ * NOT threaded through `carryPendingToSuccessor` or `getPersistablePendingSnapshot` (a function cannot
+ * cross a recycle/restart's serialization boundary) — an entry that crosses either boundary simply loses
+ * this closure and delivers with its frozen text alone, the same safe degrade as a resolver that throws.
+ * Mirrors `onGiveUpExhausted`/`onDeliver`: a closure PtyHost invokes without knowing what it does.
+ *
+ * ⚠️ CALLER RESPONSIBILITY (Code Reviewer Major ①, card 8e0d09e8): the text this resolver contributes is
+ * NOT re-read on every future delivery of the same content — `submit()` stores the fully-assembled text
+ * (tail already resolved) verbatim into `live.lastPrompt`, and `resumeAfterRateLimit` replays THAT STRING
+ * unchanged, however much later a usage-cap park happens to clear (potentially hours). A resolver whose
+ * return value conveys freshness (a live status, a count, anything time-sensitive) MUST embed its OWN
+ * read-time stamp in the string it returns — never rely on the surrounding frame's own vintage marker (if
+ * it has one) to cover the tail too; the two can legitimately diverge once a rate-limit replay is in play.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -2614,6 +2656,8 @@ export type EnqueueStdinTail = {
    * is correct precisely because none of the cross-boundary invariants above apply to them.
    */
   captureMintGen?: boolean;
+  /** See `QueuedMessage.resolveTailAtDelivery`'s own doc. No positional legacy form — options-object only. */
+  resolveTailAtDelivery?: () => string | undefined;
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -7186,6 +7230,8 @@ export class PtyHost {
     // via the tail-OBJECT form (see EnqueueStdinTail's own doc for why this must be an explicit opt-in, not
     // a `mintedAtWallClock`-presence fallback).
     const captureMintGen = isTailObject ? tailOrGiveUpHeldUntil.captureMintGen === true : false;
+    // `resolveTailAtDelivery` has NO positional legacy form (see EnqueueStdinTail's own doc) — options-object only.
+    const resolveTailAtDelivery = isTailObject ? tailOrGiveUpHeldUntil.resolveTailAtDelivery : undefined;
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -7259,7 +7305,7 @@ export class PtyHost {
         // same function the drain path uses, so there is exactly one place this logic lives. In practice
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
-        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}) };
         this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
@@ -7290,7 +7336,7 @@ export class PtyHost {
       const id = randomUUID();
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) };
+      const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}) };
       // Card eac3464d DoD-2 (owner ask 2, 2026-08-28): a SAME-SENDER agent-kind message jumps ahead of
       // any OTHER senders' messages queued after its own sender's last (eligible) entry, landing right
       // after it instead of at the FIFO tail — so drainPending's same-sender coalescing (above) actually

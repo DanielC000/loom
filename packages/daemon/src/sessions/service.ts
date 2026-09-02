@@ -9516,8 +9516,42 @@ export class SessionService {
         const otherSuffix = otherOpenCount > 0
           ? ` (+${otherOpenCount} other escalation${otherOpenCount === 1 ? "" : "s"} currently open)`
           : "";
-        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId}: ${input.title} (severity: ${severity})${otherSuffix}`;
-        try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
+        // Card 8e0d09e8 DoD-1: stamp the FILING instant (`now`, captured once at the top of this call —
+        // frozen, safe to bake into the frame right here) alongside the frozen title, so a recipient who
+        // reads this notice long after it was queued (this whole frame can sit in `live.pending` for
+        // minutes — see `enqueueStdin`'s held path) can tell it's reading a snapshot rather than a live
+        // event. ⛔ Do NOT re-mint `input.title` itself here or anywhere below — it's the dedupe signature
+        // (`escalationSignature`, companion/attention-push.ts) and must stay exactly as filed.
+        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId} (filed ${now}): ${input.title} (severity: ${severity})${otherSuffix}`;
+        // DoD-5: the card's CURRENT COLUMN — unlike the filing stamp, this is LIVE data and must be read at
+        // actual DELIVERY time, not here (this whole branch can run seconds after filing while the Lead is
+        // idle, or the note can sit queued for minutes while the Lead is busy — see the second field
+        // instance on card 8e0d09e8, where the Lead closed the card ~4 minutes before this exact notice
+        // finally drained). `resolveTailAtDelivery` is invoked by PtyHost right as the text is assembled
+        // for the real write (`annotatedMessageText`), so this closure's `getTask` read happens then, not
+        // now. A deleted task or any other lookup failure returns `undefined` (PtyHost swallows a throw
+        // too) — the notice still delivers with the filing stamp alone, never dropped or delayed by this.
+        //
+        // Code Reviewer Major ① (2026-09-02): `annotatedMessageText`'s resolved text is what `submit()`
+        // stores verbatim into `live.lastPrompt` — and `resumeAfterRateLimit` replays THAT STRING, tail
+        // already baked in, unchanged, however much later a usage-cap park happens to clear (hours,
+        // potentially). Without its own vintage marker the tail would then read as CURRENT when it can be
+        // badly stale — worse than DoD-1's gap, since a reader who trusts the frame's `(filed …)` bound
+        // has no reason to suspect the TAIL carries a different, older vintage than the frame around it.
+        // So the tail stamps ITSELF, read at the same moment as the column (never re-derived from `now`
+        // above — that's the FILING instant, not this closure's own read time) — a replayed tail then
+        // still discloses precisely when the column value it's showing was actually read, honest under a
+        // rate-limit replay exactly the same way it's honest under an ordinary queued-then-drained delivery.
+        // Matches the filing stamp's own full-ISO format (not the card's illustrative "12:08Z" shorthand)
+        // — one timestamp format in this frame, not two.
+        const resolveTailAtDelivery = () => {
+          const t = this.db.getTask(taskId);
+          if (!t) return undefined;
+          const asOf = new Date().toISOString();
+          const resolved = this.columnEscalationStatus(home.id, t.columnKey) === "resolved";
+          return resolved ? ` · column as of ${asOf}: \`${t.columnKey}\` (terminal)` : ` · column as of ${asOf}: \`${t.columnKey}\``;
+        };
+        try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { resolveTailAtDelivery })); } catch { /* Lead not live/ready — `boarded` stands */ }
       }
     }
     return {
