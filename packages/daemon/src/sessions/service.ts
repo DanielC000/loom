@@ -4851,7 +4851,10 @@ export class SessionService {
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
    * Every wake whose ENQUEUED text actually names the reason (the requester's nudge always does; a
    * manager/platform's does ONLY in the affected/full-re-orient branch, never the silent or minimal
-   * no-op branch — card 066d317c) also records the deploy SHA(s) named in the reason against its session
+   * no-op branch — card 066d317c — AND, within that branch, a MANAGER recipient only when it is in the
+   * SAME project as the requester — card 11b847e1, `reasonClauseFor` — while a PLATFORM (Lead) recipient
+   * always gets it there, since the Lead is not a party to the project-isolation boundary that scoping
+   * protects) also records the deploy SHA(s) named in the reason against its session
    * (recordDeployShasDelivered), so a later "X COMPLETE + DEPLOYED" completion escalation for the same SHA
    * is recognized as a duplicate turn and its live nudge suppressed (part 2). Recording it for a session
    * that never actually saw the reason text would let that suppression fire against a session that, in
@@ -5039,6 +5042,25 @@ export class SessionService {
     // (card 066d317c).
     const reasonShas = extractCommitShas(intent.reason);
 
+    // Card 11b847e1: `intent.reason` is FREE TEXT a manager types when calling `daemon_restart` — unlike
+    // RESTART_ORIGIN_AGENT/UNKNOWN (bounded, identity-free by construction), a reason can name a project,
+    // a card, or a person by accident ("deploying the memory fix for the Codescape board"), and this
+    // notice fans out to every OTHER manager/Lead across the WHOLE fleet, in every OTHER project. Scope
+    // it the same way `worktreeNoteFor` above already scopes cross-project data (DoD-5 of 7d3899cb): only
+    // a recipient in the SAME project as the session that actually requested the restart gets the raw
+    // text; every other recipient gets nothing in its place (the RESTART_ORIGIN_* class beside it already
+    // answers "did an agent I don't know cause this", which is all a cross-project recipient can act on
+    // anyway). `intent.managerSessionId` is always present in `resume` too (see RestartIntent's own doc),
+    // so its row is guaranteed to still exist here — this reads the REQUESTER's own project, never the
+    // resuming recipient's (that would just echo the recipient's own id back at it and always "match").
+    const originProjectId = this.db.getSession(intent.managerSessionId)?.projectId ?? null;
+    const reasonClauseFor = (recipientId: string): string => {
+      const recipientProjectId = this.db.getSession(recipientId)?.projectId ?? null;
+      return recipientProjectId !== null && recipientProjectId === originProjectId
+        ? ` (reason: ${intent.reason})`
+        : "";
+    };
+
     // Card a1b79655: this manager's/platform's cap-queued worker_spawn intent(s), if any, were silently
     // discarded by this restart — CapQueueRegistry is deliberately in-memory-only and is never re-loaded
     // on boot (see its own class doc; requestDaemonRestart snapshots the PUBLIC projection into the intent
@@ -5166,11 +5188,29 @@ export class SessionService {
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
-          // manager re-checks precisely. This is the ONLY branch whose enqueued text actually names
-          // `intent.reason` (and therefore the SHA) — so it's the only place a later completion escalation
-          // naming the same SHA is legitimately a duplicate turn, and the only place the SHA-delivered
-          // record may be written (card 066d317c; see the no-op branch's note above for what this replaced).
-          this.recordDeployShasDelivered(e.sessionId, reasonShas);
+          // manager re-checks precisely. Card 11b847e1: this branch's enqueued text now names
+          // `intent.reason` (and therefore the SHA) ONLY for a SAME-project MANAGER recipient
+          // (`reasonClauseFor` above) — so the SHA-delivered record below must follow the SAME condition,
+          // not fire unconditionally for the whole branch as it used to when this really was the only
+          // branch that ever named the reason. Recording it for a cross-project recipient that was never
+          // actually shown the reason would reintroduce the exact bug card 066d317c fixed one level up (a
+          // later "X COMPLETE + DEPLOYED" escalation for that SHA getting suppressed against a session
+          // that, in truth, was never told).
+          //
+          // The Platform Lead is carved OUT of that scoping (manager-review follow-up to 11b847e1): the
+          // isolation boundary this redaction protects is specifically "one project's MANAGER must not
+          // learn what another project is doing" (card 5a9a963b) — the Lead is not a party to that
+          // boundary. It sits ABOVE all projects by design and already holds cross-project reads
+          // elsewhere (list_all_sessions and friends), so withholding the reason from it is pure
+          // capability degradation for the one recipient whose job actually requires cross-project
+          // context, not isolation. The Lead arm therefore ALWAYS gets the raw reason — computed here,
+          // not folded into `reasonClauseFor` itself, so that helper stays a pure same-project-manager
+          // check reusable elsewhere without a role special-case baked in. Keeping `reasonClause` (not
+          // `reasonClauseFor(e.sessionId)`) as the single value both arms below AND the SHA-delivered
+          // gate read from is what keeps the two in lockstep for the Lead case too — the record must
+          // fire whenever, and only whenever, the enqueued text actually named the reason.
+          const reasonClause = e.role === "platform" ? ` (reason: ${intent.reason})` : reasonClauseFor(e.sessionId);
+          if (reasonClause) this.recordDeployShasDelivered(e.sessionId, reasonShas);
           const affected = [
             impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
             worktreeNoteFor(e.sessionId),
@@ -5189,14 +5229,14 @@ export class SessionService {
             // manager-shaped worktree/worker phrasing.
             this.enqueueDurableNudge(
               e.sessionId, e.role,
-              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
               `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           } else {
             this.enqueueDurableNudge(
               e.sessionId, e.role,
-              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon${reasonClause} and you ` +
               `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
               `state AND worktrees; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );

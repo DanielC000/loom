@@ -150,13 +150,43 @@ try {
   const doneW = `rf-done-${sfx}`;
   mkSession({ id: doneW, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, taskId: `rf-done-task-${sfx}` });
   db.appendEvent({ id: `rf-done-evt-${sfx}`, ts: now, managerSessionId: id.mgrB, workerSessionId: doneW, kind: "worker_report", detail: { status: "done", summary: "shipped it" } });
+  // Card 11b847e1: a SECOND manager in the SAME project as the requester (managerA/project A) — the
+  // positive control for the cross-project redaction below. It carries a queued pending message (forces
+  // `queuedIoReplayed > 0`, so it lands in the "affected"/full-re-orient branch exactly like managerB
+  // does) purely to exercise that branch without needing a worker of its own.
+  const mgrA2 = `rf-mgrA2-${sfx}`;
+  mkSession({ id: mgrA2, projId: A.proj, agentId: A.agent, role: "manager" });
+  // Card 11b847e1 (manager review follow-up): a Platform Lead, in its OWN reserved project (never equal
+  // to managerA's project A, so it is "cross-project" by the SAME test `reasonClauseFor` uses) — the
+  // Lead is deliberately carved OUT of that scoping, so this is the third arm: it must see the raw
+  // reason despite being cross-project, unlike managerB. Also forced into the affected branch via a
+  // queued pending message, same mechanism as mgrA2 above.
+  const PLAT = { proj: `rf-plat-${sfx}`, agent: `rf-plat-ag-${sfx}` };
+  mkProject(PLAT.proj, "/tmp/rf-plat"); mkAgent(PLAT.agent, PLAT.proj);
+  const leadX = `rf-leadX-${sfx}`;
+  // processState: "exited" — this is UNRELATED to resumeFleetOnBoot's own resume logic here (it reads
+  // only the manually-built `resumeSet`/`entries` below, never DB processState, for the entry itself).
+  // It matters for a DIFFERENT, cross-cutting feature sharing this same `db`: the "is a Platform Lead
+  // live" lookup (`this.db.listAllSessions().find(role==="platform" && processState==="live")`) used to
+  // notify a live Lead about a fleet-resume FAILURE (deadW, below, deliberately fails to resume). Leaving
+  // leadX "live" would make it the (accidental) target of that unrelated failure notice — a 3rd enqueued
+  // message this section doesn't expect — AND would leak into later sections (8i/8ii/8iii) that assert
+  // "no live Lead exists" / a SPECIFIC other Lead is the one found. "exited" keeps leadX invisible to
+  // that global lookup while still fully exercising this section's own resume/nudge path.
+  mkSession({ id: leadX, projId: PLAT.proj, agentId: PLAT.agent, role: "platform", processState: "exited" });
   const resumeSet = [
     ...fleet,
     { sessionId: deadW, role: "worker", parentSessionId: id.mgrB },
     { sessionId: blockedW, role: "worker", parentSessionId: id.mgrB },
     { sessionId: doneW, role: "worker", parentSessionId: id.mgrB },
+    { sessionId: mgrA2, role: "manager", parentSessionId: null },
+    { sessionId: leadX, role: "platform", parentSessionId: null },
   ];
-  const pendingSnap = { [id.wkrA1]: ["wkrA1 pending #1 (worker_report frame)", "wkrA1 pending #2"] };
+  const pendingSnap = {
+    [id.wkrA1]: ["wkrA1 pending #1 (worker_report frame)", "wkrA1 pending #2"],
+    [mgrA2]: ["mgrA2 pending #1"],
+    [leadX]: ["leadX pending #1"],
+  };
   const intent = { reason: "deploy merged daemon code", managerSessionId: id.mgrA, resume: resumeSet, pending: pendingSnap, requestedAt: now };
 
   const resumeCalls = [];
@@ -164,10 +194,10 @@ try {
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne, deployStaleness: CLEAN_STALENESS });
   await flush(); // let every deferred (manager/worker) continuation nudge's waitForMcpSeen().then(...) settle
 
-  check("(2) every non-dead session resumed (8)", result.resumed.length === 8 && !result.resumed.includes(deadW));
+  check("(2) every non-dead session resumed (10)", result.resumed.length === 10 && !result.resumed.includes(deadW));
   check("(2) the dead worker is in `failed`", result.failed.includes(deadW) && result.failed.length === 1);
   check("(2) the parked worker is reported skippedParked", result.skippedParked.includes(id.wkrA2) && result.skippedParked.length === 1);
-  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 9);
+  check("(2) resume injects NOTHING — resumeOne is called with a bare id only (no prompt arg)", resumeCalls.every((c) => typeof c === "string") && resumeCalls.length === 11);
 
   // Requester managerA: ONE message — its "code is now LIVE" re-prompt.
   const mgrAq = pty.getPending(id.mgrA);
@@ -194,6 +224,30 @@ try {
   // agent identity — see the card for why that would widen cross-project isolation).
   check("(2) the peer-project manager's nudge carries the explicit agent-initiated origin class, no identity",
     mgrBq[0].includes(RESTART_ORIGIN_AGENT) && !mgrBq[0].includes(id.mgrA));
+  // Card 11b847e1: managerA's `intent.reason` is FREE TEXT ("deploy merged daemon code") — a peer-project
+  // manager (managerB, project B, restart requested by managerA in project A) must NOT see it; the origin
+  // class above is the ONLY signal it gets about who/why. RED under the pre-fix code (reverted this fix
+  // and re-ran — see worker_report): mgrBq[0] contained the raw reason text verbatim.
+  check("(2) the peer-project manager's nudge OMITS the requester's raw free-text reason (cross-project redaction)",
+    !mgrBq[0].includes("deploy merged daemon code") && !mgrBq[0].includes("(reason:"));
+  // Positive control: mgrA2 is in the SAME project as the requester (managerA/project A) and also lands
+  // in the affected/full-re-orient branch (via its own queued pending message) — it DOES see the raw
+  // reason, proving the redaction above is scoped to cross-project, not a blanket removal.
+  const mgrA2q = pty.getPending(mgrA2);
+  check("(2) SAME-project manager: pending replayed first, then its nudge",
+    mgrA2q.length === 2 && mgrA2q[0] === pendingSnap[mgrA2][0]);
+  check("(2) SAME-project manager's nudge DOES include the raw reason text (positive control)",
+    mgrA2q[1].includes("deploy merged daemon code") && mgrA2q[1].includes("Another manager restarted") && mgrA2q[1].includes(RESTART_ORIGIN_AGENT));
+  // Third arm (manager-review follow-up to 11b847e1): leadX is in its OWN project (rf-plat-*, never
+  // equal to managerA's project A) — cross-project by the SAME test as managerB above — but it is a
+  // PLATFORM (Lead) recipient, deliberately carved OUT of the project-isolation scoping (the Lead is not
+  // a party to that boundary; see the src comment at the composition site). It must see the raw reason
+  // despite being cross-project, unlike managerB's negative case just above.
+  const leadXq = pty.getPending(leadX);
+  check("(2) platform Lead: pending replayed first, then its nudge",
+    leadXq.length === 2 && leadXq[0] === pendingSnap[leadX][0]);
+  check("(2) platform Lead's nudge DOES include the raw reason text despite being cross-project (Lead carve-out)",
+    leadXq[1].includes("deploy merged daemon code") && leadXq[1].includes("Another manager restarted") && leadXq[1].includes(RESTART_ORIGIN_AGENT));
   check("(2) other project's worker B1 gets the worker task nudge", pty.getPending(id.wkrB1).length === 1 && pty.getPending(id.wkrB1)[0].includes("Continue your assigned task"));
   check("(2) the dead (failed) worker received NO nudge", pty.getPending(deadW).length === 0);
   // card 547fcaaa: the worker daemon-restarted nudge no longer asserts unconditional worktree integrity —
