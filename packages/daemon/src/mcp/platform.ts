@@ -1921,13 +1921,20 @@ export class PlatformMcpRouter {
           "vaultPath (refused otherwise), mirroring where the rotation doctrine already puts an archive " +
           "(a `<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count " +
           "YOU measured before editing) to verify the doc actually shrank — this is CUT-scoped, not " +
-          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation).",
+          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation). " +
+          "Pass `rulesPath` (card 3c30258f) to also union-check markers against a NON-ROTATING rules " +
+          "file (e.g. an Orchestrator Rules.md) — a marker is satisfied if present in the ACTIVE doc OR " +
+          "the rules file, mirroring the frozen rotation-gate.mjs script's own --rules semantics; this " +
+          "is a union, NEVER a replacement — a marker present in NEITHER still fails. Like `archivePath`, " +
+          "`rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise) — omit it and " +
+          "behavior is byte-identical to a call with no rules file at all.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
+          rulesPath: z.string().optional(),
           preEditBytes: z.number().int().positive().optional(),
         }),
       },
-      async ({ archivePath, preEditBytes }) => {
+      async ({ archivePath, rulesPath, preEditBytes }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
         const session = db.getSession(callerSessionId);
         const project = session?.projectId ? db.getProject(session.projectId) : undefined;
@@ -1955,6 +1962,14 @@ export class PlatformMcpRouter {
           if (!contained.ok) return ok({ error: contained.error });
           containedArchivePath = contained.value;
         }
+        // Card 3c30258f: rulesPath is a THIRD caller-supplied host path (reaches fs.readFileSync) — same
+        // vault containment treatment as archivePath, never a third unguarded path.
+        let containedRulesPath: string | null = null;
+        if (rulesPath) {
+          const contained = containUnderVault(project.vaultPath, rulesPath, "rulesPath");
+          if (!contained.ok) return ok({ error: contained.error });
+          containedRulesPath = contained.value;
+        }
         return ok(
           runResumeDocCheck({
             resumeDocPath,
@@ -1962,6 +1977,7 @@ export class PlatformMcpRouter {
             commitmentsHeading: resolved.orchestration.rotationLiveCommitmentsHeading,
             commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
             archivePath: containedArchivePath,
+            rulesPath: containedRulesPath,
             preEditBytes: preEditBytes ?? null,
           }),
         );

@@ -269,12 +269,20 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
  * `resolveResumeDocPath`'s own containment check (`sessions/resume-doc-notes.ts`), but REFUSES on an
  * escape instead of silently falling back — there is no "authoritative default" to fall back to for an
  * optional, caller-supplied archive path the way there is for the resume doc's own basename.
+ *
+ * Card 3c30258f: also the containment used for `rulesPath` (a THIRD caller-supplied host path reaching
+ * `fs.readFileSync`) — same vault-scoped treatment, never a third unguarded path. `fieldName` names the
+ * offending field in the returned error so a caller can't misattribute which argument was rejected.
  */
-export function containUnderVault(vaultPath: string, candidatePath: string): { ok: true; value: string } | { ok: false; error: string } {
+export function containUnderVault(
+  vaultPath: string,
+  candidatePath: string,
+  fieldName: string = "archivePath",
+): { ok: true; value: string } | { ok: false; error: string } {
   const resolvedVault = path.resolve(vaultPath);
   const resolvedCandidate = path.resolve(vaultPath, candidatePath);
   const within = resolvedCandidate === resolvedVault || resolvedCandidate.startsWith(resolvedVault + path.sep);
-  if (!within) return { ok: false, error: `archivePath must resolve inside this project's vaultPath (${vaultPath}) — got ${resolvedCandidate}` };
+  if (!within) return { ok: false, error: `${fieldName} must resolve inside this project's vaultPath (${vaultPath}) — got ${resolvedCandidate}` };
   return { ok: true, value: resolvedCandidate };
 }
 

@@ -148,6 +148,47 @@ try {
   const noVaultResult = JSON.parse((await noVaultServer._registeredTools["resume_doc_check"].handler({})).content[0].text);
   check("(E) no vaultPath bound to the project: a clean {error}, never a throw", typeof noVaultResult.error === "string");
 
+  // ── (R) rulesPath union (card 3c30258f) ──────────────────────────────────────────────────────────
+  // A dedicated project/session so this block's config writes can't cross-talk with (M)'s assertions.
+  const rulesVault = path.join(tmpHome, "rules-vault");
+  fs.mkdirSync(rulesVault, { recursive: true });
+  db.insertProject({ id: "pRules", name: "RulesProj", repoPath: tmpHome, vaultPath: rulesVault, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "aRules", projectId: "pRules", name: "Lead", startupPrompt: "do it", position: 0 });
+  db.insertSession({
+    id: "mgrRules", projectId: "pRules", agentId: "aRules", engineSessionId: null, title: null, cwd: rulesVault,
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+  const rulesServer = orchRouter.buildServer("mgrRules", "manager");
+  const callRules = async (args) => JSON.parse((await rulesServer._registeredTools["resume_doc_check"].handler(args ?? {})).content[0].text);
+
+  fs.writeFileSync(path.join(rulesVault, "Orchestrator Log.md"), "nothing relevant in the active doc\n", "utf8");
+  db.setProjectConfig("pRules", { orchestration: { rotationMarkers: [{ token: "RULES-ONLY-MARKER" }] } });
+
+  const rulesFileInside = path.join(rulesVault, "Orchestrator Rules.md");
+  fs.writeFileSync(rulesFileInside, "the non-rotating rules doc mentions RULES-ONLY-MARKER here\n", "utf8");
+
+  // RED half: the marker is absent from the active doc and rulesPath is NOT passed — must FAIL. This is
+  // the control that proves the GREEN result below is the union actually working, not a no-op.
+  const withoutRules = await callRules();
+  check("(R) RED: marker absent from active doc, no rulesPath passed: ok:false, marker reported missing", withoutRules.ok === false && withoutRules.missingMarkers.includes("RULES-ONLY-MARKER"));
+
+  // GREEN half: same marker, same docs, only difference is rulesPath — must PASS, attributed to "rules".
+  const withRules = await callRules({ rulesPath: rulesFileInside });
+  check("(R) GREEN: same marker, rulesPath passed, marker present in the rules file: ok:true, satisfied via rules", withRules.ok === true && withRules.markerSources["RULES-ONLY-MARKER"] === "rules");
+
+  // Containment: rulesPath is a THIRD caller-supplied host path — refused outside vaultPath exactly like archivePath.
+  const rulesOutside = path.join(tmpHome, "rules-outside-vault.md");
+  fs.writeFileSync(rulesOutside, "RULES-ONLY-MARKER lives out here too\n", "utf8");
+  const rulesEscaping = await callRules({ rulesPath: rulesOutside });
+  check("(R) a rulesPath OUTSIDE vaultPath is REFUSED with a clean {error}, never read", typeof rulesEscaping.error === "string");
+
+  // DoD-4: a marker present in NEITHER active nor rules must still fail — the union must never become a
+  // way to satisfy a marker that exists nowhere.
+  db.setProjectConfig("pRules", { orchestration: { rotationMarkers: [{ token: "NOWHERE-MARKER" }] } });
+  const neitherResult = await callRules({ rulesPath: rulesFileInside });
+  check("(R) DoD-4: a marker present in NEITHER active nor rules still FAILS even with rulesPath supplied", neitherResult.ok === false && neitherResult.missingMarkers.includes("NOWHERE-MARKER"));
+
   // (E) code-review MINOR fix: the Lead surface gets the SAME no-vaultPath guard as the manager surface
   // (before the fix, an empty vaultPath would resolve to a bare relative filename against the daemon's
   // own cwd, which resolvePlatformLeadResumeDocPath's documented copyFileSync seed side-effect could
@@ -167,7 +208,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), and a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix) — claude-free, network-free."
+  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix), and the rulesPath union (card 3c30258f) is reachable and contained: a marker absent from the active doc fails without rulesPath (RED), passes once rulesPath is supplied and the marker is present there (GREEN), rulesPath is refused outside vaultPath exactly like archivePath, and a marker present in NEITHER active nor rules still fails even with rulesPath supplied — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
 
