@@ -26,14 +26,40 @@
 // 2026-09-01): three markers retired because the rules they protected were retired in the SAME cut —
 // `MY-PEER-SEND-LEDGER` (the per-send ledger is deleted outright), `ANNOUNCE-CANNOT-CARRY-A-SHA`
 // (retired with the merge-announce obligation it qualified), `MGR122-FLOOR` (a floor on an announced
-// number that no longer gets announced). This local copy now holds 11 markers — it is the lead's job
+// number that no longer gets announced). This local copy dropped to 11 markers — it is the lead's job
 // (not this card's) to land the matching cut in `Orchestrator Rules.md` §ROTATION-GATE and
 // `Orchestrator Log.md`; this script intentionally lands FIRST so the next rotation's gate doesn't
 // refuse the doc the vault edit is about to produce. See the card for the two markers kept despite
 // looking like ceremony — `NO-CLEARANCE-FROM-SILENCE` (protects the repo against inferring
 // authorization from silence, not etiquette) and `QUIET-LANE` (a measurement-honesty rule backing the
 // gate-queue-read-at-fire interlock) — both still required below.
-// Prior verification history (now superseded by the cut above, kept for provenance): re-verified against
+//
+// RESTORE 2026-09-02, same day (card `a681aed5`): `MGR122-FLOOR` put BACK into MARKERS (11 → 12), after
+// a peer objection to the bare cut above — the peer agreed the announce obligation is genuinely retired,
+// but objected that removing the marker AND the matching `§LIVE COMMITMENTS` numbered item in the same
+// change left NOTHING durable carrying the rule, and had a fresh first-party incident showing exactly
+// this class of loss (a marker-enforcing rotation script is what caught an unrelated rule silently
+// dropped from a DIFFERENT resume doc that same hour). `bcd3f690` otherwise stands unchanged: the floor
+// stays at 12, and `MY-PEER-SEND-LEDGER`/`ANNOUNCE-CANNOT-CARRY-A-SHA` stay retired. The token is cheap
+// to carry now — it's already `§LIVE COMMITMENTS` item 14 in the live doc, and satisfiable via `--rules`
+// from the non-rotating `Orchestrator Rules.md` too. See the MARKERS entry's own note for the one honest
+// limit this doesn't cover: a COUNT floor on the section protects how many items survive, never that any
+// SPECIFIC item (like this one) is among them — only a named marker does that.
+//
+// RE-ANCHOR 2026-09-02, same card (`a681aed5`): `countLiveCommitments` below used to close the LIVE
+// COMMITMENTS section by searching for a heading literally containing "my-peer-send-ledger" — a second,
+// independent coupling to that same retired name, missed by the `bcd3f690` cut because retiring a MARKER
+// token never touched this separate anchor. Once the vault doc dropped that heading (replacing it with
+// `§PEER-CHANNEL`), the search silently fell back to end-of-file: harmless that day only because nothing
+// else in the doc happened to hold a numbered list below the section, but a real, fail-OPEN exposure —
+// any future numbered list added below `§LIVE COMMITMENTS` would inflate the count instead of ever being
+// caught. The section end is now anchored STRUCTURALLY instead: the next markdown heading line at the
+// same level or shallower than `§LIVE COMMITMENTS`'s own heading (a sibling or ancestor section boundary)
+// — this depends on heading DEPTH, never on any heading's NAME, so it cannot go stale the way a
+// name-anchor already has, twice, in this one script. See `countLiveCommitments`'s own comment for why a
+// same-or-shallower level (not "any heading" or "the immediate next `##`") is the right rule.
+//
+// Prior verification history (now superseded by the cuts above, kept for provenance): re-verified against
 // the live vault section 2026-08-28 (card `d78a6d5d`), the marker list then held 14 entries and matched
 // §ROTATION-GATE verbatim with no drift found.
 //
@@ -147,20 +173,14 @@ const MARKERS = [
   { token: "capQueued", caseSensitive: true, note: "a literal response FIELD NAME — must match casing exactly" },
   { token: "in-memory", caseSensitive: false },
   { token: "QUIET-LANE", caseSensitive: false, note: "a measurement-honesty rule backing the gate-queue-read-at-fire interlock — kept by card bcd3f690" },
+  { token: "MGR122-FLOOR", caseSensitive: false, note: "a floor on an announced live-worker-count number — RESTORED by card a681aed5 (2026-09-02) after a peer objection: nothing else durably carries this rule once dropped from MARKERS, and a count floor on LIVE COMMITMENTS protects the SECTION SIZE, never this SPECIFIC item — see the file header" },
 ];
 
 // Retired 2026-09-02 by card `bcd3f690` (owner's ceremony cut): "MY-PEER-SEND-LEDGER" (the per-send
 // ledger is deleted outright), "ANNOUNCE-CANNOT-CARRY-A-SHA" (retired with the merge-announce
-// obligation), "MGR122-FLOOR" (a floor on an announced number that is no longer announced). None of the
-// three are required above any more — see the file header for the full reasoning.
-//
-// ⚠️ COUPLING NOTE, flagged not fixed by this cut: `countLiveCommitments` below still anchors the END of
-// the LIVE COMMITMENTS section to a heading literally containing "my-peer-send-ledger" (falling back to
-// end-of-file when absent — proven safe by this card's own RED-baseline run, see the worker report). That
-// anchor is independent of this MARKERS array and is UNCHANGED by this cut. If a future vault edit removes
-// the §MY-PEER-SEND-LEDGER heading from the resume doc entirely, the section will simply be measured to
-// end-of-file instead — a strict superset, never a false refusal, but worth knowing before touching this
-// function again.
+// obligation). Neither is required above any more — see the file header for the full reasoning.
+// A third token, "MGR122-FLOOR", was retired in that same cut and then RESTORED the same day by card
+// `a681aed5` — see the MARKERS entry above and the file header for why.
 const LIVE_COMMITMENTS_FLOOR = 12;
 
 const HELP = `rotation-gate.mjs — refuse to promote a resume-doc rotation that silently drops a durable marker or shrinks the LIVE COMMITMENTS list.
@@ -198,11 +218,12 @@ Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failu
 
 Checks run against --active (unioned with --rules when supplied):
   1. All ${MARKERS.length} markers below are present as exact substrings (see the case-sensitivity note in each).
-  2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next MY-PEER-SEND-LEDGER
-     heading LINE — a prose mention of either token that is not itself a heading line is ignored) still
-     contains AT LEAST ${LIVE_COMMITMENTS_FLOOR} numbered items, matched by /^\\d+\\. /gm — a FLOOR, never an
-     exact count: the list may grow without limit, it may never shrink below this floor. (This section is
-     only ever measured in --active — it is not a candidate for the --rules union.)
+  2. The LIVE COMMITMENTS section (between its markdown HEADING LINE and the next markdown heading LINE at
+     the same level or shallower — a prose mention of a heading-like token that is not itself a heading
+     line is ignored) still contains AT LEAST ${LIVE_COMMITMENTS_FLOOR} numbered items, matched by
+     /^\\d+\\. /gm — a FLOOR, never an exact count: the list may grow without limit, it may never shrink
+     below this floor. (This section is only ever measured in --active — it is not a candidate for the
+     --rules union.)
 
 Checks run against --archive (skipped entirely under --lint):
   3. The path exists, is a regular file, and is non-empty.
@@ -330,32 +351,67 @@ function findHeadingLine(lines, token, fromIndex) {
   return -1;
 }
 
-// Returns { count, diagnostic }. `count` is the number of /^\d+\. /gm matches strictly between the LIVE
-// COMMITMENTS heading LINE and the next MY-PEER-SEND-LEDGER heading LINE after it (or end of file if
-// there is none) — null if the LIVE COMMITMENTS heading itself can't be located at all. `diagnostic`
-// always names WHERE the section was measured (matched line number + text, or "end of file"), so a count
-// mismatch is self-diagnosable without reading this script's source (card d78a6d5d DoD-3).
+// Returns the heading depth (1-6) of a markdown heading line, or null if `line` isn't one.
+function headingLevel(line) {
+  const m = line.match(/^(#{1,6})\s/);
+  return m ? m[1].length : null;
+}
+
+// Finds the first line at or after `fromIndex` that is a markdown heading whose LEVEL is <= `maxLevel` —
+// i.e. a SIBLING or ANCESTOR section boundary of a heading at `maxLevel`. Returns the line index, or -1.
 //
-// BOTH boundaries are anchored to a markdown HEADING LINE, never a bare substring search — card
+// Deliberately structural: this depends only on heading DEPTH, never on any heading's NAME/text. Card
+// `a681aed5` (2026-09-02): the prior version of `countLiveCommitments` closed the LIVE COMMITMENTS
+// section by searching for a heading containing the literal string "my-peer-send-ledger" — a NAME anchor,
+// independent of the MARKERS array, that a later vault edit (retiring that exact heading) silently broke
+// (falling back to end-of-file — safe that day only because nothing else in the doc held a numbered list
+// below the section, but a fail-OPEN exposure: any future numbered list added below LIVE COMMITMENTS
+// would silently inflate the count instead of ever being caught — see the file header). Re-pointing the
+// search at a DIFFERENT specific heading name would only relocate the same defect to a new string the
+// next rewrite is free to delete; the fix instead drops the dependence on a name entirely.
+//
+// "Same level or shallower," not "any heading" and not "the immediate next `##`": a deeper heading
+// (e.g. a `###` sub-note nested INSIDE the commitments list, should one ever be added) must not
+// prematurely end the section — it's still part of it. A shallower heading (e.g. a `#` top-level
+// division) must end it even though it isn't the same depth — it can only ever contain, never continue,
+// the commitments section. "Same or shallower" is the one rule that gets both right.
+function findSectionBoundary(lines, fromIndex, maxLevel) {
+  for (let i = fromIndex; i < lines.length; i++) {
+    const lvl = headingLevel(lines[i]);
+    if (lvl !== null && lvl <= maxLevel) return i;
+  }
+  return -1;
+}
+
+// Returns { count, diagnostic }. `count` is the number of /^\d+\. /gm matches strictly between the LIVE
+// COMMITMENTS heading LINE and the next section-boundary heading LINE after it (same level or shallower —
+// see findSectionBoundary; or end of file if there is none) — null if the LIVE COMMITMENTS heading itself
+// can't be located at all. `diagnostic` always names WHERE the section was measured (matched line number +
+// text, or "end of file"), so a count mismatch is self-diagnosable without reading this script's source
+// (card d78a6d5d DoD-3).
+//
+// The START boundary is anchored to a markdown HEADING LINE, never a bare substring search — card
 // d78a6d5d: the prior version used plain case-insensitive `indexOf` on the raw text, so a PROSE mention
-// of either boundary token anywhere above its real heading (e.g. a doc's own header block documenting
-// this gate's contract in these exact words) silently redefined the measured span, producing a
+// of the boundary token anywhere above its real heading (e.g. a doc's own header block documenting this
+// gate's contract in these exact words) silently redefined the measured span, producing a
 // maximally-alarming false "0 numbered item(s), expected 14" on a perfectly correct document. Anchoring
 // to a heading line makes a prose mention inert: it is never itself a heading line, so it can never open
-// or close the section.
+// the section. The END boundary is anchored the same way, structurally, by heading DEPTH rather than by a
+// second boundary token's name — see findSectionBoundary's own comment (card a681aed5).
 function countLiveCommitments(text) {
   const lines = text.split(/\r\n|\r|\n/);
   const startLine = findHeadingLine(lines, "live commitments", 0);
   if (startLine === -1) {
     return { count: null, diagnostic: "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active" };
   }
-  const endLine = findHeadingLine(lines, "my-peer-send-ledger", startLine + 1);
+  const startLevel = headingLevel(lines[startLine]);
+  const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
   const sectionLines = lines.slice(startLine + 1, endLine === -1 ? lines.length : endLine);
   const matches = sectionLines.join("\n").match(/^\d+\. /gm);
   const startDesc = `heading line ${startLine + 1} ("${lines[startLine].trim()}")`;
   const endDesc =
     endLine === -1
-      ? "end of file (no MY-PEER-SEND-LEDGER heading found after it)"
+      ? `end of file (no heading at level <= ${startLevel} found after it)`
       : `heading line ${endLine + 1} ("${lines[endLine].trim()}")`;
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
 }

@@ -59,9 +59,9 @@ function writeFixture(name, content) {
 // The marker tokens rotation-gate.mjs requires, independent of this card's fix (kept as a local
 // literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is that).
 // Card bcd3f690 (2026-09-02) retired 3 of the original 14 markers (MY-PEER-SEND-LEDGER,
-// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR) — this list holds the 10 that survive that cut, unrelated to
-// this test's own subject (the floor-vs-equality fix), so the fixtures below still satisfy the current
-// marker check.
+// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR); card a681aed5 (same day) restored MGR122-FLOOR — this list
+// holds the 11 that currently survive, unrelated to this test's own subject (the floor-vs-equality fix),
+// so the fixtures below still satisfy the current marker check.
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -73,6 +73,7 @@ const ALL_MARKER_TOKENS = [
   "capQueued",
   "in-memory",
   "QUIET-LANE",
+  "MGR122-FLOOR",
 ];
 
 function commitmentsList(n) {

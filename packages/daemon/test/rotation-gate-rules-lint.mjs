@@ -28,9 +28,10 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The marker tokens rotation-gate.mjs requires, as of card 9a5837b2 and subsequently narrowed by card
-// bcd3f690 (2026-09-02, which retired MY-PEER-SEND-LEDGER, ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR —
-// kept as a local literal here; rotation-gate.mjs's own MARKERS array is the source of truth).
+// The marker tokens rotation-gate.mjs requires, as of card 9a5837b2, narrowed by card bcd3f690
+// (2026-09-02, which retired MY-PEER-SEND-LEDGER, ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR), then
+// amended by card a681aed5 (same day, restored MGR122-FLOOR) — kept as a local literal here;
+// rotation-gate.mjs's own MARKERS array is the source of truth.
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -42,6 +43,7 @@ const ALL_MARKER_TOKENS = [
   "capQueued",
   "in-memory",
   "QUIET-LANE",
+  "MGR122-FLOOR",
 ];
 
 function commitmentsList(n) {
