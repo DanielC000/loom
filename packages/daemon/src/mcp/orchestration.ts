@@ -343,7 +343,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
-      "retriedFile?, retryPassed?, retryWarning?}. `queued`/`running` " +
+      "retriedFile?, retryPassed?, retryWarning?, transientRetried?, transientRetryWarning?}. `queued`/`running` " +
       "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
       "\"Do NOT poll\" instruction: stop re-calling this tool on a timer, `idle_report({state:\"waiting\"})`, " +
       "and END your turn — the `[loom:merge-done]`/`[loom:merge-rejected]`/`[loom:merge-failed]` nudge " +
@@ -481,6 +481,23 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "runs THIS daemon's own `packages/daemon/scripts/test-daemon.mjs` hermetic suite — `identifyRetriableTestFile` " +
       "hardcodes that layout, so on every other project `retriedFile` reads `null` by construction, not by " +
       "coincidence. " +
+      "⚠️ `transientRetried`/`transientRetryWarning` (card a0d1165c) — the SIBLING gap this closes: a " +
+      "settled `outcome:\"pass\"` can ALSO be reached via the TRANSIENT-KILL AUTO-RETRY (card bcba83a1), " +
+      "which auto-retries the WHOLE gate once after attempt 1 was killed/timed out — mutually exclusive " +
+      "with the single-file retry above (a first attempt is classified either \"genuine\", eligible for " +
+      "`retriedFile`, or \"kill\"/\"timeout\", eligible for THIS retry, never both — so `retriedFile` and " +
+      "`transientRetried` are never both non-null/`true` on the same op). Before this card this fact was " +
+      "\"nudge text only\": the live `[loom:merge-done]` push rendered it, but nothing durable recorded it, " +
+      "so a manager who missed that one nudge (a recycle, a restart, a successor reading history later) saw " +
+      "an ordinary clean pass with no way to tell it apart. `transientRetried` is a MEASURED NEGATIVE, the " +
+      "identical present-with-false-vs-absent-key contract `retriedFile` uses (present-with-null): a stored " +
+      "`false` positively asserts \"this verdict was NOT reached via this retry\", present on every settled " +
+      "\"merge\" pass/fail going forward; `undefined` means only \"this row predates card a0d1165c\" or " +
+      "\"cancelled\"/\"error\" (never computed there). `transientRetryWarning` is present ONLY when " +
+      "`transientRetried` is `true`: the SAME `formatTransientRetryWarning()` text the live nudge already " +
+      "renders for this exact op — one shared formatter, so a caller who only ever reads `gate_status` gets " +
+      "the identical warning, never a paraphrase. Same \"the concurrency triple beside this note describes " +
+      "the RETRY's own admission, not attempt 1's\" caveat the live nudge's wording already carries. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +
       "ever delivered for it, treat it like `settled` for planning purposes and just re-run " +
@@ -3954,7 +3971,7 @@ export class OrchestrationMcpRouter {
           "\"skipped\"), " +
           "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
-          "sessionId, projectId, projectName, retriedFile, retryPassed, emitCompareReduced, " +
+          "sessionId, projectId, projectName, retriedFile, retryPassed, transientRetried, emitCompareReduced, " +
           "emitCompareIdenticalCount, emitCompareTestFiles}. " +
           "⚠️ CARD 6ca4b1a0 — `emitCompareReduced`: a duration series built from this table MUST bucket on " +
           "this field before comparing durations — a `\"merge\"` row's gate can run REDUCED (build + static " +
@@ -4033,6 +4050,14 @@ export class OrchestrationMcpRouter {
           "`\"cancelled\"` retroactively, not just going forward. A trend spanning the boundary is still " +
           "SAFE to compare on `outcome` for this reason — unlike `concurrentGatesMax` below, there is no " +
           "old-encoding-vs-new-encoding mix to account for here. " +
+          "⭐ CARD a0d1165c — `transientRetried` NAMES WHICH ROW IS THE RETRY, so you don't have to infer it " +
+          "from the pairing alone: DERIVED from the row's own underlying event kind (never a stored detail " +
+          "field), `true` iff this row IS the transient-kill retry's own `build_gate_retry` row just " +
+          "described (its own `outcome`/`passed` already say whether THAT retry passed or failed); `false` " +
+          "for every `build_gate`/`worker_gate`/`deploy` row, including attempt 1's own `\"reject\"` row in " +
+          "the pairing above. Mutually exclusive with a non-null `retriedFile` on the SAME row (a first " +
+          "attempt is classified either \"genuine\", eligible for the single-file retry, or \"kill\"/" +
+          "\"timeout\", eligible for THIS retry, never both) — never both truthy on one row. " +
           "⚠️ CARD db9b0130 — `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
           "\"merge\"` row whose branch's ENTIRE changed-path set was proven inert (docs-only) never spawns a " +
           "gate at all — the row still stamps `detail.passed:true` (so the merge could proceed to squash), " +

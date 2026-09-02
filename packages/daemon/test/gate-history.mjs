@@ -610,6 +610,72 @@ function seed(db) {
   }
 }
 
+// ── (unit, card a0d1165c) transientRetried — the mapper, against synthetic fixtures shaped exactly like
+// the two real producer shapes: a `build_gate` row (attempt 1 — never the transient-kill retry's own row)
+// and a `build_gate_retry` row (the retry's OWN admission+verdict — see GateHistoryRow.transientRetried's
+// own doc for why this is a SEPARATE row rather than a fold-onto-attempt-1 field like `retriedFile`/
+// `retryPassed`). DoD-4 RED-HALF POLARITY: this proves BOTH directions — a `build_gate_retry` row reads
+// transientRetried:true (the POSITIVE control: a broken check that always returns "no transient retry"
+// would fail THIS assertion), and an ordinary `build_gate` row (even one that also failed) reads
+// transientRetried:false (the negative control). DoD-3 MUTUAL EXCLUSION: a `build_gate` row carrying a
+// non-null `retriedFile` (the single-file retry) still reads transientRetried:false — the two are never
+// both truthy on the same row, proven side by side with the `build_gate_retry` row's own retriedFile:null. ─
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P = `gh-transretry-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    db.insertProject({ id: P, name: "TransRetry Fixtures", repoPath: `/tmp/${P}`, vaultPath: `/tmp/${P}`, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    const a = `${P}-a`;
+    db.insertAgent({ id: a, projectId: P, name: "dev", startupPrompt: "", position: 0 });
+    const t = `${P}-task`;
+    db.insertTask({ id: t, projectId: P, title: "TransRetry fixtures task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const mgr = `${P}-mgr`, w = `${P}-wkr`;
+    db.insertSession({ id: mgr, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: w, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t, worktreePath: `/tmp/${P}-wt`, branch: "loom/transretry-branch" });
+
+    // (1) Attempt 1's own row — REJECTED (killed/timed out), the shape `build_gate` always carries before a
+    // transient-kill retry ever starts. `null` retriedFile: the single-file retry never fired here either.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 3000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "build_gate",
+      detail: { passed: false, durationMs: 4321, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0 },
+    });
+    // (2) The retry's OWN row — `build_gate_retry`, PASSED. THE POSITIVE CONTROL.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 2000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "build_gate_retry",
+      detail: { passed: true, durationMs: 5555, gateCap: 1, concurrentGates: 1, concurrentGatesMax: 1 },
+    });
+    // (3) An ordinary single-file-retry-assisted PASS — `build_gate` carrying a non-null `retriedFile`.
+    // MUTUAL EXCLUSION: this must read transientRetried:false even though A retry did fire (the OTHER one).
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 1000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "build_gate",
+      detail: { passed: true, durationMs: 777, gateCap: 1, concurrentGates: 0, concurrentGatesMax: 0, retriedFile: "some-file", retryPassed: true },
+    });
+
+    const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
+    check("(unit, card a0d1165c) all 3 fixture rows returned", page.items.length === 3);
+    const attempt1Row = page.items.find((r) => r.durationMs === 4321);
+    const retryRow = page.items.find((r) => r.durationMs === 5555);
+    const singleFileRow = page.items.find((r) => r.durationMs === 777);
+    check("(unit, card a0d1165c) precondition: all 3 fixtures resolved to 3 distinct rows", new Set([attempt1Row, retryRow, singleFileRow]).size === 3 && [attempt1Row, retryRow, singleFileRow].every(Boolean));
+
+    check("(unit, card a0d1165c) (1) attempt 1's own reject row: transientRetried:false", attempt1Row?.transientRetried === false);
+    check("(unit, card a0d1165c) (1) attempt 1's own reject row: retriedFile is null too — neither retry fired here", attempt1Row?.retriedFile === null);
+
+    check("(unit, card a0d1165c — THE POSITIVE CONTROL) (2) a build_gate_retry row reads transientRetried:true — a broken check returning false here would fail this exact assertion", retryRow?.transientRetried === true);
+    check("(unit, card a0d1165c) (2) the retry's own row still reads outcome:\"pass\" (its OWN verdict, independent of transientRetried flagging WHICH row this is)", retryRow?.outcome === "pass");
+    check("(unit, card a0d1165c) (2) the retry's own row carries retriedFile:null — the single-file retry has no mechanism that emits this kind", retryRow?.retriedFile === null);
+
+    check("(unit, card a0d1165c — MUTUAL EXCLUSION, DoD-3) (3) a single-file-retry-assisted pass reads transientRetried:false even though retriedFile is non-null — never both truthy on one row", singleFileRow?.transientRetried === false && singleFileRow?.retriedFile === "some-file");
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
 // ── (unit, card 6ca4b1a0) emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles — the mapper,
 // against synthetic `pending_gate_ops` fixtures covering all FOUR shapes: the two arms of a genuine
 // reduction (vacuous-vs-informative `identicalCount`), an explicit `false` (a real gate proven NOT

@@ -870,6 +870,14 @@ function deriveMergeGateVerdict(
       // .retryPassed`'s doc documents, not a loss of information.
       retriedFile: v.retriedFile ?? null,
       retryPassed: v.retryPassed ?? null,
+      // Card a0d1165c: the SAME unconditional "measured negative" treatment as `retriedFile`/`retryPassed`
+      // immediately above, for the sibling TRANSIENT-KILL AUTO-RETRY fact — see
+      // `PendingGateOpVerdict.transientRetried`'s own doc for why `?? false` on a still-failing transient
+      // retry's rejection row is the CORRECT value (not a gap): `v.transientRetried` is only ever set on a
+      // `merged:true` return by design (`ConfirmMergeResult.transientRetried`'s own doc), so a rejection
+      // that WAS transient-retried already has the fact recorded elsewhere (the nudge/audit-event text),
+      // exactly like `retriedFile`'s own asymmetric-scope precedent this mirrors deliberately.
+      transientRetried: v.transientRetried ?? false,
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestCount: v.gateDetail.failingTestCount,
@@ -4271,6 +4279,27 @@ export class SessionService {
      *  this before treating any settled "merge" pass as trustworthy on its own. Absent (never an empty
      *  string) whenever `retriedFile` is `null` or `undefined`. */
     retryWarning?: string;
+    /** Card a0d1165c, sibling of `retriedFile`/`retryPassed`/`retryWarning` immediately above — the SAME
+     *  durable exposure for the OTHER retry that can produce a `passed:true` settled merge, the
+     *  TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a killed/timed-out attempt 1 auto-retries the WHOLE gate
+     *  once. `!== undefined` spread (not truthy), mirroring `retriedFile`'s own pass-through discipline —
+     *  `payload.transientRetried` is written unconditionally (`true`/`false`, never `undefined`) by
+     *  `deriveMergeGateVerdict` on every "pass"/"fail" row going forward, so a literal `false` here IS a
+     *  measured "no transient retry produced this verdict", not silence. `undefined` means only "this row
+     *  predates card a0d1165c" or "cancelled"/"error" (this pairing was never computed on those branches).
+     *  MUTUALLY EXCLUSIVE with a non-null `retriedFile` on the SAME settled row — a first gate attempt is
+     *  classified either "genuine" (eligible for the single-file retry, `retriedFile`) or "kill"/"timeout"
+     *  (eligible for THIS retry) never both, so at most one of `retriedFile`/`transientRetried` is ever
+     *  "truthy" (non-null / `true`) on one op. `transientRetryWarning` (below) is the derived-text sibling
+     *  of `retryWarning`, present under the identical gating. */
+    transientRetried?: boolean;
+    /** Card a0d1165c: present ONLY when `transientRetried` is `true` — the SAME "⚠ WEAKER PASS" wording the
+     *  `[loom:merge-done]` nudge already renders live for this exact op (`formatTransientRetryWarning()`,
+     *  the ONE shared formatter both surfaces call — never a second, independently-worded copy, mirroring
+     *  `retryWarning`'s own `formatWeakerPassWarning` precedent exactly). Explains, in plain language, that
+     *  the concurrency triple beside this note describes the RETRY's own (later) admission, not attempt
+     *  1's. Absent (never an empty string) whenever `transientRetried` is `false` or `undefined`. */
+    transientRetryWarning?: string;
   } {
     const scoped = scopeSessionId != null || scopeProjectId != null;
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
@@ -4343,6 +4372,12 @@ export class SessionService {
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
           ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile) } : {}),
+          // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
+          // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,
+          // not silence) and the same "derive the warning text, gated on truthy, via the ONE shared
+          // formatter" shape `retryWarning` already uses.
+          ...(payload?.transientRetried !== undefined ? { transientRetried: payload.transientRetried } : {}),
+          ...(payload?.transientRetried ? { transientRetryWarning: formatTransientRetryWarning() } : {}),
           // Card e2b6f900: without this, the triple is written to verdict_payload_json and NEVER read back
           // out — a manager calling gate_status(opId) after missing the nudge (precisely the post-hoc
           // recovery path this card exists to serve) would see undefined and reasonably conclude "no gate

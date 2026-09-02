@@ -104,7 +104,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GateSemaphore } = await import("../dist/orchestration/gate-semaphore.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
-const { describeGateProximity, GATE_PROXIMITY_THRESHOLD, formatWeakerPassWarning } = await import("../dist/orchestration/gate-runner.js");
+const { describeGateProximity, GATE_PROXIMITY_THRESHOLD, formatWeakerPassWarning, formatTransientRetryWarning } = await import("../dist/orchestration/gate-runner.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -715,6 +715,13 @@ try {
     check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retriedFile is a present `null`, not an absent key", "retriedFile" in status && status.retriedFile === null);
     check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retryPassed is a present `null`, not an absent key", "retryPassed" in status && status.retryPassed === null);
     check("(e2e merge verdict pass — 6dcb9cd3 NEGATIVE CONTROL) retryWarning is absent — nothing to warn about on a clean pass", !("retryWarning" in status));
+    // Card a0d1165c, NEGATIVE POLARITY — the sibling of the 6dcb9cd3 negative control immediately above,
+    // for the TRANSIENT-KILL AUTO-RETRY: an ordinary clean pass (no transient-kill retry ever fired) must
+    // expose `transientRetried` as a MEASURED NEGATIVE (`false`, present), never as an absent key — the
+    // dangerous polarity DoD-4 calls out (a broken check would ALSO return "no transient retry" here, so
+    // this alone proves nothing without the positive control in the block below).
+    check("(e2e merge verdict pass — a0d1165c NEGATIVE CONTROL) transientRetried is a present `false`, not an absent key", "transientRetried" in status && status.transientRetried === false);
+    check("(e2e merge verdict pass — a0d1165c NEGATIVE CONTROL) transientRetryWarning is absent — nothing to warn about on a clean pass", !("transientRetryWarning" in status));
   }
 
   // ── (e2e merge, card 6dcb9cd3 — RETRY-ASSISTED PASS, POSITIVE CONTROL) card 344ce950's single-file retry
@@ -782,6 +789,67 @@ try {
     check("(e2e merge retry-assisted pass — THE FIX) retryPassed:true round-trips through the tombstone", status.retryPassed === true);
     check("(e2e merge retry-assisted pass — DoD-2, SHARED FORMATTER) retryWarning is present and matches the SAME formatWeakerPassWarning text the live [loom:merge-done] nudge renders for this exact op — never a second, independently-worded copy", status.retryWarning === formatWeakerPassWarning("flaky-gst"));
     check("(e2e merge retry-assisted pass — DoD-3, steps[] not the verdict) steps[0].status is nonzero (attempt 1's real failure) even though outcome is \"pass\" — proves a reader CANNOT take steps[N].status for the verdict; outcome/retriedFile/retryWarning are what discriminate", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].status !== 0 && status.outcome === "pass");
+    // Card a0d1165c, DoD-3 MUTUAL EXCLUSION (one direction): a settled row produced by the SINGLE-FILE
+    // retry must never ALSO read transientRetried:true — the two retries are mutually exclusive per
+    // attempt (service.ts:15610-15612). The other direction is asserted in the TRANSIENT-KILL block below.
+    check("(e2e merge retry-assisted pass — a0d1165c MUTUAL EXCLUSION) transientRetried is false on a single-file-retry-assisted pass", status.transientRetried === false && !("transientRetryWarning" in status));
+  }
+
+  // ── (e2e merge, card a0d1165c — TRANSIENT-KILL RETRY-ASSISTED PASS, POSITIVE CONTROL) the sibling of the
+  // RETRY-ASSISTED PASS block above, for the OTHER retry that can produce a `merged:true` verdict: the
+  // TRANSIENT-KILL AUTO-RETRY (card bcba83a1) — attempt 1 is killed/timed out (never a "genuine" non-zero
+  // exit), the whole gate auto-retries once, and the retry passes. Before this card `gate_status(opId)`
+  // carried NEITHER `transientRetried` NOR a warning for this exact settled op — the SAME asymmetry
+  // 6dcb9cd3 already fixed for the single-file retry's sibling fields, still open here. Driven through
+  // `confirmWorkerMergeTracked` (the tracked/tombstone wrapper `gate_status` actually reads from), mirroring
+  // merge-gate-retry.mjs scenario (A)'s fixture shape (`failedSignal:"SIGKILL", failedTimedOut:false` — a
+  // "kill" classification, retry-eligible, never "genuine"). Asserted only AFTER the op leaves
+  // PendingOpRegistry's retained view, same discipline as every other block in this file. ────────────────
+  {
+    const P = `gst-transretry-pass-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-TRANSRETRY-PASS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`, mgrId = `${P}-mgr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-TRANSRETRY-PASS-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const killedThenPassGate = async () => {
+      calls++;
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: null, failedSignal: "SIGKILL", failedTimedOut: false, outputTail: "" };
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: killedThenPassGate });
+
+    const r = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
+    const { opId, value, viaAsync } = await settleMergeEitherPath(sessions, r, "e2e merge transient-retry-assisted pass");
+    if (!viaAsync) {
+      check("(e2e merge transient-retry-assisted pass) settled INLINE this run, merged:true (retry passed)", r.ok === true && value.merged === true);
+      check("(e2e merge transient-retry-assisted pass) sync result ALREADY carries transientRetried:true — precondition for this block, not the fix itself", value.transientRetried === true);
+    }
+    check("(e2e merge transient-retry-assisted pass) exactly 2 gate calls — one transient kill, one auto-retry", calls === 2);
+
+    await waitUntil(() => (sessions.peekPendingMerge(workerId) === undefined ? true : undefined), { timeoutMs: 10_000, label: "merge op to leave PendingOpRegistry's retained view" });
+
+    const status = sessions.gateStatus(opId);
+    check("(e2e merge transient-retry-assisted pass — THE FIX) gate_status alone reports outcome:\"pass\" for the settled transient-retry-assisted merge, past eviction, no nudge read anywhere in this test", status.state === "settled" && status.outcome === "pass");
+    check("(e2e merge transient-retry-assisted pass — THE FIX) transientRetried:true round-trips through the tombstone — previously absent for EVERY settled merge row, retried or not", status.transientRetried === true);
+    check("(e2e merge transient-retry-assisted pass — DoD-2, SHARED FORMATTER) transientRetryWarning is present and matches the SAME formatTransientRetryWarning text the live [loom:merge-done] nudge renders for this exact op — never a second, independently-worded copy", status.transientRetryWarning === formatTransientRetryWarning());
+    // DoD-3 MUTUAL EXCLUSION (the other direction): a transient-kill-retry-assisted pass must never ALSO
+    // read retriedFile/retryPassed as if the single-file retry had also fired.
+    check("(e2e merge transient-retry-assisted pass — a0d1165c MUTUAL EXCLUSION) retriedFile stays a present `null` — the single-file retry never fired here", "retriedFile" in status && status.retriedFile === null);
+    check("(e2e merge transient-retry-assisted pass — a0d1165c MUTUAL EXCLUSION) retryPassed stays a present `null`", "retryPassed" in status && status.retryPassed === null);
+    check("(e2e merge transient-retry-assisted pass — a0d1165c MUTUAL EXCLUSION) retryWarning stays absent", !("retryWarning" in status));
   }
 
   // ── (e2e merge, card 3407caad — GATE PROXIMITY, POSITIVE CONTROL) the merge-gate analogue of the worker

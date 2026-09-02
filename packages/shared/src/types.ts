@@ -1722,6 +1722,26 @@ export interface GateHistoryRow {
    *  /`"reject"`) — see {@link GateOutcome}'s own doc. Every OTHER non-null `retriedFile` row still pairs it
    *  with a real `true`/`false`. */
   retryPassed: boolean | null;
+  /** Card a0d1165c, sibling of `retriedFile`/`retryPassed` above — the SAME durable exposure for the OTHER
+   *  retry that can produce a `passed:true` merge row, the TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a
+   *  killed/timed-out attempt 1 auto-retries the WHOLE gate once, mutually exclusive with the single-file
+   *  retry per attempt (a first attempt is classified either "genuine" — eligible for `retriedFile` — or
+   *  "kill"/"timeout" — eligible for THIS retry — never both). Before this card a transient-kill-retry-
+   *  assisted pass was "nudge text only": `[loom:merge-done]` rendered `formatTransientRetryWarning()` live,
+   *  but nothing durable recorded it, so a reader who missed that one nudge (a recycle, a restart, a
+   *  successor reading history later) saw an ordinary `outcome:"pass"` with no way to tell it apart from a
+   *  clean first-attempt pass.
+   *  DERIVED, not a raw detail-field read: `true` iff this row's underlying event is `kind:"build_gate_retry"`
+   *  (the transient-kill retry's OWN admission and verdict — a SEPARATE row from attempt 1's `"build_gate"`
+   *  row, unlike the single-file retry which folds `retriedFile`/`retryPassed` onto the SAME row instead of
+   *  emitting a second one); `false` for every `"build_gate"`/`"worker_gate"`/`"deploy"` row, including one
+   *  that carries a non-null `retriedFile` — the two fields can never both be truthy on the same row, since
+   *  a `"build_gate"` row is never a transient-kill retry's own row and a `"build_gate_retry"` row never
+   *  carries `retriedFile` (the single-file retry has no mechanism that emits this kind). Populated on BOTH
+   *  a resulting pass and a resulting rejection of the retry itself — this row's own `outcome`/`passed`
+   *  already state which; `transientRetried:true` only flags that THIS row IS the retry, not that it
+   *  passed. */
+  transientRetried: boolean;
   /** Card 6ca4b1a0 — the RETROSPECTIVE, `gate_history`-native read of the SAME emit-compare-reduction fact
    *  `gate_status(opId)` already exposes for a settled merge op (see the daemon's `PendingGateOpVerdict
    *  .emitCompareReduced` doc for the full tri-state discipline this mirrors exactly): `true` = this merge

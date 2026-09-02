@@ -2115,6 +2115,22 @@ export interface PendingGateOpVerdict {
    *  `gate_history` tool description). A reader must never assume a non-null `retriedFile` implies
    *  `retryPassed:true`. */
   retryPassed?: boolean | null;
+  /** Card a0d1165c, sibling of `retriedFile`/`retryPassed` immediately above — durable persistence for the
+   *  OTHER retry that can produce a `merged:true` verdict, the TRANSIENT-KILL AUTO-RETRY (card bcba83a1,
+   *  `ConfirmMergeResult.transientRetried`). SAME "measured negative" discipline as `retriedFile`/
+   *  `retryPassed`: `deriveMergeGateVerdict` writes a real boolean here (`v.transientRetried ?? false`),
+   *  NEVER `undefined`, on every "pass"/"fail" row it writes going forward — `undefined` here means only
+   *  "this row predates card a0d1165c" or "a cancelled/error row, where this pairing was never computed",
+   *  never "no such retry fired". Mirrors `ConfirmMergeResult.transientRetried`'s OWN scope exactly (not
+   *  widened here): that field is set `true` ONLY on a `merged:true` return reached via this retry — a
+   *  still-failing transient retry rejects instead, and `v.transientRetried` stays `undefined` on THAT
+   *  return (the rejection's own `detailBits`/`reason` text already names the retry by other means, same
+   *  as `ConfirmMergeResult.transientRetried`'s own doc states) — so `?? false` on a rejection row records
+   *  `false` here too, by the SAME design choice the source field already made, not a new gap introduced by
+   *  this plumbing. Mutually exclusive with `retriedFile` being non-null on the SAME row, by construction
+   *  (a first attempt is classified either "genuine" — eligible for the single-file retry — or
+   *  "kill"/"timeout" — eligible for THIS retry — never both; see gate-runner.ts's `classifyGateFailure`). */
+  transientRetried?: boolean;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and
@@ -7727,6 +7743,11 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // never-backfilled discipline as `concurrentGatesMax` above.
   const retriedFile = typeof detail.retriedFile === "string" ? detail.retriedFile : null;
   const retryPassed = typeof detail.retryPassed === "boolean" ? detail.retryPassed : null;
+  // Card a0d1165c: DERIVED from the event's own `kind`, never a detail-field read — a `build_gate_retry`
+  // event IS the transient-kill retry's own admission+verdict by construction (see GateHistoryRow
+  // .transientRetried's own doc for why this is a SEPARATE row rather than a fold-onto-attempt-1 field like
+  // `retriedFile`/`retryPassed`). `false` for every other kind this function ever sees.
+  const transientRetried = r.kind === "build_gate_retry";
   // Card 6ca4b1a0: deliberately NOT read from `detail` above — the raw `build_gate` event only ever stamps
   // `emitCompareReduced` when `true` (a conditional spread at the producer, see service.ts's `evt("build_gate",
   // ...)` call site), never an explicit `false`, so `detail` alone can't tell "genuinely full run" from
@@ -7766,6 +7787,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     concurrentGatesMax,
     retriedFile,
     retryPassed,
+    transientRetried,
     emitCompareReduced,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
