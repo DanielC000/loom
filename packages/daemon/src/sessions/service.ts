@@ -48,6 +48,8 @@ import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
+import { canonicalRepoLockKey } from "../git/repo-lock.js";
+import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG } from "../orchestration/context-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -1528,6 +1530,14 @@ type RedirectResult = Omit<EnqueueResult, "landsAt"> & {
   discarded?: number;
   advisory?: string;
 };
+
+/**
+ * {@link SessionService.redirectManagerForEmergencyRecycle}'s return shape — deliberately NOT
+ * `RedirectResult` alone: the merge-danger-window refusal (see that method's own doc) never reaches
+ * `deliverRedirect` at all, so there is no `RedirectResult` to report in that case. `fired:false` means
+ * the interrupt was NOT attempted; `fired:true` carries the real `RedirectResult` from the shared core.
+ */
+type EmergencyRedirectOutcome = { fired: true; result: RedirectResult } | { fired: false; reason: string };
 
 /**
  * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
@@ -7735,6 +7745,64 @@ export class SessionService {
   }
 
   /**
+   * ContextWatcher's daemon-internal emergency-recycle interrupt (card 9f279c7b, Trigger A — see that
+   * file's class doc for the full two-trigger design). Routed through the SAME {@link deliverRedirect}
+   * core `redirectWorker`/`redirectSessionAsCompanion` use (durable enqueue, Esc-interrupt ONLY when
+   * held) — deliberately NOT a second interrupt implementation; see `deliverRedirect`'s own doc for why
+   * two that could disagree is exactly the failure card `f05e5a06` is about. Three things this wrapper
+   * does differently from its two siblings:
+   *
+   *  - `supersedeQueue: false` — the ONE caller of `deliverRedirect` that skips step (a)'s flush. Its two
+   *    siblings' targets are a WORKER or a companion-scoped session whose queue holds the CALLER's own
+   *    prior direction — content this fresh redirect legitimately replaces. A MANAGER's queue instead
+   *    holds INBOUND content from OTHER parties (a worker's `worker_report`, a `peer_message`, a platform
+   *    `session_message`) that an unrelated emergency-recycle interrupt has no business discarding —
+   *    DoD-4's "purging the queue wholesale would silently drop work the successor genuinely needs"
+   *    concern applies just as much at THIS fire step as it does at recycle time (caught by this card's
+   *    own DoD-4 negative-proof test reusing this exact method — see
+   *    `recycle-purges-stale-context-nudge.mjs`). The redirect still lands (appended, not prepended) and
+   *    the Esc-interrupt still fires via the SAME `pty.interruptForRedirect` primitive on the held path —
+   *    it just never touches whatever else was already queued.
+   *  - MERGE-DANGER GUARD: refuses (`fired:false, reason:"merge-danger-window"`) while the target's OWN
+   *    project repo sits inside an active merge-danger window — the SAME `listActiveMergeDangerWindows`
+   *    instrument `daemon_restart`'s own shutdown wait already reads (see its call above), filtered to
+   *    just this ONE repo rather than daemon-wide (an unrelated project's in-flight squash has nothing to
+   *    do with this manager, so it must not hold this interrupt hostage). An Esc mid-squash can leave a
+   *    canonical repo with staged, uncommitted residue that the NEXT merge refuses on until a human
+   *    resolves it by hand (card `f05e5a06`) — never worth risking for a nudge. Deliberately does NOT
+   *    wait/poll here (unlike `waitForMergeDangerWindowsToClear`'s bounded wait for a full daemon
+   *    shutdown): `ContextWatcher.tick()` re-runs every `contextWatchMs` regardless, and a real window is
+   *    typically ~1.5s of local git calls (see merge-danger-window.ts's own sizing doc) — a refusal here
+   *    just means "the very next tick tries again", which the caller logs plainly each time so a window
+   *    that somehow never clears stays visible in the daemon log instead of being silently retried forever.
+   *  - BESPOKE TAG: frames the message under {@link CONTEXT_EMERGENCY_REDIRECT_TAG}, not
+   *    `frameFromManager`'s `[loom:from-manager]` shape — the target here IS the manager, there is no
+   *    "from-manager" sender to name. `carryPendingToSuccessor`'s DoD-4 purge (below) matches on this
+   *    exact tag (and the ordinary nudge's `CONTEXT_RECYCLE_NUDGE_PREFIX`) to drop a still-queued copy at
+   *    recycle time, narrowly — never a wholesale queue wipe.
+   *
+   * Throws ONLY if the target session is unknown (mirrors redirectSessionAsCompanion).
+   */
+  redirectManagerForEmergencyRecycle(sessionId: string, text: string): EmergencyRedirectOutcome {
+    const target = this.db.getSession(sessionId);
+    if (!target) throw new Error("session not found");
+    const project = this.db.getProject(target.projectId);
+    if (project?.repoPath) {
+      const key = canonicalRepoLockKey(project.repoPath);
+      if (listActiveMergeDangerWindows().some((w) => canonicalRepoLockKey(w.repoPath) === key)) {
+        return { fired: false, reason: "merge-danger-window" };
+      }
+    }
+    const result = this.deliverRedirect(target, text, {
+      supersedeQueue: false,
+      frame: (t) => `[${CONTEXT_EMERGENCY_REDIRECT_TAG}]\n${t}`,
+      enqueueSender: "system",
+      eventManagerId: sessionId,
+    });
+    return { fired: true, result };
+  }
+
+  /**
    * Shared redirect core for {@link redirectWorker} and {@link redirectSessionAsCompanion} — the mechanics
    * common to BOTH (see redirectWorker's original doc comment, preserved below, for the full ordering
    * rationale). Parameterized by exactly what differs between the two callers: the wire framing (a `frame`
@@ -7773,10 +7841,26 @@ export class SessionService {
    */
   private deliverRedirect(
     target: Session, text: string,
-    opts: { frame: (text: string) => string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown> },
+    opts: {
+      frame: (text: string) => string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown>;
+      /**
+       * Card 9f279c7b: step (a)'s flush+supersede is correct ONLY when the target's queue holds the
+       * CALLER'S OWN prior direction to it (`redirectWorker`'s manager→worker case, `redirectSessionAsCompanion`'s
+       * companion-owns-the-target case) — content this new redirect legitimately REPLACES. A manager's own
+       * queue can instead hold INBOUND content addressed to it by OTHER parties (a worker's `worker_report`,
+       * a `peer_message`, a platform `session_message`) that an unrelated emergency-recycle interrupt has no
+       * business discarding — DoD-4's "purging the queue wholesale would silently drop work the successor
+       * genuinely needs" concern applies just as much at THIS fire step as it does at recycle time. Default
+       * `true` (byte-identical to every existing caller); `redirectManagerForEmergencyRecycle` is the one
+       * caller that passes `false` — it still enqueues the redirect and still interrupts via the SAME
+       * `pty.interruptForRedirect` primitive below, it just never touches whatever else was already queued.
+       */
+      supersedeQueue?: boolean;
+    },
   ): RedirectResult {
-    // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands.
-    const flushed = this.pty.flushPending(target.id);
+    // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands — SKIPPED
+    // when `opts.supersedeQueue === false` (see that field's own doc for why).
+    const flushed = opts.supersedeQueue === false ? [] : this.pty.flushPending(target.id);
     for (const m of flushed) {
       if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the redirect */ } }
     }
@@ -11771,8 +11855,31 @@ export class SessionService {
     // an unrelated future retirement if it could fire right now.
     this.capQueue.reparent(oldManagerId, fresh.id);
     void this.maybeDrainCapQueue(fresh.id);
-    const carried = this.pty.flushPending(oldManagerId);
-    const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
+    // Card 9f279c7b DoD-4: purge stale recycle/emergency nudges NARROWLY (by exact text tag) before the
+    // generic carry below — a "you're near your context limit" nudge addressed to the PREDECESSOR is
+    // actively misleading on a fresh successor whose own occupancy starts near zero. Matched on
+    // CONTEXT_RECYCLE_NUDGE_PREFIX / CONTEXT_EMERGENCY_REDIRECT_TAG ONLY (see this method's own doc for
+    // the negative proof this does not touch anything else) — every other queued entry (a worker report,
+    // a peer message, a boarded directive) is untouched and still carries forward exactly as before.
+    const flushedRaw = this.pty.flushPending(oldManagerId);
+    const durableRaw = this.db.listUnresolvedQueuedMessagesForWorker(oldManagerId);
+    const isStaleContextNudge = (text: string): boolean =>
+      text.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || text.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+    const carried: QueuedMessage[] = [];
+    for (const m of flushedRaw) {
+      if (isStaleContextNudge(m.text)) {
+        // A stale emergency redirect is durable (has onDeliver) — resolve its record now, same as
+        // carryPendingToSuccessor's own flushed loop would, so it never dangles as unresolved. The
+        // ordinary nudge is non-durable (no onDeliver) — nothing to resolve, just drop it.
+        if (m.onDeliver) { try { m.onDeliver("superseded"); } catch { /* a resolution fault must never block the recycle */ } }
+        continue;
+      }
+      carried.push(m);
+    }
+    const carriedDurable = durableRaw.filter((rec) => {
+      const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
+      return text === null || !isStaleContextNudge(text);
+    });
     this.carryPendingToSuccessor(oldManagerId, fresh.id, carried, carriedDurable);
 
     this.db.appendEvent({

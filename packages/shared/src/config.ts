@@ -414,6 +414,19 @@ export interface OrchestrationConfig {
    */
   recycleAtContextRatio: number;
   /**
+   * EMERGENCY context-recycle floor (card 9f279c7b, Trigger A) — a SECOND, harder threshold above
+   * `recycleAtContextRatio`. Where the ordinary ratio above only ever QUEUES a nudge (busy-gated,
+   * `enqueueStdin` — it lands at the manager's next turn boundary, which is exactly the mechanism that
+   * can't reach a manager stuck mid-turn), crossing THIS floor makes ContextWatcher BYPASS that queue and
+   * interrupt the manager's current turn directly (`SessionService.redirectManagerForEmergencyRecycle`,
+   * the same Esc-interrupt primitive `worker_redirect` already uses — no second interrupt mechanism).
+   * Default 0.90; 0 disables. VALIDATED at resolve time to never sit below `recycleAtContextRatio` when
+   * both are active (an emergency floor under the ordinary one is incoherent) — see resolveConfig's own
+   * clamp. No env layer (unlike `recycleAtContextRatio`'s `LOOM_RECYCLE_CONTEXT_RATIO`): this is a
+   * per-project safety knob, not something an operator needs to force daemon-wide.
+   */
+  emergencyRecycleAtContextRatio: number;
+  /**
    * Context-recycle re-nudge cadence: minutes between successive ContextWatcher recycle nudges to a
    * manager that's over `recycleAtContextRatio` but hasn't handed off yet. The context analogue of the
    * idle watchdog's `idleNudgeMinutes` — a fired nudge isn't repeated for another full window. The whole
@@ -1104,7 +1117,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1535,6 +1548,19 @@ export function resolveConfig(
   const python: PythonConfig = {};
   const interpreterPath = override.python?.interpreterPath ?? d.python.interpreterPath;
   if (interpreterPath !== undefined) python.interpreterPath = interpreterPath;
+  // Card 9f279c7b DoD-2: resolve BOTH context-recycle ratios here (once) so the emergency floor can be
+  // validated against the ordinary one — an emergency floor sitting BELOW the ratio it's supposed to be
+  // "harder" than is an incoherent config (it would fire the SOFTER queued nudge later than the interrupt
+  // it's meant to escalate past). Clamp rather than throw: resolveConfig has no error channel today and a
+  // thrown exception here would break every caller, not just the one project with a bad override. Clamping
+  // makes the invariant hold BY CONSTRUCTION for every reader of the resolved config — explicit handling,
+  // not a silent inversion — rather than trusting each of ContextWatcher/Settings/etc. to re-check it.
+  // Skipped when either is 0 (disabled): a disabled watcher's own threshold value is moot.
+  const resolvedRecycleAtContextRatio = override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio;
+  let resolvedEmergencyRecycleAtContextRatio = override.orchestration?.emergencyRecycleAtContextRatio ?? d.orchestration.emergencyRecycleAtContextRatio;
+  if (resolvedEmergencyRecycleAtContextRatio > 0 && resolvedRecycleAtContextRatio > 0 && resolvedEmergencyRecycleAtContextRatio < resolvedRecycleAtContextRatio) {
+    resolvedEmergencyRecycleAtContextRatio = resolvedRecycleAtContextRatio;
+  }
   return {
     kanbanColumns: override.kanbanColumns ?? structuredClone(d.kanbanColumns),
     permission: {
@@ -1590,7 +1616,10 @@ export function resolveConfig(
         enabled: platformOverride?.gateRetry?.enabled ?? envGateRetryEnabled() ?? d.orchestration.gateRetry.enabled,
         settleMs: platformOverride?.gateRetry?.settleMs ?? envGateRetrySettleMs() ?? d.orchestration.gateRetry.settleMs,
       },
-      recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
+      recycleAtContextRatio: resolvedRecycleAtContextRatio,
+      // Emergency floor (card 9f279c7b) — resolved + clamped above, alongside recycleAtContextRatio, so
+      // the ordering invariant (emergency ≥ ordinary, when both active) holds for every reader.
+      emergencyRecycleAtContextRatio: resolvedEmergencyRecycleAtContextRatio,
       // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.
       recycleNudgeIntervalMinutes: override.orchestration?.recycleNudgeIntervalMinutes ?? d.orchestration.recycleNudgeIntervalMinutes,

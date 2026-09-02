@@ -981,12 +981,24 @@ export type OrchestrationEventKind =
   // manager precisely because it never reached a Stop — this is the SECOND, turn-boundary-independent
   // input that lets the watcher see it anyway. `detail` carries { minutesBusy, tokensSinceLastKnown,
   // sampleCount }. A SOFT, informational signal like `worker_stuck` — never a turn interrupt (the
-  // busy-gated stdin queue can't reach a manager that isn't hitting a turn boundary either; an actual
-  // interrupt is sibling card 9f279c7b's concern, not this one's). Filed under the MANAGER
-  // (managerSessionId = m.id). Emitted ONCE per episode — de-duped via
+  // busy-gated stdin queue can't reach a manager that isn't hitting a turn boundary either). Filed under
+  // the MANAGER (managerSessionId = m.id). Emitted ONCE per episode — de-duped via
   // `getLatestEventForManagerByKind`, re-arms once a Stop finally lands (advances `lastActivity` past
   // the stamped event, mirroring `worker_stuck`'s own episode boundary).
   | "context_blind_turn"
+  // EMERGENCY context-recycle INTERRUPT (ContextWatcher, card 9f279c7b, Trigger A): a LIVE manager's last
+  // known `ctxInputTokens` reading crossed `emergencyRecycleAtContextRatio` (the harder floor above
+  // `recycleAtContextRatio`), and ContextWatcher bypassed the busy-gated nudge queue entirely —
+  // `SessionService.redirectManagerForEmergencyRecycle` flushed+superseded any queued direction, enqueued
+  // an authoritative hand-off directive, and (if the manager was busy) sent a single Esc to interrupt its
+  // current turn. `detail` carries { pct, delivered, interrupting } — the honest `EnqueueResult` outcome,
+  // never collapsed to a bare "sent" bit (card 9f279c7b DoD-5: do not inherit `49fdcbbc`'s bug). Filed
+  // under the MANAGER (managerSessionId = m.id). Emitted AT MOST once per still-current reading — de-duped
+  // via `getLatestEventForManagerByKind` against `ctxUpdatedAt`, re-arms once a fresh Stop lands (a new
+  // reading) or the manager recycles (a brand-new session id). A REFUSAL (e.g. the target project's repo
+  // is inside an active merge-danger window) never appends this event at all — see
+  // `redirectManagerForEmergencyRecycle`'s own doc for the retry-next-tick policy that follows from that.
+  | "context_emergency_interrupt"
   // Busy-worker long-turn advisory (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
   // uninterrupted turn past the `stuckWorkerMinutes` window. Filed under the OWNING MANAGER
   // (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason. A SOFT,
@@ -1427,7 +1439,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
-  idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, worker_stuck: true,
+  idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true, worker_stuck: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
@@ -2685,7 +2697,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "fleet_resume_failed",
   "question_asked",
   "idle_escalated", "idle_report",
-  "context_escalated", "context_blind_turn",
+  "context_escalated", "context_blind_turn", "context_emergency_interrupt",
   "platform_escalate",
   "session_rate_limited", "rate_limit_bailed",
   "schedule_fired", "poll_fired", "wake_fired",

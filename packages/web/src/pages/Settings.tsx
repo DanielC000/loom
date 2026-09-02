@@ -222,6 +222,7 @@ function ConfigEditor({ project }: { project: Project }) {
   const [maxWorkers, setMaxWorkers] = useState(numStr(ov.orchestration?.maxConcurrentWorkers));
   const [maxManagers, setMaxManagers] = useState(numStr(ov.orchestration?.maxConcurrentManagers));
   const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
+  const [emergencyRecycle, setEmergencyRecycle] = useState(numStr(ov.orchestration?.emergencyRecycleAtContextRatio));
   const [idleNudge, setIdleNudge] = useState(numStr(ov.orchestration?.idleNudgeMinutes));
   const [stuckWorker, setStuckWorker] = useState(numStr(ov.orchestration?.stuckWorkerMinutes));
   const [blindTurn, setBlindTurn] = useState(numStr(ov.orchestration?.managerBlindTurnMinutes));
@@ -307,6 +308,7 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNum(orch, "maxConcurrentWorkers", maxWorkers);
     applyNum(orch, "maxConcurrentManagers", maxManagers);
     applyNum(orch, "recycleAtContextRatio", recycle);
+    applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle);
     applyNum(orch, "idleNudgeMinutes", idleNudge);
     applyNum(orch, "stuckWorkerMinutes", stuckWorker);
     applyNum(orch, "managerBlindTurnMinutes", blindTurn);
@@ -445,6 +447,7 @@ function ConfigEditor({ project }: { project: Project }) {
           <NumField label="Max workers / manager" value={maxWorkers} set={setMaxWorkers} effective={resolved.orchestration.maxConcurrentWorkers} def={defaults.orchestration.maxConcurrentWorkers} />
           <NumField label="Max managers (no scheduler effect)" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} note="The cron Scheduler is one fleet-wide service; its manager cap is set under Settings → Global → Scheduler, not per-project here." />
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
+          <NumField label="Emergency recycle @ ctx ratio" value={emergencyRecycle} set={setEmergencyRecycle} effective={resolved.orchestration.emergencyRecycleAtContextRatio} def={defaults.orchestration.emergencyRecycleAtContextRatio} note="bypasses the queue and interrupts the manager's turn; 0 disables, clamped to never sit below the ratio above" />
           <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
           <NumField label="Worker stuck (min)" value={stuckWorker} set={setStuckWorker} effective={resolved.orchestration.stuckWorkerMinutes} def={defaults.orchestration.stuckWorkerMinutes} note="0 disables the stuck-worker watchdog" />
           <NumField label="Manager blind turn (min)" value={blindTurn} set={setBlindTurn} effective={resolved.orchestration.managerBlindTurnMinutes} def={defaults.orchestration.managerBlindTurnMinutes} note="0 disables the blind-turn watchdog" />

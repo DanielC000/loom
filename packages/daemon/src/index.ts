@@ -1172,7 +1172,17 @@ async function main(): Promise<void> {
   // under any project override) so a per-project recycleAtContextRatio (e.g. 0.5) is actually honored.
   const recycleRatio = Number(process.env.LOOM_RECYCLE_CONTEXT_RATIO) || 0;
   const ctxWatchMs = watchers.contextWatchMs;
-  const contextWatcher = new ContextWatcher({ db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs });
+  const contextWatcher = new ContextWatcher({
+    db, pty, ratio: recycleRatio, intervalMs: ctxWatchMs,
+    // Card 9f279c7b Trigger A: the daemon-internal emergency interrupt hook, wrapping
+    // SessionService.redirectManagerForEmergencyRecycle so context-watcher.ts stays SessionService-free
+    // (see that class's own ContextWatcherDeps doc). `sessions` is constructed above this point.
+    emergencyInterrupt: (managerId, text) => {
+      const r = sessions.redirectManagerForEmergencyRecycle(managerId, text);
+      if (!r.fired) return { fired: false, reason: r.reason };
+      return { fired: true, delivered: r.result.delivered, interrupting: r.result.interrupting };
+    },
+  });
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (${recycleRatio > 0 ? `env-forced ratio ${recycleRatio}` : `per-project ratio, platform default ${resolved.orchestration.recycleAtContextRatio}`}, tick ${ctxWatchMs}ms)`);
 

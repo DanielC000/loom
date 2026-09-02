@@ -221,6 +221,10 @@ const orchestrationOverride = z.object({
   // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
   // corrupt the ContextWatcher's recycle trigger.
   recycleAtContextRatio: z.number().min(0).max(1).optional(),
+  // Card 9f279c7b: the emergency (harder, interrupt-the-turn) floor sitting above recycleAtContextRatio.
+  // Same shape/bounds as it — ordering (emergency ≥ ordinary, when both active) is enforced at resolve
+  // time (config.ts's resolveConfig clamp), not here; this schema only bounds the raw value to [0,1].
+  emergencyRecycleAtContextRatio: z.number().min(0).max(1).optional(),
   // ContextWatcher re-nudge cadence (whole minutes) + escalation cap (whole count). Both ≥0; benign
   // tuning numbers (no host-launch / exfil capability), so they stay on the agent path too. A generous
   // ceiling on the cap guards a fat-fingered value from authorizing an endless nudge loop.

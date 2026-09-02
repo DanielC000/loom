@@ -4,6 +4,7 @@
 // built validators from dist/* only (no daemon, no claude). Mirrors the validator checks in
 // idle-watcher.mjs (case 14). Exercises BOTH paths (REST/human + agent/loom-platform MCP).
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
+import { resolveConfig } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -22,6 +23,50 @@ const orch = (o) => ({ orchestration: o });
   check("recycleAtContextRatio:0 (disable) accepted", validateProjectConfigOverride(orch({ recycleAtContextRatio: 0 })).ok === true);
   check("recycleAtContextRatio:1 accepted", validateProjectConfigOverride(orch({ recycleAtContextRatio: 1 })).ok === true);
   check("recycleAtContextRatio:0.8 (default) accepted", validateProjectConfigOverride(orch({ recycleAtContextRatio: 0.8 })).ok === true);
+}
+
+// --- emergencyRecycleAtContextRatio: same [0,1] range as recycleAtContextRatio (card 9f279c7b) -------
+{
+  const bad = validateProjectConfigOverride(orch({ emergencyRecycleAtContextRatio: 5 }));
+  check("emergencyRecycleAtContextRatio:5 (>1) rejected", bad.ok === false);
+  check("emergencyRecycleAtContextRatio:5 reason names the field", bad.ok === false && /emergencyRecycleAtContextRatio/.test(bad.error));
+  check("emergencyRecycleAtContextRatio:-0.1 (<0) rejected", validateProjectConfigOverride(orch({ emergencyRecycleAtContextRatio: -0.1 })).ok === false);
+  check("emergencyRecycleAtContextRatio:0 (disable) accepted", validateProjectConfigOverride(orch({ emergencyRecycleAtContextRatio: 0 })).ok === true);
+  check("emergencyRecycleAtContextRatio:0.9 (default) accepted", validateProjectConfigOverride(orch({ emergencyRecycleAtContextRatio: 0.9 })).ok === true);
+  // Benign per-project tuning (no host-exec/exfil capability) — stays on the agent path, like
+  // recycleAtContextRatio itself.
+  check("agent path also accepts a valid emergencyRecycleAtContextRatio", validateAgentProjectConfigOverride(orch({ emergencyRecycleAtContextRatio: 0.95 })).ok === true);
+}
+
+// --- emergencyRecycleAtContextRatio ORDERING (card 9f279c7b DoD-2): resolveConfig CLAMPS an emergency
+// floor configured BELOW the project's own ordinary ratio, rather than silently inverting the two. This
+// is a resolveConfig (shared/config.ts) concern, not a schema-bound one — the schema above only checks
+// the raw [0,1] range of each field independently; the cross-field invariant is checked here.
+{
+  const clamped = resolveConfig({ orchestration: { recycleAtContextRatio: 0.85, emergencyRecycleAtContextRatio: 0.5 } });
+  check("an emergency floor BELOW the ordinary ratio is clamped UP to the ordinary ratio, never left inverted",
+    clamped.orchestration.emergencyRecycleAtContextRatio === 0.85);
+
+  const unclamped = resolveConfig({ orchestration: { recycleAtContextRatio: 0.7, emergencyRecycleAtContextRatio: 0.9 } });
+  check("an emergency floor already ABOVE the ordinary ratio passes through unchanged",
+    unclamped.orchestration.emergencyRecycleAtContextRatio === 0.9);
+
+  // 0 (disabled) is never clamped UP into an active floor — a project that explicitly disabled the
+  // emergency watcher must stay disabled regardless of its ordinary ratio.
+  const disabledStaysDisabled = resolveConfig({ orchestration: { recycleAtContextRatio: 0.85, emergencyRecycleAtContextRatio: 0 } });
+  check("emergencyRecycleAtContextRatio:0 (disabled) is never clamped into an active floor",
+    disabledStaysDisabled.orchestration.emergencyRecycleAtContextRatio === 0);
+
+  // A disabled ORDINARY ratio (0) has nothing to clamp the emergency floor against — the emergency value
+  // passes through as configured.
+  const ordinaryDisabled = resolveConfig({ orchestration: { recycleAtContextRatio: 0, emergencyRecycleAtContextRatio: 0.3 } });
+  check("a disabled ordinary ratio (0) does not clamp an active emergency floor",
+    ordinaryDisabled.orchestration.emergencyRecycleAtContextRatio === 0.3);
+
+  // Platform defaults alone (no project override) already satisfy the invariant (0.90 >= 0.80).
+  const defaults = resolveConfig(undefined);
+  check("platform defaults already satisfy emergency >= ordinary with no clamp needed",
+    defaults.orchestration.emergencyRecycleAtContextRatio === 0.90 && defaults.orchestration.recycleAtContextRatio === 0.80);
 }
 
 // --- concurrency caps: whole-number, >=1, <=100 ----------------------------------------------------
@@ -99,6 +144,6 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..1800000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), and keeps the existing .strict()/bounds guarantees intact."
+  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..1800000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, and keeps the existing .strict()/bounds guarantees intact."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

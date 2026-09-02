@@ -30,7 +30,47 @@ export interface ContextWatcherDeps {
   ratio?: number;
   /** Tick cadence; defaults to 60s (context grows slowly). Injectable so a test drives tick() directly. */
   intervalMs?: number;
+  /**
+   * Daemon-internal emergency-recycle interrupt hook (card 9f279c7b, Trigger A — see
+   * `checkEmergencyOccupancy`'s own doc). Wraps `SessionService.redirectManagerForEmergencyRecycle` —
+   * injected rather than imported directly so this file (and its tests) stay SessionService-free, exactly
+   * like `pty` above is an injected slice of PtyHost rather than the real thing. Optional: a caller (or a
+   * test harness that only cares about the ratio/blind-turn logic) that omits it just gets Trigger A
+   * permanently no-op — never throws, mirrors every other optional callback in this watcher family.
+   */
+  emergencyInterrupt?: (managerSessionId: string, text: string) => EmergencyInterruptOutcome;
 }
+
+/**
+ * `emergencyInterrupt`'s return shape — deliberately NOT `RedirectResult` (sessions/service.ts's private
+ * type): this file has no business knowing that shape, only the honest subset it needs to log and record
+ * (card 9f279c7b DoD-5 — do not inherit `49fdcbbc`'s "discard the real outcome, stamp success anyway" bug).
+ * `fired:false` means the interrupt was NOT attempted at all (e.g. `reason:"merge-danger-window"`) — the
+ * caller (index.ts) must not report `delivered`/`interrupting` in that case, since neither ever ran.
+ */
+export interface EmergencyInterruptOutcome {
+  fired: boolean;
+  reason?: string;
+  delivered?: boolean;
+  interrupting?: boolean;
+}
+
+/**
+ * The ordinary (queued, busy-gated) recycle nudge's own text prefix — exported so
+ * `SessionService.carryPendingToSuccessor`'s DoD-4 purge (sessions/service.ts) can find and drop a
+ * still-queued copy at recycle time, sharing this ONE literal instead of a second hand-typed copy that
+ * could silently drift from it.
+ */
+export const CONTEXT_RECYCLE_NUDGE_PREFIX = "[loom:context]";
+
+/**
+ * The emergency (Trigger A) interrupt's own wire tag — see `checkEmergencyOccupancy`'s doc for why this
+ * is a bespoke tag rather than `frameFromManager`'s `[loom:from-manager]` shape (the target here IS the
+ * manager; there is no "from-manager" to speak of). Exported for the SAME reason as the prefix above: the
+ * DoD-4 purge and `SessionService.redirectManagerForEmergencyRecycle`'s own frame builder share this one
+ * literal.
+ */
+export const CONTEXT_EMERGENCY_REDIRECT_TAG = "loom:context-emergency:redirect";
 
 /**
  * Context-recycle watcher (manager-recycle-by-context). Each tick, for every LIVE manager whose
@@ -71,8 +111,24 @@ export interface ContextWatcherDeps {
  * `context_blind_turn` event (once per episode, mirroring `worker_stuck`'s de-dup) — a SOFT, human-facing
  * advisory only. It deliberately does NOT attempt a queued nudge: the busy-gated stdin queue is exactly
  * the mechanism that can't reach a manager stuck mid-turn (it lands, unread, at the next turn boundary —
- * the very event that isn't arriving), and building an actual turn-interrupt is sibling card 9f279c7b's
- * concern, not this watcher's.
+ * the very event that isn't arriving).
+ *
+ * EMERGENCY INTERRUPT (card 9f279c7b, Trigger A) — a THIRD signal, `checkEmergencyOccupancy` below,
+ * checked whenever `ctxInputTokens` IS known (it needs a real reading; the null gap is Trigger B's job,
+ * not this one's). Where the ratio logic above only ever QUEUES a nudge — busy-gated, landing at the
+ * manager's next turn boundary, which never arrives for a manager stuck in one long turn — crossing the
+ * SECOND, harder `emergencyRecycleAtContextRatio` floor (validated ≥ the ordinary ratio at resolve time,
+ * config.ts) makes this watcher BYPASS the queue: `deps.emergencyInterrupt` wraps
+ * `SessionService.redirectManagerForEmergencyRecycle`, which reuses `worker_redirect`'s existing
+ * flush+supersede+Esc-interrupt primitive (`deliverRedirect` — no second interrupt mechanism; two that
+ * could disagree is the exact failure `f05e5a06` is about) and refuses to fire while the target's own
+ * project repo sits inside an active merge-danger window (never risk wedging a mid-squash repo for a
+ * nudge — see that method's own doc for the retry-next-tick policy on refusal). ⛔ Trigger B (blind-turn,
+ * above) deliberately does NOT escalate into this interrupt: it has no occupancy number to justify
+ * cancelling a turn, and the gen-235 specimen this card's triage recorded (a manager blind for ~such a
+ * window doing perfectly ordinary, safe orchestration) is exactly the case an unconditional interrupt on
+ * blind-turn-alone would wrongly cancel. Trigger B stays the soft, human-facing advisory it already
+ * shipped as.
  */
 export class ContextWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -95,14 +151,21 @@ export class ContextWatcher {
 
       if (m.ctxInputTokens == null) continue;
 
+      const window = contextWindowForModel(m.model);
+      const r = m.ctxInputTokens / window;
+
+      // EMERGENCY INTERRUPT (card 9f279c7b, Trigger A — see the class doc above). Checked BEFORE, and
+      // independent of, the ordinary ratio/policy logic below: it must still fire even when the ordinary
+      // nudge is disabled for this project (ratio 0) or already escalated (policy 'escalated'), and it
+      // must not share that nudge's re-nudge cadence — a stuck-mid-turn manager needs the interrupt on
+      // ITS OWN de-dup, not queued behind the routine nudge's cooldown.
+      this.checkEmergencyOccupancy(db, m, cfg, r, window, nowIso);
+
       // Per-project threshold: an env force override wins for every project; otherwise this project's
       // OWN resolved recycleAtContextRatio (resolveConfig already folds the platform default under any
       // project override) — and a project setting 0 disables ITS OWN watcher, not the whole ticker.
       const ratio = envOverride && envOverride > 0 ? envOverride : cfg.recycleAtContextRatio;
       if (ratio <= 0) continue; // disabled for this project
-
-      const window = contextWindowForModel(m.model);
-      const r = m.ctxInputTokens / window;
       if (r < ratio) continue; // under this project's recycle threshold
 
       const state = db.getContextNudgeState(m.id);
@@ -138,7 +201,7 @@ export class ContextWatcher {
       }
 
       const msg =
-        `[loom:context] Your context is ~${pct}% of your ${kw}k window — hand off before it fills. ` +
+        `${CONTEXT_RECYCLE_NUDGE_PREFIX} Your context is ~${pct}% of your ${kw}k window — hand off before it fills. ` +
         `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
         `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
         `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
@@ -169,6 +232,69 @@ export class ContextWatcher {
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] nudged manager ${m.id} to recycle (${result.delivered ? "delivered" : "queued, lands next turn"}; ~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
     }
+  }
+
+  /**
+   * EMERGENCY INTERRUPT (card 9f279c7b, Trigger A) — see the class doc's own section for the full
+   * rationale on why this is a SECOND, harder floor above the ordinary ratio rather than just a lower
+   * cooldown on the same one. Needs a REAL `ctxInputTokens` reading (the caller already skips this when
+   * null — Trigger B/`checkBlindTurn` covers that gap, deliberately not this method).
+   *
+   * DE-DUP: fires AT MOST once per still-current reading. `ctxUpdatedAt` only advances at this manager's
+   * NEXT Stop (a genuinely fresh reading, possibly still over the floor — re-fires correctly) or when it
+   * finally recycles (a brand-new session id, so `getLatestEventForManagerByKind` finds nothing) — either
+   * way this re-arms naturally, exactly mirroring `checkBlindTurn`'s own "advances past the stamped event"
+   * episode boundary, one field over (`ctxUpdatedAt` here vs. `lastActivity` there).
+   *
+   * REFUSAL ACCOUNTING (DoD-5): a refusal (`fired:false` — no hook wired, session died between the
+   * `isAlive` check and the call, or the target project's repo is mid-squash) does NOT append the de-dup
+   * event and does NOT log a false success — it logs the refusal reason and lets the NEXT tick retry from
+   * scratch. This is the explicit, argued answer to "what happens when the interrupt can't fire right
+   * now": retry every tick (`intervalMs`, default 60s) rather than block this synchronous tick loop
+   * waiting, and rather than ever interrupting through an active merge-danger window regardless of age —
+   * see `SessionService.redirectManagerForEmergencyRecycle`'s own doc for why that check lives there, not
+   * here. A merge-danger window is typically ~1.5s of local git calls (see that module's own sizing doc),
+   * so in practice this almost never needs a second tick; if it ever did retry many times in a row, that
+   * repetition is itself visible in the daemon log as a real operational signal, not silently swallowed.
+   */
+  private checkEmergencyOccupancy(db: Db, m: Session, cfg: OrchestrationConfig, r: number, window: number, nowIso: string): void {
+    if (cfg.emergencyRecycleAtContextRatio <= 0) return; // disabled for this project
+    if (r < cfg.emergencyRecycleAtContextRatio) return; // under the emergency floor
+    if (!this.deps.pty.isAlive(m.id)) return;
+    if (!this.deps.emergencyInterrupt) return; // no daemon-internal hook wired (e.g. a narrower test harness)
+
+    // `>=`, not `>`: skip unless ctxUpdatedAt is STRICTLY NEWER than our last fire. Unlike checkBlindTurn's
+    // identical-looking `already.ts > m.lastActivity` (safe there because a turn start is always at least
+    // `managerBlindTurnMinutes` in the past by the time it fires), ctxUpdatedAt here can be stamped in the
+    // SAME reading the fire itself reacts to, so a `>` comparison can tie on an identical or coarser-grained
+    // timestamp and wrongly re-fire for a reading that hasn't actually advanced (caught by this file's own
+    // de-dup test: three ticks against one unchanged ctxUpdatedAt fired three times under `>`).
+    const already = db.getLatestEventForManagerByKind(m.id, "context_emergency_interrupt");
+    if (already && m.ctxUpdatedAt && already.ts >= m.ctxUpdatedAt) return; // already fired for THIS reading
+
+    const pct = Math.round(r * 100);
+    const kw = Math.round(window / 1000);
+    const msg =
+      `Your context is ~${pct}% of your ${kw}k window — this is the EMERGENCY floor, not the routine ` +
+      `recycle nudge. This interrupt may have landed mid-edit or mid-tool-call: first finish or safely ` +
+      `abandon the single step that was in flight (reconcile your working tree if you were mid-edit; do ` +
+      `not start anything new), then immediately run /loom-session-end and call recycle_me with a ` +
+      `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
+      `workers + their tasks/status, next steps, key decisions). Do not resume normal orchestration after ` +
+      `this message — hand off now.`;
+
+    const outcome = this.deps.emergencyInterrupt(m.id, msg);
+    if (!outcome.fired) {
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] EMERGENCY interrupt for manager ${m.id} (~${pct}% of ${kw}k window) NOT fired (${outcome.reason ?? "unknown"}) — will retry next tick`);
+      return; // no event recorded — retrying next tick is exactly the point, see this method's own doc
+    }
+    db.appendEvent({
+      id: randomUUID(), ts: nowIso, managerSessionId: m.id, kind: "context_emergency_interrupt",
+      detail: { pct, delivered: outcome.delivered ?? null, interrupting: outcome.interrupting ?? null },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] EMERGENCY interrupt FIRED for manager ${m.id} (~${pct}% of ${kw}k window; delivered=${outcome.delivered}, interrupting=${outcome.interrupting})`);
   }
 
   /**
