@@ -9,6 +9,7 @@ import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { resolveRepoKeyOrError } from "../projects/repos.js";
 import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { findSuspectedDuplicate } from "./duplicateDetection.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -649,6 +650,36 @@ export async function getProjectTask(
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
   };
+}
+
+/**
+ * Wraps a single full task read (`getProjectTask` / `project_task_get`'s single-id path) with the same
+ * Loom-controlled spill treatment `tasks_list`/`task_requests_list` already get via `spillTextIfLarge`
+ * (card 7aeea78b), instead of falling through — for an oversized `body` — to the HOST ENGINE's own opaque
+ * overflow-spill, which JSON-escapes embedded newlines into one unpageable line (`spill.ts`'s own doc
+ * comment names this exact failure mode). Hands the primitive ALREADY-SHAPED plain text — `title`, a
+ * blank line, then `body`, real line breaks — NEVER `JSON.stringify(task)`, which would re-escape the
+ * very newlines this exists to preserve and reproduce the defect through Loom's own writer instead.
+ *
+ * BELOW the cap: returns `task` untouched — byte-identical to before this existed.
+ * ABOVE the cap: returns `task` with `body` replaced by `bodyFile`/`bodyChars` (mirrors `okLinesSpillable`'s
+ * `rowsFile`/`rowsChars` pointer shape) plus a `note`; every other field (id, columnKey, priority,
+ * requests, merged, …) stays inline since only the body is unbounded. `key` should be deterministic per
+ * task (its own resolved id) so repeated reads of the same task overwrite rather than accumulate
+ * scratch-dir garbage — mirrors `spillTextIfLarge`'s own "same content overwrites" contract.
+ */
+export function spillableTaskGet<T extends { title: string; body: string }>(
+  sessionId: string, subdir: string, key: string, task: T,
+): T | (Omit<T, "body"> & { bodyFile: string; bodyChars: number; note: string }) {
+  const text = `${task.title}\n\n${task.body}`;
+  const spill = spillTextIfLarge(sessionId, subdir, key, text, SPILL_INLINE_BUDGET_CHARS);
+  if (spill.inline) return task;
+  const { body: _body, ...rest } = task;
+  const note =
+    `title+body are ${spill.chars} chars — too large to inline safely, so the plain text (title, a blank ` +
+    `line, then the body — real line breaks, UTF-8) was written to ${spill.file}. Read it directly, or ` +
+    "grep it for a substring; slice by character range via Bash if a single line is too long to page.";
+  return { ...rest, bodyFile: spill.file, bodyChars: spill.chars, note };
 }
 
 /** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not

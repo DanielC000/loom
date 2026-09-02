@@ -54,7 +54,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { resolvePlatformLeadResumeDocPath, lineageRootId } from "../sessions/platform-lead-prompt.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
-import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, type TaskWithMerged, type TaskCounts } from "./tasks.js";
+import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, type TaskWithMerged, type TaskCounts } from "./tasks.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -2245,14 +2245,21 @@ export class PlatformMcpRouter {
         if ("error" in project) return ok(project);
         if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
         if (taskId && taskIds) return ok({ error: "pass either taskId or taskIds, not both" });
+        // Same oversized-body gap as the in-project tasks_get (card 7aeea78b) — reuses the SAME
+        // getProjectTask read, so it can produce the SAME unbounded-body TaskWithRequests row.
+        // spillableTaskGet is a no-op below the cap (byte-identical to before); no callerSessionId
+        // (should not happen on a real request path) falls back to the pre-spill shape rather than pass
+        // an undefined recipient into spillTextIfLarge (mirrors list_all_tasks's own !callerSessionId guard).
+        const spillable = (res: Awaited<ReturnType<typeof getProjectTask>>) =>
+          "error" in res || !callerSessionId ? res : spillableTaskGet(callerSessionId, "project-task-get-spills", res.id, res);
         if (taskIds) {
           const results = await Promise.all(taskIds.map(async (id) => {
-            const res = await getProjectTask(db, project.id, id);
+            const res = spillable(await getProjectTask(db, project.id, id));
             return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
           }));
           return ok(results);
         }
-        return ok(await getProjectTask(db, project.id, taskId!));
+        return ok(spillable(await getProjectTask(db, project.id, taskId!)));
       },
     );
 

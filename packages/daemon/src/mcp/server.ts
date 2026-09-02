@@ -9,6 +9,7 @@ import type { WakeService } from "../orchestration/wake.js";
 import {
   listProjectTasks, getProjectTask, createProjectTaskChecked, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
   listProjectTaskRequests, getProjectTaskRequest, deferTaskItem, updateDeferredItemStatus, countProjectTasks,
+  spillableTaskGet,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
@@ -197,7 +198,9 @@ export class TaskMcpRouter {
       async ({ id, taskId }) => {
         const resolvedId = id ?? taskId;
         if (!resolvedId) return ok({ error: "id (or taskId) is required" });
-        return ok(await getProjectTask(db, projectId, resolvedId));
+        const result = await getProjectTask(db, projectId, resolvedId);
+        if ("error" in result) return ok(result);
+        return ok(spillableTaskGet(sessionId, "tasks-get-spills", result.id, result));
       },
     );
     server.registerTool(
