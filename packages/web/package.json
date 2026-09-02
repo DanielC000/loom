@@ -22,6 +22,7 @@
     "test:overview-stats": "node --experimental-strip-types test/overview-stats.mjs",
     "test:run-label-copy": "node test/run-label-copy.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json --noEmit",
     "preview": "vite preview",
     "test:e2e": "playwright test --config=e2e/playwright.config.ts"
   },
