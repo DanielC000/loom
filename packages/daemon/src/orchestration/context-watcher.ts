@@ -5,8 +5,16 @@ import type { Db } from "../db.js";
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface ContextPty {
   isAlive(sessionId: string): boolean;
-  /** Nudge text into the session's busy-gated queue (waits if the manager is mid-turn). */
-  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number };
+  /**
+   * Nudge text into the session's busy-gated queue (waits if the manager is mid-turn). The real
+   * PtyHost.enqueueStdin returns a richer `EnqueueResult` (see pty/host.ts) with THREE possible
+   * outcomes, collapsed here to the two this watcher needs to distinguish: `delivered:true` (handed
+   * straight to submit() this turn) or `delivered:false, queued:true` (durably held, lands at the
+   * next turn boundary) both mean the nudge was ACCEPTED; `delivered:false` with `queued` falsy means
+   * it was NOT accepted at all (e.g. the session went not-live between our own isAlive check above and
+   * this call) — card 49fdcbbc: tick() below must not treat that as a sent nudge.
+   */
+  enqueueStdin(sessionId: string, text: string): { delivered: boolean; position?: number; queued?: boolean };
 }
 
 export interface ContextWatcherDeps {
@@ -108,10 +116,31 @@ export class ContextWatcher {
         `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
         `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
         `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;
-      try { pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
+      // Card 49fdcbbc: use the return value instead of discarding it. `delivered:true` (handed straight
+      // to submit()) and `delivered:false, queued:true` (durably held — the doc on EnqueueResult says
+      // this WILL land at the next turn boundary unless redelivery is later exhausted, an async failure
+      // this synchronous call can't see) both mean the nudge was ACCEPTED, so both are recorded the same
+      // way — that is the explicit "queued should probably count" call from the card, made because we
+      // have no cheaper way here to tell queued-then-delivered from queued-and-later-parked. Anything else
+      // (not accepted — e.g. the session died between our own isAlive check above and this call, or the
+      // stub throws) must NOT stamp the cooldown or increment the escalation counter: an undelivered nudge
+      // must not buy silence, and it must not count a strike toward a human-facing escalation that reads
+      // "this manager has slept through every nudge" when it may never have been told at all.
+      let result: { delivered: boolean; queued?: boolean };
+      let threw = false;
+      try { result = pty.enqueueStdin(m.id, msg); } catch { threw = true; result = { delivered: false, queued: false }; }
+      if (!result.delivered && !result.queued) {
+        // State what was OBSERVED, not an inferred cause: enqueueStdin's real implementation never
+        // actually throws for "manager not live" (that path returns deliveryState:"dropped" instead —
+        // see the interface doc above), so a caught throw here is NOT known to mean that. Naming an
+        // unestablished cause is exactly the failure this card exists to remove.
+        // eslint-disable-next-line no-console
+        console.log(`[context-watcher] nudge to manager ${m.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not recording a sent nudge, not counting a strike`);
+        continue;
+      }
       db.recordContextNudge(m.id, nowIso); // stamp last_context_nudge_at + increment context_nudge_unanswered
       // eslint-disable-next-line no-console
-      console.log(`[context-watcher] nudged manager ${m.id} to recycle (~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
+      console.log(`[context-watcher] nudged manager ${m.id} to recycle (${result.delivered ? "delivered" : "queued, lands next turn"}; ~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
     }
   }
 
