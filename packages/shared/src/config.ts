@@ -429,6 +429,19 @@ export interface OrchestrationConfig {
    */
   maxUnansweredRecycleNudges: number;
   /**
+   * Manager BLIND-TURN advisory (ContextWatcher, card fdf1291f): minutes a LIVE manager may sit `busy`
+   * in a SINGLE uninterrupted turn — no Stop, so `ctxInputTokens`/`ctxUpdatedAt` never refresh and
+   * `recycleAtContextRatio` can't see it climbing — before the watcher surfaces it as an informational
+   * heads-up (a `context_blind_turn` event; no queued nudge is attempted, since the busy-gated stdin
+   * queue is exactly the mechanism that can't reach a manager stuck mid-turn). Structural twin of
+   * `stuckWorkerMinutes` (BusyWorkerWatcher's identical `busy` + `lastActivity`-staleness signal, applied
+   * there to workers) — reused here for managers because a manager mid-turn freezes `lastActivity` the
+   * same way a worker's does (`setBusy` only re-stamps it at turn edges). Default 30 — well under the
+   * ~65-minute blind window the incident that filed this card observed, so an operator gets a chance to
+   * notice before real context risk accrues. 0 disables the watcher entirely.
+   */
+  managerBlindTurnMinutes: number;
+  /**
    * Asleep-at-the-Wheel idle-manager watchdog. Minutes a LIVE manager may sit idle (busy=false, no live
    * workers, not snoozed/suppressed) before the watcher nudges it once. Default 45; 0 disables the
    * watcher entirely. Env LOOM_IDLE_NUDGE_MINUTES sets the platform default here (a per-project
@@ -1091,7 +1104,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1582,6 +1595,8 @@ export function resolveConfig(
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.
       recycleNudgeIntervalMinutes: override.orchestration?.recycleNudgeIntervalMinutes ?? d.orchestration.recycleNudgeIntervalMinutes,
       maxUnansweredRecycleNudges: override.orchestration?.maxUnansweredRecycleNudges ?? d.orchestration.maxUnansweredRecycleNudges,
+      // `??` (not `||`) so an explicit 0 (disables the manager blind-turn watchdog) survives the merge.
+      managerBlindTurnMinutes: override.orchestration?.managerBlindTurnMinutes ?? d.orchestration.managerBlindTurnMinutes,
       // Precedence: per-project override > LOOM_IDLE_NUDGE_MINUTES env > hardcoded default. `??` (not
       // `||`) so an explicit 0 at any layer is preserved (0 disables the watcher).
       idleNudgeMinutes: override.orchestration?.idleNudgeMinutes ?? envIdle ?? d.orchestration.idleNudgeMinutes,

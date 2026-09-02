@@ -224,6 +224,7 @@ function ConfigEditor({ project }: { project: Project }) {
   const [recycle, setRecycle] = useState(numStr(ov.orchestration?.recycleAtContextRatio));
   const [idleNudge, setIdleNudge] = useState(numStr(ov.orchestration?.idleNudgeMinutes));
   const [stuckWorker, setStuckWorker] = useState(numStr(ov.orchestration?.stuckWorkerMinutes));
+  const [blindTurn, setBlindTurn] = useState(numStr(ov.orchestration?.managerBlindTurnMinutes));
   const [maxUnanswered, setMaxUnanswered] = useState(numStr(ov.orchestration?.maxUnansweredNudges));
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
@@ -308,6 +309,7 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNum(orch, "recycleAtContextRatio", recycle);
     applyNum(orch, "idleNudgeMinutes", idleNudge);
     applyNum(orch, "stuckWorkerMinutes", stuckWorker);
+    applyNum(orch, "managerBlindTurnMinutes", blindTurn);
     applyNum(orch, "maxUnansweredNudges", maxUnanswered);
     applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze);
     // rotationMarkers: trimmed; a row blank in BOTH token and note is dropped (an accidental empty add).
@@ -445,6 +447,7 @@ function ConfigEditor({ project }: { project: Project }) {
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
           <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
           <NumField label="Worker stuck (min)" value={stuckWorker} set={setStuckWorker} effective={resolved.orchestration.stuckWorkerMinutes} def={defaults.orchestration.stuckWorkerMinutes} note="0 disables the stuck-worker watchdog" />
+          <NumField label="Manager blind turn (min)" value={blindTurn} set={setBlindTurn} effective={resolved.orchestration.managerBlindTurnMinutes} def={defaults.orchestration.managerBlindTurnMinutes} note="0 disables the blind-turn watchdog" />
           <NumField label="Max unanswered nudges" value={maxUnanswered} set={setMaxUnanswered} effective={resolved.orchestration.maxUnansweredNudges} def={defaults.orchestration.maxUnansweredNudges} />
           <NumField label="Idle snooze (min)" value={idleSnooze} set={setIdleSnooze} effective={resolved.orchestration.idleDefaultSnoozeMinutes} def={defaults.orchestration.idleDefaultSnoozeMinutes} />
         </div>

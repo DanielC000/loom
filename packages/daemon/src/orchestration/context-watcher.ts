@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
+import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
@@ -51,6 +52,27 @@ export interface ContextWatcherDeps {
  * No reset-on-activity (unlike IdleWatcher): in-session context only grows, and a context nudge is
  * answered by RECYCLING — which makes the manager go not-live and its successor a FRESH row with default
  * 'watching' state, so the cycle re-arms naturally without a counter reset.
+ *
+ * BLIND-TURN advisory (card fdf1291f) — a SECOND, independent signal, checked every tick alongside the
+ * ratio logic above: `ctxInputTokens`/`ctxUpdatedAt` refresh ONLY at the Stop hook (end of a LOGICAL
+ * turn), so a manager that issues hundreds of tool round-trips inside ONE turn (never reaching Stop) is
+ * invisible to the ratio check above for the ENTIRE duration — the worst case, since a long tool-looping
+ * turn is both the fastest way to burn context and the thing that suppresses the only signal measuring
+ * it (the incident this card investigates: ~65min blind, ending only because a human intervened). The fix
+ * is NOT a numeric occupancy estimate composed from `session_usage_samples` — those columns are
+ * per-interval BILLED-USAGE deltas, not context occupancy, and composing them into a % would need the
+ * turn-to-turn prompt-cache hit rate (unknowable from that table alone — a broken cache prefix inflates
+ * them by an unbounded factor; see `cacheHitRatio`'s doc) — shipping a wrong number here would be worse
+ * than the blindness it replaces. Instead this reuses BusyWorkerWatcher's PROVEN signal (`busy` +
+ * `lastActivity` staleness — `lastActivity` only moves at turn EDGES for a manager exactly as it does for
+ * a worker), scoped to managers, gated by `managerBlindTurnMinutes`; `session_usage_samples` is consulted
+ * ONLY as a best-effort diagnostic (confirms genuine token flow during the gap, reported alongside the
+ * alert) via `getUsageActivitySince`, never as the trigger itself. On trip it appends ONE
+ * `context_blind_turn` event (once per episode, mirroring `worker_stuck`'s de-dup) — a SOFT, human-facing
+ * advisory only. It deliberately does NOT attempt a queued nudge: the busy-gated stdin queue is exactly
+ * the mechanism that can't reach a manager stuck mid-turn (it lands, unread, at the next turn boundary —
+ * the very event that isn't arriving), and building an actual turn-interrupt is sibling card 9f279c7b's
+ * concern, not this watcher's.
  */
 export class ContextWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -62,11 +84,16 @@ export class ContextWatcher {
     const nowIso = now.toISOString();
 
     for (const m of db.listLiveManagers()) {
-      if (m.ctxInputTokens == null) continue;
-
       const project = db.getProject(m.projectId);
       if (!project) continue;
       const cfg = resolveConfig(project.config).orchestration;
+
+      // BLIND-TURN advisory (card fdf1291f) — the second, turn-boundary-independent input (see the class
+      // doc above). Runs for EVERY live manager, armed or not, BEFORE (and regardless of) the
+      // ctxInputTokens null-skip just below — that skip is exactly the blind spot this closes.
+      this.checkBlindTurn(db, pty, m, cfg, nowMs, nowIso);
+
+      if (m.ctxInputTokens == null) continue;
 
       // Per-project threshold: an env force override wins for every project; otherwise this project's
       // OWN resolved recycleAtContextRatio (resolveConfig already folds the platform default under any
@@ -142,6 +169,48 @@ export class ContextWatcher {
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] nudged manager ${m.id} to recycle (${result.delivered ? "delivered" : "queued, lands next turn"}; ~${pct}% of ${kw}k window, unanswered→${state.unanswered + 1})`);
     }
+  }
+
+  /**
+   * BLIND-TURN advisory — see the class doc's own section for the full rationale. Signal: `busy` +
+   * `lastActivity` staleness, exactly BusyWorkerWatcher's proven mechanism for the identical worker-side
+   * gap, scoped to managers. `lastActivity` on a busy session is stamped at the CURRENT turn's start (a
+   * rising edge) and never touched again until the falling edge at Stop — so for a busy manager, `now -
+   * lastActivity` is precisely how long it has been in ONE uninterrupted turn, independent of whether
+   * `ctxInputTokens` has EVER been set. Deliberately does NOT require `ctxInputTokens == null`: a manager
+   * that already has a STALE (non-null) reading from a PRIOR turn and is now mid a NEW long blind turn is
+   * the more dangerous, recurring form of this gap (its last known occupancy could already be high), and
+   * excluding it would silently miss that case.
+   */
+  private checkBlindTurn(db: Db, pty: ContextPty, m: Session, cfg: OrchestrationConfig, nowMs: number, nowIso: string): void {
+    if (cfg.managerBlindTurnMinutes <= 0) return; // disabled for this project
+    if (!m.busy) return; // idle → lastActivity means nothing here; not this watchdog's concern
+
+    const lastActivityMs = Date.parse(m.lastActivity);
+    const busyForMin = (nowMs - lastActivityMs) / 60_000;
+    if (busyForMin < cfg.managerBlindTurnMinutes) return;
+
+    if (!pty.isAlive(m.id)) return; // db says live but pty is gone → skip (nothing to surface about)
+
+    // Once-per-episode: skip if we already flagged THIS turn (an event stamped strictly after it began).
+    // A Stop eventually landing advances lastActivity past it (the NEXT turn's rising edge), re-arming —
+    // mirrors BusyWorkerWatcher's identical `worker_stuck` de-dup.
+    const already = db.getLatestEventForManagerByKind(m.id, "context_blind_turn");
+    if (already && already.ts > m.lastActivity) return;
+
+    const n = Math.round(busyForMin);
+    // Best-effort diagnostic ONLY — see getUsageActivitySince's own doc for why this can't be the trigger
+    // itself. A sampler outage (activity === null) must NOT suppress the alert; it just can't confirm
+    // genuine token flow, so the event says so plainly instead of guessing a number.
+    const activity = db.getUsageActivitySince(m.id, m.lastActivity);
+
+    db.appendEvent({
+      id: randomUUID(), ts: nowIso, managerSessionId: m.id, kind: "context_blind_turn",
+      detail: { minutesBusy: n, tokensSinceLastKnown: activity?.totalTokens ?? null, sampleCount: activity?.sampleCount ?? 0 },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] manager ${m.id} BLIND ~${n}m in one turn (no Stop → ctx unmeasured)` +
+      (activity ? ` — ~${activity.totalTokens} tokens recorded since (${activity.sampleCount} sample(s))` : " — no usage samples recorded yet"));
   }
 
   start(): void {

@@ -137,6 +137,10 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     case "idle_report":
       return detail?.state === "done" ? "manager-idle" : null;
     case "context_escalated":
+    // Card fdf1291f: same alert class as context_escalated — both are "this manager's context is at
+    // risk and the queued nudge can't reach it," just detected via a different, turn-boundary-
+    // independent signal (see the kind's own doc in shared/src/types.ts).
+    case "context_blind_turn":
       return "context-overflow";
     case "platform_escalate":
       return "escalation";
@@ -223,6 +227,9 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       break;
     case "context_escalated":
       line = `${projectName}: manager context overflow risk — ${m8}`;
+      break;
+    case "context_blind_turn":
+      line = `${projectName}: manager mid-turn ${typeof detail.minutesBusy === "number" ? `~${detail.minutesBusy}m ` : ""}with no context reading — ${m8}`;
       break;
     case "platform_escalate": {
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";

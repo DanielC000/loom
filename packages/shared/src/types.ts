@@ -973,6 +973,20 @@ export type OrchestrationEventKind =
   // Emitted EXACTLY ONCE per session — the manager's nudge policy flips 'watching'→'escalated', which the
   // policy gate skips on the next tick; a recycled successor is a fresh row, so it re-arms naturally.
   | "context_escalated"
+  // Manager BLIND-TURN advisory (ContextWatcher, card fdf1291f): a LIVE manager has been `busy` in a
+  // single uninterrupted turn (no Stop, so `ctxInputTokens`/`ctxUpdatedAt` never refresh — see
+  // context-watcher.ts's own doc) past `managerBlindTurnMinutes`, confirmed to be genuinely still
+  // consuming tokens (not merely hung) via `session_usage_samples`, which the UsageSampler fills on its
+  // OWN 5-minute timer independent of any turn boundary. The context-recycle ratio check is BLIND to this
+  // manager precisely because it never reached a Stop — this is the SECOND, turn-boundary-independent
+  // input that lets the watcher see it anyway. `detail` carries { minutesBusy, tokensSinceLastKnown,
+  // sampleCount }. A SOFT, informational signal like `worker_stuck` — never a turn interrupt (the
+  // busy-gated stdin queue can't reach a manager that isn't hitting a turn boundary either; an actual
+  // interrupt is sibling card 9f279c7b's concern, not this one's). Filed under the MANAGER
+  // (managerSessionId = m.id). Emitted ONCE per episode — de-duped via
+  // `getLatestEventForManagerByKind`, re-arms once a Stop finally lands (advances `lastActivity` past
+  // the stamped event, mirroring `worker_stuck`'s own episode boundary).
+  | "context_blind_turn"
   // Busy-worker long-turn advisory (BusyWorkerWatcher): a LIVE worker has been `busy` in a single
   // uninterrupted turn past the `stuckWorkerMinutes` window. Filed under the OWNING MANAGER
   // (managerSessionId) with workerSessionId/taskId set; `detail` carries minutesBusy + reason. A SOFT,
@@ -1401,7 +1415,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
-  idle_report: true, idle_escalated: true, context_escalated: true, worker_stuck: true,
+  idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, worker_stuck: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
@@ -2658,7 +2672,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "fleet_resume_failed",
   "question_asked",
   "idle_escalated", "idle_report",
-  "context_escalated",
+  "context_escalated", "context_blind_turn",
   "platform_escalate",
   "session_rate_limited", "rate_limit_bailed",
   "schedule_fired", "poll_fired", "wake_fired",

@@ -4490,6 +4490,34 @@ export class Db {
   }
 
   /**
+   * Best-effort ACTIVITY signal for ContextWatcher's blind-turn detector (card fdf1291f): sums this
+   * session's `session_usage_samples` rows recorded at/after `sinceIso` — a feed the UsageSampler fills
+   * on its OWN 5-minute timer, independent of the engine's turn boundary (Stop), which is exactly the
+   * blind spot this exists to see through (see UsageSampler's own doc: it reads the live transcript's
+   * cumulative usage off disk, which keeps growing through tool calls that never reach Stop).
+   *
+   * ⚠️ These columns are per-interval BILLED-USAGE deltas (input/output/cache tokens actually sent to
+   * the model across API calls), NOT context occupancy — see `readContextStats`' doc for that distinction
+   * (occupancy ≈ the LAST turn's input+cache tokens; these are a SUM across many turns). Composing them
+   * into a numeric occupancy estimate would need the turn-to-turn prompt-cache hit rate to be known and
+   * stable, which this table cannot tell you (a broken cache prefix re-pays the whole context as
+   * `cache_creation` every turn — see `cacheHitRatio`'s doc — silently inflating any such estimate by an
+   * unknown, unbounded factor). So this is used ONLY to confirm a blind manager is genuinely still
+   * WORKING (real token flow during the gap, ruling out a merely-hung `busy=1` session — a different,
+   * already-covered failure), never to estimate a % of window. Returns null when no sample has landed yet
+   * for this session at/after `sinceIso` (can't yet distinguish "burning tokens" from "hung idle").
+   */
+  getUsageActivitySince(sessionId: string, sinceIso: string): { totalTokens: number; sampleCount: number } | null {
+    const r = this.db.prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total
+       FROM session_usage_samples WHERE session_id = ? AND ts >= ?`,
+    ).get(sessionId, sinceIso) as { n: number; total: number };
+    if (r.n === 0) return null;
+    return { totalTokens: Number(r.total) || 0, sampleCount: r.n };
+  }
+
+  /**
    * The sampler's RESTART-SAFE baseline: the already-persisted token SUM per session (one GROUP BY scan).
    * `lastSeen` is in-memory and wiped on every daemon restart, so without this the sampler's FIRST-sight
    * delta after a restart would re-emit a still-live session's whole transcript cumulative — double-counting
@@ -5511,6 +5539,19 @@ export class Db {
   listEvents(managerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
       .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
+   * Most recent orchestration event of ONE kind filed under a manager — an indexed (`idx_orch_events_mgr`)
+   * point lookup, in place of pulling a manager's ENTIRE event history (`listEvents`) just to check
+   * whether one particular kind already fired. Used by ContextWatcher's once-per-episode blind-turn
+   * de-dup (mirrors BusyWorkerWatcher's `listEventsForWorker`-based "already flagged" check, kind-scoped
+   * so a long-lived manager with a large event history doesn't pay for it every tick).
+   */
+  getLatestEventForManagerByKind(managerSessionId: string, kind: OrchestrationEventKind): OrchestrationEvent | undefined {
+    const r = this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE manager_session_id = ? AND kind = ? ORDER BY ts DESC, rowid DESC LIMIT 1",
+    ).get(managerSessionId, kind) as Row | undefined;
+    return r ? toOrchestrationEvent(r) : undefined;
   }
 
   /**
