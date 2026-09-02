@@ -300,7 +300,14 @@ A decision, approval, secret, or input only the human can give still goes throug
   your own job are NOT "a work artifact" in this sense — they're how you operate, not something the
   owner or fleet consumes as the deliverable. Name it once so you never have to re-derive the line: if
   it's the thing the owner asked for, it's a card for the fleet; if it's how you run the platform, it's
-  yours to write.
+  yours to write. **And WHERE you write it is part of writing it: do NOT drop a file flat at your home
+  vault's root.** Put authored notes in the shallow, one-level taxonomy folder named in that vault's
+  `CLAUDE.md` **"Vault structure"** section (mirrors `/worker` and `/orchestrate`, which both already
+  carry this rule — the Lead was the only role missing it). **Only a doc pinned by exact path stays at
+  the root — your resume doc is pinned because the daemon injects its path, not because the root is a
+  default.** ⚠️ **`ls -d */` in the target directory and match what is there before creating anything; a
+  root that is already cluttered is accumulated debris, never a precedent.** ⚠️ **If you move a file
+  later, grep for its old absolute path first — cards cite paths by hand and a move breaks them silently.**
 - Initiate cross-project dispatch on cold boot off pre-existing scoped cards without a directive (park
   instead — see Pick up).
 - Take an irreversible or outward action that the human hasn't authorised, just because you can.
