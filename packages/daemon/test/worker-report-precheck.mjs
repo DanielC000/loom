@@ -50,7 +50,10 @@ const ptyStub = { enqueueStdin() { return { delivered: true }; } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 function seed(p) {
-  db.insertProject({ id: p.projId, name: "WRP", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
+  // `dbRepoPath`, when set, overrides `p.repo` as the PROJECT's registered repoPath — used by (P) below
+  // to simulate a moved/renamed canonical repo (the actual worktree, created from the real `p.repo`,
+  // stays physically intact; only the DB's resolved repoPath diverges from it).
+  db.insertProject({ id: p.projId, name: "WRP", repoPath: p.dbRepoPath ?? p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "WRP-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -74,7 +77,8 @@ const C = mk("c", { file: "done.txt" });
 const Z = mk("z");
 const E = mk("e");
 const N = mk("n", { file: "sneaky.txt" });
-const all = [U, C, Z, E, N];
+const P = mk("p", { file: "p-work.txt" });
+const all = [U, C, Z, E, N, P];
 
 try {
   // ── (U) UNCOMMITTED → REFUSED ───────────────────────────────────────────────────────────────────
@@ -150,6 +154,33 @@ try {
   const throwingGit = { raw: async () => { throw new Error("simulated hung/failed git child"); } };
   const det = await precheckWorkerDone(C.repo, C.worktreePath, C.branch, "HEAD", { gitFactory: () => throwingGit, timeoutMs: 200 });
   check("(unit) injected git error → fail-safe {uncommitted:false, zeroAhead:false}", det.uncommitted === false && det.zeroAhead === false);
+
+  // ── (P) UNCONTAINED PATH (board card 0f965ab7, DoD-5) — precheckRepoPath GONE, worktreePath SURVIVES.
+  // `resolveRepoByKey`'s primary path resolves the project's OWN `repoPath` — simulate a moved/renamed
+  // canonical repo (or a stale multi-repo registry entry) by pointing the DB's repoPath at a directory
+  // that was never created, while the worker's worktree (cut from a REAL repo before the "move") stays
+  // physically intact, clean, and genuinely ahead of base. Pre-fix, `precheckWorkerDone`'s bare
+  // `boundedGit(repoPath, ...)` construct call threw SYNCHRONOUSLY here and workerReport() rejected
+  // outright instead of honouring its fail-safe contract; post-fix it must ALLOW like any other precheck
+  // git failure (E, above) — the worker never authored the missing-repo condition and must not be
+  // blocked by it.
+  initRepo(P.repo);
+  { const { worktreePath, branch } = await createWorktree(P.repo, P.projId, P.taskId); P.worktreePath = worktreePath; P.branch = branch; }
+  fs.writeFileSync(path.join(P.worktreePath, P.file), "real committed work behind a moved repo\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "${P.file}"`, { cwd: P.worktreePath }); // clean + 1 ahead
+  P.dbRepoPath = path.join(os.tmpdir(), `loom-wrp-p-missing-${sfx}`); // never created on disk
+  seed(P);
+  let threwP = false;
+  let rP;
+  try {
+    rP = await sessions.workerReport(P.workerId, { status: "done", summary: "repo moved out from under me but I'm done" });
+  } catch {
+    threwP = true;
+  }
+  check("(uncontained-repo) workerReport does NOT throw (the exact bug this card fixes)", threwP === false);
+  check("(uncontained-repo) workerReport → reported:true (fail-safe, NOT refused)", rP?.reported === true && !rP?.refused);
+  check("(uncontained-repo) task moved to review (a legitimate done is not blocked by a moved canonical repo)",
+    db.getTask(P.taskId).columnKey === "review");
 } finally {
   db.close();
   for (const p of all) {
@@ -160,6 +191,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_report(done) pre-check: uncommitted work is REFUSED (task stays in_progress, files named); committed-on-assigned-branch is allowed unchanged; clean+0-ahead is allowed with a warning; a git error fails safe to allowed; noChanges:true against a branch with verified commits ahead is REFUSED (task stays in_progress, commit count named)."
+  ? "\n✅ ALL PASS — worker_report(done) pre-check: uncommitted work is REFUSED (task stays in_progress, files named); committed-on-assigned-branch is allowed unchanged; clean+0-ahead is allowed with a warning; a git error fails safe to allowed; noChanges:true against a branch with verified commits ahead is REFUSED (task stays in_progress, commit count named); a moved/missing canonical repoPath with the worktree still intact fails safe to allowed, never throws (board card 0f965ab7)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -129,11 +129,58 @@ export interface BoundedGitDeps {
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
 }
 
-/** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. */
+/**
+ * `simpleGit(repoPath, ...)` throws `GitConstructError` SYNCHRONOUSLY when `repoPath` doesn't exist or
+ * isn't a directory (verified directly against the installed simple-git, with an existing-dir control
+ * that constructs fine — board card 0f965ab7). Every caller of {@link boundedGit}/{@link boundedMergeGit}/
+ * {@link boundedDiffGit} in this file documents its own fail-safe contract on error/timeout ("FAIL SAFE",
+ * "FAILS CLOSED", "best-effort, logged not fatal", …) by wrapping the git CALLS it makes in its own
+ * try/catch — but a synchronous throw from CONSTRUCTING the git handle escapes every one of those (they
+ * only guard the calls made INSIDE them), rejecting the function outright instead of honouring its
+ * documented contract. Two of ~nine affected callers (`worktreeHasWork`, `findLandedSquashCommit`) were
+ * each individually patched to wrap their own construct call — the exact "an invariant the next caller can
+ * forget" shape that let the other seven regress. Rather than add seven more per-caller wraps, this catches
+ * the construct throw ONCE, here: `git` degrades to a stub whose every method returns the SAME rejected
+ * promise the construct threw, so a caller's existing `await withTimeout(git.<method>(...), ...)` inside
+ * its own try/catch sees this as an ordinary async git failure — indistinguishable from a timeout or a real
+ * git error — and no caller needs to change. `listCheckedOutBranches` is UNCHANGED by this: it has no
+ * try/catch of its own around its git call, so the (now-async, previously-sync) rejection still propagates
+ * out of it uncaught, exactly as its doc says it must.
+ *
+ * ⚠️ **`then`/`catch`/`finally` (and any symbol-keyed property) must resolve to `undefined`, NOT a
+ * rejecting function** — a `get` trap that answers EVERY property makes this stub a THENABLE (any code
+ * that `await`s the `{git}` handle itself, returns it from an `async` function, or passes it to
+ * `Promise.resolve()` calls `.then(resolve, reject)`). A trapped `then` here would be
+ * `() => Promise.reject(rejection)` — called with `(resolve, reject)` but IGNORING both and returning its
+ * own fresh (uncaptured) rejected promise instead of invoking either — so the awaiting promise would NEVER
+ * SETTLE: the exact unsettling-promise hazard {@link withTimeout}'s own doc warns about, reintroduced
+ * inside the fail-safe primitive meant to prevent it. No caller today awaits the handle itself (every one
+ * destructures `{git}` and calls a method on it), so this was latent, not reachable — but the whole reason
+ * this is fixed centrally rather than per-caller is the caller that doesn't exist yet. No real git method
+ * is ever named `then`/`catch`/`finally` or symbol-keyed, so excluding them costs nothing.
+ */
+export function gitConstructFailure<T extends object>(err: unknown): T {
+  const rejection = err instanceof Error ? err : new Error(String(err));
+  return new Proxy({} as T, {
+    get: (_target, prop) => {
+      if (typeof prop === "symbol" || prop === "then" || prop === "catch" || prop === "finally") return undefined;
+      return () => Promise.reject(rejection);
+    },
+  });
+}
+
+/** Build the bounded git instance + resolve the timeout for one op, applying the seam's defaults. Never
+ *  throws — see {@link gitConstructFailure}. */
 function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
-  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+  let git: Pick<SimpleGit, "raw">;
+  try {
+    git = makeGit(repoPath, timeoutMs);
+  } catch (e) {
+    git = gitConstructFailure<Pick<SimpleGit, "raw">>(e);
+  }
+  return { git, timeoutMs };
 }
 
 /**
@@ -151,7 +198,13 @@ function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleG
 function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms, nonInteractiveEnv()));
-  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+  let git: Pick<SimpleGit, "raw">;
+  try {
+    git = makeGit(repoPath, timeoutMs);
+  } catch (e) {
+    git = gitConstructFailure<Pick<SimpleGit, "raw">>(e);
+  }
+  return { git, timeoutMs };
 }
 
 /**
@@ -172,7 +225,13 @@ export interface DiffBranchDeps {
 function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
-  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+  let git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">;
+  try {
+    git = makeGit(repoPath, timeoutMs);
+  } catch (e) {
+    git = gitConstructFailure<Pick<SimpleGit, "raw" | "diffSummary" | "diff">>(e);
+  }
+  return { git, timeoutMs };
 }
 
 /**
@@ -1752,17 +1811,10 @@ export async function worktreeHasWork(
   base = "HEAD",
   deps: BoundedGitDeps = {},
 ): Promise<boolean> {
-  // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for an invalid/nonexistent
-  // repoPath (GitConstructError — see findLandedSquashCommit's own doc for the identical class of bug),
-  // so this must be wrapped here too: left bare, that throw escapes every catch below (they only guard
-  // the calls made INSIDE them) and rejects this function instead of honoring its own documented
-  // fail-safe contract.
-  let git: Pick<SimpleGit, "raw">, timeoutMs: number;
-  try {
-    ({ git, timeoutMs } = boundedGit(repoPath, deps));
-  } catch {
-    return true; // bounded failure → fail SAFE (assume work, keep the dir)
-  }
+  // boundedGit itself never throws on a bad repoPath (board card 0f965ab7 — it degrades to a git handle
+  // whose methods reject instead), so the ops below already see that as an ordinary bounded failure and
+  // fail safe through their own catches; no separate wrap is needed here.
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
   const makeGit = deps.gitFactory ?? ((p, ms) => boundedSimpleGit(p, ms));
 
   // (1) Dirty working tree? Read porcelain status IN the worktree (its own index + working tree),
@@ -3578,10 +3630,10 @@ export async function findLandedSquashCommit(
   onPreFixTrailerNotice?: (branch: string, sha: string) => void,
 ): Promise<string | null> {
   try {
-    // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent repoPath
-    // (GitConstructError) — this must be INSIDE the try, not before it (mirrors scanMergedCommitMap's fix),
-    // or a vault-only/moved-repo project's repoPath breaks the fail-safe-null contract instead of resolving
-    // to null.
+    // boundedGit itself never throws on a nonexistent/moved repoPath (board card 0f965ab7 — it degrades
+    // to a git handle whose methods reject), so this constructor call no longer NEEDS to be inside the
+    // try for that reason; it stays here anyway since every other op in this function already lives in
+    // this one try, and a rejected git.raw() below still needs it to reach the catch and resolve to null.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
     // %x1f-separated sha+body in ONE call (mirrors scanMergedCommitMap) — the body carries the
     // Loom-Worker-PathSet trailer this function needs once the branch is gone (below).
