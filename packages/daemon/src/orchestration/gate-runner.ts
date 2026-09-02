@@ -1263,3 +1263,16 @@ export function identifyRetriableTestFile(failTierTest: string | undefined, cwd:
 export function formatWeakerPassWarning(retriedFile: string): string {
   return `⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`;
 }
+
+/**
+ * Card 39da2570: the sibling of {@link formatWeakerPassWarning}, for the OTHER retry that can produce a
+ * `merged:true` merge verdict — the TRANSIENT-KILL AUTO-RETRY (card bcba83a1, a "kill"/"timeout"
+ * classification only, mutually exclusive with the single-file retry per attempt). No filename to name
+ * (this retry re-runs the WHOLE gate, not one file), so unlike `formatWeakerPassWarning` this takes no
+ * argument — call it only when `ConfirmMergeResult.transientRetried` is truthy, the same discipline that
+ * function's own callers already follow for `retriedFile`. Same no-leading-space convention as that
+ * sibling and {@link formatGateStepsDiagnostic}.
+ */
+export function formatTransientRetryWarning(): string {
+  return "⚠ WEAKER PASS: the first gate attempt was killed/timed out; passed only after one automatic full-suite retry (card bcba83a1). The concurrency triple beside this note describes the RETRY's own (later) admission, not attempt 1's — treat this differently from an ordinary clean pass.";
+}

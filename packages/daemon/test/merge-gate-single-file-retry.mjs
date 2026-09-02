@@ -566,6 +566,10 @@ try {
     check("(C) merged:true", confirm.merged === true);
     check("(C) retriedFile is undefined — no extra spawn, no retry", confirm.retriedFile === undefined);
     check("(C) retryPassed is undefined", confirm.retryPassed === undefined);
+    // Card 39da2570 negative control: a clean pass with NO retry of either kind must not fabricate the
+    // sibling transient-kill-retry signal either — proves the field isn't always-on (paired with
+    // merge-gate-retry.mjs scenario (A)'s positive assertion that it IS true on a real transient-kill pass).
+    check("(C) transientRetried is undefined — no retry of either kind fired (card 39da2570 negative control)", confirm.transientRetried === undefined);
     check("(C) NO build_gate_single_file_retry event fired", eventsOfKind(db, C.mgrId, "build_gate_single_file_retry").length === 0);
     check("(C) the build_gate event carries no retriedFile key at all (byte-identical shape)", (() => {
       const evs = eventsOfKind(db, C.mgrId, "build_gate");

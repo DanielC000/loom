@@ -54,7 +54,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -546,6 +546,21 @@ type ConfirmMergeResult = {
    *  shape an order-dependent/cross-test-pollution bug can produce (real in the suite, absent alone). Never
    *  silently upgraded to an ordinary pass anywhere this flows — see the card's own honesty requirement. */
   retryPassed?: boolean;
+  /** Card 39da2570 — the sibling gap `retriedFile`/`retryPassed` (immediately above) leave open: those two
+   *  cover ONLY the SINGLE-FILE retry (card 344ce950, fires on a "genuine" classification). The OTHER
+   *  retry that can produce a `merged:true` verdict — the TRANSIENT-KILL AUTO-RETRY (card bcba83a1, fires
+   *  on a "kill"/"timeout" classification, mutually exclusive with the single-file retry per attempt, see
+   *  that retry's own doc) — used to be "absorbed silently" on a pass: nothing on this return, and nothing
+   *  in the `[loom:merge-done]` nudge, told a reader that `concurrentGates`/`concurrentGatesMax` right
+   *  beside it describe the RETRY's own (later) admission rather than attempt 1's, even though a genuine
+   *  full-suite attempt had just failed and only the retry came back green — the exact "weaker pass" shape
+   *  `retryPassed` exists to flag for the single-file case. `true` here closes that gap for this case too:
+   *  set ONLY on a merge that reached `merged:true` via this retry (a still-failing retry rejects instead,
+   *  never reaching this field — the rejection's own `detailBits`/`reason` text already names it via
+   *  `gateRetried`/`retryOutcome`, so nothing was missing on THAT path). `undefined` for the overwhelming
+   *  majority of merges (no such retry ever fired) and for every single-file-retry-driven pass (the two
+   *  retries can never both fire for the same gate attempt). See `formatTransientRetryWarning`. */
+  transientRetried?: boolean;
   /** Card e2b6f900: the gate concurrency triple this merge's gate ran under, captured once — after the
    *  TRANSIENT-KILL AUTO-RETRY if one fired (that retry re-admits through `runExclusive`, a fresh
    *  concurrency snapshot) — and set on the SAME two dominant return paths as `outputTail` above (a plain gate-fail
@@ -13188,6 +13203,16 @@ export class SessionService {
     // the overwhelming majority of merges (no such retry ever fired).
     let retriedFile: string | undefined;
     let retryPassed: boolean | undefined;
+    // Card 39da2570: hoisted to THIS outer scope for the SAME reason as `retriedFile`/`retryPassed` just
+    // above — the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block that
+    // sets this (see the TRANSIENT-KILL AUTO-RETRY block below), so a `let` declared inside that block
+    // would be invisible by the time this method needs to report whether the retry that produced a
+    // `merged:true` verdict was this one. `false` for the overwhelming majority of merges (no such retry
+    // ever fired); flips `true` only when the transient-kill retry actually ran (regardless of whether it
+    // then passed or failed — see the success-return's own `transientRetried` field, which additionally
+    // gates on `merged:true` so a still-failing retry never reports this on a rejection, where the
+    // rejection's own `detailBits`/`reason` text already names the retry by other means).
+    let gateRetried = false;
     // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
     // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
@@ -14365,10 +14390,15 @@ export class SessionService {
       // failure as the flat "build gate failed" — managers learned not to trust it under load and hand-
       // rolled `git merge --squash --no-verify`, defeating the review/merge safety rail entirely. On a
       // retry-eligible classification ONLY (never a clean non-zero exit — see classifyGateFailure), settle
-      // briefly then re-run the SAME gate ONCE before reporting anything. A pass here is absorbed silently:
-      // the manager never even sees that a transient kill happened, and execution falls through to the
-      // normal squash-merge below exactly as if the gate had been green the first time.
-      let gateRetried = false;
+      // briefly then re-run the SAME gate ONCE before reporting anything. A pass here falls through to the
+      // normal squash-merge below exactly as if the gate had been green the first time — the squash
+      // decision itself is UNCHANGED by this retry ever having happened. CORRECTED, card 39da2570: this
+      // used to also claim the manager "never even sees" that a transient kill happened at all — that was
+      // true of the squash decision but not, since this card, of the `[loom:merge-done]` nudge: a pass via
+      // this retry now sets `transientRetried:true` on the return (see that field's own doc), which the
+      // nudge renders as a WEAKER-PASS note beside the concurrency triple. (`gateRetried` itself is
+      // declared at the method's outer scope, above the `if (gate)` block — see card 39da2570's doc on
+      // that declaration for why.)
       // BUDGET-EXCEEDED SHORT-CIRCUIT (card 73a847f5): a timeout that already consumed its one output-gated
       // auto-extend (`anyExtended` — card 24642c3d) cannot pass this retry, which always runs
       // `allowExtend:false` (see that flag's own comment a few lines below) — a hard-bounded rerun of a run
@@ -15043,8 +15073,8 @@ export class SessionService {
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       : {};
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
@@ -15429,6 +15459,18 @@ export class SessionService {
         const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
           ? ` ${formatWeakerPassWarning(outcome.value.retriedFile)}`
           : "";
+        // Card 39da2570: the sibling of `retryNote` immediately above, for the OTHER retry that can produce
+        // a `merged:true` verdict — the TRANSIENT-KILL AUTO-RETRY (card bcba83a1). Before this card, a
+        // merge saved by this retry was "absorbed silently" (per that retry's own doc): the nudge handed a
+        // reader the SAME `cap=…/concurrentGates=…/concurrentGatesMax=…` triple `concurrencyNote` renders
+        // just below, with nothing telling them it describes the retry's own (later) admission rather than
+        // attempt 1's — exactly the unlicensed-`cgMax` read this card exists to close. Mutually exclusive
+        // with `retryNote` above (the two retries can never both fire for the same gate attempt — see
+        // `ConfirmMergeResult.transientRetried`'s own doc), so at most one of the two notes is ever
+        // non-empty on a given nudge.
+        const transientRetryNote = outcome.ok && outcome.value.merged && outcome.value.transientRetried
+          ? ` ${formatTransientRetryWarning()}`
+          : "";
         // Card e2b6f900: the SAME concurrency triple the `[loom:merge-rejected]` rejection text already
         // bakes into its `detailBits` (see confirmWorkerMerge's identical `cap=… concurrentGates=…
         // concurrentGatesMax=…` wording — both use `concurrentGates=`, matching the field name everywhere
@@ -15480,7 +15522,7 @@ export class SessionService {
           : "";
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
+            ? `[loom:merge-done] ${who(opId)} merged.${subjectNote}${stepsLine}${proximityNote}${retryNote}${transientRetryNote}${concurrencyNote}${reducedGateNote}${skillNote}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
           // DoD 2 (card 522cf573): a THROWN exception can strike at literally any point inside
           // confirmWorkerMerge — including AFTER mergeBranch's own squash commit succeeded, during

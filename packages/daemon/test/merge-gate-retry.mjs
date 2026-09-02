@@ -137,6 +137,12 @@ try {
     check("(A) exactly 2 gate calls (first kill, one retry)", calls === 2);
     check("(A) retry passed -> merged:true", confirm.merged === true);
     check("(A) no gateDetail on the ultimate success", confirm.gateDetail === undefined);
+    // Card 39da2570: this used to be "absorbed silently" (see the scenario's own header comment above) —
+    // NOTHING on the return told a caller a transient-kill retry produced this pass. `transientRetried`
+    // closes that gap; `retriedFile` stays undefined because THIS is the transient-kill retry, not the
+    // single-file one (card 344ce950) — the two are mutually exclusive per attempt.
+    check("(A) transientRetried:true — the retry that produced this pass is no longer silent (card 39da2570)", confirm.transientRetried === true);
+    check("(A) retriedFile stays undefined — this is the transient-kill retry, not the single-file one", confirm.retriedFile === undefined);
     check("(A) build_gate_retry_attempt fired once", eventsOfKind(db, A.mgrId, "build_gate_retry_attempt").length === 1);
     check("(A) build_gate_retry fired once, passed:true", eventsOfKind(db, A.mgrId, "build_gate_retry").length === 1 && eventsOfKind(db, A.mgrId, "build_gate_retry")[0].detail?.passed === true);
     check("(A) NO merge_rejected event — the manager was never told a kill happened", eventsOfKind(db, A.mgrId, "merge_rejected").length === 0);
