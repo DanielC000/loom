@@ -978,6 +978,16 @@ async function main(): Promise<void> {
       if (repoPath) canonicalRepoPaths.add(repoPath);
     }
   }
+  // Merge-danger LATCH read+clear (card 7efc2bff item 3, decoupling a prior coupling smell): read and
+  // consume UNCONDITIONALLY, here — independent of the residue scan below, not nested inside its `.then()`.
+  // The nested shape made this read's own execution depend on that unrelated scan's promise settling via
+  // `.then()` at all: if that promise ever REJECTS, `readAndClearMergeDangerLatches()` would never run, and
+  // a latch would survive to a LATER, unrelated boot — exactly what this module's own doc (above) says must
+  // never happen. Reading it out here removes that dependency entirely; the scan's `.then()` below still
+  // joins the ALREADY-read `latches` against its own `dirty` result for the richer cross-referenced message
+  // (see describeMergeDangerLatchAtBoot's own doc), and the `.catch()` path now also reports any latch found,
+  // just without that cross-reference (the scan that would have supplied it never resolved).
+  const latches = readAndClearMergeDangerLatches();
   void scanCanonicalReposForMergeResidue([...canonicalRepoPaths]).then((dirty) => {
     for (const d of dirty) {
       if (d.staged) {
@@ -986,21 +996,21 @@ async function main(): Promise<void> {
         console.warn(`[boot] canonical repo has unstaged tracked changes at ${d.repoPath} — this is ordinary uncommitted work-in-progress in the canonical checkout, NOT staged, so it will NOT block the next merge attempt; no action needed unless it's unexpected (a common benign cause: a submodule whose checked-out commit is ahead of its recorded pointer, which shows up here but is normal steady state, not residue):\n${d.status}`);
       }
     }
-    // Merge-danger LATCH cross-reference (card 5a7692a4 DoD-2): deliberately sequenced HERE, inside the
-    // SAME .then() as the residue scan above, not as an independent parallel probe — the scan above
-    // answers a STATE question ("is the tree dirty right now") and can't tell a dead squash's own residue
-    // apart from a human's unrelated WIP, nor say anything when the tree came back clean. A latch answers
-    // the EVENT question ("did THIS process die inside a merge squash") and supplies the attribution the
-    // scan structurally cannot: cross-referencing against `dirty` (already resolved at this point) is what
-    // lets the two messages below differ correctly. Consume-on-read: readAndClearMergeDangerLatches deletes
-    // each latch file it returns, so a normal graceful stop (which always clears its own latch on exit —
-    // see merge-danger-window.ts) never leaves anything here to find; only a hard death does.
-    const latches = readAndClearMergeDangerLatches();
+    // Merge-danger LATCH cross-reference (card 5a7692a4 DoD-2): `latches` was already read+cleared above,
+    // unconditionally — this join only ATTRIBUTES each one against `dirty` (already resolved at this point)
+    // for the richer message; it is no longer what makes the read itself happen.
     for (const latch of latches) {
       console.warn(describeMergeDangerLatchAtBoot(latch, dirty, canonicalRepoPaths));
     }
   }).catch((err) => {
     console.warn(`[boot] canonical-repo merge-residue scan failed (continuing boot): ${(err as Error).message}`);
+    // `latches` was already read+cleared above regardless of this failure — report each one plainly rather
+    // than silently dropping it: the residue-scan cross-reference describeMergeDangerLatchAtBoot needs never
+    // resolved on this path, so this can't distinguish staged/clean/unscanned the way the happy path does.
+    for (const latch of latches) {
+      const opText = latch.opId ? `, op ${latch.opId}` : "";
+      console.warn(`[boot] we exited inside a merge window on ${latch.repoPath} (branch '${latch.branch}'${opText}) — the residue scan that would normally cross-reference this failed, so its tree state is UNKNOWN; a human should check \`git status\`/\`git diff --cached\` there by hand.`);
+    }
   });
 
   // Boot-revive (bug 4cc7826d, companion/revive.ts): revive each bound session BEFORE the controller wires

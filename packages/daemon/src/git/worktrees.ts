@@ -4873,14 +4873,25 @@ async function mergeBranchLocked(
   // failed fresh read of the branch's tip (a git error/timeout) is treated as "no stability proof
   // available", NOT as "assume unchanged" — it falls through to the ordinary enforcement below, same as a
   // branch that provably moved.
+  // SQUASH-TARGET RESOLUTION (card 7efc2bff item 1, TOCTOU closed): resolve the branch tip to an exact sha
+  // HERE, unconditionally, and squash THAT SHA below — never the branch NAME. `git merge --squash <branch>`
+  // re-resolves the ref at squash time, ~175 lines and several intervening git subprocess spawns after this
+  // point; the worker's own pty can still be alive on this path (see the preLanded doc above) and land a new
+  // commit on `branch` in that gap, which a name-based squash would then silently include even though it was
+  // never checked against `gateBaseBranchHead`/`requireCanonicalHead` above. Squashing the frozen sha instead
+  // means a branch that moves in that window simply doesn't contribute its new commit to THIS squash — the
+  // object squashed is provably the same object this function validates just below. A failed resolve (a git
+  // error/timeout) falls back to squashing by branch name, matching this function's behavior before this fix.
+  let resolvedBranchHead: string | undefined;
+  try {
+    resolvedBranchHead = (await withTimeout(
+      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (resolve squash target)",
+    )).trim();
+  } catch { /* fall through: squashTarget below stays the branch name, unchanged from before this fix */ }
+  const squashTarget = resolvedBranchHead ?? branch;
   let branchStableSinceGateBase = false;
-  if (gateBaseBranchHead) {
-    try {
-      const currentBranchHead = (await withTimeout(
-        git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (gate-base branch-stability check)",
-      )).trim();
-      branchStableSinceGateBase = currentBranchHead === gateBaseBranchHead;
-    } catch { /* fail closed: couldn't verify branch stability — fall through to enforcing the check below */ }
+  if (gateBaseBranchHead && resolvedBranchHead) {
+    branchStableSinceGateBase = resolvedBranchHead === gateBaseBranchHead;
   }
   if (requireCanonicalHead && !branchStableSinceGateBase) {
     let currentHead: string;
@@ -5052,7 +5063,7 @@ async function mergeBranchLocked(
   try {
     let rawError = false;
     try {
-      await withTimeout(git.raw(["merge", "--squash", branch]), timeoutMs, "git merge --squash (canonical)");
+      await withTimeout(git.raw(["merge", "--squash", squashTarget]), timeoutMs, "git merge --squash (canonical)");
     } catch {
       rawError = true; // a conflict OR a real failure — the explicit checks below decide
     }

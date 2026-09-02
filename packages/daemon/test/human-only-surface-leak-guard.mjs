@@ -47,8 +47,27 @@ const MCP_DIR = path.join(SRC_DIR, "mcp");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const mcpFiles = fs.readdirSync(MCP_DIR).filter((f) => f.endsWith(".ts"));
+// RECURSIVE (card 7efc2bff item 2, fixing a real gap: a bare fs.readdirSync(MCP_DIR) only sees the TOP
+// LEVEL of src/mcp — a router moved to src/mcp/<subdir>/x.ts would silently leave the scanned population
+// short a file, with nothing here to notice. src/mcp has no subdirectories today (enumerated), so this
+// changes nothing about which files are found right now — it only makes that stay true if one is ever added.
+function walkTsFiles(dir, base = dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) { out.push(...walkTsFiles(full, base)); continue; }
+    if (entry.name.endsWith(".ts")) out.push(path.relative(base, full).replace(/\\/g, "/"));
+  }
+  return out;
+}
+const mcpFiles = walkTsFiles(MCP_DIR);
 check(`the real corpus scan opened at least one src/mcp/*.ts file (found ${mcpFiles.length})`, mcpFiles.length > 0);
+// `mcpFileContents` is keyed off `mcpFiles` itself (same array, same iteration) — every key this map is ever
+// queried with elsewhere in this file (SUBSTRING_FORBIDDEN below, the registerTool scan) comes FROM
+// `mcpFiles`, so `.get(f)` is structurally guaranteed present there and is left unguarded. Section (6) below
+// is the one place this file queries the map with an INDEPENDENTLY hardcoded name list (SHELL_FILES) that
+// is not guaranteed to intersect the real corpus — that is what actually needs (and keeps) the undefined
+// guard, not this loop.
 const mcpFileContents = new Map(mcpFiles.map((f) => [f, fs.readFileSync(path.join(MCP_DIR, f), "utf8")]));
 
 // ── (1)+(2) substring-absence table — one entry per forbidden REST-path literal ──────────────────────────
@@ -137,6 +156,16 @@ check('positive control: "event_trigger" or "eventTrigger" IS findable in orches
   }
   check(`shell-terminal.mjs: no MCP server (${SHELL_FILES.join(", ")}) exposes a shell-spawn tool (offenders: ${offenders.join("; ") || "none"})`,
     offenders.length === 0);
+  // POSITIVE CONTROL (card 7efc2bff item 2): every other absence assertion in this file proves its needle
+  // is findable SOMEWHERE known-present before trusting an empty result here — section (6) was the one
+  // exception, so an absence here could not be told apart from a needle that's simply been renamed out from
+  // under it. Anchored OUTSIDE mcp/ (gateway/server.ts, pty/host.ts — the real shell-spawn implementation),
+  // same "safe to read without touching the scanned population" reasoning as the (1)+(2) anchor above.
+  const ptyHostText = fs.readFileSync(path.join(SRC_DIR, "pty", "host.ts"), "utf8");
+  for (const needle of SHELL_SURFACE) {
+    check(`positive control: "${needle}" IS findable outside mcp/ (gateway/server.ts or pty/host.ts) — proves the needle isn't stale/renamed`,
+      gatewayText.includes(needle) || ptyHostText.includes(needle));
+  }
 }
 
 console.log(failures === 0
