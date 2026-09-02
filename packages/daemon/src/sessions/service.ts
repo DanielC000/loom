@@ -9527,10 +9527,16 @@ export class SessionService {
         // actual DELIVERY time, not here (this whole branch can run seconds after filing while the Lead is
         // idle, or the note can sit queued for minutes while the Lead is busy — see the second field
         // instance on card 8e0d09e8, where the Lead closed the card ~4 minutes before this exact notice
-        // finally drained). `resolveTailAtDelivery` is invoked by PtyHost right as the text is assembled
-        // for the real write (`annotatedMessageText`), so this closure's `getTask` read happens then, not
-        // now. A deleted task or any other lookup failure returns `undefined` (PtyHost swallows a throw
-        // too) — the notice still delivers with the filing stamp alone, never dropped or delayed by this.
+        // finally drained). `resolveTailAtDelivery` is invoked by PtyHost the first time it TOUCHES this
+        // entry (see `withDeliveryTail`'s own doc, card ea77f71d — genuinely at drain time for this
+        // resolver specifically, since it never sets `senderId` and so never becomes a coalescing-budget
+        // probe candidate), so this closure's `getTask` read happens then, not now.
+        // Card ea77f71d (Code Reviewer Minor, item 7): a deleted task now returns a VISIBLE
+        // ` · column: unknown` marker instead of `undefined` — so "the resolver ran but found nothing" is
+        // no longer silently indistinguishable from "the resolver never ran at all" (a carry-boundary loss,
+        // see `QueuedMessage.resolveTailAtDelivery`'s own doc for that remaining, still-silent hole). A
+        // throw from `getTask` itself is NOT caught here — PtyHost's own `withDeliveryTail` catch handles
+        // that (degrades to the filing stamp alone, exactly as before) — never dropped or delayed by this.
         //
         // Code Reviewer Major ① (2026-09-02): `annotatedMessageText`'s resolved text is what `submit()`
         // stores verbatim into `live.lastPrompt` — and `resumeAfterRateLimit` replays THAT STRING, tail
@@ -9546,7 +9552,7 @@ export class SessionService {
         // — one timestamp format in this frame, not two.
         const resolveTailAtDelivery = () => {
           const t = this.db.getTask(taskId);
-          if (!t) return undefined;
+          if (!t) return " · column: unknown"; // card ea77f71d item 7: a VISIBLE marker, not a silent no-tail
           const asOf = new Date().toISOString();
           const resolved = this.columnEscalationStatus(home.id, t.columnKey) === "resolved";
           return resolved ? ` · column as of ${asOf}: \`${t.columnKey}\` (terminal)` : ` · column as of ${asOf}: \`${t.columnKey}\``;

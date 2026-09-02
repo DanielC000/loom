@@ -143,10 +143,41 @@ try {
   const delivered3 = fake.writes.slice(writesBeforeEsc3).join("");
   check("(3) a failed delivery-time column lookup still delivers the note (never dropped)",
     delivered3.includes(esc3.taskId) && delivered3.includes("degrade on a vanished task"));
-  check("(3) …just without a column tail — degrades to the filing stamp alone",
+  // Card ea77f71d item 7: the resolver now returns a VISIBLE ` · column: unknown` marker on a lookup miss
+  // instead of `undefined` — so this is no longer indistinguishable from a resolver that never ran at all
+  // (a carry-boundary loss — see QueuedMessage.resolveTailAtDelivery's own doc for that remaining hole).
+  check("(3) …just no `column as of` timestamp tail (the task is gone, nothing to timestamp)",
     !delivered3.includes("column as of"));
+  check("(3) THE FIX (item 7): a resolver that RAN but found nothing is now visibly marked, not silent",
+    delivered3.includes(" · column: unknown"));
 
   host.deliverHook("LEAD", { hook_event_name: "Stop" }); // settle esc3's turn (hygiene)
+
+  // ===================== ITEM 8 (Code Reviewer Minor test-coverage, card ea77f71d) =========================
+  // `pty/host.ts`'s `withDeliveryTail` swallows a THROWING resolver (not just one that returns `undefined`)
+  // — that `catch` was UNTESTED before this card (the reviewer's own proof: delete the try/catch and this
+  // very suite still went green, because scenario (3) above only ever exercises the "task not found, resolver
+  // returns undefined/a marker" branch, never a genuine THROW). This scenario stubs `db.getTask` itself to
+  // throw, which the resolver above does NOT catch — so the throw propagates out of the resolver and must be
+  // caught by PtyHost's own `withDeliveryTail`, degrading to the base text with NO tail at all (not even the
+  // ` · column: unknown` marker item 7 added — the resolver never got far enough to construct it).
+  host.enqueueStdin("LEAD", "yet another unrelated in-flight turn");
+  const writesBeforeEsc3b = fake.writes.length;
+  const esc3b = svc.platformEscalate("MGR", { title: "degrade on a throwing lookup", detail: "d3b", severity: "low" });
+  const realGetTask = db.getTask.bind(db);
+  db.getTask = (id) => { if (id === esc3b.taskId) throw new Error("simulated DB fault"); return realGetTask(id); };
+  try {
+    host.deliverHook("LEAD", { hook_event_name: "Stop" });
+  } finally {
+    db.getTask = realGetTask;
+  }
+  const delivered3b = fake.writes.slice(writesBeforeEsc3b).join("");
+  check("(3b) THE CHECK: a THROWING delivery-time lookup still delivers the note (never dropped) — exercises pty/host.ts's withDeliveryTail catch",
+    delivered3b.includes(esc3b.taskId) && delivered3b.includes("degrade on a throwing lookup"));
+  check("(3b) …with NO tail at all — not even the ` · column: unknown` marker, since the throw happens before the resolver can construct it",
+    !delivered3b.includes("column as of") && !delivered3b.includes("· column"));
+
+  host.deliverHook("LEAD", { hook_event_name: "Stop" }); // settle esc3b's turn (hygiene)
 
   // ===================== Code Reviewer Major ①: the tail's OWN stamp must survive a rate-limit replay ======
   // `submit()` bakes the FULLY-RESOLVED text (tail included) verbatim into `live.lastPrompt`, and

@@ -1002,6 +1002,47 @@ function annotateMintStamp(
 }
 
 /**
+ * Card ea77f71d (Code Reviewer Major ②, follow-up on 8e0d09e8): `m.resolveTailAtDelivery` (if present) is
+ * resolved HERE, but only ONCE ever, on the first evaluation that TOUCHES this entry — the result is
+ * memoized onto the entry itself (`m.resolvedTailReady`/`m.resolvedTail`) and every later call, for the
+ * SAME `m`, returns the cached value without re-invoking the resolver. This is load-bearing for TWO
+ * things at once:
+ *   (1) BYTE-IDENTITY: `requeueGiveUpOrigin` reconstructs the exact text a failed attempt actually wrote,
+ *       by calling this SAME function again on the SAME `QueuedMessage` object (`origin`'s members are the
+ *       identical references `drainPending` drained — see `submit`'s `live.giveUpOrigin = origin`). Before
+ *       this memoization, a resolver that reads live external state (e.g. a task's current board column)
+ *       could return a DIFFERENT value on that later reconstruction than it did at the real write, silently
+ *       breaking the late-confirmation content-match/purge mechanism this function's `Card 78e4b3f2` doc
+ *       (below) already declares load-bearing.
+ *   (2) COST: `projectedWrittenLength` (below) can invoke this up to 3x per drain candidate (a byte-bound
+ *       probe, then the accumulate, then the real write) — including, before this fix, for a candidate that
+ *       fails the byte bound and is therefore never drained at all. Memoizing collapses that back to at most
+ *       one real resolver invocation, ever, per entry.
+ * ⚠️ KNOWN CAVEAT (accepted, not closed by this fix): memoization happens on the FIRST touch, which is not
+ * always the real delivery write — a coalescing-budget probe that ends up REJECTING this candidate (it
+ * stays in `live.pending` for a later drain) still counts as a touch. Today's one production resolver
+ * (`SessionService.platformEscalate`) can never hit this, because it always enqueues with no `senderId`,
+ * which keeps it out of the same-sender coalescing-candidate scan entirely (see that scan's own
+ * `senderKey !== null` guard) — so it is always resolved exactly at its own head-of-batch, i.e. genuinely at
+ * drain time. A FUTURE resolver-bearing caller that DOES supply a `senderId` and gets rejected as a
+ * coalescing candidate would see its tail frozen at that earlier, rejected probe rather than at its actual
+ * later delivery — the resolver's own `resolveTailAtDelivery` doc (below) names this explicitly so a future
+ * caller can judge whether that's acceptable for what it reads.
+ */
+function withDeliveryTail(m: QueuedMessage): string {
+  if (!m.resolveTailAtDelivery) return m.text;
+  if (!m.resolvedTailReady) {
+    m.resolvedTailReady = true;
+    try {
+      m.resolvedTail = m.resolveTailAtDelivery();
+    } catch {
+      m.resolvedTail = undefined;
+    }
+  }
+  return m.resolvedTail ? `${m.text}${m.resolvedTail}` : m.text;
+}
+
+/**
  * Card 78e4b3f2: the text ACTUALLY submitted for a batch of drained (or `Live.giveUpOrigin`-captured)
  * messages — coalesces them with `DRAIN_SEPARATOR` exactly like before this card, but ALSO frames any
  * member whose `giveUpGen` is already set (this write is a genuine re-delivery of a message that was never
@@ -1030,23 +1071,6 @@ function annotateMintStamp(
  * `PASTE_RECOVERY_TAG` so `annotatePasteRecoveryAge` no-ops on it and leaves it untouched for this
  * function to stamp) but composing them regardless keeps this call site correct even if that changes.
  */
-/**
- * Card 8e0d09e8: resolve `m.resolveTailAtDelivery` (if present) HERE — this function runs exactly at the
- * moment a message's text is assembled for a real write, both on the immediate-submit path and from
- * `drainPending`, i.e. genuinely at delivery time rather than at the original `enqueueStdin` call. A
- * throwing or absent resolver contributes nothing; the base text still delivers, unchanged — a live
- * lookup failing must never drop or delay the message it's attached to (see the field's own doc).
- */
-function withDeliveryTail(m: QueuedMessage): string {
-  if (!m.resolveTailAtDelivery) return m.text;
-  try {
-    const tail = m.resolveTailAtDelivery();
-    return tail ? `${m.text}${tail}` : m.text;
-  } catch {
-    return m.text;
-  }
-}
-
 function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
   const base = withDeliveryTail(m);
   const t = m.giveUpGen !== undefined ? framePossibleDuplicate(base, m.logicalId) : base;
@@ -2540,20 +2564,33 @@ export type QueuedMessageKind = "warning" | "agent";
  * "FAIRNESS BOUND" comment for the mechanism this enforces.
  */
 /**
- * `resolveTailAtDelivery` (card 8e0d09e8) — an OPTIONAL caller-supplied closure invoked at the moment
- * this entry's text is actually assembled for a real write (`annotatedMessageText`, called from both the
- * immediate-submit path and `drainPending`'s held-queue drain) — i.e. genuinely at delivery time, not at
- * `enqueueStdin` call time. Its return value (or `""`/`undefined` for "nothing to add") is appended to
- * `m.text` before any other annotation. Exists so a message whose BODY must stay frozen at enqueue time
- * (e.g. `platform_escalate`'s notice — the title is a dedupe signature and must never be re-minted, see
- * `SessionService.platformEscalate`'s own doc) can still carry a small amount of LIVE state read as late
- * as possible — the escalated card's current column, in that caller's case — without mutating the frozen
- * part. Called defensively: a throwing resolver is swallowed and contributes nothing (the base text still
- * delivers unchanged) — a live lookup failing must never drop or delay the message it's attached to.
- * NOT threaded through `carryPendingToSuccessor` or `getPersistablePendingSnapshot` (a function cannot
- * cross a recycle/restart's serialization boundary) — an entry that crosses either boundary simply loses
- * this closure and delivers with its frozen text alone, the same safe degrade as a resolver that throws.
- * Mirrors `onGiveUpExhausted`/`onDeliver`: a closure PtyHost invokes without knowing what it does.
+ * `resolveTailAtDelivery` (card 8e0d09e8) — an OPTIONAL caller-supplied closure. **PURITY CONTRACT: MUST
+ * be pure / side-effect-free (a plain read, never a mutation, counter bump, or log write).** ⚠️ CORRECTED
+ * (Code Reviewer Major ②, card ea77f71d): this is NOT invoked exactly once per delivery the way
+ * `onDeliver` is — see `withDeliveryTail`'s own doc (above `annotatedMessageText`) for the real invocation
+ * count and the memoization (`resolvedTailReady`/`resolvedTail`, below) that bounds it to AT MOST one real
+ * call, ever, per entry — including, in the general case, for an entry that is later found never to have
+ * been delivered at all (a coalescing-budget probe that gets rejected). Its return value (or
+ * `""`/`undefined` for "nothing to add") is appended to `m.text` before any other annotation. Exists so a
+ * message whose BODY must stay frozen at enqueue time (e.g. `platform_escalate`'s notice — the title is a
+ * dedupe signature and must never be re-minted, see `SessionService.platformEscalate`'s own doc) can still
+ * carry a small amount of LIVE state read as late as possible — the escalated card's current column, in
+ * that caller's case — without mutating the frozen part. A throwing resolver is swallowed and contributes
+ * nothing (the base text still delivers unchanged) — a live lookup failing must never drop or delay the
+ * message it's attached to; that swallowed failure is ALSO memoized (never retried on a later touch of the
+ * same entry).
+ *
+ * ⚠️ THE CARRY HOLE (named, not just accepted as "safe degrade" — Code Reviewer Minor, card ea77f71d): NOT
+ * threaded through `carryPendingToSuccessor` or `getPersistablePendingSnapshot` (a function cannot cross a
+ * recycle/restart's serialization boundary) — an entry that crosses either boundary simply LOSES this
+ * closure and delivers with its frozen text alone, silently and with no visible marker, exactly like a
+ * resolver that returns `undefined`/throws. This is the SAME successor-Lead cold-boot persona card
+ * 8e0d09e8 named as most at risk (a daemon restart or `worker_recycle` mid-flight), so the live-tail
+ * feature is silently absent precisely where staleness matters most. `SessionService.platformEscalate`'s
+ * own resolver (see its call site) now returns a visible ` · column: unknown` marker when its OWN lookup
+ * finds the task gone — but that only disambiguates "the resolver RAN and found nothing" from silence. A
+ * resolver that never ran at all (this carry hole) or that itself threw (see `withDeliveryTail`'s catch)
+ * still produces the exact same silent no-tail output, indistinguishable from each other.
  *
  * ⚠️ CALLER RESPONSIBILITY (Code Reviewer Major ①, card 8e0d09e8): the text this resolver contributes is
  * NOT re-read on every future delivery of the same content — `submit()` stores the fully-assembled text
@@ -2562,8 +2599,17 @@ export type QueuedMessageKind = "warning" | "agent";
  * return value conveys freshness (a live status, a count, anything time-sensitive) MUST embed its OWN
  * read-time stamp in the string it returns — never rely on the surrounding frame's own vintage marker (if
  * it has one) to cover the tail too; the two can legitimately diverge once a rate-limit replay is in play.
+ *
+ * `resolvedTailReady`/`resolvedTail` (card ea77f71d) — the memoization cache `withDeliveryTail` writes onto
+ * this SAME entry the first time it's touched: `resolvedTailReady` is set `true` on that first touch
+ * (success OR failure, so a throw is never retried), and `resolvedTail` holds the resolver's return value
+ * (or stays `undefined` on failure/absence). Never set by any caller directly — `withDeliveryTail` is the
+ * sole writer. This is what makes `requeueGiveUpOrigin`'s reconstruction byte-identical to the real write:
+ * `origin`'s members are the SAME object references `drainPending` drained (see `submit`'s
+ * `live.giveUpOrigin = origin`), so its later `annotatedMessageText` call reads the cache instead of
+ * re-invoking a resolver that may have observed different external state by then.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
