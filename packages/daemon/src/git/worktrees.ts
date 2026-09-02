@@ -3299,6 +3299,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // this corpus that deliberately print failure-shaped text as their own positive control would false-
   // positive an output scan — see card 2f0b2e57).
   "packages/daemon/test/exit-code-verdict-guard.mjs",
+  // Card 3c4a19cb: a corpus-wide source-text scan asserting that any `packages/daemon/test/*.mjs` object
+  // literal setting `failingTestCount:` also sets `failTierTest:`/`failTierTestCount:` — omitting them
+  // silently loses the merge gate's single-file retry (`identifyRetriableTestFile`, gate-runner.ts reads
+  // ONLY `failTierTest*`, never `failingTest*`; see card 0e5b2045's decoupling). This bit twice, hours
+  // apart, fixed by commit a995d7bc. Belongs here on the same ground as its corpus-wide-scan siblings
+  // above: a source-TEXT property the reduced/emit-compare path cannot reason about — a diff that ADDS a
+  // new mis-paired test double to test/*.mjs (exactly the incident class this guard exists to police)
+  // would otherwise take the reduced path (that changed test file only runs ITS OWN assertions via
+  // `--only=`, never this separate guard) and never trip a single check. See the guard's own header for
+  // its one named exemption (merge-gate-concurrency-verdict.mjs) and why a narrower, `failingTestCount:`-
+  // gated rule was chosen over the wider "any failingTest:" shape.
+  "packages/daemon/test/failing-test-tier-pairing-guard.mjs",
 ];
 
 /** {@link computeEmitCompareGate}'s verdict. */
