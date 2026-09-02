@@ -310,6 +310,16 @@ function shippedAssetsFiles(assetsRoot) {
 // judgment call — flag it for a second look anyway if the category read is wrong (only .d.ts/.js hit for
 // platform-lead-prompt — no .map pair; its sourcemap happens not to embed the string).
 //
+// Card `a6f1b29b` (2026-09-02) added `mcp/setup.js`: setup.ts's project_configure tool description was
+// missing `codescape` from its settable-keys sentence (a drift-guard defect fixed by this same card —
+// see test/project-configure-description-drift.mjs) and now correctly names it, exactly mirroring the
+// ALREADY-accepted `mcp/platform.js` entry above — that file is on this list for the identical reason
+// (its OWN project_configure description names the same schema key). This is the tightest possible match
+// to an existing baseline entry: the sibling MCP router's description of the SAME settable key, not a new
+// leak category. Only `.js` hit (confirmed via `grep -l codescape` over setup.{js,d.ts,js.map,d.ts.map}),
+// same shape as platform.js's own single-file footprint. Flag for a second look if the category read is
+// wrong, per this list's own standing rule.
+//
 // Paths are relative to the repo root, POSIX-separated (portable across OSes/worktrees).
 const KNOWN_LEAKING_FILES = [
   // packages/daemon/dist — 24 files (every match of `grep -ril codescape packages/daemon/dist/`).
@@ -351,6 +361,8 @@ const KNOWN_LEAKING_FILES = [
   "packages/daemon/dist/codescape/tools-probe.js.map",
   "packages/daemon/dist/sessions/platform-lead-prompt.d.ts",
   "packages/daemon/dist/sessions/platform-lead-prompt.js",
+  // packages/daemon/dist — 1 file added by card a6f1b29b (see the provenance note above).
+  "packages/daemon/dist/mcp/setup.js",
 ];
 
 if (KNOWN_LEAKING_FILES.length === 0) {

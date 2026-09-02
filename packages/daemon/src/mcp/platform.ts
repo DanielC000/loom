@@ -413,6 +413,20 @@ function sanitizePlatformConfigForAgent(
 export const CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(projectConfigOverrideSchema.shape);
 
 /**
+ * The settable TOP-LEVEL config keys on the AGENT-facing schema (`agentProjectConfigOverrideSchema`) —
+ * derived ONCE from that schema's shape, mirroring `CONFIG_TOP_LEVEL_KEYS` above, so it too can never
+ * drift from its validator. This is the key set BOTH agent-facing config-write routers actually accept
+ * (setup.ts's `project_configure`/`project_create`, and the manager-facing project_update path) — it is
+ * a STRICT SUBSET of `CONFIG_TOP_LEVEL_KEYS` only in that `sessionEnv` is entirely omitted; every other
+ * key name survives (though `obsidian`/`orchestration`/`python` accept a NARROWER nested shape — see
+ * `agentObsidianOverride`/`agentOrchestrationOverride`/`agentPythonOverride` above). Card `a6f1b29b`:
+ * setup.ts's `project_configure` description had hand-typed its OWN settable-keys sentence against this
+ * schema and drifted from it (advertising the omitted `sessionEnv` as settable, a false positive) —
+ * exported so that sentence, and the test that guards it, can both be schema-derived instead.
+ */
+export const AGENT_CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(agentProjectConfigOverrideSchema.shape);
+
+/**
  * REST/human path validator: the full schema (gateCommand allowed). `obsidian.path` and
  * `python.interpreterPath` are HUMAN-only host paths a user may type with a leading `~` (same as
  * repoPath/vaultPath) — expand it here, post-parse (both fields are already confirmed strings by the

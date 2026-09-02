@@ -12,7 +12,7 @@ import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
-import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
+import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -246,7 +246,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian. The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path/python (host-launch) — and any unknown key — are REJECTED and the stored config is left unchanged.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian (autoStart only — obsidian.path is human-only, see below), python (accepted, but currently has no agent-settable fields — python.interpreterPath is human-only, see below), memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path and python.interpreterPath (host-launch), and sessionEnv (the internal transport those same host-launch fields ride in as env vars — allowing it would re-open the same capability) — and any unknown key — are REJECTED and the stored config is left unchanged.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -265,9 +265,12 @@ export class SetupMcpRouter {
         // posture difference of the setup surface.
         const v = validateAgentProjectConfigOverride(config);
         // List the valid top-level keys on rejection so a fat-fingered key (the kanbanColumns-vs-"columns"
-        // confusion that motivated this card) converges instead of giving up. gateCommand/alertWebhook/
-        // obsidian.path/python stay human-only and are deliberately omitted from the agent-settable hint.
-        if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS });
+        // confusion that motivated this card) converges instead of giving up. AGENT_CONFIG_TOP_LEVEL_KEYS
+        // (not the platform router's CONFIG_TOP_LEVEL_KEYS) — this surface validates against the AGENT
+        // schema, which omits sessionEnv entirely; hinting the full key set here would repeat the exact
+        // false-positive card `a6f1b29b` fixed in this tool's description, just in the rejection payload
+        // instead of the prose.
+        if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: AGENT_CONFIG_TOP_LEVEL_KEYS });
         // PATCH/MERGE (card 28c21fe1): deep-merge the VALIDATED partial into the existing override instead
         // of replacing it, so setting one key never clobbers a board's other overrides. The trust boundary
         // is UNCHANGED: the partial is validated by the AGENT validator ABOVE (a human-only key is a
