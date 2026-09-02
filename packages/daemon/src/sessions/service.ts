@@ -1729,9 +1729,11 @@ export interface EscalationStatusItem {
   status: "pending" | "in_progress" | "triaged" | "resolved" | "closed";
   columnKey: string | null;
   updatedAt: string;
-  /** Where the Lead's fix work actually went, once linked via `project_task_create`'s `resolvesEscalation`
-   *  — null until a link is recorded. `merged` is that destination card's OWN git-derived ship state (the
-   *  SAME check `project_task_get`/`tasks_get` expose) — see `status`'s doc for how to read a null here. */
+  /** Where the Lead's fix work actually went, once linked via `resolvesEscalation` — `project_task_create`'s
+   *  param at create time, or `project_task_update`'s SAME-named param after the fact (card de90f22a; the
+   *  link isn't create-only) — null until a link is recorded. `merged` is that destination card's OWN
+   *  git-derived ship state (the SAME check `project_task_get`/`tasks_get` expose) — see `status`'s doc for
+   *  how to read a null here. */
   triagedTo: { projectId: string; projectName: string; taskId: string; taskTitle: string; merged: MergedCommitInfo | null } | null;
 }
 

@@ -110,8 +110,12 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    card's own shipped state instead of asserting it the moment you move the escalation card to done on
    your OWN board. Skip this param and the escalation reports `triaged` forever, even after the fix
    ships — a body-text note in the card instead of the param is NOT a substitute; it has already failed
-   as a fix for this twice. Moving the escalation card to a terminal column marks that YOU finished
-   triaging it — it no longer, by itself, claims the underlying bug is fixed. **Write your triage
+   as a fix for this twice. **The link isn't create-only** (card de90f22a): if the fix card already
+   existed, or you only realize afterward that a card resolves an escalation, `project_task_update` takes
+   the SAME `resolvesEscalation` param and links it just as structurally after the fact — never fall back
+   to a body-text note because you missed the window at create time. Moving the escalation card to a
+   terminal column marks that YOU finished triaging it — it no longer, by itself, claims the underlying
+   bug is fixed. **Write your triage
    verdict with `project_task_update`'s `appendBody` param, never `body` (card 8636f761).** `body` is a
    full replace with no undo — writing a verdict through it destroys the reporter's original evidence
    unless you manually re-paste it under your own "preserved verbatim" heading first. `appendBody` adds

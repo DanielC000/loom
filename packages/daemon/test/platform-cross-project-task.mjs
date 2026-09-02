@@ -18,6 +18,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       unambiguous id-prefix, and REJECTS the whole create (nothing written) for an unknown escalation
 //       id OR a real taskId that isn't actually on the Platform board (scoped, never a bare unscoped
 //       lookup). escalation-status.mjs proves the READ side this link feeds.
+//   (8b) card de90f22a — the SAME link, made AFTER creation via project_task_update's own
+//        `resolvesEscalation` (the create-time-only gap ba04d607 left open): links an escalation to a fix
+//        card that already existed, returns `escalationLinked:true` only when the link was actually
+//        written, refuses the WHOLE update (no partial write) for an unknown/out-of-scope escalation id,
+//        rejects the taskIds batch path outright, and a re-link overwrites (latest write wins).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-cross-project-task.mjs
 import fs from "node:fs";
@@ -513,6 +518,54 @@ try {
   check("(8) resolvesEscalation: a taskId that exists but is NOT on the Platform board is rejected (scoped, no cross-board leak)",
     typeof outOfScopeLink.error === "string" && !outOfScopeLink.id);
   check("(8) resolvesEscalation: that rejected create ALSO inserted no card", db.listTasks("pTarget").length === nBefore8);
+
+  // ===================== (8b) resolvesEscalation on project_task_update — AFTER creation (card de90f22a) ====
+  // The whole point of the gap this card fixes: a fix card that already EXISTS (filed before the escalation
+  // was recognized, or without the param at create time) could never be structurally linked afterward — only
+  // a fresh create could carry the link. This is the POSITIVE CONTROL a create-time-only test structurally
+  // cannot produce: link a SECOND, independent escalation to a card that was ALREADY created plain.
+  const esc2 = svc.platformEscalate("M", { title: "resolvesEscalation-after-creation test escalation", detail: "evidence 2", severity: "medium" });
+  check("(8b) setup: a second, independent escalation was filed", !!esc2.taskId && !esc2.error && esc2.taskId !== esc.taskId);
+
+  const preCard = await call("project_task_create", { projectId: "pTarget", title: "fix(x): filed before the link existed", body: "v1", columnKey: "backlog" });
+  check("(8b) setup: a plain fix card (NO resolvesEscalation) was created", !!preCard.id && !preCard.error);
+  check("(8b) setup: no link exists yet for esc2 (the create-time-only gap)", db.findEscalationTriage(esc2.taskId) === null);
+
+  const linked = await call("project_task_update", { projectId: "pTarget", taskId: preCard.id, resolvesEscalation: esc2.taskId });
+  check("(8b) project_task_update + resolvesEscalation succeeds (no error)", !linked.error);
+  check("(8b) the return value SAYS what happened — escalationLinked:true", linked.escalationLinked === true);
+  const link2 = db.findEscalationTriage(esc2.taskId);
+  check("(8b) db.findEscalationTriage now resolves to the ALREADY-EXISTING preCard — the structural link, made after the fact",
+    link2 !== null && link2.destinationProjectId === "pTarget" && link2.destinationTaskId === preCard.id);
+
+  // An ordinary update (no resolvesEscalation) never fabricates the flag.
+  const ordinaryUpdate = await call("project_task_update", { projectId: "pTarget", taskId: preCard.id, priority: "p1" });
+  check("(8b) an ordinary update carries NO escalationLinked field", !("escalationLinked" in ordinaryUpdate) && !ordinaryUpdate.error);
+
+  // Re-linking the SAME escalation to a DIFFERENT card overwrites (latest link wins) — never returns success
+  // while silently leaving the old link in place.
+  const laterFix = await call("project_task_create", { projectId: "pTarget", title: "fix(x): the actually-correct fix, filed later" });
+  const relinked = await call("project_task_update", { projectId: "pTarget", taskId: laterFix.id, resolvesEscalation: esc2.taskId });
+  check("(8b) re-linking the same escalation to a different card succeeds and says so", relinked.escalationLinked === true && !relinked.error);
+  const link3 = db.findEscalationTriage(esc2.taskId);
+  check("(8b) the link now points at the NEW destination (latest write wins)", link3 !== null && link3.destinationTaskId === laterFix.id);
+
+  // Unknown escalation id: REJECTED, and — because the whole update is refused — the bundled columnKey
+  // move is NOT applied either (never a partial write dropping just the link).
+  const badUpdateLink = await call("project_task_update", { projectId: "pTarget", taskId: preCard.id, columnKey: "in_progress", resolvesEscalation: "not-a-real-task-id-at-all" });
+  check("(8b) unknown escalation id on update is REJECTED with {error}", typeof badUpdateLink.error === "string" && !badUpdateLink.escalationLinked);
+  check("(8b) the whole patch was refused — the bundled columnKey move did NOT apply either", db.getTask(preCard.id).columnKey === "backlog");
+
+  // A taskId that exists but is NOT on the Platform board is rejected — same scoping as the create-time path.
+  const outOfScopeUpdateLink = await call("project_task_update", { projectId: "pTarget", taskId: preCard.id, resolvesEscalation: laterFix.id });
+  check("(8b) an out-of-scope (non-Platform-board) escalation id on update is rejected",
+    typeof outOfScopeUpdateLink.error === "string" && !outOfScopeUpdateLink.escalationLinked);
+
+  // The taskIds batch path REJECTS resolvesEscalation outright — linking one escalation to many destination
+  // cards at once is never a legitimate ask.
+  const batchLinkRejected = await call("project_task_update", { projectId: "pTarget", taskIds: [preCard.id, laterFix.id], resolvesEscalation: esc2.taskId });
+  check("(8b) resolvesEscalation on the taskIds batch path is REJECTED",
+    typeof batchLinkRejected.error === "string" && /taskIds batch/.test(batchLinkRejected.error));
 
   await client.close();
 

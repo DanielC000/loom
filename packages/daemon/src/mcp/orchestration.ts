@@ -5158,7 +5158,8 @@ export class OrchestrationMcpRouter {
           "different cases — genuinely not fixed yet, fixed but landed outside the merge-detection scan " +
           "window, or a transient git-read failure — never treat a `triaged` reading as proof the underlying " +
           "defect is still present. `triagedTo` (present once the Lead has linked a destination via " +
-          "`project_task_create`'s `resolvesEscalation`) names {projectId, projectName, taskId, taskTitle, " +
+          "`resolvesEscalation` — either at create time, or afterward via `project_task_update`'s " +
+          "same-named param) names {projectId, projectName, taskId, taskTitle, " +
           "merged} so you can go verify the real state yourself instead of trusting this field alone. No writes.",
         inputSchema: strictShape({ taskId: z.string().optional(), includeResolved: z.boolean().optional() }),
       },

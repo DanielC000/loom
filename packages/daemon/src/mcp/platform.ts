@@ -2177,7 +2177,9 @@ export class PlatformMcpRouter {
           "substitute (that remedy already failed twice; see the card). An unknown/ambiguous/out-of-scope " +
           "escalation id is REJECTED with {error} and nothing is written (the whole create fails, not just " +
           "the link — a card claiming to resolve an escalation it isn't actually linked to would be worse " +
-          "than no link at all).",
+          "than no link at all). Missed this at create time — the fix card already existed, or you only " +
+          "later realized it resolves an escalation? `project_task_update` takes the SAME `resolvesEscalation` " +
+          "param (card de90f22a) — the link isn't create-only.",
         inputSchema: strictShape({
           projectId: z.string(),
           title: z.string(),
@@ -2346,7 +2348,22 @@ export class PlatformMcpRouter {
           "concurrent edit the way a full replace can, so there's nothing to gate — worst case under a race " +
           "is two sections landing in a nondeterministic order, never lost content. The destructive-truncation " +
           "guard above still applies to the resulting write (it can never fire on a correct append, but stays " +
-          "as a backstop against a buggy one). Returns the full updated Task row, same as a `body` write.",
+          "as a backstop against a buggy one). Returns the full updated Task row, same as a `body` write.\n" +
+          "`resolvesEscalation` (card de90f22a, single-`taskId` path only) is the AFTER-CREATION counterpart " +
+          "to `project_task_create`'s param of the same name: pass an escalation's taskId (full id or " +
+          "unambiguous prefix, resolved on YOUR OWN \"" + PLATFORM_PROJECT_NAME + "\" board — never a task on " +
+          "the destination board) to STRUCTURALLY link THIS existing card as that escalation's fix, exactly " +
+          "as if you'd passed it at create time. Exists because the create-time-only param left no way to " +
+          "link a SECOND escalation to a fix that already exists — the link had to be conveyed in prose or " +
+          "lost (see de90f22a). Re-linking an escalation that already has a link REPLACES it (latest write " +
+          "wins) — same as re-filing `resolvesEscalation` on a fresh create would. Validated + resolved " +
+          "BEFORE the rest of the patch is written: an unknown/ambiguous/out-of-scope escalation id is " +
+          "REJECTED with {error} and the WHOLE update is refused, nothing written — same discipline as the " +
+          "create-time param (a card claiming to resolve an escalation it isn't actually linked to would be " +
+          "worse than no link at all). The response carries `escalationLinked:true` ONLY when the link was " +
+          "actually written — never on a patch that also failed for some other reason (a stale baseVersion, " +
+          "an unknown column) or on the `taskIds` batch path, which REJECTS `resolvesEscalation` outright " +
+          "(linking one escalation to many destination cards at once is never a legitimate ask).",
         inputSchema: strictShape({
           projectId: z.string(),
           taskId: z.string().optional(),
@@ -2363,15 +2380,35 @@ export class PlatformMcpRouter {
           repoKey: z.string().nullable().optional(),
           baseVersion: z.number().optional(),
           allowTruncate: z.boolean().optional(),
+          resolvesEscalation: z.string().optional(),
         }),
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
-      async ({ projectId, taskId, taskIds, baseVersion, allowTruncate, appendBody, ...patch }) => {
+      async ({ projectId, taskId, taskIds, baseVersion, allowTruncate, appendBody, resolvesEscalation, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
         if (taskId && taskIds) return ok({ error: "pass either taskId or taskIds, not both" });
+        if (resolvesEscalation !== undefined && taskIds) {
+          return ok({ error: "resolvesEscalation does not support the taskIds batch path — link one card at a time via taskId" });
+        }
+        // Resolve + validate the escalation link BEFORE writing anything — same discipline as
+        // project_task_create's resolvesEscalation (card ba04d607): a rejected link must fail the WHOLE
+        // update, never silently apply the rest of the patch while dropping the link.
+        let escalationTaskId: string | undefined;
+        if (resolvesEscalation !== undefined) {
+          const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+          if (!home) return ok({ error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" });
+          const escTask = getByIdPrefix(
+            resolvesEscalation,
+            (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
+            () => db.listTasks(home.id),
+            "escalation task",
+          );
+          if ("error" in escTask) return ok(escTask);
+          escalationTaskId = escTask.id;
+        }
         // held-clear guard (card 9b0373c0): updateProjectTask enforces this identically here — the Lead
         // gets NO exemption (owner decision) even though it's the human-driven cross-project operator; a
         // human-set hold is refused just like it is via tasks_update, only the human REST/UI path clears it.
@@ -2397,7 +2434,19 @@ export class PlatformMcpRouter {
           }));
           return ok(results);
         }
-        return ok(spillable(await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody)));
+        const raw = await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody);
+        // Card de90f22a: only write the link — and only claim escalationLinked:true — once the REST of the
+        // patch is confirmed written. `raw` carries `id` on every non-error shape (Task/TaskUpdateAck), so
+        // this also picks up the RESOLVED full task id even when `taskId` was passed as a prefix.
+        if (escalationTaskId && !("error" in raw)) {
+          db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: callerSessionId ?? "",
+            taskId: escalationTaskId, kind: "escalation_triaged",
+            detail: { destinationProjectId: project.id, destinationTaskId: raw.id },
+          });
+          return ok({ ...spillable(raw), escalationLinked: true });
+        }
+        return ok(spillable(raw));
       },
     );
 
