@@ -32,7 +32,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
-const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } = await import("../dist/orchestration/resume-nudge.js");
+const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT } = await import("../dist/orchestration/resume-nudge.js");
 // Card 062fa934, Code Review CRITICAL — every resumeFleetOnBoot call below must inject this explicitly;
 // see _deploy-staleness-fixture.mjs's own doc for the reproduced incident (a turbo cache-hit build
 // replaying a stale build-info.json flipped `deploySignatureMismatch:true`, withholding the "now LIVE"
@@ -188,6 +188,12 @@ try {
   // Other manager B: the neutral continuation note (NOT the requester's framing).
   const mgrBq = pty.getPending(id.mgrB);
   check("(2) other manager B gets the neutral 'you were resumed' note", mgrBq.length === 1 && mgrBq[0].includes("Another manager restarted") && !mgrBq[0].includes("now LIVE"));
+  // Card 7d3899cb: THIS is the card's own specimen shape — a different project's manager, otherwise
+  // given no other signal about who restarted the daemon. It must see the explicit origin class rather
+  // than having to infer it from "Another manager restarted" prose alone (and never a project/session/
+  // agent identity — see the card for why that would widen cross-project isolation).
+  check("(2) the peer-project manager's nudge carries the explicit agent-initiated origin class, no identity",
+    mgrBq[0].includes(RESTART_ORIGIN_AGENT) && !mgrBq[0].includes(id.mgrA));
   check("(2) other project's worker B1 gets the worker task nudge", pty.getPending(id.wkrB1).length === 1 && pty.getPending(id.wkrB1)[0].includes("Continue your assigned task"));
   check("(2) the dead (failed) worker received NO nudge", pty.getPending(deadW).length === 0);
   // card 547fcaaa: the worker daemon-restarted nudge no longer asserts unconditional worktree integrity —
@@ -208,8 +214,12 @@ try {
   // path's/watchdog's copies — pin the shared constant itself so a divergent re-wording fails here.
   check("(2) the blocked nudge body is BYTE-IDENTICAL to buildBlockedResumeNudgeBody's output",
     blockedWq[0] === buildBlockedResumeNudgeBody(
-      "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
+      `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed.`,
     ) + RESUME_NUDGE_TAIL);
+  // Card 7d3899cb: the daemon_restart path's nudge explicitly self-classifies as agent-initiated — the
+  // ONLY class it can ever be, since resumeFleetOnBoot runs if-and-only-if a RestartIntent was captured.
+  check("(2) the blocked nudge carries the explicit agent-initiated origin class",
+    blockedWq[0].includes(RESTART_ORIGIN_AGENT));
   // Card 9f7c59f1: a worker whose LAST report is worker_report(done), still unconsumed, gets NO nudge at
   // all on the daemon_restart path either — mirrors recoverCrashOrphanedWorkers's identical silence (its
   // report already stands; there's nothing left for it to continue). RED under pre-9f7c59f1 code (it got

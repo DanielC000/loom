@@ -51,7 +51,7 @@ import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_D
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
-import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody } from "../orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
@@ -5118,15 +5118,15 @@ export class SessionService {
         // worker-branch calls already carry.
         const workerTaskId = this.db.getSession(e.sessionId)?.taskId ?? null;
         if (awaitingReview && reportedState === "done") {
-          if (draftNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`, workerTaskId);
+          if (draftNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`, workerTaskId);
         } else {
           this.enqueueDurableNudge(
             e.sessionId, e.role,
             reportedState === "blocked"
               ? buildBlockedResumeNudgeBody(
-                  "[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed.",
+                  `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed.`,
                 ) + RESUME_NUDGE_TAIL + draftNote
-              : `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — re-check your ` +
+              : `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — re-check your ` +
                 `worktree's state. Continue your assigned task from where you left off. If you had already finished, ` +
                 `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
             workerTaskId,
@@ -5162,7 +5162,7 @@ export class SessionService {
           // suppress its live nudge to a Lead that never actually saw it — the sender read `boarded` and
           // stood down believing the report was durably filed, with no way to tell that apart from a
           // genuinely offline Lead. See the `else` branch below for the one place this record IS correct.
-          if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}${capNote}`);
+          if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
@@ -5189,14 +5189,14 @@ export class SessionService {
             // manager-shaped worktree/worker phrasing.
             this.enqueueDurableNudge(
               e.sessionId, e.role,
-              `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
               `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
           } else {
             this.enqueueDurableNudge(
               e.sessionId, e.role,
-              `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
+              `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Resume orchestrating from where you left off (re-check your workers' ` +
               `state AND worktrees; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote + capNote,
             );
@@ -5217,13 +5217,13 @@ export class SessionService {
         if (e.busy) {
           this.enqueueDurableNudge(
             e.sessionId, e.role,
-            `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
+            `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} The daemon was rebuilt + restarted and you were resumed — continue your ` +
             `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
           );
         } else if (draftNote) {
           // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
           // new, actionable information a silent resume would otherwise never surface at all.
-          this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`);
         }
       } else if (draftNote) {
         // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
@@ -5231,7 +5231,7 @@ export class SessionService {
         // enqueueDurableNudge's role gate never defers here (null/"run" don't mount loom-orchestration) —
         // same as today's immediate enqueueStdin (wrapped in the durable helper for the same never-vanish
         // guarantee — card 06ebbb78).
-        this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+        this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}`);
       }
     }
 
@@ -5590,7 +5590,7 @@ export class SessionService {
                 w.workerSessionId, "worker",
                 cleanStop
                   ? buildBlockedResumeNudgeBody(
-                      "[loom:daemon-restarted] The daemon was stopped and restarted (not a crash).",
+                      `[loom:daemon-restarted] ${RESTART_ORIGIN_UNKNOWN} The daemon was stopped and restarted (not a crash).`,
                       bootDiagnosticsClause,
                     ) + RESUME_NUDGE_TAIL
                   : buildBlockedResumeNudgeBody(
@@ -5614,7 +5614,7 @@ export class SessionService {
             this.enqueueDurableNudge(
               w.workerSessionId, "worker",
               cleanStop
-                ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — re-check your ` +
+                ? `[loom:daemon-restarted] ${RESTART_ORIGIN_UNKNOWN} The daemon was stopped and restarted (not a crash) — re-check your ` +
                   `worktree's state, then continue your assigned task from where you left off. If you had already ` +
                   `finished, call worker_report (done/blocked) so your manager isn't left waiting.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
                 : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — re-check your ` +
@@ -5645,7 +5645,7 @@ export class SessionService {
       if (isNoOpManagerWake(impact)) continue;
       const tag = cleanStop ? "[loom:daemon-restarted]" : "[loom:crash-recovered]";
       const lead = cleanStop
-        ? "The daemon was stopped and restarted (not a crash) and Loom resumed"
+        ? `${RESTART_ORIGIN_UNKNOWN} The daemon was stopped and restarted (not a crash) and Loom resumed`
         : hadCrashLog
           ? "The daemon crashed and Loom auto-resumed"
           : "The daemon was killed from outside (no crash record was written) and Loom auto-resumed";

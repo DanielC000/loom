@@ -46,6 +46,37 @@ export const RESUME_NUDGE_TAIL =
   'check before any install step.)';
 
 /**
+ * Card 7d3899cb: the explicit, machine-checkable ORIGINATOR CLASS folded into every `[loom:daemon-restarted]`
+ * notice, right after the tag — so a reading peer (most pointedly, another project's manager, who has no
+ * other way to learn this) never has to infer WHO triggered the restart from prose alone, or guess whether
+ * a missing announcement is a real breach of the cross-project announce-before-restart pact (that pact
+ * binds only the agent case). Composed at exactly the two sites that ever emit this tag, and nowhere else:
+ *
+ *   RESTART_ORIGIN_AGENT — sessions/service.ts's `resumeFleetOnBoot`, which runs if-and-only-if a
+ *   `daemon_restart` tool call captured a `RestartIntent` before exiting (index.ts: `restartIntent ?
+ *   resumeFleetOnBoot(...) : recoverCrashOrphanedWorkers(...)`, mutually exclusive per boot). The
+ *   supervisor's own exit-75 relaunch is not a third shape here: RESTART_EXIT_CODE=75 is written only by
+ *   `requestDaemonRestart` (service.ts), which always calls `writeRestartIntent` first — so an exit-75
+ *   relaunch reads back its own intent and is agent-initiated by construction.
+ *
+ *   RESTART_ORIGIN_UNKNOWN — `recoverCrashOrphanedWorkers`'s `cleanStop` (shutdown-marker-found) branch
+ *   ONLY, i.e. the SAME `[loom:daemon-restarted]` tag reused for a no-intent boot that is provably not a
+ *   crash. Real-world evidence (card 7d3899cb's own filing) showed a deliberate human Ctrl-C + relaunch can
+ *   present at boot identically to a genuine crash — no restart-intent, no shutdown marker either — so
+ *   `cleanStop` genuinely cannot separate "a human stopped it" from "an as-yet-unexplained non-crash"; it
+ *   only rules out an agent (which always writes an intent) and rules out a JS-level crash (which never
+ *   leaves a fresh marker). Do NOT invent a third `owner-initiated` label: it would be wrong on every
+ *   genuine crash still routed to this branch by a stray/late marker, and an invented origin is worse than
+ *   none because it would be believed. The SIBLING branch (no marker at all — `[loom:crash-recovered]`,
+ *   "crashed" / "killed from outside") is deliberately left WITHOUT this clause: that tag already states an
+ *   unambiguous, non-agent cause in its own prose and was never the source of the peer's confusion.
+ */
+export const RESTART_ORIGIN_AGENT = "(origin: agent-initiated — a daemon_restart tool call)";
+export const RESTART_ORIGIN_UNKNOWN =
+  "(origin: unknown — no restart-intent was captured, so this could be a deliberate stop or a crash; " +
+  "the daemon cannot tell which, and it was NOT triggered by an agent's daemon_restart call)";
+
+/**
  * CONDITIONAL companion to RESUME_NUDGE_TAIL — appended only for a session whose raw-terminal composer
  * held an unsent human draft at restart-capture time (RestartResumeEntry.hadUnsentDraft, set from
  * PtyHost.isComposerDirty in liveFleetResumeSet). Unlike RESUME_NUDGE_TAIL's two facts (always true of

@@ -81,7 +81,7 @@ const { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } = await import
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { snapshotAndArchiveRecovered } = await import("../dist/sessions/boot-backstop.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
-const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody } = await import("../dist/orchestration/resume-nudge.js");
+const { RESUME_NUDGE_TAIL, buildBlockedResumeNudgeBody, RESTART_ORIGIN_UNKNOWN, RESTART_ORIGIN_AGENT } = await import("../dist/orchestration/resume-nudge.js");
 
 // Capture console.log/warn (the exclusion + resume-failure reasons are logged, never silent) — restore
 // the real functions in `finally` so genuine test output still shows.
@@ -529,6 +529,12 @@ try {
     !pty.getPending(id10a.wkr).some((m) => m.includes("[loom:crash-recovered]")));
   check("(10a) the worker nudge is worded as a clean restart ('not a crash'), still tells it to continue",
     pty.getPending(id10a.wkr).some((m) => /not a crash/i.test(m) && /continue your assigned task/i.test(m)));
+  // Card 7d3899cb: this is the no-restart-intent path — a human Ctrl-C and a genuine crash present
+  // identically at boot here, so this must read as UNKNOWN origin, never invented as owner-initiated,
+  // and never confusable with the agent-initiated class (which only ever fires from resumeFleetOnBoot).
+  check("(10a) the worker nudge carries the explicit unknown-origin class, never claims agent-initiated",
+    pty.getPending(id10a.wkr).some((m) => m.includes(RESTART_ORIGIN_UNKNOWN)) &&
+    !pty.getPending(id10a.wkr).some((m) => m.includes(RESTART_ORIGIN_AGENT)));
 
   // (10b) the solo-manager plain nudge (zero worker candidates) is also worded as a clean restart.
   // card c9e51581: zero worker candidates alone is no longer enough to force the nudge (see section 9's
@@ -545,6 +551,11 @@ try {
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10b) the solo-manager nudge uses [loom:daemon-restarted] and 'not a crash', not 'crashed'",
     pty.getPending(id10b.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /not a crash/i.test(m) && !/crashed/i.test(m)));
+  // Card 7d3899cb: this IS the card's own specimen shape — a manager with zero worker candidates (a
+  // "peer" bystander), otherwise given no signal about who restarted the daemon.
+  check("(10b) the solo-manager nudge carries the explicit unknown-origin class, never agent-initiated",
+    pty.getPending(id10b.mgr).some((m) => m.includes(RESTART_ORIGIN_UNKNOWN)) &&
+    !pty.getPending(id10b.mgr).some((m) => m.includes(RESTART_ORIGIN_AGENT)));
 
   // (10c) the with-workers manager summary nudge is also worded as a clean restart.
   const id10c = { mgr: `cow-mgr10c-${sfx}`, wkr: `cow-wkr10c-${sfx}` };
@@ -556,6 +567,9 @@ try {
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10c) the manager summary nudge uses [loom:daemon-restarted], names the recovered count, and never says 'crashed'",
     pty.getPending(id10c.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /1 of your 1/i.test(m) && !/crashed/i.test(m)));
+  check("(10c) the manager summary nudge carries the explicit unknown-origin class, never agent-initiated",
+    pty.getPending(id10c.mgr).some((m) => m.includes(RESTART_ORIGIN_UNKNOWN)) &&
+    !pty.getPending(id10c.mgr).some((m) => m.includes(RESTART_ORIGIN_AGENT)));
 
   // (10d) no shutdownMarker (the ordinary genuine-crash path, undefined/null) is UNCHANGED — still the
   // original crash phrasing. A regression guard alongside the sections above that already cover this.
@@ -568,6 +582,13 @@ try {
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10d) with NO shutdown marker, the worker still gets the original [loom:crash-recovered] nudge",
     pty.getPending(id10d.wkr).some((m) => m.includes("[loom:crash-recovered]") && /The daemon crashed/i.test(m)));
+  // Card 7d3899cb DoD-3: the genuine-crash / supervisor-relaunch shape is NEITHER of the two new origin
+  // classes — it must not be silently folded into `agent-initiated` (obviously wrong: no daemon_restart
+  // call happened) NOR into the new `origin unknown` clause text (its OWN prose already unambiguously
+  // says "crashed", so tacking on a second, differently-worded classifier would be redundant and could
+  // read as walking that certainty back). Neither marker string should ever appear here.
+  check("(10d) the crash nudge carries NEITHER new origin-class marker (it already unambiguously says 'crashed')",
+    !pty.getPending(id10d.wkr).some((m) => m.includes(RESTART_ORIGIN_AGENT) || m.includes(RESTART_ORIGIN_UNKNOWN)));
 
   // (10e) card 2f146782: no shutdownMarker AND hadCrashLogAtBoot:false (the preceding process was killed
   // from outside mid-execution, with no chance to write a JS-level fatal record) — the nudge still uses
@@ -585,6 +606,11 @@ try {
     pty.getPending(id10e.wkr).some((m) => m.includes("[loom:crash-recovered]") && /killed from outside/i.test(m) && !/\bcrashed\b/i.test(m)));
   check("(10e) hadCrashLogAtBoot:false — manager summary nudge says 'killed from outside', never 'crashed'",
     pty.getPending(id10e.mgr).some((m) => m.includes("[loom:crash-recovered]") && /killed from outside/i.test(m) && !/\bcrashed\b/i.test(m)));
+  // Card 7d3899cb DoD-3: same "neither class" guard as (10d), for the killed-from-outside supervisor
+  // shape (also no restart-intent, also not a fresh clean-stop marker).
+  check("(10e) the killed-from-outside nudge carries NEITHER new origin-class marker either",
+    !pty.getPending(id10e.wkr).some((m) => m.includes(RESTART_ORIGIN_AGENT) || m.includes(RESTART_ORIGIN_UNKNOWN)) &&
+    !pty.getPending(id10e.mgr).some((m) => m.includes(RESTART_ORIGIN_AGENT) || m.includes(RESTART_ORIGIN_UNKNOWN)));
 
   // (10f) card 547fcaaa: neither worker nudge variant here (clean-stop [loom:daemon-restarted] from (10a),
   // nor either [loom:crash-recovered] flavor from (10d)/(10e)) asserts an unconditional worktree-integrity
@@ -938,9 +964,14 @@ try {
     !pty.getPending(id15b.wkr).some((m) => /continue your assigned task/i.test(m)));
   // card cfffeda6 (DoD-3): same pin as (15), for the OTHER cleanStop branch's copy.
   {
-    const prefix15b = "[loom:daemon-restarted] The daemon was stopped and restarted (not a crash).";
+    const prefix15b = `[loom:daemon-restarted] ${RESTART_ORIGIN_UNKNOWN} The daemon was stopped and restarted (not a crash).`;
     const bodyNoExtra15b = buildBlockedResumeNudgeBody(prefix15b, "");
     const msg15b = pty.getPending(id15b.wkr).find((m) => m.includes("[loom:daemon-restarted]") && /re-state your blocker/i.test(m));
+    // Card 7d3899cb: this is the NO-restart-intent branch — a human Ctrl-C and a genuine crash present
+    // identically here (the card's own filed finding), so the origin genuinely CANNOT be positively
+    // attributed to the owner; it must read as unknown, never invented as owner-initiated.
+    check("(15b) the nudge carries the explicit unknown-origin class, never claims agent-initiated",
+      !!msg15b && msg15b.includes(RESTART_ORIGIN_UNKNOWN) && !msg15b.includes(RESTART_ORIGIN_AGENT));
     check("(15b) the nudge body is byte-identical to buildBlockedResumeNudgeBody's output (boot-diagnostics clause aside)",
       !!msg15b && msg15b.startsWith(bodyNoExtra15b) && msg15b.endsWith(RESUME_NUDGE_TAIL) &&
       /^ Boot started .+\.$/.test(msg15b.slice(bodyNoExtra15b.length, msg15b.length - RESUME_NUDGE_TAIL.length)));
