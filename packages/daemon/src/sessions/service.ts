@@ -2373,6 +2373,16 @@ export class SessionService {
    * everywhere, never a bare `this.codescape.`).
    */
   private readonly codescape: CodescapeSupervisor | undefined;
+  /**
+   * Card d671f1b8 — the shared vault-flush + codescape-stop cleanup `gracefulShutdown` (index.ts) already
+   * runs, registered here so {@link requestDaemonRestart}'s `process.exit(75)` path runs the SAME cleanup
+   * instead of skipping it (the root cause: that path never ran `gracefulShutdown` at all, since a bare
+   * `process.exit()` emits no signal). Set post-construction via {@link setShutdownCleanup} — index.ts
+   * wires it up once `vaultVersioners` is ready, which is AFTER `SessionService` is constructed — rather
+   * than threaded through the constructor `opts` like `codescape` above. `undefined` until then (and in
+   * every existing test constructor) ⇒ `this.shutdownCleanup?.()`, never a bare call.
+   */
+  private shutdownCleanup: (() => void) | undefined;
   constructor(
     private db: Db, private pty: PtyHost, private control: OrchestrationControl,
     opts?: {
@@ -2407,6 +2417,16 @@ export class SessionService {
     this.runWebhookTimeoutMs = opts?.runWebhookTimeoutMs ?? RUN_WEBHOOK_TIMEOUT_MS;
     this.runTimeoutMs = opts?.runTimeoutMs ?? RUN_TIMEOUT_MS;
     this.codescape = opts?.codescape;
+  }
+
+  /**
+   * Card d671f1b8 — register the shared vault-flush + codescape-stop cleanup (see the field doc above),
+   * so {@link requestDaemonRestart} can run it. Called once at boot from index.ts, after `vaultVersioners`
+   * is ready; a test that wants the restart path's cleanup call observable can call this directly with a
+   * fake instead of threading a real vault versioner through.
+   */
+  setShutdownCleanup(fn: () => void): void {
+    this.shutdownCleanup = fn;
   }
 
   /**
@@ -3685,6 +3705,36 @@ export class SessionService {
    * {@link waitForMergeDangerWindowsToClear} guard, with the same bounded, fail-open semantics
    * `gracefulShutdown` uses — never a hard refusal; always resolves within the grace ceiling regardless of
    * what the in-flight squash does.
+   *
+   * Card d671f1b8: the SAME bare `process.exit()` gap also meant this path never ran `gracefulShutdown`'s
+   * vault-flush / codescape-stop cleanup ({@link setShutdownCleanup}) — a vault edit still inside its
+   * debounce window at restart time was silently dropped from git (recoverable on the NEXT edit to that
+   * vault, but not before). Fixed by invoking that same shared cleanup from inside the exit-flush timer
+   * below, deliberately AFTER the 300ms MCP-response-flush delay rather than before it: the cleanup's vault
+   * half runs a bounded-but-potentially-multi-minute `execSync` git flush (`VaultVersioner.flushSync`,
+   * bounded at `VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS` = 5min for the working-tree-scale calls), and running
+   * it BEFORE `setTimeout` would delay the MCP response itself by however long that flush takes — the exact
+   * latency this path was written to protect (see the 300ms comment below). Running it AFTER means the
+   * caller's response is unaffected; only the actual process exit (which nobody is waiting synchronously
+   * on) is delayed by however long the flush takes, same trade `gracefulShutdown` already accepts for a
+   * manual `loom stop`. `shutdownCleanup` is `undefined` until index.ts registers it post-boot (see its own
+   * doc) — a restart requested in that brief window skips the flush, but there's nothing to flush yet
+   * either way (the vault watcher isn't running), so this degrades to today's pre-fix behavior, never worse.
+   *
+   * ⚠️ RESIDUAL RISK, accepted and documented rather than left unnoticed (card d671f1b8 follow-up): a
+   * timed-out `git add -A`/`git commit` inside `flushSync` does not stop the real `git.exe` child — it
+   * ABANDONS it, and the orphan keeps running and holding `.git/index.lock` for the rest of its own
+   * duration (project memory `[[execsync-timeout-kills-only-the-shell-on-windows]]`: one measured case
+   * landed its commit ~8s after the bound fired). THIS path is the one place that risk is sharpest: the
+   * supervisor relaunches almost immediately on exit 75, so a fresh daemon could boot straight into a
+   * lock an orphan from the PREVIOUS process still holds — unlike a crash exit (crashlog.ts's handlers,
+   * deliberately excluded from this same cleanup for exactly this reason) or a graceful `loom stop`,
+   * neither of which triggers an immediate relaunch to race against. Judged low rather than zero: this
+   * needs `git add -A` to actually exceed `VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS` (5min), which steady-state
+   * measurements put at ~100ms — only a pathological vault reaches it. No guard added here: `flushSync`'s
+   * own try/catch already degrades a lock-contention failure to a logged warn + `false` (never a throw or
+   * a hang) if a fresh boot's own flush attempt collides with a still-held lock, so the failure mode this
+   * risk produces is itself already bounded, just not eliminated.
    */
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
@@ -3833,7 +3883,8 @@ export class SessionService {
     // requester's RELIABLE read surface is the post-restart nudge (resumeFleetOnBoot, below), fed by the
     // SAME `supervisorResponseFields`-shaped distinction via the persisted intent stamped just above.
     const exit = deps.exit ?? ((code: number) => process.exit(code));
-    setTimeout(() => exit(RESTART_EXIT_CODE), 300);
+    const cleanup = this.shutdownCleanup;
+    setTimeout(() => { cleanup?.(); exit(RESTART_EXIT_CODE); }, 300);
     return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
   }
 

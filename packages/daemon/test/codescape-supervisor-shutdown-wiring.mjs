@@ -4,8 +4,16 @@
 // unnoticed a second time. Mirrors shutdown-snapshot.mjs's own wiring check (5): read the BUILT
 // dist/index.js, structurally bound gracefulShutdown()'s body via the shared _graceful-region.mjs
 // helper (no fixed byte budget — survives future teardown additions), and assert
-// codescapeSupervisor.stop() is called inside that body, before the clean-stop process.exit(0).
+// codescapeSupervisor.stop() is reached from inside that body, before the clean-stop process.exit(0).
 // Static/structural — no daemon spawn, no real codescape, matches this file's sibling harness.
+//
+// Card d671f1b8: the real `codescapeSupervisor.stop()` call moved OUT of gracefulShutdown's own body
+// and into a shared `flushVaultsAndStopCodescape` function (so daemon_restart's exit path can call the
+// SAME cleanup) — gracefulShutdown's body now just calls that function. So this no longer asserts the
+// literal call text lives INSIDE the gracefulShutdown region; it asserts the region calls
+// flushVaultsAndStopCodescape, AND that flushVaultsAndStopCodescape's own body genuinely contains the
+// real codescapeSupervisor.stop() call — same anti-regression guarantee (a dropped call in EITHER
+// place fails loudly), just spanning two anchors instead of one.
 //
 // MUST match in CODE POSITION, not raw text: the fix's own explanatory comment above the real call
 // literally contains the substring "codescapeSupervisor.stop() (card 8c13a023): ..." — a naive regex
@@ -42,9 +50,22 @@ function stripComments(source) {
   return kept.join("\n");
 }
 
+// Card d671f1b8: the shared cleanup function's own body region — from its `const
+// flushVaultsAndStopCodescape = (` anchor to the next top-level statement (`sessions.setShutdownCleanup(`,
+// which immediately follows it in source, both in this file and in the compiled output — tsc doesn't
+// reorder a simple const-then-call sequence). No fixed byte budget, same reasoning as
+// gracefulShutdownRegion: survives future comment/line additions inside the function.
+function flushCleanupRegion(codeOnly) {
+  const start = codeOnly.indexOf("flushVaultsAndStopCodescape = (");
+  if (start < 0) return ""; // anchor gone — assertions on "" fail loudly, which is the point
+  const end = codeOnly.indexOf("sessions.setShutdownCleanup(", start);
+  return end >= 0 ? codeOnly.slice(start, end) : codeOnly.slice(start);
+}
+
 const indexJs = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js"), "utf8");
 const codeOnly = stripComments(indexJs);
-const region = gracefulShutdownRegion(codeOnly);
+const gracefulRegion = gracefulShutdownRegion(codeOnly);
+const cleanupRegion = flushCleanupRegion(codeOnly);
 
 // Sanity: prove the stripper actually removes the fix's own comment mention of the symbol, so a
 // positive result below can't be coming from the comment text this test was written to ignore.
@@ -55,10 +76,13 @@ check("sanity: comment-stripped text no longer contains that mention as a `//`-p
 
 check("built daemon calls codescapeSupervisor.stop in real CODE (not merely mentioned in a comment)",
   /codescapeSupervisor\.stop\s*\(/.test(codeOnly));
-check("the graceful-shutdown path invokes codescapeSupervisor.stop in CODE before its clean-stop exit",
-  /codescapeSupervisor\.stop\s*\(/.test(region) && region.indexOf("codescapeSupervisor.stop") < region.indexOf("process.exit(0)"));
+check("the shared flushVaultsAndStopCodescape function's own body genuinely contains the codescapeSupervisor.stop call (not just mentioned nearby)",
+  cleanupRegion !== "" && /codescapeSupervisor\.stop\s*\(/.test(cleanupRegion));
+check("the graceful-shutdown path invokes flushVaultsAndStopCodescape in CODE before its clean-stop exit",
+  /flushVaultsAndStopCodescape\s*\(\s*\)/.test(gracefulRegion) &&
+    gracefulRegion.indexOf("flushVaultsAndStopCodescape()") < gracefulRegion.indexOf("process.exit(0)"));
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the shared graceful-shutdown path calls codescapeSupervisor.stop() in real code before its clean-stop exit (verified comment-stripped, so the adjacent explanatory comment mentioning the same symbol can't mask a dropped call), so the codescape serve child is reaped explicitly rather than depending on an undocumented platform default."
+  ? "\n✅ ALL PASS — the shared graceful-shutdown path calls flushVaultsAndStopCodescape() before its clean-stop exit, and that shared function's own body genuinely calls codescapeSupervisor.stop() in real code (verified comment-stripped, so the adjacent explanatory comment mentioning the same symbol can't mask a dropped call), so the codescape serve child is reaped explicitly rather than depending on an undocumented platform default."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

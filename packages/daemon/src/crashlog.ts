@@ -224,6 +224,29 @@ function isNodePtyConsoleListRace(reason: unknown): boolean {
  *   `main()` startup-failure path) that didn't route through the handlers above. A clean stop (exit 0,
  *   the graceful path) and the intentional restart sentinel (75) are NOT crashes, so they are skipped.
  * Idempotent: a second call is a no-op.
+ *
+ * Card d671f1b8: `uncaughtException`/`unhandledRejection` below are TWO of the four live `process.exit`
+ * routes that daemon shutdown/restart can take — and, deliberately, the two that DON'T run the shared
+ * shutdown-cleanup function `gracefulShutdown` (index.ts) and `SessionService.requestDaemonRestart`'s
+ * exit-75 path both run (that shared function's own doc names what it does and why — not repeated here).
+ * This is an inversion worth stating explicitly, not leaving implicit: the vault-commit loss on THIS path
+ * is actually the LONGEST-lived of the two shapes — `daemon-supervisor.mjs` only relaunches on the exit-75
+ * restart sentinel, so a crash here leaves the daemon down (and the pending commit unrecovered) until a
+ * HUMAN re-runs it.
+ *
+ * A bounded flush was considered and rejected here — ⛔ NOT because a bounded `execSync` can hang this
+ * handler (project memory `[[execsync-timeout-kills-only-the-shell-on-windows]]` measured the timeout
+ * option reliably returning control within its bound: ~511ms observed on a 500ms cap — so that fear is
+ * false for a genuinely short bound). The real reason is what that SAME memory measures on the OTHER
+ * side: a timed-out `git add -A` does not stop the real `git.exe` child — it ABANDONS it, and the orphan
+ * keeps running and holding `.git/index.lock` for the rest of its own duration (one measured case: the
+ * orphan's commit landed ~8s after the bound fired). On a large vault `git add -A` reliably exceeds a
+ * short bound rather than occasionally (11.6s measured cold on a 20k-file vault vs. a 2-3s cap) — so a
+ * short bound here would not merely fail to help sometimes, it would routinely leave a lock behind. The
+ * crash paths already accept the deferred-commit cost (no supervisor relaunch to race against — the
+ * orphan has as long as it needs to finish and release the lock before a human restarts anything), so
+ * adding a flush attempt here would trade a benign wait for a NEW, self-inflicted failure mode with
+ * nothing to show for it.
  */
 export function installCrashHandlers(): void {
   if (installed) return;

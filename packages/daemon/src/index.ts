@@ -1301,6 +1301,45 @@ async function main(): Promise<void> {
     console.warn(`[boot] vault auto-committer start failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Card d671f1b8: shared shutdown-cleanup — vault flush + codescape-supervisor stop — factored into ONE
+  // named function so every exit path that needs it calls the SAME code instead of a duplicated (and, as
+  // found, divergent) copy per path. Today that's `gracefulShutdown` below (SIGINT/SIGTERM/SIGHUP + the
+  // loopback `/internal/shutdown` hook) AND `SessionService.requestDaemonRestart`'s `process.exit(75)`
+  // restart path, which used to run neither. Registered with `sessions` right here, the instant
+  // vaultVersioners itself is ready — a `daemon_restart` requested any time before this line has nothing
+  // to flush yet either way (the watcher isn't running), so the brief pre-registration window during boot
+  // is harmless by construction, not by luck.
+  const flushVaultsAndStopCodescape = (): void => {
+    // Vault auto-commit final flush: synchronous, so an edit still inside the debounced-commit window
+    // reaches git before the process dies instead of waiting for a debounced commit that may never fire
+    // again (versioner.ts's chokidar watcher re-arms with `ignoreInitial: true` on the next boot).
+    // flushSync honors its own externally-managed/pause-lease backoffs and is a no-op when nothing is
+    // staged. Best-effort + never-throws; must not block exit.
+    try {
+      let flushed = 0;
+      for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
+      if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
+    } catch { /* never block the exit */ }
+    // codescapeSupervisor.stop() (card 8c13a023): on Windows a non-`detached` `codescape serve` child is
+    // implicitly job-object-bound and already dies with this process regardless of exit path (verified by
+    // isolating the one variable that flips the outcome — see `spawnServe`'s own doc in codescape/
+    // supervisor.ts, next to the `spawn()` call this is actually about) — so calling stop() here is mostly
+    // making the cleanup OURS rather than relying on that undocumented platform default. On POSIX a
+    // non-detached child is reparented and would keep running (unverified/predicted, not measured here —
+    // Windows-only repro), which only matters for a POSIX host running `LOOM_DEV=1` self-hosted (this
+    // supervisor never starts for a regular loomctl end user).
+    // Guarded like the vault half above, ⛔ not incidentally: `stop()` itself cannot currently throw (its
+    // own body already wraps `this.child.kill()`), but a throw HERE would behave very differently across
+    // this function's two callers. On gracefulShutdown it would just cost a clean `exit(0)`. On
+    // daemon_restart's exit-flush timer (SessionService.requestDaemonRestart, sessions/service.ts) it
+    // would escape as an uncaughtException — routing through crashlog.ts's handler, which exits `1`
+    // instead of the restart sentinel `75`, so the supervisor would NOT relaunch and the daemon would stay
+    // down. Swallowing here makes "a future edit to stop() can't silently turn a restart into a
+    // non-relaunching crash" true by construction rather than true by accident.
+    try { codescapeSupervisor.stop(); } catch { /* never block the exit */ }
+  };
+  sessions.setShutdownCleanup(flushVaultsAndStopCodescape);
+
   // Vault push-status visibility (task f48ee77d): the auto-committer above is commit-only BY DESIGN —
   // pushing is a human-only trust-boundary action (git/writer.ts GitWriter.push()), never something this
   // unattended, filesystem-triggered watcher should do itself. For a vault whose governing repo DOES have
@@ -1446,36 +1485,12 @@ async function main(): Promise<void> {
     // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
     // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
     try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-    // Vault auto-commit final flush: this path is SYNCHRONOUS and exits immediately, so the versioners'
-    // async debounced commit would be dropped (a doc edit inside the 5s debounce window never reaching
-    // git). flushSync synchronously stages+commits each pending vault (externally-managed backoff honored,
-    // no-op when nothing's staged). Best-effort + never-throws; must not block exit (mirrors the snapshot above).
-    try {
-      let flushed = 0;
-      for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
-      if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
-    } catch { /* never block the exit */ }
+    // Vault flush + codescape-supervisor stop: shared with `daemon_restart`'s exit path — see
+    // flushVaultsAndStopCodescape's own doc above for why this is factored out and what each half does.
+    flushVaultsAndStopCodescape();
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
-    // codescapeSupervisor.stop() (card 8c13a023): this was ABSENT from the list below for a long time
-    // with no observed orphan — repro'd empirically (Windows) why: a non-`detached` child_process.spawn()
-    // child (exactly how spawnServe() launches `codescape serve`) is implicitly bound by Node/libuv to a
-    // Windows job object with kill-on-close tied to THIS process's own lifetime, so any death of this
-    // process — a clean exit here or an external hard-kill — already tears the serve child down with it.
-    // Verified by isolating the ONE variable that flips the outcome: an identical spawn with `detached:true`
-    // survives the parent's death; without it, the child dies every time, including when killed via
-    // TerminateProcess (an API with no console-signalling path at all — ruling out a console/`CTRL_CLOSE`
-    // explanation, which would also have taken the still-alive grandparent process with it). So the prior
-    // silence was real but PLATFORM-SPECIFIC, not incidental and not something this code ever guaranteed —
-    // calling stop() explicitly here makes the cleanup ours rather than an undocumented Windows default.
-    // This supervisor is `isCodescapeSupervisorEnabled()`-gated to `LOOM_DEV=1` (paths.ts) and never starts
-    // for a regular loomctl end user, so this is a dev/self-host hygiene + portability fix, NOT something
-    // protecting any shipped `loom service install` deployment — POSIX has no equivalent implicit reaper
-    // (a non-detached child there is simply reparented on exit and keeps running), which matters only for a
-    // POSIX host running `LOOM_DEV=1` self-hosted, unverified/predicted, not measured here (Windows-only repro).
-    // This is NOT a leak fix — no leak has ever been observed on this host.
-    codescapeSupervisor.stop();
     scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     // Gate-aware exit (board card 5a7692a4): this path used to `process.exit(0)` unconditionally, with

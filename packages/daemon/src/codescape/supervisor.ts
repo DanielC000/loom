@@ -866,6 +866,21 @@ export class CodescapeSupervisor {
       // Card 194d343d: pin CODESCAPE_HOME explicitly (same value as `cwd`) so serve's env-first resolver
       // check wins over any upstream cwd-relative walk — must match ingest()'s own CODESCAPE_HOME above,
       // or ingest and serve can disagree about where the store lives.
+      //
+      // Card 8c13a023 / d671f1b8: no `detached` option below — this child is spawned NON-detached,
+      // deliberately left that way rather than a gap. On Windows that means it's implicitly bound by
+      // Node/libuv to a Windows job object with kill-on-close tied to the PARENT (this daemon process)'s
+      // own lifetime, so any death of the parent — a clean exit, a restart, or an external hard-kill —
+      // already tears this child down with it, with no explicit stop() needed on that platform. Verified
+      // by isolating the ONE variable that flips the outcome: an identical spawn with `detached:true`
+      // survives the parent's death; without it (as here), the child dies every time, including when
+      // killed via `TerminateProcess` (an API with no console-signalling path at all — ruling out a
+      // console/`CTRL_CLOSE` explanation, which would also have taken the still-alive grandparent process
+      // with it). On POSIX a non-detached child is instead reparented on the parent's death and KEEPS
+      // RUNNING — unverified/predicted, not measured here (this repro is Windows-only) — which is why
+      // `index.ts`'s shutdown-cleanup path calls `stop()` explicitly rather than relying on this platform
+      // default: harmless-but-redundant on Windows, load-bearing on a POSIX host running this supervisor
+      // (`LOOM_DEV=1`-gated; never starts for a regular loomctl end user).
       child = spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODESCAPE_HOME: this.homeDir } });
     } catch (err) {
       console.warn(`[codescape] serve spawn failed: ${(err as Error).message}`);
