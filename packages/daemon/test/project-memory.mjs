@@ -245,6 +245,55 @@ try {
       ["u3", "u4", "u5"].every((k) => finalUnpinned.some((r) => r.key === k)));
   }
 
+  // ===================== card 2bc735d3: memory_write must not evict the row it JUST WROTE =====================
+  // THE RED-HALF CONDITION (traced mechanism): a store sitting exactly AT `maxNotes` unpinned rows where
+  // EVERY existing unpinned row has already been retrieved (last_retrieved_at non-null) means a brand-new
+  // row — last_retrieved_at NULL by construction on INSERT, the MOST-evictable class — is the SOLE
+  // eviction candidate once the write pushes the count one over the cap. Before this fix, the eviction
+  // sweep (which runs AFTER the insert) deleted that exact row, the post-write read-back returned
+  // undefined, a bare `!` silenced that at the type level, and mcp/memory.ts's computeNeverDropStatus
+  // crashed on `entry.tags` — the transaction had already COMMITTED, so the note was written, evicted, and
+  // gone, not merely rejected. This test seeds exactly that condition and goes through the REAL
+  // memory_write path (writeProjectMemory), not the blind db.upsertProjectMemory, so it reproduces the
+  // actual reported crash site.
+  {
+    const cliffProj = "proj-eviction-cliff";
+    const cap = 5;
+    // writeProjectMemory (the real memory_write path) resolves maxNotes from the PROJECT's own config, not
+    // a caller-passed cap — unlike the raw db.upsertProjectMemory calls elsewhere in this file — so the cap
+    // must be set here for the seeded writes below to actually arm the cliff.
+    db.insertProject({ id: cliffProj, name: "Eviction Cliff Project", repoPath: tmpHome, vaultPath: tmpHome, config: { memory: { maxNotes: cap } }, createdAt: now, archivedAt: null });
+    const seedKeys = Array.from({ length: cap }, (_, i) => `seed-${i}`);
+    for (const k of seedKeys) writeProjectMemory(db, cliffProj, { key: k, text: `seed note ${k}` });
+    // Touch EVERY seed note so none stays never-retrieved — the exact precondition that makes the next
+    // (fresh) write the sole never-retrieved candidate.
+    db.touchProjectMemoryRetrieved(db.listProjectMemory(cliffProj).map((r) => r.id));
+    check("(cliff) setup: store sits exactly at cap, and every unpinned note has already been retrieved",
+      db.listProjectMemory(cliffProj).filter((r) => !r.pinned).length === cap &&
+      db.listProjectMemory(cliffProj).every((r) => r.lastRetrievedAt !== null));
+
+    let threw = null;
+    let freshResult;
+    try {
+      freshResult = writeProjectMemory(db, cliffProj, { key: "brand-new-at-cliff", text: "must survive its own write" });
+    } catch (e) {
+      threw = e;
+    }
+    check("(cliff) memory_write of a fresh key at the cap does NOT throw", threw === null);
+    check("(cliff) memory_write of a fresh key at the cap SUCCEEDS (no error/conflict shape)",
+      !!freshResult && !("error" in freshResult) && !("conflict" in freshResult));
+    // The absence check is the half that actually proves the WRITE was lost (not merely that something
+    // threw) — a fix that still ate the row but threw a nicer error would fail only this line.
+    check("(cliff) the fresh note is actually PRESENT afterward — the write was not silently lost",
+      db.getProjectMemoryByKey(cliffProj, "brand-new-at-cliff") !== undefined);
+    check("(cliff) the store still honors the cap after the write (fix does not let maxNotes drift)",
+      db.listProjectMemory(cliffProj).filter((r) => !r.pinned).length <= cap);
+    // Eviction still actually RAN (this isn't "the fix disabled eviction") — exactly one of the original
+    // seed notes was evicted to make room for the new, protected row.
+    check("(cliff) eviction still ran: exactly ONE original seed note was evicted to make room",
+      db.listProjectMemory(cliffProj).filter((r) => seedKeys.includes(r.key)).length === cap - 1);
+  }
+
   // ===================== FTS5 search =====================
   {
     const ftsProj = "proj-fts";

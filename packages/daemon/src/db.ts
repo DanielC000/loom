@@ -6101,8 +6101,22 @@ export class Db {
       requestIds: input.requestIds === undefined ? null : JSON.stringify(input.requestIds),
       now,
     });
-    this.evictProjectMemoryOverCap(projectId, maxNotes);
-    return this.getProjectMemoryByKey(projectId, input.key)!;
+    // Card 2bc735d3: exclude the row just written from eviction candidates — otherwise a brand-new row
+    // (last_retrieved_at NULL, the most-evictable class) can be the very row the sweep below deletes,
+    // and the read-back two lines down would silently return undefined for a write that just committed.
+    // Cap semantics are unaffected: `over` is computed from the POST-write unpinned count, so excluding
+    // this one key from the candidate set still leaves exactly `over` other rows to satisfy it (over is
+    // always <= count-of-other-unpinned-rows here, since maxNotes >= 1 whenever eviction runs at all).
+    this.evictProjectMemoryOverCap(projectId, maxNotes, input.key);
+    const written = this.getProjectMemoryByKey(projectId, input.key);
+    if (!written) {
+      // Should be unreachable given the exclusion above — the only remaining way to get here is a
+      // concurrent delete of this exact key landing between the INSERT and this read-back (this method
+      // is explicitly BLIND/no-concurrency-guard, see the doc comment above). Fail loudly and legibly
+      // instead of the `undefined.tags` crash this used to produce two layers up in mcp/memory.ts.
+      throw new Error(`upsertProjectMemory: row for key "${input.key}" (project ${projectId}) vanished immediately after write`);
+    }
+    return written;
   }
   /**
    * Optimistic-concurrency-guarded upsert (card a5f98bb4, Lore audit F3) — the memory_write MCP tool's
@@ -6207,8 +6221,13 @@ export class Db {
    *  never counted. A never-retrieved row (`last_retrieved_at IS NULL`) sorts as the MOST evictable (treated
    *  as older than any real retrieval), tie-broken by `created_at` — so eviction favors notes nobody has
    *  found useful yet over one merely due for a refresh. `maxNotes <= 0` disables the cap entirely (an
-   *  explicit "unbounded" escape hatch, never the default). */
-  private evictProjectMemoryOverCap(projectId: string, maxNotes: number): void {
+   *  explicit "unbounded" escape hatch, never the default).
+   *  `excludeKey` (card 2bc735d3) removes one key from the candidate set — used by {@link upsertProjectMemory}
+   *  to protect the row it just wrote from being the row this same sweep deletes (a brand-new row is,
+   *  by construction, in the most-evictable never-retrieved class). Excluding it never lets the store
+   *  exceed `maxNotes`: `over` is already computed from the post-write count, so there are always at
+   *  least `over` OTHER unpinned rows available to satisfy it. */
+  private evictProjectMemoryOverCap(projectId: string, maxNotes: number, excludeKey?: string): void {
     if (maxNotes <= 0) return;
     const { c } = this.db.prepare("SELECT COUNT(*) AS c FROM project_memory WHERE project_id = ? AND pinned = 0")
       .get(projectId) as { c: number };
@@ -6216,11 +6235,11 @@ export class Db {
     if (over <= 0) return;
     this.db.prepare(
       `DELETE FROM project_memory WHERE id IN (
-         SELECT id FROM project_memory WHERE project_id = ? AND pinned = 0
+         SELECT id FROM project_memory WHERE project_id = @projectId AND pinned = 0 AND key != @excludeKey
          ORDER BY last_retrieved_at IS NOT NULL, last_retrieved_at ASC, created_at ASC
-         LIMIT ?
+         LIMIT @over
        )`,
-    ).run(projectId, over);
+    ).run({ projectId, excludeKey: excludeKey ?? "", over });
   }
 
   // --- schedules (phase-2 Pillar B) ---
