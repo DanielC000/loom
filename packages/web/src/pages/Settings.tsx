@@ -1701,16 +1701,21 @@ function ProjectLinksPanel() {
         {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/project-links"}</span>}
 
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {/* A native <select> auto-sizes its CLOSED box to its widest <option> text (card 7539206b) —
+              with no cap, one long project name (e.g. a 46-char UUID-suffixed name) pushes this select,
+              and the page, past the viewport at phone width. minWidth:0 lets the flex item shrink;
+              maxWidth:"100%" stops the select from ever exceeding the space that leaves it (the browser
+              clips the closed control's rendered text to the box, same as any overflow:hidden field). */}
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
             <span style={fieldLabel}>Project A</span>
-            <Select value={projectA} onChange={(e) => setProjectA(e.target.value)}>
+            <Select value={projectA} onChange={(e) => setProjectA(e.target.value)} style={{ width: 200, maxWidth: "100%" }}>
               <option value="">select…</option>
               {options.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
             <span style={fieldLabel}>Project B</span>
-            <Select value={projectB} onChange={(e) => setProjectB(e.target.value)}>
+            <Select value={projectB} onChange={(e) => setProjectB(e.target.value)} style={{ width: 200, maxWidth: "100%" }}>
               <option value="">select…</option>
               {options.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
