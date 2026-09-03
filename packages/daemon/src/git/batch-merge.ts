@@ -65,8 +65,9 @@ import { nonInteractiveEnv } from "./writer.js";
  * `mergeBase..branchTip` diff says `shared.txt`; the LANDED `batchHeadBefore..landedSha` diff says
  * `shared-renamed.txt` — genuinely different digests for the identical logical change, and this is NOT a
  * conflict the batch's own drop-wholesale policy would ever catch. Computing the trailer from the branch's
- * pre-landing diff (the shape {@link mergeBranchLocked}'s own solo-path stamp uses) would make the trailer
- * LIE the moment {@link verifyPersistedPathSet} later recomputes it from the commit's REAL ancestry (either
+ * pre-landing diff (the shape {@link mergeBranchLocked}'s own solo-path stamp USED to use, before card
+ * 756a2cd8 fixed it the same way) would make the trailer LIE the moment {@link verifyPersistedPathSet}
+ * later recomputes it from the commit's REAL ancestry (either
  * `sha^..sha` or, here, `Loom-Worker-Base..sha` — both are the LANDED range) — a false verification failure
  * (fails closed, so safe, but defeats the point). **This is a semantics point worth restating plainly:
  * `Loom-Worker-PathSet` describes WHAT LANDED on main, NOT what the branch originally touched on its own

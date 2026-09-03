@@ -39,6 +39,31 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Loom-Worker-PathSet — simulating history that predates this fix), branch absent: must still resolve
 //       via the unchanged degraded trailer-presence-only fallback (no regression for old commits that can
 //       never carry the new trailer).
+//   (6) RENAME REGRESSION (card 756a2cd8, DoD-2) — main RENAMES a path the branch also edited, then the
+//       branch squash-merges CLEANLY (git's rename-following 3-way merge; zero conflicts). Before this fix
+//       the STAMP was computed from the branch's own PRE-landing diff (`merge-base(HEAD, branch)..branch` —
+//       names the ORIGINAL path), while VERIFY always recomputes from the LANDED range (`sha^..sha` — names
+//       the RENAMED path): different digests, so a genuinely-merged card resolved to null once the branch
+//       was deleted. MUST FAIL against unfixed code (verified below by reverting the fix and re-running).
+//   (7) POSITIVE CONTROL (DoD-3) — a WRONG `Loom-Worker-Base` must still be REJECTED, not blindly trusted.
+//       d62dad73's own equivalent (case 7f in test/batch-merge.mjs) strips the Base trailer outright — for a
+//       BATCHED multi-commit contribution the sha^ fallback then under-spans and a mismatch is guaranteed.
+//       That exact recipe does NOT discriminate for a solo squash: a solo commit's `sha^` IS its own
+//       Loom-Worker-Base by construction (see LOOM_WORKER_BASE_TRAILER's doc in git/worktrees.ts) — stripping
+//       the trailer here would fall back to the identical value and still verify green, proving nothing. The
+//       meaningful equivalent for a single-commit contribution is a WRONG base substituted in place of the
+//       real one (the OLD pre-756a2cd8 base, `merge-base(HEAD, branch)` — exactly what the buggy code used
+//       to stamp) while the TRUE PathSet digest (computed from the real `sha^..sha`) is kept untouched: the
+//       verifier must recompute against the wrong base, land on a different digest, and reject. ATTRIBUTION
+//       (Code Review follow-up): the genuine, uncorrupted commit is first asserted to resolve "pathset" via
+//       the SAME branch-deleted+gc'd path, before it is corrupted — so the later `null` can only mean "the
+//       wrong base was rejected", never "this fixture is broken in some unrelated way".
+//   (8) BACKWARD-COMPAT GUARD (DoD-5, Code Review Blocking-2) — `Loom-Worker-PathSet` present,
+//       `Loom-Worker-Base` ABSENT (case (7)'s own strip-only recipe, minus its corruption step): must still
+//       resolve "pathset" via the sha^ fallback. This is the shape of nearly all of Loom's real merged
+//       history (every solo commit landed before card 756a2cd8), and once every FRESH commit stamps both
+//       trailers, this is the only case in the corpus still exercising that fallback at all — a future
+//       regression to it would silently flip that whole population from "pathset" to "null" unnoticed.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-pathset-deleted-branch.mjs
 import fs from "node:fs";
@@ -232,6 +257,141 @@ try {
     // silently upgraded to look as confident as the "content"/"pathset" cases above.
     check("(5) getTaskMergedInfo reports verification:\"trailer-only\" for pre-fix history (no path-set trailer)", board?.verification === "trailer-only");
   }
+
+  // ── (6) RENAME REGRESSION (card 756a2cd8) — clean squash onto a path main renamed, zero conflicts ──────
+  {
+    const repo = newRepo("rename");
+    const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const taskId = `pgd-task-rename-${sfx}`;
+    const branch = `loom/${taskKey(taskId)}`;
+
+    fs.writeFileSync(path.join(repo, "shared.txt"), "line1\nline2\nline3\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "add shared file"`, { cwd: repo });
+    const wt = makeWorktreeBranch(repo, branch, "shared.txt", "line1-BRANCH-EDIT\nline2\nline3\n");
+    removeWorktree(repo, wt);
+
+    // main renames the SAME file the branch edited, AFTER the branch was cut — no conflict with the
+    // branch's own edit (git's rename-following 3-way merge lands it cleanly under the new name).
+    execSync(`git mv shared.txt renamed.txt`, { cwd: repo });
+    execSync(`git ${GIT_ID} commit -q -m "main: rename shared file"`, { cwd: repo });
+
+    const merged = await mergeBranch(repo, branch, "Card rename title");
+    check("(6) precondition: squash onto a renamed path succeeded (no conflict — rename-following)", merged.ok === true && typeof merged.sha === "string");
+    check("(6) precondition: the landed commit touched the RENAMED path, not the original name",
+      git(repo, `diff --name-only --no-renames ${merged.sha}~1..${merged.sha}`).trim() === "renamed.txt");
+    check("(6) precondition: the squash commit carries a Loom-Worker-Base trailer (card 756a2cd8)",
+      git(repo, "log -1 --format=%B").includes("Loom-Worker-Base: "));
+
+    deleteBranchesReflogAndGc(repo, [branch]);
+
+    const find = await findLandedSquashCommit(repo, branch);
+    check("(6) DoD-2: findLandedSquashCommit ACCEPTS a genuine merge despite the upstream RENAME (must fail on unfixed code)", find === merged.sha);
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, taskId);
+    check("(6) getTaskMergedInfo ALSO accepts it", board !== null && merged.sha.startsWith(board.sha));
+    check("(6) verification tier is \"pathset\", not degraded to \"trailer-only\"", board?.verification === "pathset");
+  }
+
+  // ── (7) POSITIVE CONTROL (DoD-3) — a WRONG Loom-Worker-Base is REJECTED, not blindly trusted ───────────
+  {
+    const repo = newRepo("wrong-base");
+    const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const taskId = `pgd-task-wrongbase-${sfx}`;
+    const branch = `loom/${taskKey(taskId)}`;
+
+    fs.writeFileSync(path.join(repo, "shared.txt"), "line1\nline2\nline3\n");
+    execSync(`git add -A && git ${GIT_ID} commit -q -m "add shared file"`, { cwd: repo });
+    const preLandingMergeBase = git(repo, "rev-parse HEAD"); // the OLD (pre-756a2cd8, buggy) stamp base
+    const wt = makeWorktreeBranch(repo, branch, "shared.txt", "line1-BRANCH-EDIT\nline2\nline3\n");
+    removeWorktree(repo, wt);
+
+    execSync(`git mv shared.txt renamed.txt`, { cwd: repo });
+    execSync(`git ${GIT_ID} commit -q -m "main: rename shared file"`, { cwd: repo });
+
+    const merged = await mergeBranch(repo, branch, "Card wrong-base title");
+    check("(7) precondition: squash landed", merged.ok === true && typeof merged.sha === "string");
+    const realBody = git(repo, `log -1 --format=%B ${merged.sha}`);
+    const trueDigest = realBody.match(/Loom-Worker-PathSet: (\S+)/)?.[1];
+    check("(7) precondition: the real commit carries both trailers", /Loom-Worker-Base: \S+/.test(realBody) && !!trueDigest);
+    check("(7) precondition: the pre-landing merge-base genuinely differs from the real (sha^) base",
+      !realBody.includes(`Loom-Worker-Base: ${preLandingMergeBase}`));
+
+    // ── ATTRIBUTION (Code Review follow-up): prove the GENUINE, uncorrupted commit resolves "pathset" —
+    //     via the SAME branch-deleted+gc'd path the corrupted assertion below will also go through — BEFORE
+    //     corrupting anything. Without this, a later `null` result is ambiguous: it could mean "the wrong
+    //     base was correctly rejected" (what this case claims) OR "something about this fixture is broken"
+    //     (an unrelated failure that would ALSO read as null). Pinning "pathset" here first rules the latter
+    //     out, so the corrupted assertion's `null` can only be attributed to the base substitution itself.
+    deleteBranchesReflogAndGc(repo, [branch]);
+    __resetMergedCommitMapCacheForTest();
+    const genuineBoard = await getTaskMergedInfo(repo, taskId);
+    check("(7) ATTRIBUTION: the genuine, uncorrupted commit resolves \"pathset\" (rules out a broken fixture before corrupting it)",
+      genuineBoard !== null && merged.sha.startsWith(genuineBoard.sha) && genuineBoard.verification === "pathset");
+
+    // Substitute the WRONG (pre-landing) base while keeping the TRUE digest untouched. Rebuilt via separate
+    // -m paragraphs (not one embedded-newline string) to avoid cross-platform shell-quoting hazards.
+    const subject = realBody.split("\n\n")[0];
+    const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
+    execSync(
+      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "Loom-Worker-Base: ${preLandingMergeBase}" -m "Loom-Worker-PathSet: ${trueDigest}"`,
+      { cwd: repo },
+    );
+    const corruptedSha = git(repo, "rev-parse HEAD");
+    check("(7) precondition: the corrupted commit really carries the wrong base now",
+      git(repo, `log -1 --format=%B ${corruptedSha}`).includes(`Loom-Worker-Base: ${preLandingMergeBase}`));
+
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, taskId);
+    check("(7) DoD-3: a WRONG Loom-Worker-Base is REJECTED, not blindly trusted (verifyPersistedPathSet fails closed)", board === null);
+  }
+
+  // ── (8) BACKWARD-COMPAT GUARD (DoD-5, Code Review Blocking-2 follow-up) — Loom-Worker-PathSet present,
+  //     Loom-Worker-Base ABSENT, must still resolve "pathset" via verifyPersistedPathSet's sha^ fallback.
+  //     This is the shape of nearly all of Loom's real merged history: every commit landed before card
+  //     756a2cd8 (which is the first thing to ever stamp Base on the solo path) has PathSet with no Base.
+  //     Before this case, once every FRESH solo commit started carrying both trailers, no test in this
+  //     corpus asserted that shape resolves correctly any more — a future regression to the sha^ fallback
+  //     would silently flip that entire population from "pathset" to "null" with nothing here to catch it.
+  //     Same strip-a-trailer-via-amend recipe as case (7)'s own precondition, but WITHOUT (7)'s corruption
+  //     step — the point here is that a MISSING Base still verifies correctly, not that a WRONG one is
+  //     rejected (case (7)'s own case already covers "strip Base alone does not discriminate" for why THAT
+  //     shape isn't a meaningful DoD-3 positive control — it just happens to be exactly the right shape for
+  //     this DoD-5 backward-compat assertion instead).
+  {
+    const repo = newRepo("no-base-fallback");
+    const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const taskId = `pgd-task-nobasefallback-${sfx}`;
+    const branch = `loom/${taskKey(taskId)}`;
+    const wt = makeWorktreeBranch(repo, branch, "no-base-fallback.txt", "genuine content\n");
+    removeWorktree(repo, wt);
+
+    const merged = await mergeBranch(repo, branch, "Card no-base-fallback title");
+    check("(8) precondition: squash landed", merged.ok === true && typeof merged.sha === "string");
+    const realBody = git(repo, `log -1 --format=%B ${merged.sha}`);
+    check("(8) precondition: the real commit carries both trailers before stripping",
+      /Loom-Worker-Base: \S+/.test(realBody) && /Loom-Worker-PathSet: \S+/.test(realBody));
+
+    // Strip ONLY the Loom-Worker-Base line, keeping the TRUE Loom-Worker-PathSet digest untouched — exactly
+    // the shape a solo squash produced before card 756a2cd8 (no Base trailer existed on that path at all).
+    const subject = realBody.split("\n\n")[0];
+    const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
+    const pathSetTrailerLine = realBody.match(/^Loom-Worker-PathSet: .+$/m)[0];
+    execSync(
+      `git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "${pathSetTrailerLine}"`,
+      { cwd: repo },
+    );
+    const strippedSha = git(repo, "rev-parse HEAD");
+    check("(8) precondition: the Base trailer is really gone now, PathSet is unchanged",
+      !/Loom-Worker-Base:/.test(git(repo, `log -1 --format=%B ${strippedSha}`))
+      && git(repo, `log -1 --format=%B ${strippedSha}`).includes(pathSetTrailerLine));
+
+    deleteBranchesReflogAndGc(repo, [branch]);
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, taskId);
+    check("(8) DoD-5: PathSet present, Base ABSENT still resolves \"pathset\" via the sha^ fallback " +
+      "(the pre-756a2cd8 shape — nearly all of Loom's real merged history)",
+      board !== null && strippedSha.startsWith(board.sha) && board.verification === "pathset");
+  }
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
@@ -239,6 +399,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — once a worker branch is deleted (and even after a real `git gc --prune=now`), a forged Loom-Worker-Branch trailer is refused via the persisted Loom-Worker-PathSet digest, a genuine merge still resolves (including when main concurrently advanced a shared file), and pre-fix history without the new trailer keeps its old degraded-but-unchanged behavior."
+  ? "\n✅ ALL PASS — once a worker branch is deleted (and even after a real `git gc --prune=now`), a forged Loom-Worker-Branch trailer is refused via the persisted Loom-Worker-PathSet digest, a genuine merge still resolves (including when main concurrently advanced a shared file, or renamed a path the branch also edited — card 756a2cd8), pre-fix history (and any fresh commit missing Loom-Worker-Base) keeps resolving via the unchanged sha^ fallback, and a WRONG Loom-Worker-Base is rejected rather than blindly trusted."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

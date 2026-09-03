@@ -167,8 +167,10 @@ try {
   for (let t = 0; t < TRIALS; t++) {
     const sfx = `${Date.now()}-${t}-${Math.random().toString(36).slice(2, 7)}`;
     const repo = makeTrialRepo(sfx);
-    const mainlineBase = git(repo, "rev-parse HEAD"); // pre-merge tip both branches forked from — the
-    // <mergeBase>..<branch> endpoint the Loom-Worker-PathSet digest itself is computed from at merge time.
+    const mainlineBase = git(repo, "rev-parse HEAD"); // pre-merge tip both branches forked from — this test
+    // never advances main mid-trial, so this coincides with each landed commit's own sha^ (the LANDED base
+    // the Loom-Worker-PathSet digest is actually computed from post-756a2cd8 — see the confinement check
+    // below, which reasons from the branch's OWN diff, not from the trailer's recorded base).
     makeWorktree(repo, "loom/branch-a", "file-a.txt", `a-content-${sfx}\n`, sfx);
     makeWorktree(repo, "loom/branch-b", "file-b.txt", `b-content-${sfx}\n`, sfx);
 
@@ -232,8 +234,10 @@ try {
       // ── CONFINEMENT (card 9f776570): the two checks above only assert the trailer's OWN file is present
       //    and correct — a commit carrying its own file AND a FOREIGN one (the zero-concurrency corruption
       //    reproduced in card 9e77050f) passes both of them. Assert the landed commit's diff path set is
-      //    EXACTLY the branch's own changed-file set — the same property the Loom-Worker-PathSet digest
-      //    encodes (mergeBase..branch), checked here against the commit's own diffstat.
+      //    EXACTLY the branch's own changed-file set, checked here against the commit's own diffstat —
+      //    independent of (and not asserting anything about) whatever base Loom-Worker-PathSet itself was
+      //    stamped from; `mainlineBase` is used here only because it equals `sha^` in this test's no-main-
+      //    advance shape, not because it's what the trailer records.
       let statOut;
       try {
         statOut = execGitIntegrity(repo, `show --stat --format= ${sha}`, `git show --stat ${sha.slice(0, 7)} (:115)`);
