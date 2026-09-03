@@ -4011,7 +4011,16 @@ export class SessionService {
     await waitForMergeDangerWindowsToClear(deps.mergeDangerGraceMs ?? MERGE_DANGER_SHUTDOWN_GRACE_MS);
     const mergeDangerWait = { waitedMs: Date.now() - mergeWaitStart, windowsActive };
     if (windowsActive > 0) {
-      console.log(`[restart] daemon_restart waited ${mergeDangerWait.waitedMs}ms for ${windowsActive} in-flight merge danger window(s) before exiting.`);
+      // Card 7f9444f3 audit: this write runs AFTER the merge-danger wait above already settled, so
+      // (unlike gracefulShutdown's own pre-fix shape) an EPIPE here can't skip that guard — but left
+      // unguarded it would still abort this async function BEFORE the cleanup+exit below is scheduled,
+      // turning an intentional, already-built restart into an unhandled rejection that never actually
+      // restarts the daemon (and, via the top-level handler, a phantom crash for what should read as a
+      // clean deploy). Guarded for the same reason as gracefulShutdown, not because this path shares its
+      // worse failure mode.
+      try {
+        console.log(`[restart] daemon_restart waited ${mergeDangerWait.waitedMs}ms for ${windowsActive} in-flight merge danger window(s) before exiting.`);
+      } catch { /* never block the restart */ }
     }
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent. NOTE: this
@@ -4020,7 +4029,12 @@ export class SessionService {
     // SAME `supervisorResponseFields`-shaped distinction via the persisted intent stamped just above.
     const exit = deps.exit ?? ((code: number) => process.exit(code));
     const cleanup = this.shutdownCleanup;
-    setTimeout(() => { cleanup?.(); exit(RESTART_EXIT_CODE); }, 300);
+    // Card 7f9444f3 audit: `cleanup` (flushVaultsAndStopCodescape) is already internally guarded end to
+    // end today (see that function's own doc), so this try is belt-and-suspenders — but it makes "a
+    // future edit to the registered cleanup can't turn a restart into a non-relaunching crash" true by
+    // construction, matching the reasoning flushVaultsAndStopCodescape's own doc already gives for why
+    // ITS internal codescapeSupervisor.stop() call is guarded the same way.
+    setTimeout(() => { try { cleanup?.(); } catch { /* never block the restart exit */ } exit(RESTART_EXIT_CODE); }, 300);
     return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
   }
 

@@ -65,8 +65,8 @@ import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
-import { waitForMergeDangerWindowsToClear } from "./git/merge-danger-window.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
+import { runGracefulTeardown } from "./graceful-teardown.js";
 
 async function main(): Promise<void> {
   // Card 572dd777 DoD-3: this boot's own start time, captured as the very first statement of main() so
@@ -1348,6 +1348,9 @@ async function main(): Promise<void> {
     // non-relaunching crash" true by construction rather than true by accident.
     try { codescapeSupervisor.stop(); } catch { /* never block the exit */ }
   };
+  // Card 7f9444f3 audit: this function's only two writes (the `console.log` above and the
+  // `codescapeSupervisor.stop()` call) are ALREADY each individually try/catch-guarded, so a throw here
+  // (EPIPE included) can never escape this function — safe as-is, no change needed for that card.
   sessions.setShutdownCleanup(flushVaultsAndStopCodescape);
 
   // Vault push-status visibility (task f48ee77d): the auto-committer above is commit-only BY DESIGN —
@@ -1489,29 +1492,35 @@ async function main(): Promise<void> {
     // signal. `daemon_restart` never calls this path at all (see the exit-75 branch below `main`), so its
     // own restart-intent.json remains the sole marker for that flow — untouched here.
     const isSignal = (HANDLED_SIGNALS as readonly string[]).includes(reason);
-    writeShutdownMarker({ kind: isSignal ? "signal" : "intentional", reason, signal: isSignal ? reason : null });
-    // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
-    // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
-    // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
-    // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
-    try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
-    // Vault flush + codescape-supervisor stop: shared with `daemon_restart`'s exit path — see
-    // flushVaultsAndStopCodescape's own doc above for why this is factored out and what each half does.
-    flushVaultsAndStopCodescape();
-    // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
-    // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
-    void companionController.stop().catch(() => { /* never block the exit */ });
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
-    console.log(`[shutdown] graceful stop (${reason})`);
+    // Card 7f9444f3: the ENTIRE teardown body below is best-effort inside runGracefulTeardown's try —
+    // a real crash showed the LAST console.log here (just before the gate-aware exit) throwing EPIPE on a
+    // destroyed stdout (the Windows-console-close SIGHUP case), which skipped the merge-danger-window
+    // guard entirely and turned a clean stop into a phantom crash.log. Wrapping the whole body (not just
+    // that one write) means the guard below always runs, and no future write/throw added to this
+    // teardown sequence can reopen either hole — see graceful-teardown.ts for the full reasoning.
+    runGracefulTeardown(() => {
+      writeShutdownMarker({ kind: isSignal ? "signal" : "intentional", reason, signal: isSignal ? reason : null });
+      // Crash/shutdown transcript backstop: snapshot every LIVE session's engine transcript BEFORE we
+      // exit. The pty onExit hook (the per-session snapshot trigger) never fires on a signal-kill, so
+      // without this a long-lived session loses its transcript when Claude later prunes the JSONL.
+      // Best-effort + never-throws (snapshotAllLive swallows per-session failures); must not block exit.
+      try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
+      // Vault flush + codescape-supervisor stop: shared with `daemon_restart`'s exit path — see
+      // flushVaultsAndStopCodescape's own doc above for why this is factored out and what each half does.
+      flushVaultsAndStopCodescape();
+      // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
+      // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
+      void companionController.stop().catch(() => { /* never block the exit */ });
+      scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); worktreeVanishedWatcher.stop(); resumeDocWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
+      console.log(`[shutdown] graceful stop (${reason})`);
+    }, () => process.exit(0)); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
     // Gate-aware exit (board card 5a7692a4): this path used to `process.exit(0)` unconditionally, with
     // zero awareness of an in-flight canonical merge squash — a measured ~92s-margin near-miss. Delay the
     // actual exit by a SHORT, BOUNDED grace ONLY if a merge is currently inside its danger window (the
     // common case — nothing in flight — resolves this synchronously, so an ordinary stop's exit latency is
     // unchanged). Fail-open: never a hard refusal of the owner's stop, always exits within the grace
-    // ceiling regardless of what the merge does. See merge-danger-window.ts for the full mechanism.
-    void waitForMergeDangerWindowsToClear().finally(() => {
-      process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
-    });
+    // ceiling regardless of what the merge does — runGracefulTeardown always awaits it before exiting. See
+    // merge-danger-window.ts for the full mechanism.
   };
   // SIGINT/SIGTERM plus SIGHUP — Node also emits SIGHUP for the Windows console-close case (closing the
   // terminal window) as well as the POSIX hangup case, so listing it here covers that win32 path too,
