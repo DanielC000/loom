@@ -495,6 +495,56 @@ const worktrees = [];
     check("(repo-guard-only, b) repo genuinely free afterward", await repoFreedAfter(sem, "/repo/contended"));
   }
 
+  // (squash-visibility, card 93b568e6) — POSITIVE-CONTROLLED: a merge past its own gate command, still
+  // holding its repo guard through its own squash (same `holdRepoGuardOnExit` shape as (b) above), used to
+  // be enumerated NOWHERE — gone from `snapshot()` (its registry entry is deleted unconditionally in
+  // `runExclusive`'s own `finally`, same as every settled op) and never in `repoGuardOnlySnapshot()` either
+  // (that map mirrors ONLY an `acquireRepoGuardOnly` hold, never an `admit()`-based one — see that map's
+  // own doc for the exact disqualifying clause). `squashOnlySnapshot()` is the fix; this asserts all three
+  // readings AT ONCE, on the SAME live hold, so a reader can't mistake "gone from the other two" for "gone
+  // entirely". Before `squashOnlySnapshot()` existed this block's THE FIX check below could not even be
+  // written — `sem.squashOnlySnapshot` was `undefined` and calling it threw, i.e. failed exactly as hard as
+  // a check ever can.
+  {
+    const sem = new GateSemaphore();
+    // fn deliberately does NO internal awaiting at all (unlike (b) above, which needs to stay open long
+    // enough to prove a CONCURRENT waiter is blocked) — this block only needs the hold to exist at ALL
+    // past the gate's own settle, which `holdRepoGuardOnExit` alone already guarantees regardless of how
+    // long `fn` itself runs.
+    const pGate = sem.runExclusive(2, {
+      gateType: "merge", projectId: "p", sessionId: "sq-sess", taskId: "sq-task", branch: "loom/sq",
+      repoPath: "/repo/squash-vis", opId: "sq-op",
+    }, async (_startedAt, _cancelSignal, _hooks, _getMax, holdRepoGuardOnExit) => {
+      holdRepoGuardOnExit(); // real confirmWorkerMerge shape: hold survives the gate's own settle
+      return "gate-done";
+    });
+    // NO sleep here (mirrors (repo-guard-only, c)'s own precedent above): a free cap + free worktree/repo
+    // guard takes acquire()'s synchronous fast path — `admit()` runs, and `active` is bumped, BEFORE
+    // `acquire()` ever returns a promise wrapper, i.e. before `runExclusive` itself suspends at its own
+    // `await`. Nothing async happens between calling `runExclusive` (not yet awaited) and this check.
+    check("(squash-visibility) the gate is genuinely admitted before settling", sem.snapshot().active === 1);
+
+    // NO sleep here either: since `fn` above never awaits internally, `await pGate` alone drains every
+    // remaining microtask — including `runExclusive`'s own `finally` (registry delete, then release(),
+    // which populates squashHolders because holdRepoGuard is set) — before this line's continuation ever
+    // runs. Nothing async remains unresolved by the time `pGate` itself settles.
+    const gateResult = await pGate;
+    check("(squash-visibility) the gate settled normally", gateResult === "gate-done");
+    check("(squash-visibility) GONE from snapshot() the instant the gate settles — the pre-existing behavior, unchanged",
+      sem.snapshot().entries.length === 0);
+    check("(squash-visibility) NEVER in repoGuardOnlySnapshot() — this was never an acquireRepoGuardOnly hold",
+      sem.repoGuardOnlySnapshot().length === 0);
+    const squashing = sem.squashOnlySnapshot();
+    check("(squash-visibility) THE FIX: still visible in squashOnlySnapshot() while its squash is in flight, with the real descriptor fields",
+      squashing.length === 1 && squashing[0].repoPath === "/repo/squash-vis" && squashing[0].opId === "sq-op" &&
+      squashing[0].projectId === "p" && squashing[0].taskId === "sq-task" && squashing[0].branch === "loom/sq");
+
+    sem.endSquash("/repo/squash-vis", "sq-op");
+    check("(squash-visibility) gone from squashOnlySnapshot() once endSquash fires", sem.squashOnlySnapshot().length === 0);
+    check("(squash-visibility) repo genuinely free afterward (a queued acquireRepoGuardOnly resolves near-instantly)",
+      await repoFreedAfter(sem, "/repo/squash-vis"));
+  }
+
   // (c) HANDOFF TO A QUEUED REAL GATE (the reverse direction of (b)): a real merge gate queued behind an
   // inert-skip's OWN hold must be admitted the instant that hold releases — proving the two mechanisms
   // compose in both directions, not just one.

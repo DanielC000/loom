@@ -245,6 +245,26 @@ export interface RepoGuardOnlyQueueEntry {
   workerLabel?: string | null;
 }
 
+/** Card 93b568e6: one entry in {@link GateQueueSnapshot.squashing} — the read-side shape of a
+ *  {@link SquashHolderEntry}, with the SAME cross-project redaction posture {@link RepoGuardOnlyQueueEntry}
+ *  already establishes: `taskId`/`branch`/`workerLabel` present ONLY for the calling manager's own
+ *  project, `repoPath` NEVER disclosed cross-project (an absolute host filesystem path). A row here has
+ *  ALREADY left `running`/`queued` above (its registry entry is gone) and was never a
+ *  {@link RepoGuardOnlyQueueEntry} either — it is the one class of live gate work neither of those two
+ *  arrays can show: a merge past its own gate command, still holding its repo guard through its own
+ *  squash. See {@link SquashHolderEntry}'s own doc for the full mechanism this closes. */
+export interface SquashQueueEntry {
+  opId: string | null;
+  projectId: string;
+  projectName: string;
+  since: string;
+  elapsedMs: number;
+  repoPath?: string;
+  taskId?: string | null;
+  branch?: string | null;
+  workerLabel?: string | null;
+}
+
 /** One live declaration in {@link GateQueueSnapshot.declarations} (card a5d1ae04) — the read-side shape of
  *  a {@link GateIntentRow}, with the SAME cross-project redaction posture `GateQueueEntry` already
  *  establishes (own-project: full detail; foreign-project: `redacted: true` plus a sparse, deliberately
@@ -307,10 +327,14 @@ export interface GateIntentEntry {
 /** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
  *  into running/queued so a manager reads queue depth and admission order without counting entries itself.
  *  `repoGuardOnly` (card b9e07a4a) is a SEPARATE array, deliberately not folded into `running`/`queued` —
- *  see {@link RepoGuardOnlyQueueEntry}'s own doc for why it's a genuinely different resource. `declarations`
- *  (card a5d1ae04) is a THIRD, independent array again — see {@link GateIntentEntry}'s own doc; unlike
- *  `running`/`queued`/`repoGuardOnly`, nothing in it was ever admitted through (or even seen by) the
- *  GateSemaphore — it's pure advisory disclosure with no bearing on cap/admission at all. */
+ *  see {@link RepoGuardOnlyQueueEntry}'s own doc for why it's a genuinely different resource. `squashing`
+ *  (card 93b568e6) is a FOURTH, independent array: a `merge`-kind op past its own gate command, still
+ *  holding its repo guard through its own squash — gone from `running`/`queued` (its registry entry was
+ *  already deleted) and never a `repoGuardOnly` entry either (that array covers ONLY an
+ *  `acquireRepoGuardOnly` hold, never an `admit()`-based one — see {@link SquashQueueEntry}'s own doc).
+ *  `declarations` (card a5d1ae04) is a FIFTH, independent array again — see {@link GateIntentEntry}'s own
+ *  doc; unlike the other four, nothing in it was ever admitted through (or even seen by) the GateSemaphore
+ *  — it's pure advisory disclosure with no bearing on cap/admission at all. */
 export interface GateQueueSnapshot {
   cap: number;
   activeCount: number;
@@ -318,6 +342,7 @@ export interface GateQueueSnapshot {
   running: GateQueueEntry[];
   queued: GateQueueEntry[];
   repoGuardOnly: RepoGuardOnlyQueueEntry[];
+  squashing: SquashQueueEntry[];
   declarations: GateIntentEntry[];
 }
 
@@ -4548,6 +4573,26 @@ export class SessionService {
       }
       return entry;
     });
+    // Card 93b568e6: a `merge`-kind op mid-squash — a SEPARATE resource from BOTH the cap-admitted
+    // registry above AND `repoGuardOnly` (that array covers only an `acquireRepoGuardOnly` hold, never an
+    // `admit()`-based one — see SquashQueueEntry's own doc). Same redaction rule as toEntry() above.
+    const squashing: SquashQueueEntry[] = this.gateSemaphore.squashOnlySnapshot().map((e) => {
+      const project = this.db.getProject(e.projectId);
+      const entry: SquashQueueEntry = {
+        opId: e.opId, projectId: e.projectId, projectName: project?.name ?? e.projectId,
+        since: new Date(e.since).toISOString(), elapsedMs: Date.now() - e.since,
+      };
+      if (e.projectId === callerProjectId) {
+        const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
+        const session = this.db.getSession(e.sessionId);
+        const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+        entry.repoPath = e.repoPath;
+        entry.taskId = e.taskId;
+        entry.branch = e.branch;
+        entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+      }
+      return entry;
+    });
     // Card a5d1ae04: `declarations` is computed independently of everything above it — it never touches
     // `this.gateSemaphore` at all, only `this.gateIntents`. `snapshot()`'s own `isSessionLive` predicate is
     // what performs the dead-seat reaping described on `GateIntentEntry`'s own doc: a session row that's
@@ -4557,7 +4602,7 @@ export class SessionService {
     const declarations: GateIntentEntry[] = this.gateIntents
       .snapshot((sid) => this.db.getSession(sid)?.processState === "live")
       .map((row) => this.toGateIntentEntry(row, callerProjectId, nowMs));
-    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, declarations };
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations };
   }
 
   /** Shapes one {@link GateIntentRow} into its wire form ({@link GateIntentEntry}) — shared by

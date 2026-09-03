@@ -339,6 +339,29 @@ export interface RepoGuardOnlyEntry {
   branch: string | null;
 }
 
+/**
+ * Card 93b568e6: one `merge`-kind op currently past its own gate command but still holding
+ * {@link activeMergeRepos} because its `fn` called `holdRepoGuardOnExit` (card c24dd48a) — i.e. it is
+ * mid-squash. This op has ALREADY been deleted from {@link registry} (every `runExclusive` caller is,
+ * unconditionally, in its `finally` — see that method's own doc), so {@link GateSemaphore.snapshot} never
+ * sees it; and it was never an {@link acquireRepoGuardOnly} hold, so {@link repoGuardOnlyHolders}/
+ * {@link repoGuardOnlySnapshot} never see it either (see that map's own doc for the exact disqualifying
+ * clause). Before this existed, a squashing merge was enumerated NOWHERE — `gate_queue` read empty for it,
+ * indistinguishable from "nothing is running". This type — and {@link GateSemaphore.squashOnlySnapshot} —
+ * close that read gap. Purely a read-side mirror, same posture as {@link repoGuardOnlyHolders}'s own doc:
+ * the actual admission state still lives in {@link activeMergeRepos} exactly as it always has.
+ */
+export interface SquashHolderEntry {
+  repoPath: string;
+  /** Epoch-ms this op's gate command settled and its repo hold began surviving past `release()`. */
+  since: number;
+  opId: string | null;
+  projectId: string;
+  sessionId: string;
+  taskId: string | null;
+  branch: string | null;
+}
+
 /** Internal registry row: `startedAt` is null while queued, stamped at admission. `priority` is retained
  *  so {@link GateSemaphore.snapshot} can order queued entries in the real high-then-low admission order.
  *  `controller` (card 8d585277) is created unconditionally for EVERY run, admitted or not — cheap (a
@@ -586,8 +609,20 @@ export class GateSemaphore {
     this.active--;
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.delete(wt);
-    if (!holdRepoGuard && entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
-      this.freeRepoPath(entry.descriptor.repoPath, this.repoHolderId(entry), entry.descriptor.opId, "release");
+    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+      if (holdRepoGuard) {
+        // Card 93b568e6: this op is now mid-squash — registry deletion (this method's own caller,
+        // runExclusive's `finally`) is about to make it invisible to `snapshot()`; record it here so
+        // `squashOnlySnapshot()` can still report it until `endSquash`/`releaseMergeRepoGuard` frees it.
+        const repoPath = entry.descriptor.repoPath;
+        this.squashHolders.set(repoPath, {
+          repoPath, since: Date.now(), opId: entry.descriptor.opId ?? null,
+          projectId: entry.descriptor.projectId, sessionId: entry.descriptor.sessionId,
+          taskId: entry.descriptor.taskId ?? null, branch: entry.descriptor.branch ?? null,
+        });
+      } else {
+        this.freeRepoPath(entry.descriptor.repoPath, this.repoHolderId(entry), entry.descriptor.opId, "release");
+      }
     }
     this.grantNext();
   }
@@ -622,6 +657,15 @@ export class GateSemaphore {
   private readonly repoGuardOnlyHolders = new Map<string, { id: string; descriptor: RepoGuardOnlyDescriptor; since: number }>();
   private repoGuardOnlySeq = 0;
 
+  /** Card 93b568e6: repoPath -> the descriptor+timestamp of a `merge`-kind op currently mid-squash — i.e.
+   *  {@link release} was called with `holdRepoGuard:true` for it. Populated ONLY there, cleared ONLY in
+   *  {@link freeRepoPath} once the SAME repoPath's identity check there passes (the same instant
+   *  {@link activeMergeRepos} would otherwise show this repoPath as freed/handed-off) — so this map's
+   *  membership always tracks "past release(), not yet endSquash()" exactly, never longer. Read-side
+   *  mirror only, same posture as {@link repoGuardOnlyHolders} — {@link activeMergeRepos} remains the sole
+   *  admission authority; this exists purely so {@link squashOnlySnapshot} can report it. */
+  private readonly squashHolders = new Map<string, SquashHolderEntry>();
+
   /** Card b9e07a4a: the ONE place `activeMergeRepos` ever actually vacates a `repoPath` — shared by
    *  {@link release} (a `runExclusive`-admitted merge's own repo hold) and {@link releaseMergeRepoGuard}/
    *  {@link endSquash} (the same op's LATER, deferred release via `holdRepoGuardOnExit`), and
@@ -652,6 +696,10 @@ export class GateSemaphore {
       return;
     }
     this.repoGuardOnlyHolders.delete(repoPath);
+    // Card 93b568e6: the identity check above already confirmed `holderId` owns whatever is CURRENTLY
+    // stored for `repoPath` — safe to unconditionally clear a squash-hold record for it too (a no-op if
+    // this repoPath was never mid-squash to begin with).
+    this.squashHolders.delete(repoPath);
     const waiters = this.repoGuardOnlyWaiters.get(repoPath);
     if (waiters && waiters.length > 0) {
       const w = waiters.shift()!;
@@ -766,6 +814,15 @@ export class GateSemaphore {
       });
     }
     return entries;
+  }
+
+  /** Card 93b568e6: point-in-time snapshot of every `merge`-kind op currently mid-squash (past its own
+   *  gate command's `release()`, held via `holdRepoGuardOnExit`, not yet freed by `endSquash`/
+   *  `releaseMergeRepoGuard`) — the {@link squashHolders} counterpart to {@link snapshot}/
+   *  {@link repoGuardOnlySnapshot}, closing the read gap neither of those two covers (see
+   *  {@link SquashHolderEntry}'s own doc for exactly why). Read-only. */
+  squashOnlySnapshot(): SquashHolderEntry[] {
+    return Array.from(this.squashHolders.values());
   }
 
   /** Look up ONE repo-guard-only holder/waiter by its `opId` (full or an unambiguous id-prefix — same

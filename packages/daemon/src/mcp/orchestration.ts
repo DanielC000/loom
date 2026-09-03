@@ -692,6 +692,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "structurally cannot see). Returns {cap, " +
         "activeCount, queuedCount, running: " +
         "GateQueueEntry[], queued: GateQueueEntry[], repoGuardOnly: RepoGuardOnlyQueueEntry[], " +
+        "squashing: SquashQueueEntry[], " +
         "declarations: GateIntentEntry[]} — `queued` is already in real admission order (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
         "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
@@ -776,7 +777,22 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "disclosed cross-project). Explains a queued `merge`-kind entry above reporting " +
         "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
         "contending holder is here, not there. " +
-        "ALSO returns `declarations` (card a5d1ae04) — a THIRD, independent array: a manager's own " +
+        "ALSO returns `squashing` (card 93b568e6) — a THIRD, independent array, separate from BOTH " +
+        "`running`/`queued` AND `repoGuardOnly`: a `merge`-kind op that has already finished its own gate " +
+        "command (so its registry entry above is gone) but is still holding its per-repo merge-admission " +
+        "guard while its squash (the actual git merge/commit) is in flight. Before this array existed, " +
+        "a squashing merge was enumerated NOWHERE in this tool's result — `activeCount`/`running`/`queued`/" +
+        "`repoGuardOnly` could ALL read empty for a repo whose merge was still genuinely in progress, and " +
+        "an empty read was silently indistinguishable from 'nothing is running'. Each entry is " +
+        "{opId, projectId, projectName, since, elapsedMs, repoPath?, taskId?, branch?, workerLabel?} — " +
+        "same cross-project redaction as `repoGuardOnly` (`repoPath`/`taskId`/`branch`/`workerLabel` " +
+        "own-project only, never redacted-to-null, simply absent for a foreign entry). `since`/`elapsedMs` " +
+        "measure from the instant the gate command settled (NOT from admission — see `gate_status`'s " +
+        "`admittedAt` for that), i.e. how long the squash itself has been running. A repo appearing here " +
+        "explains a queued `merge`-kind entry above reporting `repoContended:true` with NO matching " +
+        "`running` entry for that repo at all: the contending holder is here, not there — the SAME shape " +
+        "`repoGuardOnly` already covers for its own resource, now covered for THIS one too. " +
+        "ALSO returns `declarations` (card a5d1ae04) — a FOURTH, independent array: a manager's own " +
         "structured \"I intend to fire a gate at ~T\" advisory, declared via `gate_intent_declare` and " +
         "withdrawn via `gate_intent_withdraw`. ⛔ ADVISORY DISCLOSURE ONLY — nothing here was ever admitted " +
         "through, or even seen by, the GateSemaphore that governs `running`/`queued`/`repoGuardOnly` above; " +
