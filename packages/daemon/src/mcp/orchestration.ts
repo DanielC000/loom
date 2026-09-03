@@ -2816,6 +2816,59 @@ export class OrchestrationMcpRouter {
     const worktreePathAliases = (worktreePath: string | null | undefined, selfId: string): number | null =>
       worktreePath ? db.listSessionsAtWorktreePath(worktreePath, selfId).length : null;
 
+    // Card f8d53712: `worker_status`'s single-worker body used to spread `...w` — the RAW session row
+    // straight from `db.getSession()` — into its tool response. That's an OPT-OUT projection: any column
+    // added to the `sessions` table in future reaches the calling agent automatically, with no code
+    // change and no review step (contrast `fleetView` just below, which already names every field it
+    // returns explicitly and never spreads a raw row — this closes the one place that didn't). This
+    // helper names every field `toSession` (db.ts) actually sets on a `Session` — i.e. exactly what
+    // `...w` was already emitting — so swapping it in is BEHAVIOUR-PRESERVING against today's row shape,
+    // not a trim; the fields below make the NEXT addition to `Session` a deliberate one-line choice here
+    // instead of an automatic one. `pendingMerge` is deliberately omitted: `toSession` never sets it (it's
+    // projected in from the in-memory PendingOpRegistry elsewhere), and the `worker_status` handler always
+    // overrides it with the live-computed value regardless of what `...w` would have carried.
+    const projectSessionRowFields = (w: Session): Omit<Session, "pendingMerge"> => ({
+      id: w.id,
+      projectId: w.projectId,
+      agentId: w.agentId,
+      engineSessionId: w.engineSessionId,
+      title: w.title,
+      cwd: w.cwd,
+      processState: w.processState,
+      resumability: w.resumability,
+      busy: w.busy,
+      createdAt: w.createdAt,
+      lastActivity: w.lastActivity,
+      lastError: w.lastError,
+      role: w.role,
+      parentSessionId: w.parentSessionId,
+      taskId: w.taskId,
+      worktreePath: w.worktreePath,
+      branch: w.branch,
+      reviewBaseSha: w.reviewBaseSha,
+      repoKey: w.repoKey,
+      gen: w.gen,
+      recycledFrom: w.recycledFrom,
+      ctxInputTokens: w.ctxInputTokens,
+      ctxTurns: w.ctxTurns,
+      turnSeq: w.turnSeq,
+      ctxUpdatedAt: w.ctxUpdatedAt,
+      model: w.model,
+      rateLimitedUntil: w.rateLimitedUntil,
+      rateLimitDeadline: w.rateLimitDeadline,
+      browserTesting: w.browserTesting,
+      documentConversion: w.documentConversion,
+      restrictedTools: w.restrictedTools,
+      noCommit: w.noCommit,
+      skills: w.skills,
+      connections: w.connections,
+      vaultWrite: w.vaultWrite,
+      companionLeadMode: w.companionLeadMode,
+      capabilities: w.capabilities,
+      archivedAt: w.archivedAt,
+      scheduledSpawn: w.scheduledSpawn,
+    });
+
     const fleetView = async () => {
       const workers = db.listWorkers(managerSessionId).map((w) => {
         const pendingMerge = withGatePhase(sessions.peekPendingMerge(w.id) ?? null);
@@ -3045,7 +3098,7 @@ export class OrchestrationMcpRouter {
         const mismatch = deriveLastMismatch(w.id);
         const directiveProjection = staleDirectiveProjection(w.id, w.turnSeq ?? 0);
         return ok({
-          ...w,
+          ...projectSessionRowFields(w),
           neverCompletedTurn: (w.turnSeq ?? 0) === 0,
           lastEngineOutputAt: pty?.getLastOutputAt(w.id) ?? null,
           composerDirtyLen: pty?.getComposerDirtyLen(w.id) ?? null,
