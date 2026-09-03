@@ -108,6 +108,40 @@ const GREEN_POLL_WINDOW_MS = 1500; // deliberately SMALL and FIXED, NOT scaled w
                                     // path 1 (not path 2) BEFORE this window is trusted — turning that
                                     // precondition into something this test verifies, not just claims in a
                                     // comment (card 8e75ee20 merge review).
+const HOOK_STARTED_POLL_WINDOW_MS = GREEN_POLL_WINDOW_MS; // card 6799aa3b: the [green] hookStarted check
+                                           // used to be a single SYNCHRONOUS fs.existsSync right when the
+                                           // wrapper settles — but that settlement fires as soon as
+                                           // simple-git observes the DIRECT git.exe child's own close/exit
+                                           // (see withTimeoutKillingChild's doc), which is INDEPENDENT of
+                                           // the pre-commit hook's own descendant process tree (sh -> node):
+                                           // per this file's own header comment, killing the top-level
+                                           // git.exe on Windows does NOT kill an already-spawned hook
+                                           // child, which keeps running orphaned. Under real full-suite
+                                           // host contention, that orphaned chain can be genuinely
+                                           // spawned (git DID invoke the hook) yet not yet SCHEDULED far
+                                           // enough by the OS to have executed its own first line (the
+                                           // marker write) at the exact instant of the synchronous check
+                                           // — a false "never started" for a hook that, in fact, started
+                                           // and was merely still catching up. Polling (bounded, fail-fast
+                                           // on success in the [green] usage — same idiom as
+                                           // RED_POLL_WINDOW_MS) distinguishes that from the TRUE vacuous
+                                           // case (the kill fired before git even reached the
+                                           // hook-invocation step at all, so nothing was ever spawned and
+                                           // the marker never appears regardless of how long we wait — see
+                                           // the [setup] positive control below, which still proves this).
+                                           // DELIBERATELY REUSES GREEN_POLL_WINDOW_MS rather than a third,
+                                           // independently-chosen number: this window is ALSO a NEGATIVE
+                                           // poll in its OTHER use site (the [setup] leg-2 vacuous control,
+                                           // which must keep returning false) — GREEN_POLL_WINDOW_MS's own
+                                           // doc above is the reasoning for why that side must stay small
+                                           // and fixed, not scaled with HOOK_TOTAL_MS. Sized generously
+                                           // relative to this card's own directly-measured hit distribution
+                                           // (11-302ms, n=45 trials at moderate, core-matched CPU load —
+                                           // see worker_report) without being scaled to chase a load level
+                                           // this file's own installSlowTalkingPreCommitHook comment (above)
+                                           // already documents as measuring the FIXTURE's own process-
+                                           // creation overhead, not anything under test, at 2x-oversubscribed
+                                           // saturation.
 
 const repo = path.join(os.tmpdir(), `loom-killtest-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
@@ -150,11 +184,16 @@ function commitSubjectsOnRepo(repoPath) {
  *  in this codebase (bare `withTimeout`, no kill). `timeoutMs`/`killGraceMs` default to the fixture's
  *  own `TIMEOUT_MS`/`withTimeoutKillingChild`'s own default (`= ms`) — a caller overrides them only to
  *  manufacture the leg-2 positive control below (a race so tight the hook can't even start). Returns the
- *  settled elapsed ms, whether it rejected, the rejection's own message (so a caller can tell WHICH of
- *  withTimeoutKillingChild's two rejection paths actually fired — see the [green] path-1 check below for
- *  why this matters), and `hookStarted` (card e083c9b7 leg 2: whether the pre-commit hook's own
- *  start-marker was ever written — i.e. whether the hook, and thus the commit machinery, got a genuine
- *  chance to run before the kill landed). */
+ *  settled elapsed ms (measured up to the wrapper's OWN settlement, NOT including the hookStarted poll
+ *  below — see there for why those must stay separate), whether it rejected, the rejection's own message
+ *  (so a caller can tell WHICH of withTimeoutKillingChild's two rejection paths actually fired — see the
+ *  [green] path-1 check below for why this matters), and `hookStarted` (card e083c9b7 leg 2, refined by
+ *  card 6799aa3b: whether the pre-commit hook's own start-marker was ever written — i.e. whether the
+ *  hook, and thus the commit machinery, got a genuine chance to run — observed via a bounded, fail-fast
+ *  POLL rather than a single synchronous check at the instant the wrapper settles, since a killed
+ *  git.exe's own hook descendant can be orphaned and still catching up on its own process-spawn chain —
+ *  see HOOK_STARTED_POLL_WINDOW_MS's own doc for why a single synchronous check can false-negative under
+ *  host contention). */
 async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs }) {
   const markerPath = hookStartMarkerPath(repo, message);
   try { fs.rmSync(markerPath, { force: true }); } catch { /* no prior marker for this message — fine */ }
@@ -171,7 +210,13 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
     await withTimeout(git.raw(["commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   }
-  return { elapsed: performance.now() - t0, rejected, rejectMessage, hookStarted: fs.existsSync(markerPath) };
+  // Captured BEFORE the hookStarted poll below, deliberately: the [green]/[red] elapsed-based checks
+  // assert how quickly the WRAPPER settled relative to TIMEOUT_MS/HOOK_TOTAL_MS — folding the poll's own
+  // (possibly multi-second) wait into `elapsed` would make those assertions measure the wrong thing.
+  const elapsed = performance.now() - t0;
+  const hookStarted = await pollUntil(() => fs.existsSync(markerPath),
+    { timeoutMs: HOOK_STARTED_POLL_WINDOW_MS, intervalMs: 20 });
+  return { elapsed, rejected, rejectMessage, hookStarted };
 }
 
 const RED_MSG = "red-commit";
@@ -247,6 +292,12 @@ try {
   // it, not a close race. Re-run over 5/5 attempts at timeoutMs=5 (this exact positive control, repeated
   // 5 times) also came back hookStarted:false every time. This is ONE host's measurement, not a
   // cross-host guarantee — if it ever proves too tight elsewhere, widen this value, not the reasoning.
+  // [MEASURED against the OLD synchronous-check implementation, pre-card-6799aa3b — still the right
+  // reasoning for THIS control: a 5ms trigger fires before git even reaches the hook-invocation step, so
+  // the hook process tree is never spawned at all, and no amount of the NEW polling (below) can find a
+  // marker that nothing ever wrote. The floor numbers describe write-completion timing for an
+  // ALREADY-spawned hook, which is a different question from whether the hook was spawned in the first
+  // place — polling only helps the former.]
   // `killGraceMs` is set generously here (unlike the real [green] run) because this control isn't
   // testing WHICH rejection path fires, only that the run rejects at all and that the hook never
   // started.
@@ -254,9 +305,10 @@ try {
     const vacuous = await attemptCommit({ kill: true, message: "vacuous-control-commit", timeoutMs: 5, killGraceMs: 5000 });
     check(`[setup] positive control (leg 2): a 5ms kill-trigger still rejects, not hangs — actual message: ` +
       `"${vacuous.rejectMessage}"`, vacuous.rejected);
-    check(`[setup] positive control (leg 2): hookStarted is false when the kill fires before the hook's ` +
-      `own spawn chain can complete — proving the [green] hookStarted assertion below is NOT vacuous ` +
-      `itself: it CAN observe this exact failure mode`, vacuous.hookStarted === false);
+    check(`[setup] positive control (leg 2): hookStarted stays false, even after polling up to ` +
+      `${HOOK_STARTED_POLL_WINDOW_MS}ms, when the kill fires before the hook's own spawn chain can even ` +
+      `begin — proving the [green] hookStarted assertion below is NOT vacuous itself: it CAN observe this ` +
+      `exact failure mode`, vacuous.hookStarted === false);
   }
 
   const result = await assertNeverWithControl({
@@ -319,9 +371,14 @@ try {
       // the hook started in every one of 8 trials (50ms — see the positive control's own comment for the
       // full sweep), so it reliably starts on an idle host, but — per this card's own measurement under
       // 32-worker CPU saturation — can still lose that race under real contention, which is exactly the
-      // case this check exists to catch.
-      check(`[green] the pre-commit hook actually STARTED before the kill landed (hookStarted=` +
-        `${green.hookStarted}) — otherwise this run would be a VACUOUS pass, not a real one`,
+      // case this check exists to catch. Card 6799aa3b: `hookStarted` is now a bounded POLL (see
+      // HOOK_STARTED_POLL_WINDOW_MS), not a synchronous check at settle time — so this asserts the hook
+      // genuinely got INVOKED (not skipped by an over-early kill), not literally "wrote its marker before
+      // the kill landed": an already-spawned-but-orphaned hook that finishes writing its marker moments
+      // AFTER the kill still counts, correctly, as a real (non-vacuous) run.
+      check(`[green] the pre-commit hook actually got invoked, not skipped by an over-early kill ` +
+        `(hookStarted=${green.hookStarted}, observed via up to ${HOOK_STARTED_POLL_WINDOW_MS}ms of ` +
+        `polling) — otherwise this run would be a VACUOUS pass, not a real one`,
         green.hookStarted === true);
       // Still poll (fail-fast, a SHORT fixed window — see GREEN_POLL_WINDOW_MS's own doc) as extra
       // robustness — nothing else in this fixture's design SHOULD be able to land the commit late, GIVEN
