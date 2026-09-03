@@ -72,7 +72,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
-import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { registerForCleanup, mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -149,9 +149,11 @@ try {
   // ── (2) e2e, REAL spawn: idleMs grows while quiet, drops after new output — via gate_queue AND gate_status ──
   {
     const P = `gil-idle-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    // mkdtemp is OS-guaranteed-unique — unlike the bare Date.now() join this replaces, it closes the
+    // cross-process os.tmpdir() collision two concurrent gate lanes could hit in the same clock tick.
+    const repo = mkdtempManaged("gil-idle-repo-");
     makeRepo(repo);
-    const scratchDir = path.join(os.tmpdir(), `${P}-scratch`);
+    const scratchDir = mkdtempManaged("gil-idle-scratch-");
     scratchDirs.push(scratchDir);
     // tick-1 prints immediately; tick-2 prints 3s later (a real, generously-sized quiet gap); the process
     // then stays alive another 3s before exiting, giving a wide, reliably-pollable window AFTER tick-2 in
@@ -245,9 +247,9 @@ try {
   // ── (3) e2e, REAL spawn, REAL auto-extend: extended flips false → true ───────────────────────────────
   {
     const P = `gil-extend-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gil-extend-repo-");
     makeRepo(repo);
-    const scratchDir = path.join(os.tmpdir(), `${P}-scratch`);
+    const scratchDir = mkdtempManaged("gil-extend-scratch-");
     scratchDirs.push(scratchDir);
     // Steady output every 150ms, forever — same "streaming-forever" shape as gate-timeout-extend.mjs's own
     // fixture (C): idle at the first deadline is tiny (≈150ms), so the REAL auto-extend fires.
@@ -303,10 +305,10 @@ try {
   // ── (4) e2e, cross-project: idleMs/extended are present on a FOREIGN entry (not redacted-to-omitted) ──
   {
     const P1 = `gil-own-${Date.now()}`, P2 = `gil-foreign-${Date.now()}`;
-    const repo1 = path.join(os.tmpdir(), `${P1}-repo`), repo2 = path.join(os.tmpdir(), `${P2}-repo`);
+    const repo1 = mkdtempManaged("gil-own-repo-"), repo2 = mkdtempManaged("gil-foreign-repo-");
     makeRepo(repo1);
     makeRepo(repo2);
-    const scratchDir = path.join(os.tmpdir(), `${P1}-scratch`);
+    const scratchDir = mkdtempManaged("gil-own-scratch-");
     scratchDirs.push(scratchDir);
     // A single, real, slow-ish gate on P1 (cap 1) so P2's op is genuinely queued behind it while we read.
     const gateCommand = writeScript(scratchDir, "slow-pass.cjs", [

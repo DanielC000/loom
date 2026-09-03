@@ -89,7 +89,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
-import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { registerForCleanup, mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -258,7 +258,9 @@ try {
   // ── (e2e, gate kind) sessions.gateStatus reflects a REAL runWorkerGate op's live state ──────────────
   {
     const P = `gst-gate-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    // mkdtemp is OS-guaranteed-unique — unlike the bare Date.now() join this replaces, it closes the
+    // cross-process os.tmpdir() collision two concurrent gate lanes could hit in the same clock tick.
+    const repo = mkdtempManaged("gst-gate-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -407,7 +409,7 @@ try {
   // worker_report tool) and naming the merge completion nudges, not the worker self-check ones. ──────────
   {
     const P = `gst-antipoll-mgr-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-antipoll-mgr-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -465,7 +467,7 @@ try {
   // that was never minted, once PendingOpRegistry itself evicted it (which happens immediately on settle).
   {
     const P = `gst-fast-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-fast-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -508,7 +510,7 @@ try {
   // ever delivered, read, or even inspectable. ──────────────────────────────────────────────────────────
   {
     const P = `gst-verdict-pass-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-verdict-pass-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -550,7 +552,7 @@ try {
   // is worthless. A small configured budget (10s) makes the math exact and the test fast. ──────────────
   {
     const P = `gst-proximity-pos-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-proximity-pos-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -581,7 +583,7 @@ try {
   // gate_status alone, with no nudge read. ─────────────────────────────────────────────────────────────
   {
     const P = `gst-verdict-fail-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-verdict-fail-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -630,7 +632,7 @@ try {
   // nothing this card is about. ─────────────────────────────────────────────────────────────────────────
   {
     const P = `gst-mverdict-pass-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mverdict-pass-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -736,7 +738,7 @@ try {
   // other block in this file. ─────────────────────────────────────────────────────────────────────────────
   {
     const P = `gst-mretry-pass-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mretry-pass-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -807,7 +809,7 @@ try {
   // PendingOpRegistry's retained view, same discipline as every other block in this file. ────────────────
   {
     const P = `gst-transretry-pass-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-transretry-pass-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -858,7 +860,7 @@ try {
   // the exact "warn while still passing" case the card's DoD calls out. ────────────────────────────────
   {
     const P = `gst-mproximity-pos-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mproximity-pos-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -903,7 +905,7 @@ try {
   // `gate_status(opId)` — a test that only exercised a gate that RAN could never see this divergence. ────
   {
     const P = `gst-mskip-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mskip-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -979,7 +981,7 @@ try {
   // at all" (proven by the NEXT block's negative control). ────────────────────────────────────────────
   {
     const P = `gst-mverdict-fail-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mverdict-fail-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
@@ -1055,7 +1057,7 @@ try {
   // would be ambiguous between the two. ─────────────────────────────────────────────────────────────────
   {
     const P = `gst-mverdict-nogate-${Date.now()}`;
-    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    const repo = mkdtempManaged("gst-mverdict-nogate-repo-");
     makeRepo(repo);
     const db = new Db();
     dbs.push(db);
