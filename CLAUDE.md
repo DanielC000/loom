@@ -184,6 +184,7 @@ Loom's commit scope vocabulary, derived from the real tree. Pick the one subsyst
   `tasks` (the task board / cards domain), `update`, `vault`, `webhooks` (inbound webhook ingress/verification/storage + outbound alert formatting).
 - **Cross-cutting / process:** `deps` (dependency bumps), `ci`, `release`, `docs`, `assets` (bundled
   skills / hook-relay / vault-lint under `packages/daemon/assets/**`), `site` (the hand-authored GitHub Pages landing page under `site/**`).
+- **Top-level `scripts/` files aren't their own scope** — pick the scope of what the script SERVES (e.g. a daemon-supervisor script → `daemon`, `check-main-ci` → `ci`).
 
 This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list in its OWN `CLAUDE.md`; a project with no documented list gets one derived from its structure at intake, and only a project with no meaningful code subdivisions may go scopeless.
 - Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
