@@ -2,7 +2,7 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
-import { annotateBacklinks } from "../sessions/project-memory-backlinks.js";
+import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 
@@ -368,25 +368,41 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  no inbound links" — structurally distinguishable from the field being absent altogether. */
 export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
 
-function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry): ProjectMemoryEntryWithLinks {
+/** `backlinksOverride`, when given, skips the per-note {@link annotateBacklinks} DB round-trip in favor
+ *  of a value the caller already resolved in bulk (card 41c3f546 — see `listProjectMemoryEntries`,
+ *  below) — a LIST caller must never let this fall through to the single-note path per row, since that
+ *  is exactly the O(N²) cost {@link annotateBacklinksBulk} exists to replace. */
+function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlinksOverride?: string[]): ProjectMemoryEntryWithLinks {
   return {
     ...entry,
     requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
     everDelivered: entry.retrievalCount > 0,
-    backlinks: annotateBacklinks(db, projectId, entry.key),
+    backlinks: backlinksOverride ?? annotateBacklinks(db, projectId, entry.key),
   };
 }
 
 /**
- * Full listing (small corpus by design — dozens to low-hundreds of short notes, per the card's design
- * doc) — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to curate.
+ * Full listing — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to
+ * curate. **The "dozens to low-hundreds of short notes" corpus-size premise this doc comment used to
+ * cite is stale** (card 41c3f546 — this project's own store already measured at 487 notes, 2026-09-03);
+ * see project-memory-backlinks.ts's `findInboundBacklinks` doc comment for the live reconciliation.
+ * This function stays safe at that scale ONLY because it resolves `backlinks` via the bulk path
+ * ({@link annotateBacklinksBulk}), not per row — see its own doc comment below.
  * Each row is annotated with its linked Requests' LIVE state (card e6d270b3): `memory_list` returns full
  * note BODIES (unlike a metadata-only listing), so the same stale-decided-voice text this card exists to
  * fix would otherwise stand unchallenged here too — annotating only kickoff-injection + `memory_read`
  * would leave this access path telling a different story.
+ *
+ * `backlinks` (card 41c3f546) are resolved via {@link annotateBacklinksBulk} over the SAME fetched
+ * corpus — not per row via {@link annotateBacklinks} — because per-row resolution used to mean N+1
+ * `db.listProjectMemory` fetches and N full-corpus regex scans for a listing of N notes: measured at
+ * ~4.2s wall-clock (synchronous, on the daemon's single event loop) against this project's own 487-note
+ * corpus, versus ~15ms for the bulk path over the identical corpus and cap.
  */
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {
-  return db.listProjectMemory(projectId).map((e) => withLinks(db, projectId, e));
+  const corpus = db.listProjectMemory(projectId);
+  const backlinksByKey = annotateBacklinksBulk(corpus);
+  return corpus.map((e) => withLinks(db, projectId, e, backlinksByKey.get(e.key) ?? []));
 }
 
 /** Read ONE note in full by key, annotated with its linked Requests' LIVE state (card e6d270b3). */

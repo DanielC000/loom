@@ -1,3 +1,4 @@
+import type { ProjectMemoryEntry } from "@loom/shared";
 import type { Db } from "../db.js";
 
 /**
@@ -79,9 +80,19 @@ export interface InboundBacklink {
 /**
  * Every OTHER note in the project whose text wikilinks to `targetKey`, most-recently-updated first,
  * capped at `cap` (default {@link MAX_BACKLINKS}), alongside the TRUE total found (before the cap). A
- * full-corpus scan per call — this store is "dozens to low-hundreds of short notes" by design (see
- * project-memory-recall.ts's own doc comment), so this is cheap; not indexed, since the corpus is
- * deliberately never expected to be large enough to need it.
+ * full-corpus scan per call — not indexed. **Card 41c3f546 reconciliation:** the "dozens to
+ * low-hundreds of short notes" premise this used to cite was already false by the time {@link
+ * MAX_BACKLINKS_DIGEST}'s own neighbouring comment recorded a real corpus at 400 notes (2026-08-28) —
+ * the two comments contradicted each other. (project-memory-recall.ts, cited by the old wording as
+ * sharing this premise, does NOT actually carry it as of this reconciliation — re-checked directly,
+ * not assumed.) Measured directly against this project's own live corpus (2026-09-03: 487 notes, ~1.5MB
+ * of text): ONE call here is genuinely cheap (~10-15ms, dominated by the SQL fetch/row-map, not the
+ * regex scan) — a single on-demand call (`memory_read`, one row of the kickoff digest) is fine exactly
+ * as this function is written, index or no index. The cost this comment used to gloss over is calling
+ * this ONCE PER ROW of a listing: that turns a ~15ms query into an O(N²) ~4.2s wall-clock cost on this
+ * corpus, run SYNCHRONOUSLY on the daemon's single event loop. A LIST caller must never call this per
+ * row — use {@link findInboundBacklinksBulk}, which amortizes the corpus fetch and the per-note regex
+ * extraction ONCE across every row instead of paying for either N times.
  */
 export function findInboundBacklinks(
   db: Db,
@@ -99,6 +110,39 @@ export function findInboundBacklinks(
   };
 }
 
+/**
+ * Bulk variant of {@link findInboundBacklinks} — resolves EVERY note's inbound backlinks in ONE pass
+ * over `corpus`, instead of one full `db.listProjectMemory` fetch + one full-corpus regex scan PER note
+ * (see {@link findInboundBacklinks}'s own doc comment for the O(N²) cost this replaces). The caller
+ * fetches `corpus` itself (typically `db.listProjectMemory(projectId)`) and passes it once;
+ * `extractWikilinkKeys` then runs exactly ONCE per note — not once per note per target — and the
+ * per-target match/sort runs as an array filter over those already-extracted key lists, never a fresh
+ * regex scan, which is what turns the cost from O(N × corpus bytes) into O(N × average links-per-note).
+ *
+ * Keyed by note `key`, with exactly one entry per note in `corpus`. Semantics — self-link exclusion,
+ * most-recently-updated-first ordering, the `cap`/`totalFound` split — are IDENTICAL to calling
+ * {@link findInboundBacklinks} once per note; this function changes only HOW the corpus is fetched and
+ * scanned, never WHAT is returned.
+ */
+export function findInboundBacklinksBulk(
+  corpus: ProjectMemoryEntry[],
+  cap: number = MAX_BACKLINKS,
+): Map<string, { matches: InboundBacklink[]; totalFound: number }> {
+  const withKeys = corpus.map((entry) => ({ entry, keys: extractWikilinkKeys(entry.text) }));
+  const result = new Map<string, { matches: InboundBacklink[]; totalFound: number }>();
+  for (const target of corpus) {
+    const matching = withKeys
+      .filter((x) => x.entry.key !== target.key && x.keys.includes(target.key))
+      .map((x) => x.entry)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+    result.set(target.key, {
+      matches: matching.slice(0, cap).map((m) => ({ key: m.key })),
+      totalFound: matching.length,
+    });
+  }
+  return result;
+}
+
 /** One backlink's annotation line — deliberately names ONLY the key (already a safe, KEY_RE-bounded
  *  slug), never the linking note's title or any of its body: "surfacing [[companion]] tells a reader
  *  something exists; it does not deliver its content" (card e4e180ad's explicit bound) — a free-form title
@@ -106,6 +150,17 @@ export function findInboundBacklinks(
  *  just naming the key a reader can `memory_read` themselves. */
 function backlinkLine(b: InboundBacklink): string {
   return `[backlink: [[${b.key}]] links here]`;
+}
+
+/** Shared by {@link annotateBacklinks} and {@link annotateBacklinksBulk} so both render an identical
+ *  line shape from an already-resolved `{matches, totalFound}` result — the truncation-notice wording
+ *  lives in exactly one place regardless of which resolution path produced the result. */
+function linesForBacklinkResult({ matches, totalFound }: { matches: InboundBacklink[]; totalFound: number }): string[] {
+  const lines = matches.map(backlinkLine);
+  if (totalFound > matches.length) {
+    lines.push(`[backlinks: showing ${matches.length} of ${totalFound} inbound links — see memory_list for the rest]`);
+  }
+  return lines;
 }
 
 /**
@@ -119,10 +174,19 @@ function backlinkLine(b: InboundBacklink): string {
  * MAX_BACKLINKS_DIGEST} unconditionally, for EVERY note the kickoff digest renders.
  */
 export function annotateBacklinks(db: Db, projectId: string, targetKey: string, cap: number = MAX_BACKLINKS): string[] {
-  const { matches, totalFound } = findInboundBacklinks(db, projectId, targetKey, cap);
-  const lines = matches.map(backlinkLine);
-  if (totalFound > matches.length) {
-    lines.push(`[backlinks: showing ${matches.length} of ${totalFound} inbound links — see memory_list for the rest]`);
-  }
+  return linesForBacklinkResult(findInboundBacklinks(db, projectId, targetKey, cap));
+}
+
+/**
+ * Bulk variant of {@link annotateBacklinks}, built on {@link findInboundBacklinksBulk} — every note in
+ * `corpus` gets its annotation lines resolved from ONE pass over the corpus instead of one full
+ * `db.listProjectMemory` fetch + scan per note. Keyed by note `key`; every entry in `corpus` gets exactly
+ * one map entry (possibly `[]`, a measured zero — never omitted). For a LIST caller (`memory_list`, the
+ * human-UI REST route) — never for a single on-demand read, which stays on {@link annotateBacklinks}.
+ */
+export function annotateBacklinksBulk(corpus: ProjectMemoryEntry[], cap: number = MAX_BACKLINKS): Map<string, string[]> {
+  const perNote = findInboundBacklinksBulk(corpus, cap);
+  const lines = new Map<string, string[]>();
+  for (const [key, result] of perNote) lines.set(key, linesForBacklinkResult(result));
   return lines;
 }

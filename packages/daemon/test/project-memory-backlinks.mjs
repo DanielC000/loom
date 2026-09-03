@@ -43,7 +43,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
-const { extractWikilinkKeys, findInboundBacklinks, annotateBacklinks, MAX_BACKLINKS, MAX_BACKLINKS_DIGEST } =
+const { extractWikilinkKeys, findInboundBacklinks, findInboundBacklinksBulk, annotateBacklinks, MAX_BACKLINKS, MAX_BACKLINKS_DIGEST } =
   await import("../dist/sessions/project-memory-backlinks.js");
 const { retrieveProjectMemoryForKickoff, NEVER_DROP_TAG } = await import("../dist/sessions/project-memory-recall.js");
 const { writeProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
@@ -117,6 +117,66 @@ try {
     // NEGATIVE CONTROL: a corpus UNDER the cap gets NO truncation notice at all.
     check("(cap) NEGATIVE CONTROL: the small 'canonical' case above (1 backlink, well under the cap) has no truncation notice",
       !lines.some((l) => l.includes("showing")));
+  }
+
+  // ===================== 2b. findInboundBacklinksBulk: equivalence to the per-key resolver (card 41c3f546) =====================
+  // findInboundBacklinksBulk exists ONLY to change how the corpus is fetched/scanned (one pass over an
+  // already-fetched array instead of one `db.listProjectMemory` + one regex scan PER note) — its output
+  // for every note must be IDENTICAL to calling findInboundBacklinks once per key. This corpus is built
+  // to exercise every documented semantic: self-link exclusion, a cap-overflow hub (totalFound > cap),
+  // an under-cap hub (no truncation), and several linkers written in quick succession so their
+  // updatedAt values commonly tie — exercising the secondary key-ascending sort tiebreaker, not just the
+  // primary updatedAt-desc order.
+  {
+    const proj = "proj-backlinks-bulk-equivalence";
+    db.insertProject({ id: proj, name: "Bulk Equivalence Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    db.upsertProjectMemory(proj, { key: "bulk-hub-under-cap", text: "a note with a few linkers, under the cap" }, 500);
+    db.upsertProjectMemory(proj, { key: "bulk-hub-over-cap", text: "a note with more linkers than MAX_BACKLINKS" }, 500);
+    db.upsertProjectMemory(proj, { key: "bulk-self-linker", text: "mentions [[bulk-self-linker]] itself, must exclude" }, 500);
+    db.upsertProjectMemory(proj, { key: "bulk-lonely", text: "nothing links here" }, 500);
+    for (let i = 0; i < 3; i++) {
+      db.upsertProjectMemory(proj, { key: `bulk-under-linker-${i}`, text: `references [[bulk-hub-under-cap]] #${i}` }, 500);
+    }
+    const overCapCount = MAX_BACKLINKS + 5;
+    for (let i = 0; i < overCapCount; i++) {
+      db.upsertProjectMemory(proj, { key: `bulk-over-linker-${String(i).padStart(2, "0")}`, text: `references [[bulk-hub-over-cap]] #${i}` }, 500);
+    }
+
+    const corpus = db.listProjectMemory(proj);
+    const bulkResult = findInboundBacklinksBulk(corpus);
+    check("(bulk) equivalence corpus is non-trivial (sanity on the test setup itself)", corpus.length > MAX_BACKLINKS);
+
+    let allEquivalent = true;
+    for (const entry of corpus) {
+      const perKey = findInboundBacklinks(db, proj, entry.key);
+      const bulk = bulkResult.get(entry.key);
+      const same = JSON.stringify(perKey) === JSON.stringify(bulk);
+      if (!same) allEquivalent = false;
+    }
+    check("(bulk) EVERY note's bulk result is byte-identical to calling findInboundBacklinks once per key (self-link exclusion, cap, totalFound, tie-broken order all included)", allEquivalent);
+
+    // Targeted checks on the two hub notes specifically, so a future reader sees the actual shape, not
+    // only the aggregate boolean above.
+    const underHub = bulkResult.get("bulk-hub-under-cap");
+    check("(bulk) under-cap hub: totalFound matches the 3 real linkers, no truncation", underHub.totalFound === 3 && underHub.matches.length === 3);
+    const overHub = bulkResult.get("bulk-hub-over-cap");
+    check(`(bulk) over-cap hub: totalFound reports the TRUE total (${overCapCount}), matches capped at MAX_BACKLINKS (${MAX_BACKLINKS})`,
+      overHub.totalFound === overCapCount && overHub.matches.length === MAX_BACKLINKS);
+    const selfHub = bulkResult.get("bulk-self-linker");
+    check("(bulk) self-link exclusion holds in the bulk path too", selfHub.totalFound === 0);
+    const lonelyHub = bulkResult.get("bulk-lonely");
+    check("(bulk) MEASURED ZERO in the bulk path: a note nothing links to reports totalFound:0, matches:[]", lonelyHub.totalFound === 0 && lonelyHub.matches.length === 0);
+
+    // POSITIVE CONTROL that this equivalence check can actually FAIL (DoD-4): re-run the same comparison
+    // against a DELIBERATELY DESYNCED bulk result — a corpus missing one of the real over-cap linkers —
+    // and require the comparison to come back FALSE, proving `allEquivalent` isn't vacuously true no
+    // matter what bulk returns.
+    const desyncedCorpus = corpus.filter((e) => e.key !== "bulk-over-linker-00");
+    const desyncedBulk = findInboundBacklinksBulk(desyncedCorpus);
+    const realOverHub = findInboundBacklinks(db, proj, "bulk-hub-over-cap");
+    const desyncedOverHub = desyncedBulk.get("bulk-hub-over-cap");
+    check("(bulk) POSITIVE CONTROL: a bulk result computed from a DESYNCED (stale/incomplete) corpus is CORRECTLY caught as non-equivalent to the real per-key result",
+      JSON.stringify(realOverHub) !== JSON.stringify(desyncedOverHub));
   }
 
   // ===================== 3. mcp/memory.ts: memory_read / memory_list carry `backlinks` =====================

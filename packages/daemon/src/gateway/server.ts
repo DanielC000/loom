@@ -24,7 +24,7 @@ import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { filterRetainedWorktreesByProject } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
-import { findInboundBacklinks } from "../sessions/project-memory-backlinks.js";
+import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
@@ -3811,26 +3811,39 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // same rows with a live-resolved-request-link annotation (card e6d270b3); this route deliberately
   // doesn't, since the owner viewing this page can already see a request's live state via the Requests
   // UI directly. Returns full entries — pinned flag + retrievalCount + updatedAt + the note text — so a
-  // single list read backs BOTH the entry list and the note-detail body (the corpus is small by design:
-  // dozens to low-hundreds of short ≤4KB notes). HUMAN-only loopback read, same trust posture as the
-  // sibling /board + /vault project reads; READ-ONLY — no write/forget surface here (curation stays the
-  // memory MCP's job).
+  // single list read backs BOTH the entry list and the note-detail body. HUMAN-only loopback read, same
+  // trust posture as the sibling /board + /vault project reads; READ-ONLY — no write/forget surface
+  // here (curation stays the memory MCP's job). **The "corpus is small by design: dozens to
+  // low-hundreds of short notes" premise this comment used to cite is stale** (card 41c3f546 — this
+  // project's own store already measured at 487 notes, 2026-09-03); see project-memory-backlinks.ts's
+  // `findInboundBacklinks` doc comment for the live reconciliation. This route stays safe at that scale
+  // ONLY because backlinks below are resolved via `findInboundBacklinksBulk` over one fetched corpus,
+  // not per row.
   //
   // `backlinks` (card d371a9bf, the human-UI half of card e4e180ad's agent-facing field) is resolved
-  // HERE, per row, via `findInboundBacklinks` directly — deliberately NOT by repointing this route at
+  // HERE, over the corpus this route already fetched — deliberately NOT by repointing this route at
   // `mcp/memory.ts`'s `listProjectMemoryEntries` wrapper, which would also drag in `requestAnnotations`
   // and `everDelivered`: d371a9bf's own decision block excludes both (the first is redundant with the
   // Requests UI already shown above; the second is undecidable between never-matched and
   // matched-then-evicted, so it would mislead a human reader). Shaped as structured
   // `{ keys, totalFound }` (`ProjectMemoryBacklinks`), not the prose annotation LINES
   // `ProjectMemoryEntryWithLinks.backlinks: string[]` renders for agents — the UI needs a bare key to
-  // link to, not text to parse. Capped at `findInboundBacklinks`'s own default (`MAX_BACKLINKS`), same
-  // "N of M" truncation contract the agent-facing tools already use — never silent.
+  // link to, not text to parse. Capped at `findInboundBacklinksBulk`'s own default (`MAX_BACKLINKS`),
+  // same "N of M" truncation contract the agent-facing tools already use — never silent.
+  //
+  // `findInboundBacklinksBulk` (card 41c3f546), not one `findInboundBacklinks` call per row: the
+  // per-row shape used to mean N+1 `db.listProjectMemory` fetches and N full-corpus regex scans for a
+  // listing of N notes — measured at ~4.2s wall-clock (synchronous, blocking the daemon's single event
+  // loop for the whole request) against this project's own 487-note corpus, versus ~15ms for the bulk
+  // path over the identical corpus and cap. `corpus` here is fetched exactly once and reused for every
+  // row's backlink lookup.
   app.get("/api/projects/:id/memory", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return deps.db.listProjectMemory(p.id).map((entry) => {
-      const { matches, totalFound } = findInboundBacklinks(deps.db, p.id, entry.key);
+    const corpus = deps.db.listProjectMemory(p.id);
+    const backlinksByKey = findInboundBacklinksBulk(corpus);
+    return corpus.map((entry) => {
+      const { matches, totalFound } = backlinksByKey.get(entry.key) ?? { matches: [], totalFound: 0 };
       return { ...entry, backlinks: { keys: matches.map((m) => m.key), totalFound } };
     });
   });
