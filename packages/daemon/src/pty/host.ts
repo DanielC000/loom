@@ -7,7 +7,7 @@ import { spawn as spawnProcess } from "node:child_process";
 import { spawn, type IPty } from "node-pty";
 import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
-import { resolveProfileCapabilities } from "@loom/shared";
+import { resolveProfileCapabilities, usesOrchestrationMcp } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
 import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
@@ -10354,8 +10354,9 @@ export class PtyHost {
    * markReady's own capture never calls this at all in that case — genuinely byte-identical now, since
    * `startupPrompt`, unlike `lastPrompt`, is never written by a resume's own pre-ready drain.
    *
-   * Card a57b07af: for a role that mounts loom-orchestration (manager/worker/assistant — mirrors
-   * SessionService.usesOrchestrationMcp), the actual delivery inside the setTimeout below now additionally
+   * Card a57b07af: for a role that mounts loom-orchestration (manager/worker/assistant — see
+   * `usesOrchestrationMcp`, shared from @loom/shared per card 95f40ee0), the actual delivery inside the
+   * setTimeout below now additionally
    * awaits `waitForMcpSeen` — the SAME readiness gate the resume-continuation nudge already uses (card
    * df5e37e7), closing the asymmetry the Code Review that filed this card found: turn 1 calls MCP tools
    * almost immediately (a worker's first real action is typically `tasks_get`), so it deserves the same
@@ -10369,8 +10370,10 @@ export class PtyHost {
   private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
     setTimeout(() => {
       // Card a57b07af: gate delivery on `mcpSeen` for the same roles the resume-continuation nudge already
-      // gates on (SessionService.usesOrchestrationMcp — manager/worker/assistant; re-derived from `role`
-      // here since PtyHost has no access to that helper). MEASURED (card a57b07af DoD-1, against this
+      // gates on. Card 95f40ee0: this used to re-derive the manager/worker/assistant list inline (PtyHost
+      // has no access to SessionService) — now both sides import the SAME `usesOrchestrationMcp` predicate
+      // from @loom/shared (the one module both layers already import), so there is no longer a second
+      // hand-typed copy of this role list to drift out of sync. MEASURED (card a57b07af DoD-1, against this
       // exact log line's own timestamp vs. each session's first observed `/mcp-orch` hit, over the full
       // retained daemon-output.log history): 494/494 real production turn-1 kickoff spawns for these roles
       // already had `mcpSeen` true at this precise tick, by 1.19s-2.32s (mean ~1.42s) — zero counterexamples.
@@ -10380,7 +10383,7 @@ export class PtyHost {
       // A role that never mounts loom-orchestration (platform/setup/run/auditor/workspace-auditor/shell)
       // would otherwise wait out the full timeout for a signal that can never fire, so those skip the wait.
       const l0 = this.live.get(sessionId);
-      const gateOnMcp = l0?.role === "manager" || l0?.role === "worker" || l0?.role === "assistant";
+      const gateOnMcp = usesOrchestrationMcp(l0?.role ?? null);
       const proceed = (): void => {
         const l = this.live.get(sessionId);
         // Re-checked here (not just before the wait) because `waitForMcpSeen` can take up to

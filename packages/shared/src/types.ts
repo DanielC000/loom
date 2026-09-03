@@ -499,6 +499,30 @@ export type Resumability = "unknown" | "resumable" | "dead";
 export const SESSION_ROLES = ["manager", "worker", "platform", "auditor", "setup", "workspace-auditor", "run", "assistant", "operator"] as const;
 export type SessionRole = (typeof SESSION_ROLES)[number];
 
+/**
+ * Card 95f40ee0: the roles that mount the loom-orchestration MCP server (manager/worker get the full
+ * coordination surface, assistant/Companion gets only my_context + chat_reply). Shared here, in the one
+ * module both `sessions/service.ts` (`usesOrchestrationMcp`'s former home) and `pty/host.ts`
+ * (`scheduleKickoffGuarantee`'s `gateOnMcp`) already import, so the two no longer maintain
+ * independently-typed copies of the same three-role list that could silently drift — `PtyHost`
+ * deliberately has no access to `SessionService`, so this predicate (not a shared class/method) is the
+ * layering-safe way to give both sides one source.
+ *
+ * ⚠️ NOT the only copy of this role list. `pty/host.ts` STILL hand-rolls the identical
+ * `role === "manager" || role === "worker" || role === "assistant"` comparison in TWO more places this
+ * card deliberately left untouched (out of scope — they decide a different concern, actual MCP mounting/
+ * allowlisting, not the kickoff mcpSeen gate this predicate serves): `buildMcpServers`'s `wantsOrch`
+ * (which servers get mounted for a spawn) and the spawn-arg allowlist's own `wantsOrch` (which MCP server
+ * names get allowlisted). Adding a role here does NOT update either of them — do that separately, in
+ * lockstep, or a role can end up gated on this predicate for an MCP that `buildMcpServers` never actually
+ * mounts. That drift direction is a hazard, not a measured behaviour (traced from the code, not executed):
+ * a role added only here would wait on `waitForMcpSeen` for a handshake that can never fire, since nothing
+ * mounted the server it's waiting on — unlike this card's own now-closed drift, which was fail-safe.
+ */
+export function usesOrchestrationMcp(role: SessionRole | null): boolean {
+  return role === "manager" || role === "worker" || role === "assistant";
+}
+
 // --- Agent Runs (R2): the AgentRun primitive ------------------------------------------------------
 /**
  * An AgentRun's lifecycle status (Agent Runs R2). queued/starting/running are in-flight; the rest are

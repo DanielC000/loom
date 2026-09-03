@@ -4,6 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
+  usesOrchestrationMcp,
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -4809,17 +4810,6 @@ export class SessionService {
   }
 
   /**
-   * Only manager/worker/assistant(Companion) sessions mount the loom-orchestration MCP server
-   * (pty/host.ts buildMcpServers' `wantsOrch`) — platform/auditor/workspace-auditor/setup use their OWN
-   * separate per-role MCP routers, not wired to markMcpSeen in this v1 (scoped to loom-orchestration, the
-   * router implicated by the observed failure + the one carrying the state-mutating tools). Mirrors
-   * buildMcpServers' role gate exactly so a future role change to either side is easy to keep in sync.
-   */
-  private usesOrchestrationMcp(role: SessionRole | null): boolean {
-    return role === "manager" || role === "worker" || role === "assistant";
-  }
-
-  /**
    * Card 597903fc: durable post-resume continuation-nudge dispatch — a boot-time notice that must not be
    * silently dropped if its in-session give-up budget exhausts. Before this card, a boot-resume nudge (bare
    * `pty.enqueueStdin`, no `onGiveUpExhausted`) drops a message with nothing surviving but a console line
@@ -4869,7 +4859,7 @@ export class SessionService {
     const kind = opts.kind ?? "warning";
     const { route } = opts;
     const dispatch = (): void => { this.enqueueDurableMessage(id, text, { sender: "system", kind, taskId, route }); };
-    if (this.usesOrchestrationMcp(role)) {
+    if (usesOrchestrationMcp(role)) {
       void this.pty.waitForMcpSeen(id).then(dispatch).catch((e: unknown) => {
         console.warn(`[enqueue-durable-nudge] deferred durable nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
       });
