@@ -2145,6 +2145,35 @@ export class PlatformMcpRouter {
     //     surfaces (loom-orchestration manager/worker, loom-setup operator): a project
     //     orchestrator/worker/setup-operator stays confined to its OWN board (those surfaces resolve the
     //     projectId SERVER-SIDE and never take one), so none can gain cross-project write. ---
+    /**
+     * Resolve + validate a `resolvesEscalation` id against the reserved Platform home board — shared by
+     * `project_task_create` and `project_task_update` (card 216be962, extracted from `de90f22a`'s
+     * duplicate). This is the load-bearing property both call sites depend on: resolution is confined to
+     * the Platform board on BOTH resolution paths (the exact-id lookup re-checks `t.projectId ===
+     * home.id`, and the prefix-disambiguation candidate list is `db.listTasks(home.id)`) — an escalation
+     * id belonging to another project must never resolve here, and now can't drift between the two call
+     * sites independently. Returns `{ error }` for the caller to return verbatim, or the resolved
+     * `escalationTaskId` (`undefined` when no link was requested at all — `resolvesEscalation === undefined`).
+     * Resolve-only: each call site's own write-ordering (create-before-vs-update-after-patch) and the
+     * `taskIds` batch guard stay at the call site, not here — see card 216be962 for why unifying those too
+     * would have flattened real differences.
+     */
+    function resolveEscalationLink(
+      resolvesEscalation: string | undefined,
+    ): { error: string } | { escalationTaskId: string | undefined } {
+      if (resolvesEscalation === undefined) return { escalationTaskId: undefined };
+      const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+      if (!home) return { error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" };
+      const escTask = getByIdPrefix(
+        resolvesEscalation,
+        (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
+        () => db.listTasks(home.id),
+        "escalation task",
+      );
+      if ("error" in escTask) return escTask;
+      return { escalationTaskId: escTask.id };
+    }
+
     server.registerTool(
       "project_task_create",
       {
@@ -2198,19 +2227,9 @@ export class PlatformMcpRouter {
         if ("error" in project) return ok(project);
         // Resolve + validate the escalation link BEFORE creating anything — a rejected link must fail the
         // WHOLE create (see the tool doc above), not leave an unlinked card sitting on the destination board.
-        let escalationTaskId: string | undefined;
-        if (resolvesEscalation !== undefined) {
-          const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
-          if (!home) return ok({ error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" });
-          const escTask = getByIdPrefix(
-            resolvesEscalation,
-            (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
-            () => db.listTasks(home.id),
-            "escalation task",
-          );
-          if ("error" in escTask) return ok(escTask);
-          escalationTaskId = escTask.id;
-        }
+        const escalationResolution = resolveEscalationLink(resolvesEscalation);
+        if ("error" in escalationResolution) return ok(escalationResolution);
+        const escalationTaskId = escalationResolution.escalationTaskId;
         const created = createProjectTaskChecked(
           db, project.id, { title, body, priority, columnKey, repoKey }, { allowDuplicate, supersedes, relatedTo },
         );
@@ -2396,19 +2415,9 @@ export class PlatformMcpRouter {
         // Resolve + validate the escalation link BEFORE writing anything — same discipline as
         // project_task_create's resolvesEscalation (card ba04d607): a rejected link must fail the WHOLE
         // update, never silently apply the rest of the patch while dropping the link.
-        let escalationTaskId: string | undefined;
-        if (resolvesEscalation !== undefined) {
-          const home = db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
-          if (!home) return ok({ error: "no reserved Loom Platform project exists — cannot resolve resolvesEscalation" });
-          const escTask = getByIdPrefix(
-            resolvesEscalation,
-            (id) => { const t = db.getTask(id); return t && t.projectId === home.id ? t : undefined; },
-            () => db.listTasks(home.id),
-            "escalation task",
-          );
-          if ("error" in escTask) return ok(escTask);
-          escalationTaskId = escTask.id;
-        }
+        const escalationResolution = resolveEscalationLink(resolvesEscalation);
+        if ("error" in escalationResolution) return ok(escalationResolution);
+        const escalationTaskId = escalationResolution.escalationTaskId;
         // held-clear guard (card 9b0373c0): updateProjectTask enforces this identically here — the Lead
         // gets NO exemption (owner decision) even though it's the human-driven cross-project operator; a
         // human-set hold is refused just like it is via tasks_update, only the human REST/UI path clears it.
