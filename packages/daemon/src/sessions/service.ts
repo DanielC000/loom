@@ -15577,8 +15577,18 @@ export class SessionService {
         const descriptor: GateDescriptor = { gateType: "merge", projectId: finalProjectId, sessionId: managerSessionId, taskId: null, branch: null, opId, repoPath: finalRepoPath, worktreePath };
         let holdOnPass = false;
         let r: GateSequentialResult;
+        // Card 3d2afb53: the SAME admission-instant/concurrency-neighbourhood capture confirmWorkerMerge's
+        // own runExclusive callback does (see its `concurrentAtStart`/`getConcurrentGatesMax` locals) — this
+        // batch gate is a single, one-shot admission (runGate is called exactly once per batch, see
+        // batch-merge.ts's own doc), so there's no retry loop to thread these through, just one capture.
+        let gateStartedAt = 0;
+        let concurrentAtStart = 0;
+        let getConcurrentGatesMax: (() => number) | undefined;
         try {
-          r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, descriptor, async (_startedAt, _cancelSignal, hooks, _getMax, holdRepoGuardOnExit) => {
+          r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, descriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+            gateStartedAt = startedAt;
+            concurrentAtStart = this.gateSemaphore.snapshot().active;
+            getConcurrentGatesMax = getMaxConcurrentGates;
             const gr = await runGateSequential(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks);
             if (gr.passed) { holdOnPass = true; holdRepoGuardOnExit(); }
             return gr;
@@ -15587,12 +15597,28 @@ export class SessionService {
           if (err instanceof GateCancelledError) return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
           throw err;
         }
+        const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+        // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
+        // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
+        // so `emitCompareReduced` is DECIDABLE here whenever `computeEmitCompareGate`'s predicate applies at
+        // all — mirrors confirmWorkerMerge's own `emitCompareStructuredFields` (`gateRan && !notApplicable`)
+        // rather than the older true-only-else-absent shape this line used to have.
+        const emitCompareDecidable = batchEmitCompare !== undefined && !batchEmitCompare.notApplicable;
         evtBatch("build_gate", {
           // `branchCount` is the ACTUAL post-assembly landed count (`landedCount`, == LOOM_GATE_BATCH_SIZE
           // on this run's gate child) — never `chosen.length`, the requested K, which can over-report after
           // a conflict drop-out (DoD-4).
           passed: r.passed, batched: true, branchCount: landedCount,
-          ...(batchEmitCompare?.eligible ? { emitCompareReduced: true, emitCompareTestFiles: batchEmitCompare.changedTestFiles } : {}),
+          // Card 3d2afb53: this batch gate never routes through confirmWorkerMergeTracked/PendingOpRegistry
+          // (see this method's own header doc — no extra finalize logic, no extra gate run), so there is no
+          // `pending_gate_ops` row for `gate_history`'s usual verdict-payload JOIN to find for this opId —
+          // durationMs/gateCap/concurrentGates/concurrentGatesMax are read straight off THIS event's own
+          // `detail` by `toGateHistoryRow` (db.ts) regardless of gate kind, so stamping them here (mirroring
+          // confirmWorkerMerge's own `evt("build_gate", ...)` call) is the whole fix — first measured missing
+          // on the first live batch run (opId 1cfb5219, row ed9bf9a0: every one of these read back null).
+          durationMs: Date.now() - gateStartedAt, gateCap: orchestration.maxConcurrentGates,
+          concurrentGates: concurrentAtStart, concurrentGatesMax,
+          ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
         });
         return { passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps } };
       };

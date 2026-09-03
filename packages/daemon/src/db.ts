@@ -7784,7 +7784,18 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // parsed above into `verdictPayload` — shared with `failingTest`'s own fallback) is the one place
   // `deriveMergeGateVerdict` persists the real tri-state — see GateHistoryRow.emitCompareReduced's own doc
   // (shared/types.ts) for the full discipline this projects.
-  const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean" ? verdictPayload.emitCompareReduced : null;
+  // Card 3d2afb53: a BATCHED merge gate (`detail.batched === true`) is the one exception to the paragraph
+  // above — it never routes through confirmWorkerMergeTracked/PendingOpRegistry at all (see mergeBatch's
+  // own header doc, sessions/service.ts), so `verdictPayload` is always empty for it; there is no second
+  // "merge" row to fall back to. Its own `build_gate` event stamps a genuine DECIDABLE tri-state directly
+  // in `detail` instead (mirrors confirmWorkerMerge's own `emitCompareStructuredFields`, gated on
+  // `gateRan && !notApplicable` — never the true-only-else-absent shape the paragraph above warns about),
+  // so recovering it from `detail` is safe ONLY for this one kind: every non-batched row's own `detail.
+  // emitCompareReduced` stays legacy true-only (never an honest `false`), so falling back to it there would
+  // silently fabricate a tri-state the producer never actually computed.
+  const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
+    ? verdictPayload.emitCompareReduced
+    : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;
   // Both gated on `emitCompareReduced === true` (never merely "present in the payload") — the producer
   // only ever stamps these two alongside a `true` reduced flag, so this mirrors that pairing defensively
   // rather than trusting an already-redundant payload shape.
