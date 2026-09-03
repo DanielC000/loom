@@ -15362,8 +15362,30 @@ export class SessionService {
     // NOT_HERMETIC clause just above — before this card, a mixed diff (a transpile-identical compiled file
     // PLUS an inert path) reported only the compiled-file count, leaving the inert path unaccounted for and
     // indistinguishable from a silently dropped one (see EmitCompareGateResult.inertPathsSkipped's own doc).
+    // Card cf4aa7d1: `emitCompareIdenticalCount` is `changedTsFiles.length` (git/worktrees.ts,
+    // `computeEmitCompareGate`) — the transpile-identity check only ever iterates that list, so a
+    // test-only diff (no compiled `.ts` file changed at all) leaves it at 0 WITHOUT the check ever running.
+    // The old leading clause ("0 compiled file(s) proven transpile-identical") rendered that skip as a
+    // measured zero — the same null-vs-0 conflation this codebase polices everywhere else (see
+    // `gate-history.mjs`'s own "(1) changed-test-files arm ... VACUOUS" fixture, which already documents
+    // this exact ambiguity for the STRUCTURED field; this clause now says the same thing in the
+    // human-readable one). `emitCompareIdenticalCount > 0` is only ever true when the check ran AND every
+    // changed compiled file passed it (any failure returns `notReducible` before `eligible:true`, so a
+    // partial/failed check can never reach here) — so the two clauses below are exhaustive and unambiguous.
+    const emitCompareCompiledClause = emitCompareIdenticalCount > 0
+      ? `${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad)`
+      : "no compiled file(s) changed in this diff — transpile-identity check not applicable (card cf4aa7d1)";
+    // Card cf4aa7d1: a reduced gate that ran a changed test file DIRECTLY (`--only=<file>`) is an ISOLATION
+    // run — structurally incapable of catching a regression whose defect class only manifests in the full
+    // suite (order-dependence, shared-state coupling). This is true of ANY count of directly-run test
+    // files, not just one: three files run via `--only=` still never exercise the rest of the suite around
+    // them, so the caveat is gated on `emitCompareTestFiles.length > 0`, never narrowed to the single-file
+    // shape. Purely additive reporting — no change to the reduction's own eligibility/classification logic.
+    const emitCompareIsolationCaveat = emitCompareTestFiles.length
+      ? ` ⚠️ ${emitCompareTestFiles.length === 1 ? "this changed test file was" : `these ${emitCompareTestFiles.length} changed test files were`} run in ISOLATION (\`test:daemon --only=\`); if ${emitCompareTestFiles.length === 1 ? "its" : "their"} defect class is order-dependent (passes standalone, fails only in the full suite), this green is not evidence either way (card cf4aa7d1).`
+      : "";
     const emitCompareWarning = emitCompareSkip
-      ? `merge gate reduced: ${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad) — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}`
+      ? `merge gate reduced: ${emitCompareCompiledClause} — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}${emitCompareIsolationCaveat}`
       : undefined;
     // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the

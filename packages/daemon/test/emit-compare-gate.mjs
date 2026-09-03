@@ -112,6 +112,16 @@ try {
     check("(A) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(A) captured command runs guard ${g}`, capturedGate.includes(g));
     check("(A) a distinguishing warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
+    // Card cf4aa7d1 DoD-3 (positive control, compiled-file arm): the check DID run here (a real compiled
+    // .ts file changed and was proven transpile-identical) — the count must stay fully informative, never
+    // swap to the "not applicable" wording that's reserved for the test-only arm.
+    check("(A) card cf4aa7d1: the informative compiled-count wording is used (the check genuinely ran)",
+      typeof confirm.warning === "string" && /1 compiled file\(s\) proven transpile-identical/.test(confirm.warning));
+    // Card cf4aa7d1 (negative control): no test file was run in isolation here (a comment-only .ts edit
+    // touches no test/*.mjs path) — the isolation caveat must NOT appear on a reduction that never ran a
+    // test file directly.
+    check("(A) card cf4aa7d1: no isolation caveat — this reduction never ran a test file in isolation",
+      typeof confirm.warning === "string" && !/ISOLATION/.test(confirm.warning));
   }
 
   // ── (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate ──────────────────────────────────────────────────
@@ -135,6 +145,11 @@ try {
     check("(B) the gate command WAS called exactly once", calls === 1);
     check("(B) captured command IS byte-identical to the configured full gate", capturedGate === FULL_GATE);
     check("(B) no reduced-gate warning present", !(typeof confirm.warning === "string" && /reduced/.test(confirm.warning)));
+    // Card cf4aa7d1 DoD-3 (negative control, FULL gate): a real full-suite run must carry neither the
+    // isolation caveat nor the "not applicable" compiled-clause wording — both are ONLY ever assembled
+    // inside the `emitCompareSkip` branch, which a genuinely full (non-reduced) gate never enters.
+    check("(B) card cf4aa7d1: no isolation caveat on a full (non-reduced) gate",
+      !(typeof confirm.warning === "string" && /ISOLATION/.test(confirm.warning)));
     // Card 2db8a3dd: a genuinely Loom-layout diff that the predicate evaluated and proved NOT reducible —
     // the POSITIVE-CONTROL polarity of `emitCompareReduced`. Must stay a real, decidable `false`, never
     // swallowed by the `notApplicable` widening below (that widening is scoped to (F)'s shape, not this

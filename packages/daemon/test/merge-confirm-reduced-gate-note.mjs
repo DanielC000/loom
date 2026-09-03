@@ -130,6 +130,11 @@ try {
     check("(N) the composed [loom:merge-done] TEXT itself says NOT_HERMETIC", /NOT_HERMETIC/.test(nudgeText));
     check("(N) the composed TEXT also carries the reduction announcement itself (DoD-2: whole message, not just the exclusion clause)",
       /merge gate reduced/.test(nudgeText));
+    // Card cf4aa7d1: the NOT_HERMETIC file is excluded from `emitCompareTestFiles` (it never reaches
+    // `--only=` — see EmitCompareGateResult.notHermeticExcluded's own doc), so exactly one file
+    // (kickoff-real.mjs) was actually run in isolation here; the caveat must still fire for that one.
+    check("(N) card cf4aa7d1: the isolation caveat still fires for the one ordinary test file actually run via --only= (the NOT_HERMETIC file is excluded, not counted)",
+      /this changed test file was run in ISOLATION/.test(nudgeText));
   }
 
   // ── (O) ALL-HERMETIC, POSITIVE CONTROL — no NOT_HERMETIC name; no stray clause/whitespace ──────────────
@@ -160,6 +165,19 @@ try {
     check("(O) no NOT_HERMETIC clause — nothing was excluded", !/NOT_HERMETIC/.test(nudgeText));
     check("(O) no stray double-space or dangling semicolon artifact around the omitted clause",
       !/  /.test(nudgeText) && !/;\s*$/.test(nudgeText.trim()) && !/;\s+⚠/.test(nudgeText));
+    // Card cf4aa7d1 DoD-3 (positive control, test-only arm, OBSERVED on the real composed nudge TEXT —
+    // the actual surface a manager reads on the always-pending path, not just the sync return object):
+    // this diff changed ONE ordinary test file and NO compiled .ts file — the transpile-identity check
+    // never ran, so the leading clause must say so honestly rather than rendering that skip as a measured
+    // "0 compiled file(s) proven transpile-identical".
+    check("(O) card cf4aa7d1: the leading clause honestly reports the compiled-check as not applicable (no compiled file changed), not a measured zero",
+      /no compiled file\(s\) changed in this diff — transpile-identity check not applicable/.test(nudgeText));
+    check("(O) card cf4aa7d1: the stale \"0 compiled file(s) proven transpile-identical\" wording is gone",
+      !/0 compiled file\(s\) proven transpile-identical/.test(nudgeText));
+    // Card cf4aa7d1 DoD-3 (positive control, isolation caveat): the one changed test file WAS run via
+    // `--only=` — an isolation run — so the caveat must be present and must name it as isolation, singular.
+    check("(O) card cf4aa7d1: the isolation caveat is present and singular-worded for the one changed test file",
+      /this changed test file was run in ISOLATION/.test(nudgeText));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
