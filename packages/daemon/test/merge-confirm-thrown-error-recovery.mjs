@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mtr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -60,6 +61,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // budget) — rather than the fast/inline path, which no completion nudge exists to assert on at all.
 const TEST_SYNC_BUDGET_MS = 100;
 const SLOW_THROW_MS = 400;
+
+// OBSERVED-PROGRESS SETTLE WAIT (card 01207cf7): the original `pendingOps.waitBriefly(key, 8000)` races the
+// op's real settle against a SINGLE fixed sleep — under host contention the recovery's own git/worktree work
+// (findLandedSquashCommit, finishAlreadyMerged) can legitimately outlast any one guessed budget, and a miss
+// there fell straight through to a SECOND confirmWorkerMergeTracked call with only TEST_SYNC_BUDGET_MS(100ms)
+// left to wait, misreporting a still-in-flight (but correct) recovery as "failed to settle" — the exact
+// specimen captured in gate op d3464e9f (3 downstream FAILs, all from one settling timeout; every control in
+// the same block PASSED, proving the daemon itself behaved correctly). Poll the registry's own OBSERVABLE
+// `peek()` state instead (mirrors merge-confirm-dead-owner-recovery.mjs's proven pattern) — this re-checks
+// reality every 10ms rather than betting once on a duration, and `waitUntil`'s own grace window (see
+// _wait.mjs) still fails loudly — just later — for a GENUINE hang, so this is not a weakened assertion.
+async function waitForMergeSettle(sessions, workerId, label) {
+  await waitUntil(() => sessions.pendingOps.peek(`merge:${workerId}`)?.state !== "running", {
+    label: `${label} merge op leaves 'running' (real recovery observed to settle)`,
+    timeoutMs: 30_000,
+  });
+}
 
 function makePtyStub() {
   const calls = [];
@@ -119,13 +137,13 @@ async function setup(sfx, { preLand } = {}) {
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(A) degrades to pending past the tiny sync budget (forces the real async completion-nudge path)", pending.settled === false);
-  // waitBriefly, NOT a nudge-text poll: the recovery path's [loom:already-merged] push fires from INSIDE
+  // Not a nudge-text poll: the recovery path's [loom:already-merged] push fires from INSIDE
   // finishAlreadyMerged, partway through its own body (before its pty.stop/finalizeMerge tail) — well
   // BEFORE the op itself genuinely settles in the registry. Waiting on the nudge text alone raced that
   // tail (observed directly: a second confirmWorkerMergeTracked call landing in that window found the op
-  // still 'running' and degraded to pending AGAIN). Wait for the real settle signal instead — mirrors
-  // merge-confirm-dead-owner-recovery.mjs's own proven pattern.
-  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 8000);
+  // still 'running' and degraded to pending AGAIN). Wait for the real settle signal instead (see
+  // waitForMergeSettle above) — mirrors merge-confirm-dead-owner-recovery.mjs's own proven pattern.
+  await waitForMergeSettle(sessions, workerId, "(A)");
   const result = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(A) the confirm settles (not a hung pending)", result.settled === true);
   check("(A) it recovers to a REAL merged:true — never reports the landed work as failed", result.ok === true && result.value?.merged === true);
@@ -155,7 +173,10 @@ async function setup(sfx, { preLand } = {}) {
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(B) degrades to pending past the tiny sync budget (forces the real async completion-nudge path)", pending.settled === false);
-  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 8000);
+  // Same OBSERVED-PROGRESS wait as (A) — see waitForMergeSettle above (card 01207cf7 DoD-5: this block
+  // shares (A)'s forced-pending → fixed-wait shape and is equally exposed under host contention, even
+  // though it did not fire in the specimen that filed this card).
+  await waitForMergeSettle(sessions, workerId, "(B)");
   const result = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
   check("(B) the confirm settles", result.settled === true);
   check("(B) recovery correctly found nothing to recover — the throw surfaces (ok:false)", result.settled === true && result.ok === false);
