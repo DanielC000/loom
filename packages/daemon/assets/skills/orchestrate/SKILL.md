@@ -579,9 +579,14 @@ what you checked. Found none? Treat it as live.
      ordinary per-branch path. A red gate falls back to individual gating automatically, no bisection
      (read `fallback`; nothing to re-call) — but if main advances mid-gate the whole batch forfeits and
      re-gates individually too, so one branch's wasted gate becomes up to K: worth weighing before
-     batching large groups habitually. Two things people misread: `mergedVerification:"trailer-only"`
-     on a batched landing is the weakest tier **by design** (each branch lands its own commits, not a
-     squash, so the usual path-set digest can't apply) — not a defect. And measure savings in gate
+     batching large groups habitually. Two things to get right: a batched landing is **not** capped at
+     the weakest verification tier — each branch's landed commit carries the same path-set digest a solo
+     squash gets, computed over that branch's whole contribution however many commits it had, so a batch
+     normally reads `mergedVerification:"pathset"` (or `"content"` while its branch ref still exists),
+     exactly like a solo merge; that is the expected result, not an anomaly to go hunting a bug for.
+     `"trailer-only"` remains the right answer for history that landed before that stamping existed —
+     but on a **fresh** batch it now means the stamp itself didn't land (it is best-effort, and its
+     failure is logged), so treat it as worth a look rather than a shrug. And measure savings in gate
      **wall-clock**, never gate-run count — a "reduced" gate is a fraction the length of a full one, so
      counting runs can show a saving exactly where batching cost more time than it saved.
    - **Before batching, run the retitle check named in the card-titling bullet above** (`ownTipSubject`
