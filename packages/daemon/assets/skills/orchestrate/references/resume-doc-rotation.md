@@ -34,3 +34,9 @@ token's literal text survived, never that no meaning survived a rewording. If no
 and you want this protection, add markers via your own project's config (additive-only from a manager
 session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
 daemon capability, not a doc convention — you don't need to build anything to use it.
+
+**One rule that dies at rotation deserves its own line: a handoff must also carry what you disclosed to
+a peer, not only what you consumed from one or withdrew.** A terminal-state line ("zero live workers at
+my last read") describes your state at the moment of handoff — it is not a record of what you disclosed
+during the seat, and a successor must never read it as one. State the shape yourself; this doctrine only
+requires the axis exist.
