@@ -963,6 +963,80 @@ function deriveDeployGateVerdict(
 }
 
 /**
+ * Card be260976 — the `mergeBatch` analogue of {@link deriveDeployGateVerdict}: `mergeBatch`'s own gate
+ * call, like `deployOwnProject`'s, is a single, one-shot `gateSemaphore.runExclusive` that deliberately
+ * never routes through `PendingOpRegistry` (see `mergeBatch`'s own header doc for why — batching keeps no
+ * extra finalize logic, no extra gate run). This closes the gap that omission left: before this card a
+ * settled batch op's `opId` was NOT durably tombstoned at all, so `gate_status(opId)` returned
+ * `"never_existed"` for it the instant it dropped out of the live `GateSemaphore` registry — resolvable
+ * while running, gone forever the moment it settled (see this card's own worker_report for the full
+ * mechanism trace). Called directly, once, right after the `runExclusive` `await` resolves (or is
+ * cancelled/errors) — mirroring `deriveDeployGateVerdict`'s own call shape exactly. `result` is the plain
+ * {@link GateSequentialResult} the batch's shared gate run produced; `gateStartedAt` is the epoch-ms GATE
+ * START (post-admission) instant `GateSemaphore.runExclusive` itself stamped for THIS op, the SAME clock
+ * the batch's own `build_gate` audit event already reads (never a second, independently-computed one).
+ *
+ * INCLUDES `settledAt`/`totalDurationMs` — CORRECTED (Code Reviewer `7933b507`, card be260976): an earlier
+ * version of this doc argued these should be OMITTED because the tombstone mints "just before `runExclusive`
+ * admits", making `totalDurationMs` a near-duplicate of `durationMs`. That premise was FALSE: the mint
+ * (`insertPendingGateOp`, in `mergeBatch`'s `runGate` closure) precedes the `await
+ * this.gateSemaphore.runExclusive(...)` call, which itself calls `acquire()` — and `gateStartedAt` (what
+ * `durationMs` below measures from) is stamped inside `admit()`, i.e. AFTER whatever queue wait `acquire()`
+ * spent waiting for a slot. Mint→admission is the FULL queue wait, not ~0 — this is a standing, pinned fact
+ * on this project (`gate_status.admittedAt` is MINT time, not admission time; a queued op can sit for
+ * minutes before it's actually admitted, routine at `maxConcurrentGates>=2` — see `gate_status`'s own tool
+ * description). A batch op is precisely the kind that queues behind the whole fleet's merge lane, so this
+ * queue wait is often the MOST interesting part of its span — `gate_queue`'s own tool description directs a
+ * caller wanting a settled op's real span to `gate_status(opId)`'s `admittedAt`/`settledAt`/`totalDurationMs`
+ * triple specifically because it "covers the WHOLE op"; omitting these two fields here would have made that
+ * documented recovery path silently not work for batch ops — the identical defect this card exists to fix,
+ * reproduced one field over. `totalDurationMs` (`settledAt - admittedAt`, `admittedAt` being this op's real
+ * mint instant, `opMintedAtMs` below) is therefore the genuinely broader span; `durationMs` stays the
+ * narrower gate-command-only span, unchanged. Computed from ONE captured `nowMs` (see the call site's own
+ * comment for why), mirroring {@link deriveMergeGateVerdict}'s identical single-clock-read discipline.
+ *
+ * DELIBERATELY OMITS `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles`: unlike a
+ * solo merge, a batch's `build_gate` event already stamps a genuine decidable tri-state directly onto its
+ * OWN `detail` (see `mergeBatch`'s own `evtBatch("build_gate", ...)` call), and `gate_history`'s reader
+ * (`toGateHistoryRow`, db.ts) has a dedicated, already-correct `detail.batched === true` fallback for
+ * exactly this case (card 3d2afb53) — reusing/duplicating the fact here would risk the two disagreeing on
+ * a future edit to either producer for no benefit (`gate_status(opId)` was never the reader this fact
+ * needed; `gate_history` already has it). See db.ts's `toGateHistoryRow`'s own `emitCompareReduced`
+ * derivation comment for the full discipline this preserves — that comment's claim that a batch row's
+ * `verdictPayload` is "always empty" no longer holds now that this function populates one, but the
+ * fallback itself stays correct and load-bearing precisely because this payload omits these three fields.
+ *
+ * INCLUDES `gateCap`/`concurrentGates`/`concurrentGatesMax` (unlike deploy, which omits them): this row's
+ * `kind` is `"merge"` (a batch gate IS a merge-type gate — see the mint call site), and `gate_status`'s own
+ * return-type doc already documents this triple as "Populated for 'merge' rows only" — a "merge"-kind
+ * tombstone that omitted it would be a surprising, kind-inconsistent gap for a caller who already knows to
+ * expect it there. The values are the SAME ones the batch's own `build_gate` event already stamps
+ * (`concurrentAtStart`/`concurrentGatesMax`/`orchestration.maxConcurrentGates`) — no new computation, just
+ * also handed to this payload.
+ */
+function deriveBatchGateVerdict(
+  result: GateSequentialResult, gateStartedAt: number, opMintedAtMs: number, nowMs: number,
+  gateCap: number, concurrentGates: number, concurrentGatesMax: number,
+): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } {
+  return {
+    kind: result.passed ? "pass" : "fail",
+    payload: {
+      durationMs: nowMs - gateStartedAt,
+      settledAt: new Date(nowMs).toISOString(),
+      totalDurationMs: nowMs - opMintedAtMs,
+      steps: result.steps,
+      outputTail: result.outputTail,
+      gateCap, concurrentGates, concurrentGatesMax,
+      ...(result.passed ? {} : { gateDetail: {
+        failedStep: result.failedStep, failingTest: result.failingTest, failingTestCount: result.failingTestCount,
+        exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? undefined,
+        timedOut: result.failedTimedOut,
+      } }),
+    },
+  };
+}
+
+/**
  * Card 7d492f8b: recover a genuinely-settled gate/merge op's REAL verdict from its own durable audit
  * events ({@link Db.findGateOpEventsByOpId}, keyed off the `opId` every `evt()` closure now stamps onto
  * its detail) — the fix for `SessionService.reconcileOrphanedGateOps` misreporting a settled op as
@@ -15818,6 +15892,33 @@ export class SessionService {
         let gateStartedAt = 0;
         let concurrentAtStart = 0;
         let getConcurrentGatesMax: (() => number) | undefined;
+        // DURABLE TOMBSTONE (card be260976 — closing DoD-4 of a Loom-lead-filed question, following the
+        // deployOwnProject precedent at this file's own `insertPendingGateOp` call in `deployOwnProject`):
+        // mint the row HERE, immediately before admission, rather than at `opId`'s own declaration above —
+        // `runBatchedMerge` (batch-merge.ts) can decide not to call `runGate` at all when nothing landed
+        // cleanly into the batch (`landed.length === 0`); minting at the earlier declaration would leave a
+        // permanently-`pending`, never-settled tombstone on that path, since nothing downstream would ever
+        // settle it. `runGate` itself is called exactly ONCE per batch (see this closure's own comment
+        // above), so this mint site is reached at most once, always immediately followed by a settle below
+        // (on the pass/fail path, the cancelled-error path, or the rethrown-error path) — never left
+        // dangling the way an earlier mint could be. `surfacedPending:false` is DELIBERATE and load-bearing,
+        // not merely the default: `reconcileOrphanedGateOps`' boot sweep only ever selects rows that are
+        // BOTH `surfaced_pending=1` AND still `state:'pending'` (see the schema doc), so a crash strictly
+        // between this mint and this closure's own settle below leaves this row invisible to that sweep —
+        // a real, KNOWN trade against the old `never_existed` (a permanently-pending row nobody reconciles),
+        // carded separately; do not "fix" it by flipping this to `true` — this row is `kind:"merge"`, and a
+        // surfaced-pending "merge" row that DOES reach that sweep takes the full merge-orphaned branch,
+        // which pushes a `[loom:merge-orphaned]` nudge telling the manager to re-run `worker_merge_confirm`
+        // — WRONG advice for a batch op, which has no single worker/branch to re-confirm. Mirrors
+        // `deployOwnProject`'s own explicit `if (row.kind === "deploy") continue;` exclusion in that same
+        // sweep, just enforced here by never setting the flag that would route this row into it at all.
+        const opMintedAt = new Date().toISOString();
+        const opMintedAtMs = Date.parse(opMintedAt);
+        this.db.insertPendingGateOp({
+          opId, kind: "merge", key: `merge-batch:${managerSessionId}`, ownerSessionId: managerSessionId,
+          projectId: finalProjectId, taskId: null, branch: null, startedAt: opMintedAt,
+          state: "pending", surfacedPending: false,
+        });
         try {
           r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, descriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
             gateStartedAt = startedAt;
@@ -15828,10 +15929,34 @@ export class SessionService {
             return gr;
           }, "high");
         } catch (err) {
-          if (err instanceof GateCancelledError) return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+          // Settle the tombstone on EVERY exit from this try, mirroring the pass/fail settle below — a
+          // cancel/error here is exactly as capable of leaving the row permanently "pending" as a missing
+          // settle on the happy path would be. Carries settledAt/totalDurationMs too, same discipline as
+          // deriveMergeGateVerdict's own cancelled/error branches (both single-clock-read from `nowMs`,
+          // never two independent `Date.now()` calls that could disagree by a millisecond).
+          const nowMs = Date.now();
+          const settledAt = new Date(nowMs).toISOString();
+          const totalDurationMs = nowMs - opMintedAtMs;
+          if (err instanceof GateCancelledError) {
+            this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt, totalDurationMs } });
+            return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+          }
+          this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } });
           throw err;
         }
         const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+        // ONE captured instant for everything this closure still needs to timestamp — not two independent
+        // `Date.now()` calls — so gate_status's durationMs (via deriveBatchGateVerdict below) and
+        // gate_history's own durationMs (the evtBatch call below) for the SAME op can never disagree by a
+        // few host-scheduling milliseconds (Code Review, card be260976 should-do #3; `gate_queue`'s own tool
+        // description explicitly teaches managers to compare these duration tiers against each other, so an
+        // unexplained delta between them would read as a real mystery rather than measurement noise).
+        const nowMs = Date.now();
+        // Settle the tombstone minted above — see that insert's own comment for why this fires
+        // unconditionally here (the pass/fail branch), back-to-back with the gate's own settle, mirroring
+        // deployOwnProject's identical back-to-back settle (see deriveBatchGateVerdict's own doc for what
+        // this payload deliberately includes/omits vs. deriveMergeGateVerdict/deriveDeployGateVerdict).
+        this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, gateStartedAt, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax));
         // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
         // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
         // so `emitCompareReduced` is DECIDABLE here whenever `computeEmitCompareGate`'s predicate applies at
@@ -15844,13 +15969,25 @@ export class SessionService {
           // a conflict drop-out (DoD-4).
           passed: r.passed, batched: true, branchCount: landedCount,
           // Card 3d2afb53: this batch gate never routes through confirmWorkerMergeTracked/PendingOpRegistry
-          // (see this method's own header doc — no extra finalize logic, no extra gate run), so there is no
-          // `pending_gate_ops` row for `gate_history`'s usual verdict-payload JOIN to find for this opId —
-          // durationMs/gateCap/concurrentGates/concurrentGatesMax are read straight off THIS event's own
-          // `detail` by `toGateHistoryRow` (db.ts) regardless of gate kind, so stamping them here (mirroring
-          // confirmWorkerMerge's own `evt("build_gate", ...)` call) is the whole fix — first measured missing
-          // on the first live batch run (opId 1cfb5219, row ed9bf9a0: every one of these read back null).
-          durationMs: Date.now() - gateStartedAt, gateCap: orchestration.maxConcurrentGates,
+          // (see this method's own header doc — no extra finalize logic, no extra gate run). CORRECTED
+          // (card be260976): a `pending_gate_ops` row for this opId DOES now exist — see the
+          // `insertPendingGateOp`/`settlePendingGateOp` pair around this closure's `runExclusive` call —
+          // but `toGateHistoryRow` (db.ts) still reads durationMs/gateCap/concurrentGates/concurrentGatesMax
+          // straight off THIS event's own `detail`, regardless of gate kind, exactly as before be260976;
+          // that tombstone row exists for `gate_status(opId)` to resolve a settled batch op at all (the
+          // defect be260976 closed — `gate_status` used to return `"never_existed"` for a settled batch op),
+          // not to change what `gate_history` reads for these four fields. Stamping them here (mirroring
+          // confirmWorkerMerge's own `evt("build_gate", ...)` call) is still necessary regardless — first
+          // measured missing on the first live batch run (opId 1cfb5219, row ed9bf9a0: every one of these
+          // read back null). ⚠️ A FIFTH field DOES now change on this same op, just not read from `detail`
+          // here: `db.ts`'s `toGateHistoryRow` falls back to `verdictPayload.gateDetail.failingTest` (card
+          // eb9348b0) whenever the raw event carries none — a failed batch's own `build_gate` event never
+          // sets `failingTest` in `detail` (by construction, same as every other gate kind), so before this
+          // card `gate_history.failingTest` for a rejected batch was ALWAYS null; it now recovers a real
+          // value from `deriveBatchGateVerdict`'s own `gateDetail.failingTest` on a "fail" verdict — a
+          // genuine, intentional improvement (this is exactly what card eb9348b0's fallback was built for),
+          // not an oversight to reconcile away.
+          durationMs: nowMs - gateStartedAt, gateCap: orchestration.maxConcurrentGates,
           concurrentGates: concurrentAtStart, concurrentGatesMax,
           ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
         });

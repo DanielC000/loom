@@ -7822,13 +7822,19 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // (shared/types.ts) for the full discipline this projects.
   // Card 3d2afb53: a BATCHED merge gate (`detail.batched === true`) is the one exception to the paragraph
   // above — it never routes through confirmWorkerMergeTracked/PendingOpRegistry at all (see mergeBatch's
-  // own header doc, sessions/service.ts), so `verdictPayload` is always empty for it; there is no second
-  // "merge" row to fall back to. Its own `build_gate` event stamps a genuine DECIDABLE tri-state directly
-  // in `detail` instead (mirrors confirmWorkerMerge's own `emitCompareStructuredFields`, gated on
-  // `gateRan && !notApplicable` — never the true-only-else-absent shape the paragraph above warns about),
-  // so recovering it from `detail` is safe ONLY for this one kind: every non-batched row's own `detail.
-  // emitCompareReduced` stays legacy true-only (never an honest `false`), so falling back to it there would
-  // silently fabricate a tri-state the producer never actually computed.
+  // own header doc, sessions/service.ts). CORRECTED (card be260976): `verdictPayload` is NO LONGER always
+  // empty for it — mergeBatch now mints+settles its own `pending_gate_ops` tombstone directly (closing a
+  // separate defect: `gate_status(opId)` used to return `"never_existed"` for a settled batch op), so a
+  // real `verdictPayload` exists here too. It stays a non-factor for THIS field specifically only because
+  // `deriveBatchGateVerdict` (service.ts) deliberately OMITS `emitCompareReduced`/`emitCompareIdenticalCount`/
+  // `emitCompareTestFiles` from what it writes — a deliberate choice (see that function's own doc) to keep
+  // this fallback the single source of truth for batch rows rather than risk two producers disagreeing.
+  // Its own `build_gate` event stamps a genuine DECIDABLE tri-state directly in `detail` instead (mirrors
+  // confirmWorkerMerge's own `emitCompareStructuredFields`, gated on `gateRan && !notApplicable` — never
+  // the true-only-else-absent shape the paragraph above warns about), so recovering it from `detail` is
+  // safe ONLY for this one kind: every non-batched row's own `detail.emitCompareReduced` stays legacy
+  // true-only (never an honest `false`), so falling back to it there would silently fabricate a tri-state
+  // the producer never actually computed.
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
     ? verdictPayload.emitCompareReduced
     : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;
