@@ -8901,6 +8901,35 @@ export class SessionService {
   }
 
   /**
+   * Card 932f13d4 — consumes `PtyHostEvents.onEngineSessionId`'s `previousEngineId` param: a genuine
+   * engine-session-id ROTATION (a second `SessionStart` reporting a different `session_id` for the SAME
+   * live pty — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117) just landed for `sessionId`.
+   * By the time this fires, `db.setEngineSessionId` has already overwritten the tracked id — this is the
+   * ONLY durable record of the OLD id (card 8a5bd0d0's own finding: nothing downstream can reconstruct
+   * it). Durable-only, deliberately NO live nudge (unlike `handlePasteLengthLoss` above): a single
+   * rotation is not a decision point for anyone in the moment — it's audit trail for the two triggers
+   * named on the card itself (a transcript read that comes back shorter than expected; a future revisit
+   * of cross-rotation stitching). `managerSessionId` falls back to the session's own id when it has no
+   * parent (a manager/plain/setup session rotating its own engine id) — same NOT-NULL-column convention
+   * `handlePasteLengthLoss` uses above.
+   *
+   * To read the accumulated rotation history: `db.appendEvent`'s rows are queryable via
+   * `SELECT id, ts, worker_session_id, detail_json FROM orchestration_events WHERE kind =
+   * 'engine_session_rotated' ORDER BY ts` — the row count is the lifetime rotation count SINCE this
+   * shipped (starts at ZERO on deploy, never back-filled — do not difference it against card 8a5bd0d0's
+   * pre-existing "4 in the retained log window" figure, a different, retention-bounded instrument) and
+   * `MIN(ts)` is the oldest observation, the figure that turns the count into a rate.
+   */
+  handleEngineSessionRotated(sessionId: string, previousEngineId: string, newEngineId: string): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "engine_session_rotated", detail: { previousEngineSessionId: previousEngineId, newEngineSessionId: newEngineId },
+    });
+  }
+
+  /**
    * Card 2d8d2e42 — consumes `PtyHostEvents.onRepeatedToolCall`: `sessionId` has called `info.tool` with
    * IDENTICAL arguments `info.count` consecutive times within one turn (no Stop boundary between them) —
    * fired at the Nth repeat and every subsequent multiple of N (see `RepeatedCallResult.firedAtThreshold`'s

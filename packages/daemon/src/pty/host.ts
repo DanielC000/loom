@@ -3672,7 +3672,15 @@ export interface SpawnOpts {
 }
 
 export interface PtyHostEvents {
-  onEngineSessionId(sessionId: string, engineId: string): void;
+  /**
+   * `previousEngineId` (card 932f13d4) is the id `live.engineSessionId` held BEFORE this capture — `null`
+   * on a session's FIRST SessionStart (nothing to rotate from), non-null on a genuine mid-session ROTATION
+   * (the same condition the `[pty] … engine session id ROTATED …` console.warn below guards on). Captured
+   * and passed HERE because this is the only point where both ids are still in scope: the caller
+   * overwrites `live.engineSessionId` (and the DB, via `db.setEngineSessionId`) immediately after invoking
+   * this callback, so a consumer that wants the old id must take it NOW or lose it forever.
+   */
+  onEngineSessionId(sessionId: string, engineId: string, previousEngineId: string | null): void;
   /** Persist the turn-in-flight flag (rising on UserPromptSubmit, falling on Stop/StopFailure). */
   onBusy(sessionId: string, busy: boolean): void;
   /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
@@ -5860,12 +5868,19 @@ export class PtyHost {
         // on in a file Loom never knew existed. A later report of the SAME id (the overwhelmingly common
         // case — a plain resume/fork correctly re-reports what it was given) is still a no-op below.
         if (typeof hook.session_id === "string" && hook.session_id !== live.engineSessionId) {
-          if (live.engineSessionId) {
+          // Card 932f13d4: capture the OLD id before it's overwritten below — this line (and the
+          // console.warn it guards) is the ONLY place in the codebase where both the old and new engine
+          // session ids are simultaneously in scope. `db.setEngineSessionId` (invoked via
+          // `onEngineSessionId` just below) unconditionally overwrites, so anything not taken here is
+          // gone for good; `previousEngineId` rides `onEngineSessionId` so a durable rotation record can
+          // be persisted without a second read of soon-to-be-stale state.
+          const previousEngineId = live.engineSessionId;
+          if (previousEngineId) {
             // eslint-disable-next-line no-console
-            console.warn(`[pty] ${sessionId} engine session id ROTATED mid-session: ${live.engineSessionId} -> ${hook.session_id} (SessionStart fired without a new spawn) — updating tracked id`);
+            console.warn(`[pty] ${sessionId} engine session id ROTATED mid-session: ${previousEngineId} -> ${hook.session_id} (SessionStart fired without a new spawn) — updating tracked id`);
           }
           live.engineSessionId = hook.session_id;
-          this.events.onEngineSessionId(sessionId, hook.session_id);
+          this.events.onEngineSessionId(sessionId, hook.session_id, previousEngineId);
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
         }
         // Claude is up → converge the permission mode to its target, once per (re)spawn. Card 51926260:

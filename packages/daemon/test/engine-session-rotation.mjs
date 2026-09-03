@@ -19,6 +19,13 @@
 // (which persists engine_session_id) fires again on rotation, and that the rotation is logged
 // fail-visibly, not silently.
 //
+// Card 932f13d4: `events.onEngineSessionId` and the `sessions` (a REAL SessionService) it feeds mirror
+// index.ts's actual production wiring byte-for-byte, so the checks at "4b" below drive the SHIPPED code
+// path, not a hand-rolled substitute — a durable `engine_session_rotated` orchestration_event, carrying
+// BOTH the old and new engine session ids, lands on a genuine rotation and ONLY on a genuine rotation
+// (checks "1" and "7" are the paired negative controls: a first capture and a same-id repeat must both
+// emit nothing durable, so "4b" proves the firing arm, not just that the code never emits at all).
+//
 // RUN: 1) build daemon (pnpm --filter @loom/daemon build), 2) node test/engine-session-rotation.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -54,6 +61,8 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { Db } = await import("../dist/db.js");
 const { ContextWatcher } = await import("../dist/orchestration/context-watcher.js");
+const { SessionService } = await import("../dist/sessions/service.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 const fakes = [];
 class TestPtyHost extends createSeamHost(PtyHost) {
@@ -94,12 +103,23 @@ const warnLog = [];
 const realWarn = console.warn;
 console.warn = (...args) => { warnLog.push(args.join(" ")); realWarn(...args); };
 
+// Card 932f13d4: `sessions` is a forward reference (assigned right after `host` below) — mirrors
+// index.ts's own real wiring exactly (onEngineSessionId -> db.setEngineSessionId, then, ONLY on a
+// genuine rotation (previousEngineId non-null), sessions.handleEngineSessionRotated persists the durable
+// engine_session_rotated event). Driving the SAME wiring the daemon actually uses (not a hand-rolled
+// substitute) is what makes the assertions below a real positive control on the shipped code path.
+let sessions;
 const events = {
-  onEngineSessionId(id, engineId) { engineIdEvents.push({ id, engineId }); db.setEngineSessionId(id, engineId); },
+  onEngineSessionId(id, engineId, previousEngineId) {
+    engineIdEvents.push({ id, engineId, previousEngineId });
+    db.setEngineSessionId(id, engineId);
+    if (previousEngineId) sessions.handleEngineSessionRotated(id, previousEngineId, engineId);
+  },
   onBusy() {}, onRateLimited() {}, onExit() {},
   onContextStats(id, s) { db.setContextCounters(id, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }); },
 };
 const host = new TestPtyHost(events);
+sessions = new SessionService(db, host, new OrchestrationControl());
 const watcher = new ContextWatcher({ db, pty: { isAlive: (id) => host.isAlive(id), enqueueStdin: (id, t) => host.enqueueStdin(id, t) }, ratio: 0 });
 
 const ENGINE_1 = `engine-session-alpha-${RUN_SUFFIX}`;
@@ -122,6 +142,13 @@ try {
   host.deliverHook(SID, { hook_event_name: "SessionStart", session_id: ENGINE_1 });
   check("1: first capture recorded engine-1", engineIdEvents.length === 1 && engineIdEvents[0].engineId === ENGINE_1);
   check("1: first capture logs NO rotation warning", !warnLog.some((w) => w.includes("ROTATED")));
+  check("1: first capture carries previousEngineId=null (nothing to rotate from)", engineIdEvents[0].previousEngineId === null);
+  // NEGATIVE CONTROL (card 932f13d4 DoD-3's own named trap): a FIRST capture must NOT durably emit
+  // `engine_session_rotated` — this is the branch that a guard which always fires on any onEngineSessionId
+  // call (never distinguishing first-capture from rotation) would falsely pass. If this check were broken
+  // (e.g. always true), it would prove nothing about the firing arm asserted at "4" below.
+  check("1: first capture emits NO durable engine_session_rotated event",
+    db.listEventsForWorker(SID).filter((e) => e.kind === "engine_session_rotated").length === 0);
 
   writeTranscript(ENGINE_1, [
     { type: "assistant", message: { content: [{ type: "text", text: "a" }], usage: { input_tokens: 1000 } } },
@@ -142,6 +169,18 @@ try {
     db.getSession(SID)?.engineSessionId === ENGINE_2);
   check("4: the rotation is FAIL-VISIBLE — a warning names both ids and the session",
     warnLog.some((w) => w.includes("ROTATED") && w.includes(SID) && w.includes(ENGINE_1) && w.includes(ENGINE_2)));
+  check("4: onEngineSessionId's previousEngineId correctly carries the OLD (engine-1) id on rotation",
+    engineIdEvents[1].previousEngineId === ENGINE_1);
+
+  // === 4b) DoD-3, THE FIRING ARM: card 932f13d4's own DoD-3 warns that a check asserting only "no event
+  // on a normal SessionStart" (the "1:" negative control above) passes against code that never emits at
+  // all — so assert the event actually LANDS, durably, with BOTH ids, on the genuine rotation just driven. ===
+  const rotationEvents = db.listEventsForWorker(SID).filter((e) => e.kind === "engine_session_rotated");
+  check("4b: exactly ONE durable engine_session_rotated event landed for this rotation", rotationEvents.length === 1);
+  check("4b: it carries the OLD engine session id", rotationEvents[0]?.detail?.previousEngineSessionId === ENGINE_1);
+  check("4b: it carries the NEW engine session id", rotationEvents[0]?.detail?.newEngineSessionId === ENGINE_2);
+  check("4b: it is filed under this session (manager, no parent) per the paste_length_loss NOT-NULL convention",
+    rotationEvents[0]?.managerSessionId === SID && rotationEvents[0]?.workerSessionId === SID);
 
   // The REAL context had been growing in engine-2's transcript the whole time (per the incident: the
   // engine kept running, context kept growing, but Loom was blind to it). Simulate that: engine-2's
@@ -164,6 +203,8 @@ try {
   host.deliverHook(SID, { hook_event_name: "SessionStart", session_id: ENGINE_2 });
   check("7: a repeat SessionStart with the SAME id is a no-op (no new event, no warning)",
     engineIdEvents.length === eventsCountBefore && warnLog.length === warnCountBefore);
+  check("7: a repeat report of the same id does NOT add a spurious durable engine_session_rotated row",
+    db.listEventsForWorker(SID).filter((e) => e.kind === "engine_session_rotated").length === 1);
 
   // === 8) The null-branch fail-visible logging DISTINGUISHES its two causes (both used to be silent). ===
   const ENGINE_3 = `engine-session-gamma-${RUN_SUFFIX}`;
@@ -215,7 +256,8 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a mid-session engine-session-id rotation is tracked (not silently discarded), the DB " +
-    "persists it, context-stats follow the ACTUAL active transcript, and the recycle nudge fires on the " +
-    "TRUE crossed ratio."
+    "persists it, context-stats follow the ACTUAL active transcript, the recycle nudge fires on the " +
+    "TRUE crossed ratio, and (card 932f13d4) a durable engine_session_rotated event carrying both the " +
+    "old and new ids lands on every genuine rotation and ONLY on a genuine rotation."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

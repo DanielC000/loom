@@ -1458,7 +1458,21 @@ export type OrchestrationEventKind =
   // gateOpIdEnvOverride's own doc in sessions/service.ts). This is the ONE failure mode batching makes
   // strictly worse than today (1 branch's gate wasted -> up to K), so it is instrumented distinctly from an
   // ordinary `merge_rejected`/`build_gate` failure rather than folded into either.
-  | "batch_merge_forfeited";
+  | "batch_merge_forfeited"
+  // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
+  // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
+  // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
+  // overwrites the tracked id on every capture (first AND rotated alike), so this event is the ONLY
+  // durable record of the OLD id once it fires — there is nothing to reconstruct it from afterward.
+  // Filed under `s?.parentSessionId ?? sessionId` (SessionService.handleEngineSessionRotated), the same
+  // NOT-NULL fallback `paste_length_loss` uses, since a manager/plain/setup session rotating its own
+  // engine id has no parent to file under. `detail` carries { previousEngineSessionId, newEngineSessionId
+  // }. Audit-only, deliberately excluded from `EVENT_TRIGGER_EVENT_KINDS` and `GATE_HISTORY_KINDS` (no
+  // live decision follows from a single rotation — see the card's own DoD-2 for the named reader/trigger
+  // that consumes an ACCUMULATION of these). Any count derived from this kind starts at ZERO on the
+  // deploy that ships it and can never be back-filled — do not difference it against a pre-this-change
+  // figure (a different instrument, a retention-bounded floor, not a measurement).
+  | "engine_session_rotated";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1493,7 +1507,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
-  repeated_tool_call: true, batch_merge_forfeited: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

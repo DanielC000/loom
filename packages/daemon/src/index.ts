@@ -296,7 +296,14 @@ async function main(): Promise<void> {
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   // onExit references orchMcp (declared below) — only invoked at runtime, after init.
   const pty = new PtyHost({
-    onEngineSessionId: (sessionId, engineId) => db.setEngineSessionId(sessionId, engineId),
+    // Card 932f13d4: `previousEngineId` is non-null only on a genuine mid-session ROTATION (not a
+    // session's first capture) — `sessions` (forward reference, same pattern as onBusy/onGiveUpConfirmed
+    // below) persists a durable audit row for it BEFORE the overwrite below lands, since `setEngineSessionId`
+    // is the point of no return for the old id. See SessionService.handleEngineSessionRotated's own doc.
+    onEngineSessionId: (sessionId, engineId, previousEngineId) => {
+      db.setEngineSessionId(sessionId, engineId);
+      if (previousEngineId) sessions.handleEngineSessionRotated(sessionId, previousEngineId, engineId);
+    },
     // Persist busy, and on the falling edge nudge the manager if a worker went idle without
     // reporting (stranded-worker guard; no-op for non-workers). On the RISING edge, purge any
     // still-queued idle-worker nudge for this worker from its manager's FIFO — it re-engaged, so a
