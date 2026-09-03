@@ -3257,21 +3257,43 @@ export async function repoTreeReferencesInertPrefix(
 const SKILL_ASSET_PREFIX = "packages/daemon/assets/skills/";
 
 /**
- * Skill NAMES touched by the diff between `base` and `ref` under {@link SKILL_ASSET_PREFIX} — card
- * 64a30c79: `skills/inject.ts` delivers a session's skills from the STORE (`<LOOM_HOME>/skills/<name>/
- * SKILL.md`), never from `assets/` directly, so a merge that lands an `assets/skills/<name>/**` change is
- * NOT live for any agent at merge time — only at the next daemon restart (a pristine/customized:false
- * skill) or an explicit adopt (a customized skill, which a restart never advances). This function only
- * DETECTS which skill(s) a diff touched; it asserts nothing about customization state (the caller reads
- * that from the live skill store) and changes no skill-loading behavior itself.
+ * Per-skill info for what a diff between `base` and `ref` touched under {@link SKILL_ASSET_PREFIX} — card
+ * 64a30c79, reworded by card 13965c93 after a cross-project miscommunication showed the original
+ * single-fact detector collapsed three DIFFERENT facts into one warning line:
  *
- * Deduplicated + sorted; empty for a diff that never touches this prefix. Fails closed to `[]` on any git
+ * 1. `skills/inject.ts` delivers a session's skills from the STORE (`<LOOM_HOME>/skills/<name>/**`),
+ *    never from `assets/` directly — a merge landing an `assets/skills/<name>/**` change is not in the
+ *    store at merge time; only a daemon restart re-seeds it (pristine skills only — a customized one
+ *    needs an explicit adopt, which a restart never does for it).
+ * 2. Being in the store is not the same as a SESSION holding it: `injectSkills` runs on every
+ *    resume/fork/recycle (not just first spawn), so a session already live across a restart only picks
+ *    up the new content the NEXT time it resumes, not the instant the store updates.
+ * 3. `SKILL.md` is read ambiently; `references/**` is read on demand. A `references/**`-only change can
+ *    be seeded, injected, byte-correct on disk in a session's own copy — and still behaviourally absent
+ *    indefinitely, because nothing makes an agent open it. `referencesOnly` below flags exactly this case
+ *    so the caller's warning text can say so, instead of implying "restart/resume ⇒ live" the way the
+ *    original one-line detector did.
+ *
+ * This function only DETECTS what a diff touched; it asserts nothing about store/session state (the
+ * caller reads `customized` from the live skill store) and changes no skill-loading behavior itself.
+ *
+ * Sorted by name; empty for a diff that never touches this prefix. Fails closed to `[]` on any git
  * error/timeout, same posture as {@link isInertMergeDiff} — a missed detection costs one missing (never a
  * wrong) warning line.
  */
+export interface ChangedSkillInfo {
+  name: string;
+  /** `true` iff this diff touched `<name>/SKILL.md` itself (the ambiently-read file). */
+  skillMdChanged: boolean;
+  /** `true` iff every touched path under `<name>/` sits under `references/` — i.e. `SKILL.md` was NOT
+   *  touched, so nothing about this diff is ambient; an agent only sees it if it happens to open that
+   *  specific reference file. */
+  referencesOnly: boolean;
+}
+
 export async function changedSkillNames(
   repoPath: string, base: string, ref: string, deps: BoundedGitDeps = {},
-): Promise<string[]> {
+): Promise<ChangedSkillInfo[]> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   let paths: string[];
   try {
@@ -3279,13 +3301,25 @@ export async function changedSkillNames(
   } catch {
     return [];
   }
-  const names = new Set<string>();
+  const bySkill = new Map<string, string[]>();
   for (const p of paths) {
     if (!p.startsWith(SKILL_ASSET_PREFIX)) continue;
-    const name = p.slice(SKILL_ASSET_PREFIX.length).split("/")[0];
-    if (name) names.add(name);
+    const rest = p.slice(SKILL_ASSET_PREFIX.length);
+    const slash = rest.indexOf("/");
+    const name = slash === -1 ? rest : rest.slice(0, slash);
+    const subPath = slash === -1 ? "" : rest.slice(slash + 1);
+    if (!name) continue;
+    const list = bySkill.get(name);
+    if (list) list.push(subPath); else bySkill.set(name, [subPath]);
   }
-  return [...names].sort();
+  return [...bySkill.keys()].sort().map((name) => {
+    const subPaths = bySkill.get(name)!;
+    return {
+      name,
+      skillMdChanged: subPaths.includes("SKILL.md"),
+      referencesOnly: subPaths.length > 0 && subPaths.every((s) => s.startsWith("references/")),
+    };
+  });
 }
 
 /** Compiled-source and non-compiled-test path scopes {@link computeEmitCompareGate} classifies changed

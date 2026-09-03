@@ -12,18 +12,35 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // repos under test, mirroring how a self-hosted daemon's `ASSET_SKILLS` is its own package dir, not the
 // project repo it happens to be merging.
 //
+// Card 13965c93 reworded the nudge itself after a cross-project miscommunication showed the original
+// text collapsed THREE separate facts into one sentence: (1) store-liveness (restart advances a pristine
+// skill; a customized one needs an explicit adopt), (2) session-reach (a session already live across a
+// restart only picks up the change on its OWN next resume — injectSkills runs on every resume, not just
+// first spawn), and (3) `SKILL.md` is read ambiently but `references/**` is read on demand, so a
+// `references/**`-only change can be live in the store AND in a session's own injected copy and still
+// never get opened. Tests (F)/(G) below cover fact (3); the rest cover facts (1)/(2), unchanged from
+// card 64a30c79's original coverage plus the reworded assertion text.
+//
 // Proves:
 //   (A) NEGATIVE CONTROL — a merge that never touches assets/skills/** carries no `skillWarning` at all,
 //       byte-identical to before this card (DoD-4).
 //   (B) A skill name the live store has never seen (not yet seeded) reads PRISTINE — nothing to protect,
 //       and it will be seeded fresh at the next restart either way.
-//   (C) A PRISTINE bundled skill (store copy == shipped) — the warning must say "live at the next daemon
-//       restart" (DoD-2), and must still be present (DoD-3: pristine is NEVER suppressed).
+//   (C) A PRISTINE bundled skill (store copy == shipped) — the warning must say the change is live in the
+//       STORE at the next restart AND that a session only picks it up on its own next resume (DoD-1), and
+//       must still be present (DoD-3: pristine is NEVER suppressed).
 //   (D) A CUSTOMIZED bundled skill (store copy edited, diverges from its base) — the warning must say
-//       "needs an explicit adopt" and that a restart will NOT advance it (DoD-2), read from the REAL
-//       store `customized` flag, never guessed (this card exists partly because an earlier draft inferred
-//       it instead).
+//       "needs an explicit adopt", that a restart will NOT advance it, and that even after adopting a
+//       session only gets it on its next resume, read from the REAL store `customized` flag, never
+//       guessed (this card exists partly because an earlier draft inferred it instead).
 //   (E) TWO skills touched by one merge — both must be named.
+//   (F) POSITIVE CONTROL for the references/**-only flag — a diff that touches ONLY a skill's
+//       `references/**` (never `SKILL.md`) gets a distinct on-demand-read clause, on top of (not instead
+//       of) the store-liveness fact (DoD-2).
+//   (G) NEGATIVE CONTROL for (F) — a diff that touches BOTH `SKILL.md` and `references/**` for the same
+//       skill must NOT get the on-demand-read clause (SKILL.md's own ambient read makes the diff not
+//       references-only), proving the flag actually discriminates rather than firing on any references/
+//       touch at all.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-skill-liveness-warning.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -77,6 +94,12 @@ function writeSkillAssetFile(worktreePath, name, content) {
   const dir = path.join(worktreePath, "packages", "daemon", "assets", "skills", name);
   mkdirp(dir);
   fs.writeFileSync(path.join(dir, "SKILL.md"), content);
+}
+
+function writeSkillReferenceFile(worktreePath, name, relPath, content) {
+  const dir = path.join(worktreePath, "packages", "daemon", "assets", "skills", name, "references");
+  mkdirp(dir);
+  fs.writeFileSync(path.join(dir, relPath), content);
 }
 
 const dbs = [];
@@ -144,7 +167,7 @@ try {
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
     check("(C) merged:true", confirm.merged === true);
     check("(C) skillWarning names pristine-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("pristine-skill"));
-    check("(C) reads pristine — live at the next daemon restart", /pristine-skill \(pristine — live at the next daemon restart\)/.test(confirm.skillWarning));
+    check("(C) reads pristine — live in the store at next restart, session picks it up on next resume", /pristine-skill \(pristine — live in the skill store at the next daemon restart; a session picks it up only on its next resume\)/.test(confirm.skillWarning));
     check("(C) pristine is NEVER suppressed (DoD-3)", confirm.skillWarning !== undefined);
   }
 
@@ -171,7 +194,7 @@ try {
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
     check("(D) merged:true", confirm.merged === true);
     check("(D) skillWarning names customized-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("customized-skill"));
-    check("(D) reads customized — needs an explicit adopt, restart will NOT advance it", /customized-skill \(customized — needs an explicit adopt; a restart will NOT advance it\)/.test(confirm.skillWarning));
+    check("(D) reads customized — needs an explicit adopt, restart won't do it, resume needed even after", /customized-skill \(customized — needs an explicit adopt \(a restart will NOT do it\); even after adopting, a session gets it only on its next resume\)/.test(confirm.skillWarning));
   }
 
   // ── (E) two skills touched by ONE merge — both must be named ─────────────────────────────────────────
@@ -192,6 +215,47 @@ try {
     check("(E) merged:true", confirm.merged === true);
     check("(E) both skills named", confirm.skillWarning.includes("skill-one") && confirm.skillWarning.includes("skill-two"));
   }
+
+  // ── (F) POSITIVE CONTROL — a references/**-only diff gets a distinct on-demand-read clause (DoD-2) ────
+  {
+    const F = mk("f");
+    makeRepo(F);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }) });
+    const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
+    F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
+    // No SKILL.md at all here — only a references/** file, so this diff is references-only by construction.
+    writeSkillReferenceFile(worktreePath, "refs-only-skill", "note.md", "# a reference note\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add a reference note"`, { cwd: worktreePath });
+    seed(db, F, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
+    check("(F) merged:true", confirm.merged === true);
+    check("(F) skillWarning names refs-only-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("refs-only-skill"));
+    check("(F) flags the references/**-only, read-on-demand case", /references\/\*\*.*read on demand/.test(confirm.skillWarning));
+    check("(F) still carries the store-liveness fact alongside it (not instead of it)", /pristine — live in the skill store at the next daemon restart/.test(confirm.skillWarning));
+  }
+
+  // ── (G) NEGATIVE CONTROL for (F) — SKILL.md + references/** together does NOT get the on-demand note ──
+  {
+    const G = mk("g");
+    makeRepo(G);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }) });
+    const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
+    G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
+    writeSkillAssetFile(worktreePath, "mixed-skill", "# mixed\n");
+    writeSkillReferenceFile(worktreePath, "mixed-skill", "note.md", "# a reference note\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add mixed-skill with a reference"`, { cwd: worktreePath });
+    seed(db, G, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
+    check("(G) merged:true", confirm.merged === true);
+    check("(G) skillWarning names mixed-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("mixed-skill"));
+    check("(G) SKILL.md touched ⇒ NOT references-only, no on-demand note", !/read on demand/.test(confirm.skillWarning));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -200,6 +264,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge landing packages/daemon/assets/skills/<name>/** carries a skillWarning naming the skill(s) and the correct next step read from the live store's customized flag (pristine ⇒ next restart, customized ⇒ explicit adopt, never suppressed); a merge that never touches that prefix carries no skillWarning at all."
+  ? "\n✅ ALL PASS — a merge landing packages/daemon/assets/skills/<name>/** carries a skillWarning naming the skill(s), the correct store-liveness next step read from the live store's customized flag (pristine ⇒ next restart, customized ⇒ explicit adopt, never suppressed), that a session only reflects it on its own next resume, and — for a references/**-only diff — a distinct on-demand-read clause; a merge that never touches that prefix carries no skillWarning at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

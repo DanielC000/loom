@@ -103,8 +103,19 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   waits for an explicit **adopt** (Skills UI or `POST /api/skills/<name>/adopt`) regardless of restarts
   (`skills/seed.ts:73`). **Ordering trap:** if the store carries a Skills-UI edit not yet folded into
   `packages/daemon/assets/`, adopting first silently discards it — land the content in `packages/daemon/assets/` first, then adopt.
-  **To check whether a merged skill change is actually live, grep the STORE, never a worktree:**
-  `grep -c "<new string>" "$LOOM_HOME/skills/<name>/SKILL.md"` — nonzero means agents get it, zero means
+  **The store-grep check below answers ONE of three separate questions, never "is it live" — collapsing
+  them is exactly what card 13965c93 fixed in the merge-confirm nudge (`skillWarning`):** (1) did the
+  change reach the **STORE** (the grep below); (2) does a given **SESSION**'s own injected `.claude/skills`
+  copy reflect it — `injectSkills` is called unconditionally from `createPty` (`pty/host.ts:5597`), and
+  every resume/fork/recycle goes through `createPty`, so the copy is refreshed on every **resume**, not
+  frozen at first spawn; a session that stayed live across the restart still needs its own next resume before it reflects the
+  change; (3) has the **AGENT** actually opened it — ⛔ **no grep answers this.** `SKILL.md` is read
+  ambiently; `references/**` is read **on demand**, so a `references/**` change can be live in the store
+  and in a session's own copy and still be behaviourally absent, because nothing makes the agent open that
+  file.
+  **To check whether a merged skill change reached the STORE (question 1 only), grep the STORE, never a worktree:**
+  `grep -c "<new string>" "$LOOM_HOME/skills/<name>/SKILL.md"` — nonzero means the store has it (not that a
+  live session reflects it, and not that any agent has read a `references/**` change). Zero means
   merged-and-dead. ⛔ Don't grep a dev worktree's own `.claude/skills` as a proxy — `pnpm build` runs
   `scripts/sync-claude-skills.mjs`, which mirrors `packages/daemon/assets/skills/**` straight into that worktree's
   `.claude/skills` on every build, independent of the store and independent of any restart; a check

@@ -17,7 +17,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -635,14 +635,19 @@ type ConfirmMergeResult = {
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
-  /** Card 64a30c79: set ONLY when this merge's squash commit touched `packages/daemon/assets/skills/
-   *  <name>/**` (see {@link changedSkillNames}) — i.e. only ever on Loom's own self-hosted repo, never any
-   *  other project. Names the skill(s) and, per skill, the CORRECT next step read from the live skill
-   *  store's own `customized` flag (never guessed): a pristine skill auto-advances at the next daemon
-   *  restart; a customized one needs an explicit adopt, which a restart will NOT do for it. `undefined`
-   *  for every merge that doesn't touch that prefix — byte-identical to before this field existed. Distinct
-   *  from the generic `warning` field above so it can't be silently absorbed into (or crowded out by) an
-   *  unrelated warning; echoed separately into the `[loom:merge-done]` nudge too (see
+  /** Card 64a30c79 (reworded by card 13965c93): set ONLY when this merge's squash commit touched
+   *  `packages/daemon/assets/skills/<name>/**` (see {@link changedSkillNames}) — i.e. only ever on Loom's
+   *  own self-hosted repo, never any other project. Names the skill(s) and, per skill, states THREE
+   *  separate facts rather than collapsing them into one (card 13965c93's whole point — see
+   *  {@link ChangedSkillInfo}'s own doc for the mechanism each fact rests on): (1) whether the STORE
+   *  advances at the next restart (pristine) or needs an explicit adopt that a restart will never do for
+   *  it (customized, read from the live store's own `customized` flag, never guessed); (2) that a session
+   *  already live across that restart only picks up the change on its own NEXT RESUME, not the instant
+   *  the store updates; (3) when the diff only touched `references/**` (never `SKILL.md`), that the file
+   *  is read on demand, so being live in a session's own copy still doesn't mean any agent opens it.
+   *  `undefined` for every merge that doesn't touch that prefix — byte-identical to before this field
+   *  existed. Distinct from the generic `warning` field above so it can't be silently absorbed into (or
+   *  crowded out by) an unrelated warning; echoed separately into the `[loom:merge-done]` nudge too (see
    *  confirmWorkerMergeTracked's `msg` construction) so both DoD-1 surfaces carry it. */
   skillWarning?: string;
   /** Card 65336570: the SAME text as the local `emitCompareWarning` computed just above the `warning`/
@@ -15533,20 +15538,29 @@ export class SessionService {
     // has this path), so `skillWarning` stays `undefined` there, byte-identical to before this existed.
     let skillWarning: string | undefined;
     if (merge.sha) {
-      const skillNames = await changedSkillNames(repoPath, `${merge.sha}^`, merge.sha, { timeoutMs: this.gitOpMs });
-      if (skillNames.length) {
+      const skillDiffs = await changedSkillNames(repoPath, `${merge.sha}^`, merge.sha, { timeoutMs: this.gitOpMs });
+      if (skillDiffs.length) {
         // Read the REAL customized flag from the live store — never inferred/guessed (this card exists
         // partly because a prior draft inferred it from an mtime coincidence and got it wrong). A name not
         // found in the store (e.g. a brand-new skill not yet seeded) reads as pristine: correct, since it
         // has nothing to customize yet and will be seeded fresh at the next restart either way.
         const store = listSkillStore();
-        const describeSkill = (name: string): string => {
-          const entry = store.find((s) => s.name === name);
-          return entry?.customized
-            ? `${name} (customized — needs an explicit adopt; a restart will NOT advance it)`
-            : `${name} (pristine — live at the next daemon restart)`;
+        // Card 13965c93: state store-liveness and session-reach as TWO separate facts (a restart advances
+        // the store; a live session only reflects it on its OWN next resume — see ChangedSkillInfo's doc
+        // for why those aren't the same instant), and call out `references/**`-only edits distinctly (read
+        // on demand — see the store/reach facts above still hold, but neither one implies an agent opens
+        // the file).
+        const describeSkill = (d: ChangedSkillInfo): string => {
+          const entry = store.find((s) => s.name === d.name);
+          const storeClause = entry?.customized
+            ? "customized — needs an explicit adopt (a restart will NOT do it); even after adopting, a session gets it only on its next resume"
+            : "pristine — live in the skill store at the next daemon restart; a session picks it up only on its next resume";
+          const referencesNote = d.referencesOnly
+            ? "; this edit only touched references/**, which is read on demand — resuming doesn't make an agent open the file"
+            : "";
+          return `${d.name} (${storeClause}${referencesNote})`;
         };
-        skillWarning = `skill change(s) not yet live for any agent: ${skillNames.map(describeSkill).join(", ")}`;
+        skillWarning = `skill change(s) not yet live for any agent: ${skillDiffs.map(describeSkill).join(", ")}`;
       }
     }
     // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds

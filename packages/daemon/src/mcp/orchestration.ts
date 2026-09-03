@@ -4599,12 +4599,17 @@ export class OrchestrationMcpRouter {
           "the Loom-owned STORE (`<LOOM_HOME>/skills/<name>/SKILL.md`), never read live from `assets/` — " +
           "the store only re-syncs from a merged `packages/daemon/assets/skills/**` change on daemon " +
           "boot/restart (`seedGlobalSkills()`), so `deployStaleness` reading clean after an assets-only " +
-          "merge does NOT mean nothing needs to happen: every agent stays on the OLD skill until a restart " +
+          "merge does NOT mean nothing needs to happen: the STORE stays on the OLD skill until a restart " +
           "actually occurs. `pendingRestart` names every PRISTINE bundled skill (never edited by the user) " +
           "with a shipped update waiting in `assets/` — a `daemon_restart` (or human relaunch) auto-advances " +
-          "these. `pendingAdopt` names every CUSTOMIZED bundled skill (the user has edited their store copy) " +
-          "with a shipped update — a restart will NOT advance these by design (protecting the user's edit); " +
-          "each needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`) regardless of restarts. " +
+          "these IN THE STORE. `pendingAdopt` names every CUSTOMIZED bundled skill (the user has edited their " +
+          "store copy) with a shipped update — a restart will NOT advance these by design (protecting the " +
+          "user's edit); each needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`) " +
+          "regardless of restarts. ⚠️ Card 13965c93: neither list is \"every agent now has it\" — a session " +
+          "already live across the restart only reflects the store's new content on ITS OWN next resume " +
+          "(`skills/inject.ts` refreshes on every resume/fork/recycle, not just first spawn), and `SKILL.md` " +
+          "is read ambiently while `references/**` is read on demand — being current in the store (or a " +
+          "session's own injected copy) doesn't mean any agent has opened a changed reference file. " +
           "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached. " +
           "Card bb76b8d8: `skillStoreStaleness` itself never consults git — it compares the store against " +
           "the shipped asset's WORKING-TREE content, so a live, UNCOMMITTED edit to a shipped SKILL.md " +
