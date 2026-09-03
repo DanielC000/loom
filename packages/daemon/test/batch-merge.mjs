@@ -24,11 +24,30 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 
-const { createWorktree } = await import("../dist/git/worktrees.js");
+const { createWorktree, getTaskMergedInfo, __resetMergedCommitMapCacheForTest } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches, fastForwardCanonicalMain, runBatchedMerge, computeBatchSize } =
   await import("../dist/git/batch-merge.js");
+
+// Mirrors production's changedPathSetDigest exactly (git/worktrees.ts) — independent re-computation used
+// to assert the STAMPED digest is actually correct, not just present.
+function pathSetDigest(cwd, base, ref) {
+  const raw = execSync(`git diff --name-only --no-renames ${base}..${ref}`, { cwd }).toString();
+  const paths = raw.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+  return createHash("sha256").update(paths.join("\n")).digest("hex");
+}
+
+function removeWorktree(repo, wt) {
+  try { execSync(`git worktree remove --force "${wt}"`, { cwd: repo }); } catch { /* best-effort */ }
+}
+
+function deleteBranchAndGc(repo, branch) {
+  try { execSync(`git branch -D ${branch}`, { cwd: repo }); } catch { /* already gone */ }
+  execSync("git reflog expire --expire=now --all", { cwd: repo });
+  execSync("git gc --prune=now -q", { cwd: repo });
+}
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -276,6 +295,251 @@ try {
     check("(6) the OTHER branch (no merge commit) still lands cleanly",
       assembled.landed.some((l) => l.branch === other.branch));
     check("(6) canonical main untouched by assembly alone", git(repo, "rev-parse HEAD") === baseMainSha);
+  }
+
+  // ── (7) Loom-Worker-Base + Loom-Worker-PathSet STAMP (card d62dad73 phase 2, subsumes phase 1) ─────────
+  //     EVERY batched branch's tip now carries both trailers, regardless of commit count — a single-commit
+  //     branch (phase 1's now-folded-away special case) AND a multi-commit branch alike. Also: a POSITIVE
+  //     CONTROL that a wrong/forged digest is REJECTED, DoD-3's "verify against sha^ must FAIL" for a
+  //     multi-commit contribution, and a ROBUSTNESS case for the exact divergence this card's own
+  //     investigation found (a clean, non-conflicting rename-following cherry-pick) — the stamped digest
+  //     must reflect the LANDED file name, not the branch's own pre-landing file name.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-pathset-${sfx}`);
+    makeRepo(repo);
+    const single = await cutBranch(repo, "ps-single", "ps-single.txt", "single commit work\n");
+    const multi = await cutBranchMultiCommit(repo, "ps-multi", [
+      { file: "ps-multi-1.txt", content: "m1\n", message: "feat(test): ps multi 1" },
+      { file: "ps-multi-2.txt", content: "m2\n", message: "feat(test): ps multi 2" },
+      { file: "ps-multi-3.txt", content: "m3\n", message: "feat(test): ps multi 3" },
+    ]);
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-pathset-${sfx}`);
+
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [single, multi], passGate);
+    check("(7) ok:true", result.ok === true);
+    check("(7) both branches landed", result.landed.length === 2 && result.dropped.length === 0);
+
+    const singleLanded = result.landed.find((l) => l.branch === single.branch);
+    const multiLanded = result.landed.find((l) => l.branch === multi.branch);
+    const singleBody = git(repo, `log -1 --format=%B ${singleLanded.sha}`);
+    const multiBody = git(repo, `log -1 --format=%B ${multiLanded.sha}`);
+
+    // ── (7a) single-commit branch: Base is redundant with sha^ here, but stamped uniformly anyway ────────
+    check("(7a) single-commit branch's tip carries a Loom-Worker-PathSet trailer", /Loom-Worker-PathSet: \S+/.test(singleBody));
+    check("(7a) single-commit branch's tip ALSO carries a Loom-Worker-Base trailer", /Loom-Worker-Base: \S+/.test(singleBody));
+    const expectedSingleDigest = pathSetDigest(repo, `${singleLanded.sha}~1`, singleLanded.sha);
+    check("(7a) the stamped digest matches an independent recomputation from the commit's own sha^..sha",
+      singleBody.includes(`Loom-Worker-PathSet: ${expectedSingleDigest}`));
+
+    // ── (7b) multi-commit branch: NOW stamped too (phase 2 subsumes phase 1's single-commit-only gate) ───
+    check("(7b) multi-commit branch's tip carries a Loom-Worker-PathSet trailer (no longer omitted)", /Loom-Worker-PathSet: \S+/.test(multiBody));
+    check("(7b) multi-commit branch's tip carries a Loom-Worker-Base trailer", /Loom-Worker-Base: \S+/.test(multiBody));
+    const multiBaseMatch = multiBody.match(/Loom-Worker-Base: (\S+)/);
+    // THE DISCRIMINATING ASSERTION: the digest must cover ALL 3 commits (batchHeadBefore..tip), not just
+    // the tip's own last commit (sha^..sha, which would only see ps-multi-3.txt) — this is exactly the gap
+    // phase 1 could not close and phase 2 exists to close.
+    const expectedMultiDigest = pathSetDigest(repo, multiBaseMatch[1], multiLanded.sha);
+    const wrongTipOnlyDigest = pathSetDigest(repo, `${multiLanded.sha}~1`, multiLanded.sha);
+    check("(7b) precondition: the TRUE full-contribution digest differs from a tip-only (sha^..sha) digest",
+      expectedMultiDigest !== wrongTipOnlyDigest);
+    check("(7b) the stamped digest is the TRUE full-contribution one (batchHeadBefore..tip, all 3 commits), not tip-only",
+      multiBody.includes(`Loom-Worker-PathSet: ${expectedMultiDigest}`) && !multiBody.includes(`Loom-Worker-PathSet: ${wrongTipOnlyDigest}`));
+    check("(7b) the stamped Base is exactly this branch's own batchHeadBefore (single's landed sha, since single landed first)",
+      multiBaseMatch[1] === singleLanded.sha);
+
+    // ── (7c) POSITIVE: after both branches are deleted + gc'd, verification recovers to "pathset" tier ───
+    removeWorktree(repo, single.worktreePath);
+    removeWorktree(repo, multi.worktreePath);
+    deleteBranchAndGc(repo, single.branch);
+    deleteBranchAndGc(repo, multi.branch);
+    __resetMergedCommitMapCacheForTest();
+    const singleBoard = await getTaskMergedInfo(repo, single.taskId);
+    check("(7c) getTaskMergedInfo resolves the single-commit branch after deletion+gc", singleBoard !== null && singleLanded.sha.startsWith(singleBoard.sha));
+    check("(7c) single-commit verification tier is \"pathset\"", singleBoard?.verification === "pathset");
+    __resetMergedCommitMapCacheForTest();
+    const multiBoard = await getTaskMergedInfo(repo, multi.taskId);
+    check("(7c) getTaskMergedInfo resolves the MULTI-commit branch after deletion+gc (was impossible under phase 1)", multiBoard !== null && multiLanded.sha.startsWith(multiBoard.sha));
+    check("(7c) multi-commit verification tier is \"pathset\", not the weaker \"trailer-only\"", multiBoard?.verification === "pathset");
+  }
+
+  // ── (7f) DoD-3 for PHASE 2 — a multi-commit contribution verified against sha^ (i.e. the Base trailer
+  //     lost/stripped) MUST FAIL, not silently pass. Proves Loom-Worker-Base is load-bearing, not
+  //     decorative: without it, verification falls back to sha^..sha, which only spans this branch's LAST
+  //     commit — a real digest mismatch against the true (larger) stored PathSet, correctly rejected. ─────
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-pathset-nobase-${sfx}`);
+    makeRepo(repo);
+    const multi3 = await cutBranchMultiCommit(repo, "ps-nobase", [
+      { file: "ps-nobase-1.txt", content: "n1\n", message: "feat(test): ps nobase 1" },
+      { file: "ps-nobase-2.txt", content: "n2\n", message: "feat(test): ps nobase 2" },
+      { file: "ps-nobase-3.txt", content: "n3\n", message: "feat(test): ps nobase 3" },
+    ]);
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-nobase-${sfx}`);
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [multi3], passGate);
+    check("(7f) precondition: the 3-commit branch landed", result.ok === true && result.landed.length === 1);
+    const landed = result.landed[0];
+    check("(7f) precondition: canonical main gained exactly 3 commits (all 3, not squashed)",
+      git(repo, `rev-list --count ${baseMainSha}..HEAD`) === "3");
+
+    // Strip ONLY the Loom-Worker-Base trailer, keeping the real Loom-Worker-PathSet (the TRUE 3-commit
+    // digest) untouched — simulates the exact case DoD-3 asks for: verifying a multi-commit contribution
+    // with no base override, so verifyPersistedPathSet falls back to sha^.
+    const realBody = git(repo, `log -1 --format=%B ${landed.sha}`);
+    check("(7f) precondition: the real commit carries both trailers before stripping", /Loom-Worker-Base: \S+/.test(realBody) && /Loom-Worker-PathSet: \S+/.test(realBody));
+    const subject = realBody.split("\n\n")[0];
+    const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
+    const pathSetTrailerLine = realBody.match(/^Loom-Worker-PathSet: .+$/m)[0];
+    execSync(`git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "${pathSetTrailerLine}"`, { cwd: repo });
+    const strippedSha = git(repo, "rev-parse HEAD");
+    check("(7f) precondition: the Base trailer is really gone now", !/Loom-Worker-Base:/.test(git(repo, `log -1 --format=%B ${strippedSha}`)));
+
+    removeWorktree(repo, multi3.worktreePath);
+    deleteBranchAndGc(repo, multi3.branch);
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, multi3.taskId);
+    check("(7f) DoD-3: verifying the TRUE multi-commit PathSet against sha^ (no Base trailer) FAILS closed — getTaskMergedInfo returns null, not a false pathset/content pass", board === null);
+  }
+
+  // ── (7g) AUTHOR PRESERVATION ACROSS THE PATHSET AMEND — the pre-amend code deliberately invests in
+  //     `--author`/`--date` to keep the worker's own authorship (batch-merge.ts); the follow-up
+  //     `git commit --amend` that adds Loom-Worker-Base/PathSet relies on git's IMPLICIT default of
+  //     preserving author on an unattributed amend, rather than passing `--author`/`--date` again. Only a
+  //     discriminating test if the worker's author identity DIFFERS from the identity performing the
+  //     amend — every other test in this file uses the SAME identity for both, so this is a dedicated case. ─
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-author-${sfx}`);
+    makeRepo(repo);
+    const taskId = `bm-task-author-${sfx}`;
+    const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+    fs.writeFileSync(path.join(worktreePath, "author-check.txt"), "authored work\n");
+    // Distinct from GIT_ID (bm@loom/bm) — the identity that will later perform the amend in the batch
+    // worktree (its own git config, inherited from makeRepo). A broken amend that silently resets author
+    // to the CURRENT committer would produce bm/bm@loom here instead — this is what makes it discriminating.
+    const WORKER_AUTHOR_NAME = "Worker Author";
+    const WORKER_AUTHOR_EMAIL = "worker-author@example.com";
+    const WORKER_AUTHOR_DATE_INPUT = "2020-01-01T00:00:00+00:00";
+    execSync(`git add author-check.txt`, { cwd: worktreePath });
+    execSync(
+      `git -c user.name="${WORKER_AUTHOR_NAME}" -c user.email=${WORKER_AUTHOR_EMAIL} commit -q -m "author-check work"`,
+      { cwd: worktreePath, env: { ...process.env, GIT_AUTHOR_DATE: WORKER_AUTHOR_DATE_INPUT, GIT_COMMITTER_DATE: WORKER_AUTHOR_DATE_INPUT } },
+    );
+    // Read git's OWN %aI normalization back (it renders a "+00:00" offset as "Z") rather than assuming a
+    // format, so this doesn't depend on guessing git's exact ISO-8601 rendering rules.
+    const WORKER_AUTHOR_DATE = git(worktreePath, "log -1 --format=%aI");
+    const worker = { workerSessionId: `bm-wkr-author-${sfx}`, taskId, branch, taskTitle: "feat(test): author-check" };
+    // NOTE: `<`, `>`, `|` are all cmd.exe metacharacters (redirection / pipe) — query each field with its
+    // OWN plain `git log` call rather than a delimited multi-field format, or execSync silently
+    // mis-parses the command on Windows.
+    check("(7g) precondition: the worker's own commit is authored under the DISTINCT identity, not GIT_ID's",
+      git(worktreePath, "log -1 --format=%an") === WORKER_AUTHOR_NAME && git(worktreePath, "log -1 --format=%ae") === WORKER_AUTHOR_EMAIL);
+
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-author-${sfx}`);
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [worker], passGate);
+    check("(7g) precondition: it landed and carries a PathSet trailer (went through the amend path)",
+      result.ok === true && result.landed.length === 1 && /Loom-Worker-PathSet: \S+/.test(git(repo, `log -1 --format=%B ${result.landed[0].sha}`)));
+
+    const landedSha = result.landed[0].sha;
+    check("(7g) the AMENDED (PathSet-bearing) commit still carries the worker's own author name+email, not the batch identity's",
+      git(repo, `log -1 --format=%an ${landedSha}`) === WORKER_AUTHOR_NAME && git(repo, `log -1 --format=%ae ${landedSha}`) === WORKER_AUTHOR_EMAIL);
+    check("(7g) the AMENDED commit still carries the worker's own original author date",
+      git(repo, `log -1 --format=%aI ${landedSha}`) === WORKER_AUTHOR_DATE);
+  }
+
+  // ── (7d) POSITIVE CONTROL — a WRONG/forged Loom-Worker-PathSet digest is REJECTED, not silently trusted ─
+  //     Proves the check can actually FAIL: without this, a check that always reports "verified" would
+  //     pass every test above for the wrong reason.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-pathset-forged-${sfx}`);
+    makeRepo(repo);
+    const wrong = await cutBranch(repo, "ps-forged", "ps-forged.txt", "forged branch work\n");
+    const decoy = await cutBranch(repo, "ps-decoy", "ps-decoy.txt", "decoy branch work\n");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-forged-${sfx}`);
+
+    // `decoy` lands FIRST, `wrong` lands LAST — so wrong's tip commit ends up at canonical HEAD, where
+    // `git commit --amend` can reach it directly.
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [decoy, wrong], passGate);
+    check("(7d) precondition: both landed", result.ok === true && result.landed.length === 2);
+    const wrongLanded = result.landed.find((l) => l.branch === wrong.branch);
+    const decoyLanded = result.landed.find((l) => l.branch === decoy.branch);
+    check("(7d) precondition: wrong's tip is canonical HEAD (landed last)", git(repo, "rev-parse HEAD") === wrongLanded.sha);
+
+    // Corrupt the just-landed commit's trailer to declare the DECOY's own real digest instead of its own —
+    // same forged-trailer shape as merge-pathset-deleted-branch.mjs's own case (1), applied to a batch-
+    // landed single-commit tip. Rebuilt via separate -m paragraphs (not one embedded-newline string) to
+    // avoid cross-platform shell-quoting hazards.
+    const forgedDigest = pathSetDigest(repo, `${decoyLanded.sha}~1`, decoyLanded.sha);
+    const realBody = git(repo, `log -1 --format=%B ${wrongLanded.sha}`);
+    const subject = realBody.split("\n\n")[0];
+    const branchTrailerLine = realBody.match(/^Loom-Worker-Branch: .+$/m)[0];
+    check("(7d) precondition: the forged digest actually differs from the real stamped one", !realBody.includes(`Loom-Worker-PathSet: ${forgedDigest}`));
+    execSync(`git ${GIT_ID} commit --amend -q -m "${subject.replace(/"/g, '\\"')}" -m "${branchTrailerLine}" -m "Loom-Worker-PathSet: ${forgedDigest}"`, { cwd: repo });
+    const forgedSha = git(repo, "rev-parse HEAD");
+
+    removeWorktree(repo, wrong.worktreePath);
+    removeWorktree(repo, decoy.worktreePath);
+    deleteBranchAndGc(repo, wrong.branch);
+    deleteBranchAndGc(repo, decoy.branch);
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, wrong.taskId);
+    check("(7d) a forged/wrong PathSet digest is REJECTED once the branch is gone (verifyPersistedPathSet fails closed)", board === null);
+    check("(7d) sanity: the forged commit really is what's on main now", git(repo, "rev-parse HEAD") === forgedSha);
+  }
+
+  // ── (7e) ROBUSTNESS — a single-commit branch cherry-picks CLEANLY (no conflict) onto a tree where an
+  //     earlier-landed batch member RENAMED the very file this branch also edits. The stamped digest must
+  //     reflect the LANDED file name, not the branch's own pre-landing file name — this is the exact
+  //     divergence this card's investigation found and is why the digest is computed from the landed range
+  //     (batchHeadBefore..landedSha), never from the branch's own pre-landing mergeBase..branchTip diff. ──
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-pathset-rename-${sfx}`);
+    makeRepo(repo);
+    fs.writeFileSync(path.join(repo, "renameable.txt"), "line1\nline2\nline3\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "seed renameable.txt"`, { cwd: repo });
+
+    // "renamer" lands FIRST in the batch and renames the shared file.
+    const renamerTaskId = `bm-task-renamer-${sfx}`;
+    const renamerWt = await createWorktree(repo, projId, renamerTaskId);
+    execSync(`git mv renameable.txt renamed.txt`, { cwd: renamerWt.worktreePath });
+    execSync(`git ${GIT_ID} commit -q -m "renamer: rename the shared file"`, { cwd: renamerWt.worktreePath });
+    const renamer = { workerSessionId: `bm-wkr-renamer-${sfx}`, taskId: renamerTaskId, branch: renamerWt.branch, taskTitle: "feat(test): renamer", worktreePath: renamerWt.worktreePath };
+
+    // "editor" (single commit) edits a DIFFERENT line of the ORIGINAL (pre-rename) file — a clean,
+    // non-conflicting cherry-pick once it lands on top of the renamer's already-landed rename.
+    const editorTaskId = `bm-task-editor-${sfx}`;
+    const editorWt = await createWorktree(repo, projId, editorTaskId);
+    const lines = fs.readFileSync(path.join(editorWt.worktreePath, "renameable.txt"), "utf8").split("\n");
+    lines[2] = "line3-EDITED";
+    fs.writeFileSync(path.join(editorWt.worktreePath, "renameable.txt"), lines.join("\n"));
+    execSync(`git add . && git ${GIT_ID} commit -q -m "editor: edit the shared file"`, { cwd: editorWt.worktreePath });
+    const editor = { workerSessionId: `bm-wkr-editor-${sfx}`, taskId: editorTaskId, branch: editorWt.branch, taskTitle: "feat(test): editor", worktreePath: editorWt.worktreePath };
+
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-rename-${sfx}`);
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [renamer, editor], passGate);
+
+    check("(7e) precondition: both landed cleanly (no conflict — rename-following cherry-pick)", result.ok === true && result.landed.length === 2);
+    const editorLanded = result.landed.find((l) => l.branch === editor.branch);
+    const editorBody = git(repo, `log -1 --format=%B ${editorLanded.sha}`);
+    check("(7e) precondition: the editor's landed commit touched the RENAMED path, not the original name",
+      git(repo, `diff --name-only --no-renames ${editorLanded.sha}~1..${editorLanded.sha}`).trim() === "renamed.txt");
+    check("(7e) the editor's stamped PathSet digest reflects the LANDED (renamed) path", (() => {
+      const m = editorBody.match(/Loom-Worker-PathSet: (\S+)/);
+      if (!m) return false;
+      const landedDigest = pathSetDigest(repo, `${editorLanded.sha}~1`, editorLanded.sha);
+      return m[1] === landedDigest;
+    })());
+
+    removeWorktree(repo, editor.worktreePath);
+    removeWorktree(repo, renamer.worktreePath);
+    deleteBranchAndGc(repo, editor.branch);
+    deleteBranchAndGc(repo, renamer.branch);
+    __resetMergedCommitMapCacheForTest();
+    const board = await getTaskMergedInfo(repo, editor.taskId);
+    check("(7e) verification still resolves to \"pathset\" post-deletion despite the upstream rename", board?.verification === "pathset");
   }
 
   // ── fastForwardCanonicalMain: a no-op batch (nothing landed on top) is a safe success, not a refusal ──

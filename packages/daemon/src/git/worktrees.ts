@@ -2739,6 +2739,36 @@ async function branchContentLandedInCommit(
 const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 
 /**
+ * The `Loom-Worker-Base:` trailer (card d62dad73 phase 2) — a BATCHED landing's tip commit stamps this
+ * alongside `Loom-Worker-PathSet` to record the explicit base its digest was computed against: the batch
+ * tip as it stood immediately before this branch's own cherry-picks began (`batchHeadBefore` in {@link
+ * landBranchCommitsIndividually}, `git/batch-merge.ts`) — a real commit in the LANDED history, equal to the
+ * FIRST cherry-picked commit's own `sha^`, since that first commit lands directly onto it. It is NOT equal
+ * to the TIP's own `sha^` once a branch contributes more than one commit — the tip's `sha^` is then the
+ * branch's own PREVIOUS cherry-picked commit, not `batchHeadBefore` — which is exactly why this trailer
+ * exists: without it, verification would have nothing but the tip's own too-narrow `sha^` to fall back to.
+ *
+ * A SOLO squash merge ({@link mergeBranchLocked}) never stamps this. 🔴 **Its own digest is NOT computed
+ * against `HEAD`/`sha^`** — it's computed against `merge-base(HEAD, branch)` (`git/worktrees.ts`, the
+ * `mergeBaseForSquashMeta` call in the squash-commit path), and `sha^` coincides with that base ONLY for an
+ * UP-TO-DATE branch (main hasn't advanced past the branch's own fork point at squash time). When main HAS
+ * advanced, the two diverge — the same rename-following divergence this card's batch investigation found
+ * (main renames a file the branch also edits; the squash lands cleanly under the renamed path while the
+ * stamped digest, computed from the branch's own pre-landing diff, still names the original path). This is
+ * a KNOWN OPEN GAP on the solo path — carded separately as `756a2cd8` — not redundancy, and NOT a defect in
+ * the sense of a false positive: it FAILS CLOSED exactly like every other check in this file (a genuinely
+ * landed commit reads as unverified, never a false green). Exposure is narrow in practice: {@link
+ * mergeMainIntoWorktree}'s stale-base auto-forward makes `merge-base(HEAD, branch) === HEAD` the common
+ * case, which is exactly when this gap is a no-op.
+ *
+ * {@link verifyPersistedPathSet} prefers this trailer's value when present and falls back to `sha^` when
+ * absent — backward compatible by construction: every solo-squash and pre-phase-2 batched commit lacks
+ * this trailer and keeps today's exact `sha^`-based behavior (including the solo path's own open gap above,
+ * unchanged either way).
+ */
+const LOOM_WORKER_BASE_TRAILER = /^Loom-Worker-Base:\s*(\S+)/m;
+
+/**
  * The raw changed-path list between `base` and `ref` — the single git-diff invocation {@link
  * changedPathSetDigest} and {@link isInertMergeDiff} BOTH build on (Code Review, card db9b0130: extracted
  * after the two calls were found to have drifted into byte-identical copies of the same `git diff` args —
@@ -2825,8 +2855,16 @@ async function changedPathsBetween(
  * the digest recorded at merge time from `mergeBase..branch`. The two path sets then genuinely differ, an
  * honest merge mismatches, and the caller falls through to null/a redundant merge attempt. Rare (main and
  * the branch would have to land the exact same bytes independently), never unsafe.
+ *
+ * Exported for {@link batch-merge.ts}'s per-branch PathSet stamp (card d62dad73 phase 2) — that caller
+ * computes this digest over `batchHeadBefore..landedSha`: the batch tip as it stood immediately before this
+ * branch's OWN cherry-picks began, through its final landed commit — covering the branch's WHOLE
+ * contribution regardless of commit count, never the tip commit's own `sha^` (which would only span its
+ * last cherry-picked commit) and never the original un-landed branch's own diff. This is the only
+ * invocation shape proven safe against a rename-following cherry-pick (see that file's own header doc for
+ * why the original-branch range is NOT safe to reuse here).
  */
-async function changedPathSetDigest(
+export async function changedPathSetDigest(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string> {
   const paths = (await changedPathsBetween(git, base, ref, timeoutMs)).sort();
@@ -3997,12 +4035,20 @@ export function buildReducedGateCommand(changedTestFiles: string[]): string {
  * dominates the pre-f621f185 answer (trailer presence alone, no path check at all) and never introduces a
  * false positive it wouldn't already have produced — but a caller must not read a `true` here as "content
  * verified" the way {@link branchContentLandedInCommit}'s `true` (the branch-PRESENT path) actually is.
+ *
+ * `baseOverride`, when supplied (card d62dad73 phase 2 — the commit's own `Loom-Worker-Base` trailer, if
+ * present), is used as the base instead of `sha^` — required for a BATCHED landing's tip commit whose own
+ * `sha^` only spans its LAST cherry-picked commit, not the branch's whole contribution (see
+ * `git/batch-merge.ts`'s header doc for the full "why the digest is computed from the landed range"
+ * reasoning, and its own `landBranchCommitsIndividually` for where `Loom-Worker-Base` is stamped). Omitted
+ * (every solo-squash commit, and every pre-phase-2 batched commit), this is BYTE-IDENTICAL to the original
+ * `sha^`-only behavior — backward compatible by construction, never a behavior change for existing history.
  */
 async function verifyPersistedPathSet(
-  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedDigest: string,
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedDigest: string, baseOverride?: string,
 ): Promise<boolean> {
   try {
-    const parent = (await withTimeout(
+    const parent = baseOverride ?? (await withTimeout(
       git.raw(["rev-parse", `${sha}^`]), timeoutMs, "git rev-parse (path-set verify parent)",
     )).trim();
     const actual = await changedPathSetDigest(git, parent, sha, timeoutMs);
@@ -4090,7 +4136,11 @@ export async function findLandedSquashCommit(
       // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has one.
       const pathSetMatch = body.match(LOOM_WORKER_PATHSET_TRAILER);
       if (pathSetMatch) {
-        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!))) return null;
+        // Phase 2 (card d62dad73): prefer the commit's own Loom-Worker-Base trailer as the verification
+        // base when present (a batched multi-commit landing); undefined here falls back to sha^ exactly
+        // as before for a solo squash or a pre-phase-2 batched commit — see verifyPersistedPathSet's doc.
+        const baseMatch = body.match(LOOM_WORKER_BASE_TRAILER);
+        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!, baseMatch?.[1]))) return null;
       } else if (onPreFixTrailerNotice) {
         onPreFixTrailerNotice(branch, sha);
       } else {
@@ -4507,12 +4557,17 @@ const LOOM_WORKER_BRANCH_TRAILER = /^Loom-Worker-Branch:\s*(\S+)/m;
 
 /**
  * Per-branch map entry: the landed commit's persisted `Loom-Worker-PathSet` digest, if this commit
- * carries one (card f621f185), else `null` for pre-fix history. Exported (card 6ee48e4d) only because
- * it's structurally part of {@link MergedCommitScan}, itself exported for {@link getMergedCommitMapCached}
- * — {@link getTaskMergedInfo}'s own public return stays the plain {@link MergedCommitInfo} shape.
+ * carries one (card f621f185), else `null` for pre-fix history. `baseSha` (card d62dad73 phase 2) is the
+ * commit's own `Loom-Worker-Base` trailer value, if present — a BATCHED multi-commit landing's explicit
+ * verification base; `null` for a solo squash or a pre-phase-2 batched commit, where `resolveMergedCommitMapHit`
+ * falls back to `sha^` exactly as before (see {@link verifyPersistedPathSet}'s own doc). Exported (card
+ * 6ee48e4d) only because it's structurally part of {@link MergedCommitScan}, itself exported for {@link
+ * getMergedCommitMapCached} — {@link getTaskMergedInfo}'s own public return stays the plain {@link
+ * MergedCommitInfo} shape.
  */
 export interface MergedMapEntry extends MergedCommitInfo {
   pathSetDigest: string | null;
+  baseSha: string | null;
 }
 
 /**
@@ -4582,7 +4637,14 @@ async function scanMergedCommitMap(
       if (!sha || !trailer) continue;
       const branch = trailer[1]!;
       const pathSetTrailer = body.match(LOOM_WORKER_PATHSET_TRAILER);
-      if (!map.has(branch)) map.set(branch, { sha, date, pathSetDigest: pathSetTrailer ? pathSetTrailer[1]! : null }); // first hit = most recent (reverse-chron)
+      const baseTrailer = body.match(LOOM_WORKER_BASE_TRAILER);
+      if (!map.has(branch)) {
+        map.set(branch, { // first hit = most recent (reverse-chron)
+          sha, date,
+          pathSetDigest: pathSetTrailer ? pathSetTrailer[1]! : null,
+          baseSha: baseTrailer ? baseTrailer[1]! : null,
+        });
+      }
     }
   } catch {
     return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
@@ -4728,8 +4790,10 @@ async function resolveMergedCommitMapHit(
       if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
       return { sha: hit.sha, verification: "content" };
     } else if (hit.pathSetDigest) {
-      // Branch gone (card f621f185): verify against the persisted path-set trailer.
-      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest))) return null;
+      // Branch gone (card f621f185): verify against the persisted path-set trailer. `hit.baseSha`
+      // (card d62dad73 phase 2) prefers the commit's own Loom-Worker-Base trailer when present (a batched
+      // multi-commit landing); undefined/null falls back to sha^ exactly as before.
+      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest, hit.baseSha ?? undefined))) return null;
       return { sha: hit.sha, verification: "pathset" };
     }
     // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer.

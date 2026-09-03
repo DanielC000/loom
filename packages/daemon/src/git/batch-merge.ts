@@ -1,6 +1,6 @@
 import type { SimpleGit } from "simple-git";
 import { withTimeout, boundedSimpleGit } from "./bounded.js";
-import { findLandedSquashCommit, type MergeEmptyKind } from "./worktrees.js";
+import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } from "./worktrees.js";
 import { nonInteractiveEnv } from "./writer.js";
 
 /**
@@ -39,16 +39,46 @@ import { nonInteractiveEnv } from "./writer.js";
  * expects, and a branch's ship-state has always been "found via ITS trailer commit", never "every commit
  * this branch happens to touch".
  *
- * ⚠️ **`Loom-Worker-PathSet` is deliberately OMITTED on a batched landing's tip commit** (unlike the solo
- * squash path, which stamps one). That trailer's OWN verification contract (`verifyPersistedPathSet`,
- * `git/worktrees.ts`) assumes the commit it's attached to IS the whole branch's diff (`sha^..sha` spans
- * everything the branch changed — true for a one-commit squash, false for a multi-commit tip that only
- * carries its OWN last commit's diff). Stamping a full-branch-range digest on a commit whose own `sha^..sha`
- * is much narrower would make that trailer LIE about what it claims to prove, silently breaking `pathset`-
- * tier verification once the branch ref is deleted. Omitting it is SAFE, not a regression: `findLandedSquashCommit`
- * already has a graceful degrade for a trailer commit with no `Loom-Worker-PathSet` — it falls back to
- * `Loom-Worker-Branch` presence alone (the same `trailer-only` tier every pre-`f621f185` commit gets), just
- * a weaker verification tier once the branch is gone, never a false answer either way.
+ * ⭐ **`Loom-Worker-PathSet` + `Loom-Worker-Base` are now stamped on EVERY batched branch's tip, regardless
+ * of commit count** (card d62dad73 phase 2 — SUBSUMES phase 1's single-commit-only special case, which
+ * existed only as a stopgap and has been folded away; see git history for that narrower version if needed).
+ * `Loom-Worker-Base: <batchHeadBefore>` records the batch tip as it stood immediately before this branch's
+ * OWN cherry-picks began — a real, already-existing commit reachable from HEAD forever once the batch
+ * fast-forwards canonical main (a fast-forward never rewrites history, so this ancestry relationship is
+ * permanent). `Loom-Worker-PathSet` is the digest of `batchHeadBefore..landedSha` — the branch's ACTUAL
+ * landed contribution (ALL of its commits, not just the last one). `verifyPersistedPathSet`
+ * (`git/worktrees.ts`) prefers this trailer's base over its default `sha^` fallback, so a multi-commit
+ * contribution — where `sha^` would only span the tip's own last commit, not the whole branch — verifies
+ * correctly instead of lying. See {@link landBranchCommitsIndividually}'s own implementation: the tip
+ * commit lands WITHOUT either trailer first (so its real sha exists), the digest is computed via {@link
+ * changedPathSetDigest} against that real sha and `batchHeadBefore`, then BOTH trailers are added via
+ * `git commit --amend` (which preserves the original author/date by default — verified empirically, not
+ * assumed).
+ *
+ * 🔴 **WHY THE DIGEST IS COMPUTED FROM THE LANDED RANGE, NOT THE ORIGINAL BRANCH'S OWN DIFF** (card
+ * d62dad73's flagged untested assumption — investigated, and the naive alternative it warned against is
+ * REAL): a cherry-picked commit's touched-path-set CAN genuinely differ from the same commit's diff on its
+ * original branch, with NO conflict at all — reproduced with a clean (`cherry-pick` exit 0, no merge
+ * markers) rename on the receiving side: main renames a file the branch also edits ({@code git mv
+ * shared.txt shared-renamed.txt}), then a cherry-pick of the branch's edit to `shared.txt` lands cleanly as
+ * an edit to `shared-renamed.txt` (git's rename-following 3-way merge). The ORIGINAL branch's own
+ * `mergeBase..branchTip` diff says `shared.txt`; the LANDED `batchHeadBefore..landedSha` diff says
+ * `shared-renamed.txt` — genuinely different digests for the identical logical change, and this is NOT a
+ * conflict the batch's own drop-wholesale policy would ever catch. Computing the trailer from the branch's
+ * pre-landing diff (the shape {@link mergeBranchLocked}'s own solo-path stamp uses) would make the trailer
+ * LIE the moment {@link verifyPersistedPathSet} later recomputes it from the commit's REAL ancestry (either
+ * `sha^..sha` or, here, `Loom-Worker-Base..sha` — both are the LANDED range) — a false verification failure
+ * (fails closed, so safe, but defeats the point). **This is a semantics point worth restating plainly:
+ * `Loom-Worker-PathSet` describes WHAT LANDED on main, NOT what the branch originally touched on its own
+ * fork — under rename-following, those two can legitimately differ with no conflict involved. A future
+ * reader who diffs a branch's own history against this trailer and finds a mismatch is looking at expected
+ * behavior, not a bug to "fix".** The fix that makes this safe: stamp the digest computed from
+ * `batchHeadBefore..landedSha` — the branch's ACTUAL landed contribution, using two real, already-existing
+ * commits in the batch's own history — which is trivially and unconditionally IDENTICAL to what {@link
+ * verifyPersistedPathSet} will recompute later, by construction, regardless of any rename/auto-merge on the
+ * receiving side. See `test/batch-merge.mjs` case (7e) for this exact scenario, kept as a permanent
+ * regression guard: the landed-range digest verifies GREEN there in precisely the case where a pre-landing
+ * digest would have gone red.
  *
  * ⚠️ A branch whose own commit range contains a MERGE commit (e.g. a stale-base auto-forward that unioned
  * main into the worker's worktree mid-work — `mergeMainIntoWorktree`) is DROPPED, not cherry-picked:
@@ -176,10 +206,12 @@ interface LandResult {
  * per-branch assembly step card 6801c0a1 rewrote (see this file's own header doc for the full rationale).
  *
  * Mechanism: cherry-pick every commit in `merge-base(HEAD, branch)..branch`, OLDEST FIRST, each as its own
- * commit (never squashed, never a merge commit). The LAST (tip) commit gets the `Loom-Worker-Branch:
- * <branch>` trailer appended to its message (see the header doc for why the tip, and why NOT
- * `Loom-Worker-PathSet`) — every earlier commit from this branch lands with its ORIGINAL message,
- * unmodified.
+ * commit (never squashed, never a merge commit). The LAST (tip) commit gets `Loom-Worker-Branch: <branch>`
+ * PLUS `Loom-Worker-Base`/`Loom-Worker-PathSet` (card d62dad73 phase 2) appended to its message, added via a
+ * follow-up `git commit --amend` once the tip's real sha exists — every earlier commit from this branch
+ * lands with its ORIGINAL message, unmodified. See the header doc's "WHY THE DIGEST IS COMPUTED FROM THE
+ * LANDED RANGE..." section for why the base must be `batchHeadBefore` (this branch's own pre-cherry-pick
+ * batch tip), never the branch's own pre-landing diff.
  *
  * ALL-OR-NOTHING PER BRANCH: if ANY commit in the range fails to cherry-pick (a real conflict, or any
  * other failure), the cherry-pick is aborted and the batch worktree is HARD-RESET back to exactly where it
@@ -321,6 +353,33 @@ async function landBranchCommitsIndividually(
     } catch (e) {
       await rollback();
       return { ok: false, reason: `${branch}: commit failed while landing tip commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
+    }
+    // Stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` via a follow-up amend (card d62dad73 phase 2),
+    // computed from the LANDED range (batchHeadBefore..the commit just created) — NOT from this branch's
+    // own pre-landing diff, which can genuinely differ with no conflict involved (a clean rename-following
+    // cherry-pick reproduced this; see the header doc's "WHY THE DIGEST IS COMPUTED FROM THE LANDED
+    // RANGE..." section). `batchHeadBefore` is fixed for this whole call (captured once before the loop
+    // above began), so this covers the branch's ENTIRE contribution regardless of commit count — for a
+    // single-commit branch it's unconditionally identical to `sha^..sha` (phase 1's now-folded-away special
+    // case); for a multi-commit branch it's exactly what {@link verifyPersistedPathSet} needs the explicit
+    // `Loom-Worker-Base` trailer for, since its own `sha^..sha` would only span this last commit. Best-
+    // effort, matching {@link mergeBranchLocked}'s own PathSet capture: a failure here just omits both
+    // trailers (the commit above already landed and stays valid without them, degrading to the existing
+    // `trailer-only` tier) rather than failing an otherwise-successful branch.
+    try {
+      const landedSha = (await withTimeout(
+        git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, pathset)",
+      )).trim();
+      const digest = await changedPathSetDigest(git, batchHeadBefore, landedSha, timeoutMs);
+      const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
+      await withTimeout(
+        git.raw([...identityArgs, "commit", "--amend", "-m", amendedMessage]),
+        timeoutMs, "git commit --amend (batch land, pathset)",
+      );
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
+        `commit lands without either trailer: ${(e as Error).message}`);
     }
   }
 
