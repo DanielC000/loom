@@ -37,6 +37,13 @@ const NOW = new Date("2026-06-11T12:00:00.000Z");
 const STABILITY_MS = 120_000; // 2 min — the injected stability window for these tests
 const at = (ms) => new Date(NOW.getTime() + ms);
 
+// PRODUCTION-SHAPE DEFAULT (card 0d5b0b13 — inversion): index.ts always wires `enqueueDurableNudge`
+// (sessions.enqueueDurableNudge.bind(sessions)); the raw `pty.enqueueStdin` dispatch is only a FALLBACK
+// for a test double that omits the dep. So `makeEnv()` now defaults to a WIRED recording stub — every
+// test below exercises dispatchNudge's real (production) branch unless it opts out. To exercise the
+// fallback branch specifically, pass `enqueueDurableNudge: null` (the explicit "no dep" sentinel — distinct
+// from simply not passing the option, which now means "give me the default wired stub"). Passing an actual
+// function (as (17a)/(17b) below do, to inspect their OWN call log) still works unchanged.
 function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-crash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
@@ -52,9 +59,15 @@ function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
   const resume = (id) => { resumes.push(id); db.setProcessState(id, "live"); return true; };
   const enqueued = [];
   const pty = { enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; } };
+  const durableCalls = [];
+  const dep = enqueueDurableNudge === undefined
+    ? (id, role, text, taskId) => { durableCalls.push({ id, role, text, taskId }); } // default: production shape
+    : enqueueDurableNudge === null
+      ? undefined // explicit opt-out → dispatchNudge falls back to raw pty.enqueueStdin
+      : enqueueDurableNudge; // caller-supplied stub (e.g. (17a)/(17b) inspecting their own log)
   const control = new OrchestrationControl();
-  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge });
-  return { dbFile, db, projId, agentId, resumes, enqueued, control, watcher, resume };
+  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge: dep });
+  return { dbFile, db, projId, agentId, resumes, enqueued, durableCalls, control, watcher, resume };
 }
 
 // Seed a session. Defaults: a resumable, EXITED manager (the recovery target).
@@ -134,11 +147,12 @@ function cleanup(e) {
   e.watcher.tick(at(100));
   check("(2) a dead session with session_died is AUTO-RESUMED on tick", e.resumes.length === 1 && e.resumes[0] === "s2");
   check("(2) the resume attempt is recorded (attempt 1 of 3)", evKinds(e, "s2", "session_resume_attempt").length === 1 && evKinds(e, "s2", "session_resume_attempt")[0].detail?.attempt === 1 && evKinds(e, "s2", "session_resume_attempt")[0].detail?.maxAttempts === 3);
-  check("(2) a continuation nudge is enqueued to the recovered session (so it re-engages, not just idle)", e.enqueued.length === 1 && e.enqueued[0].id === "s2" && /auto-recovered/.test(e.enqueued[0].text));
+  check("(2) a continuation nudge is dispatched (production shape: enqueueDurableNudge) to the recovered session (so it re-engages, not just idle)", e.durableCalls.length === 1 && e.durableCalls[0].id === "s2" && /auto-recovered/.test(e.durableCalls[0].text));
+  check("(2) raw pty.enqueueStdin is NOT also called (no double-dispatch — dispatchNudge picks ONE branch)", e.enqueued.length === 0);
   // PL Auditor #11 consistency follow-up: the watcher's auto-resume nudge carries the SAME shared
   // RESUME_NUDGE_TAIL as resumeFleetOnBoot — a `claude --resume`'d session has the same engine reality
   // (reset file-read tracking + a bare "Continue" turn), so the nudge must NOTE both.
-  const nudge = e.enqueued[0].text;
+  const nudge = e.durableCalls[0].text;
   check("(2) the auto-resume nudge carries the shared RESUME_NUDGE_TAIL (DRY — one source)", nudge.includes(RESUME_NUDGE_TAIL));
   check("(2) the tail's file-read-reset note is present (re-Read before Edit)", /reset your file-read tracking/.test(nudge) && /Read a file again before you Edit/.test(nudge));
   // card 5d8dea5f: the bare-"Continue" disclaimer paragraph was REMOVED from the tail — the daemon's single
@@ -286,7 +300,7 @@ function cleanup(e) {
   e.watcher.tick(at(100));
   check("(10) a dead assistant session IS auto-resumed on tick (Mission Control is no longer dark)", e.resumes.includes("asst-10b"));
   check("(10) the resume attempt is recorded for the assistant session", evKinds(e, "asst-10b", "session_resume_attempt").length === 1);
-  const nudge = e.enqueued.find((x) => x.id === "asst-10b");
+  const nudge = e.durableCalls.find((x) => x.id === "asst-10b");
   check("(10) the assistant gets an auto-recovered continuation nudge tailored to it (not the manager/worker copy)",
     !!nudge && /auto-recovered/.test(nudge.text) && !/re-dispatch|worker_report/.test(nudge.text));
   cleanup(e);
@@ -305,7 +319,7 @@ function cleanup(e) {
   die(e, "s11a", NOW);
   e.watcher.tick(at(100));
   check("(11a) a dead manager with NO live workers/board/answer is still AUTO-RESUMED", e.resumes.includes("s11a"));
-  check("(11a) but it gets NO continuation nudge (silent — no stake)", e.enqueued.filter((x) => x.id === "s11a").length === 0);
+  check("(11a) but it gets NO continuation nudge (silent — no stake)", e.durableCalls.filter((x) => x.id === "s11a").length === 0);
   cleanup(e);
 }
 
@@ -316,7 +330,7 @@ function cleanup(e) {
   seedSession(e, "s11b-wkr", { role: "worker", parentSessionId: "s11b", processState: "live" });
   die(e, "s11b", NOW);
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11b");
+  const nudge = e.durableCalls.find((x) => x.id === "s11b");
   check("(11b) a manager with a live worker gets the FULL re-orient nudge",
     !!nudge && /auto-recovered/.test(nudge.text) && /re-check your workers/i.test(nudge.text));
   cleanup(e);
@@ -329,7 +343,7 @@ function cleanup(e) {
   seedSession(e, "s11c", { role: "manager", processState: "exited" });
   recordUndeliveredReport(e.db, e.db.getSession("s11c"), { reportingWorkerId: "wkr-somewhere-else", taskId: null });
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11c");
+  const nudge = e.durableCalls.find((x) => x.id === "s11c");
   check("(11c) a manager resumed via worker_report_undelivered gets the FULL review/merge nudge (queuedIoReplayed stake)",
     !!nudge && /worker_list/.test(nudge.text) && /review/.test(nudge.text));
   // Card b25ed05a #1: the dropped parenthetical asserted CURRENT board state ("the task is already in
@@ -353,7 +367,7 @@ function cleanup(e) {
   seedTask(e, "s11d-task");
   die(e, "s11d", NOW);
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11d");
+  const nudge = e.durableCalls.find((x) => x.id === "s11d");
   check("(11d) a dead platform (Lead) with ORDINARY pending board work (policy 'watching') now resumes SILENTLY — idle-watcher covers it", !nudge);
   cleanup(e);
 }
@@ -369,7 +383,7 @@ function cleanup(e) {
   e.db.setIdleNudgePolicy("s11d2", "suppressed");
   die(e, "s11d2", NOW);
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11d2");
+  const nudge = e.durableCalls.find((x) => x.id === "s11d2");
   check("(11d2) a dead platform (Lead) with STRANDED board work (escalated-suppressed policy) still gets the FULL nudge",
     !!nudge && /auto-recovered/.test(nudge.text));
   // card 2ed72a24 (Finding 1): Path C now mirrors Path A's role==='platform' copy branch — no
@@ -391,7 +405,7 @@ function cleanup(e) {
   e.db.setIdleNudgePolicy("s11e", "suppressed");
   die(e, "s11e", NOW);
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11e");
+  const nudge = e.durableCalls.find((x) => x.id === "s11e");
   check("(11e) a manager with STRANDED board work (escalated-suppressed policy) gets the FULL nudge", !!nudge && /re-check your workers/i.test(nudge.text));
   cleanup(e);
 }
@@ -406,7 +420,7 @@ function cleanup(e) {
   });
   die(e, "s11f", NOW);
   e.watcher.tick(at(100));
-  const nudge = e.enqueued.find((x) => x.id === "s11f");
+  const nudge = e.durableCalls.find((x) => x.id === "s11f");
   check("(11f) a manager with an unconsumed ANSWERED question gets the FULL nudge despite an empty board", !!nudge);
   cleanup(e);
 }
@@ -421,7 +435,7 @@ function cleanup(e) {
   seedSession(e, "s11g-wkr", { role: "worker", parentSessionId: "mgr-11g" });
   die(e, "s11g-wkr", NOW);
   e.watcher.tick(at(100));
-  const wnudge = e.enqueued.find((x) => x.id === "s11g-wkr");
+  const wnudge = e.durableCalls.find((x) => x.id === "s11g-wkr");
   check("(11g) the worker auto-recovered nudge does NOT assert worktree integrity",
     !!wnudge && !/your worktree WIP is intact/i.test(wnudge.text));
   check("(11g) it instead points the worker at re-checking its worktree's state",
@@ -434,7 +448,7 @@ function cleanup(e) {
   e.db.setIdleNudgePolicy("s11g-mgr", "suppressed");
   die(e, "s11g-mgr", NOW);
   e.watcher.tick(at(200));
-  const mnudge = e.enqueued.find((x) => x.id === "s11g-mgr");
+  const mnudge = e.durableCalls.find((x) => x.id === "s11g-mgr");
   check("(11g) the manager/platform auto-recovered nudge does NOT assert worktree integrity",
     !!mnudge && !/your worktrees are intact/i.test(mnudge.text));
   check("(11g) it instead tells the manager to re-check workers' state AND worktrees",
@@ -499,7 +513,7 @@ function cleanup(e) {
   e.watcher.tick(at(100));
   check("(13) a dead operator session IS auto-resumed on tick", e.resumes.includes("op-13b"));
   check("(13) the resume attempt is recorded for the operator session", evKinds(e, "op-13b", "session_resume_attempt").length === 1);
-  const nudge = e.enqueued.find((x) => x.id === "op-13b");
+  const nudge = e.durableCalls.find((x) => x.id === "op-13b");
   check("(13) the operator gets its OWN auto-recovered nudge, not the manager/platform 'continue orchestrating' copy",
     !!nudge && /auto-recovered/.test(nudge.text) && !/re-check your workers|continue orchestrating/i.test(nudge.text));
   cleanup(e);
@@ -586,7 +600,7 @@ function cleanup(e) {
   e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16a", workerSessionId: "wkr-16a", taskId: "t16a", kind: "worker_report", detail: { status: "blocked", summary: "need creds", needs: "API key" } });
   die(e, "wkr-16a", at(1000));
   e.watcher.tick(at(1100));
-  const nudge = e.enqueued.find((x) => x.id === "wkr-16a");
+  const nudge = e.durableCalls.find((x) => x.id === "wkr-16a");
   check("(16a) a blocked-and-unresolved worker does NOT get the generic continue-your-task nudge", !nudge || !/continue your assigned task/i.test(nudge.text));
   check("(16a) it DOES get a distinct nudge naming its blocked report and telling it to re-state its blocker",
     !!nudge && /blocked/i.test(nudge.text) && /re-state your blocker/i.test(nudge.text));
@@ -612,7 +626,7 @@ function cleanup(e) {
   e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16b", workerSessionId: "wkr-16b", taskId: "t16b", kind: "worker_report", detail: { status: "done" } });
   die(e, "wkr-16b", at(1000));
   e.watcher.tick(at(1100));
-  const nudge = e.enqueued.find((x) => x.id === "wkr-16b");
+  const nudge = e.durableCalls.find((x) => x.id === "wkr-16b");
   check("(16b) a done-and-awaiting-review worker gets NO nudge at all (silence, matching the boot path)", !nudge);
   cleanup(e);
 }
@@ -626,7 +640,7 @@ function cleanup(e) {
   seedSession(e, "wkr-16c", { role: "worker", parentSessionId: "mgr-16c", taskId: "t16c" });
   die(e, "wkr-16c", at(1000));
   e.watcher.tick(at(1100));
-  const nudge = e.enqueued.find((x) => x.id === "wkr-16c");
+  const nudge = e.durableCalls.find((x) => x.id === "wkr-16c");
   check("(16c) CONTROL: an ordinary worker with no report at all still gets the continue-nudge", !!nudge && /continue your assigned task/i.test(nudge.text));
   cleanup(e);
 }
@@ -642,7 +656,7 @@ function cleanup(e) {
   e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "mgr-16d", workerSessionId: "wkr-16d", taskId: "t16d", kind: "message_worker", detail: { text: "here's the key" } });
   die(e, "wkr-16d", at(1000));
   e.watcher.tick(at(1100));
-  const nudge = e.enqueued.find((x) => x.id === "wkr-16d");
+  const nudge = e.durableCalls.find((x) => x.id === "wkr-16d");
   check("(16d) a CONSUMED blocked report (a manager reply already sent) gets the ordinary continue-nudge, not the re-state-your-blocker one",
     !!nudge && /continue your assigned task/i.test(nudge.text) && !/re-state your blocker/i.test(nudge.text));
   cleanup(e);
@@ -684,11 +698,13 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// (17c) REGRESSION GUARD: with NO `enqueueDurableNudge` dep (every pre-existing hermetic test double,
-// throughout this whole file, above) the watcher falls back to the pre-9f7c59f1 raw `pty.enqueueStdin`
-// dispatch, byte-identical — this is what keeps every test (1)-(16d) above passing unmodified.
+// (17c) REGRESSION GUARD — card 0d5b0b13's ONE explicit no-dep test: with `enqueueDurableNudge`
+// EXPLICITLY absent (the `null` opt-out sentinel — every OTHER test in this file now defaults to the
+// wired production stub instead), the watcher falls back to the pre-9f7c59f1 raw `pty.enqueueStdin`
+// dispatch, byte-identical to the pre-9f7c59f1 behavior — proving that fallback branch still works, now
+// that it's no longer the tests' silent default.
 {
-  const e = makeEnv(); // no enqueueDurableNudge — the default every other test in this file already uses
+  const e = makeEnv({ enqueueDurableNudge: null }); // explicit opt-out → exercises the raw fallback branch
   seedSession(e, "mgr-17c", { role: "manager", processState: "live" });
   seedSession(e, "wkr-17c", { role: "worker", parentSessionId: "mgr-17c", taskId: "t17c" });
   die(e, "wkr-17c", at(1000));
@@ -696,6 +712,8 @@ function cleanup(e) {
   const nudge = e.enqueued.find((x) => x.id === "wkr-17c");
   check("(17c) with no enqueueDurableNudge dep, the nudge still lands via raw pty.enqueueStdin (fallback)",
     !!nudge && /continue your assigned task/i.test(nudge.text));
+  check("(17c) durableCalls stays empty (the fallback branch, not the wired one, actually ran)",
+    e.durableCalls.length === 0);
   cleanup(e);
 }
 

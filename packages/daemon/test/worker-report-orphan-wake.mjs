@@ -32,7 +32,12 @@ const NOW = new Date();
 const STABILITY_MS = 600_000; // large: the exited-at-tick paths never reach the recovery (live) branch anyway
 const at = (ms) => new Date(NOW.getTime() + ms);
 
-function makeEnv({ projectConfig = {} } = {}) {
+// PRODUCTION-SHAPE DEFAULT (card 0d5b0b13 — inversion, same shape as crash-recovery-watcher.mjs): index.ts
+// always wires `enqueueDurableNudge` (sessions.enqueueDurableNudge.bind(sessions)); the raw
+// `pty.enqueueStdin` dispatch inside CrashRecoveryWatcher is only a FALLBACK for a test double that omits
+// the dep. So `makeEnv()` now defaults to a WIRED recording stub for the WATCHER's continuation nudges —
+// pass `enqueueDurableNudge: null` to opt OUT and exercise the raw fallback branch instead.
+function makeEnv({ projectConfig = {}, enqueueDurableNudge } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-orphan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `op-${Math.random().toString(36).slice(2, 8)}`;
@@ -63,8 +68,14 @@ function makeEnv({ projectConfig = {} } = {}) {
   const resume = (id) => { resumes.push(id); db.setProcessState(id, "live"); return true; };
   const control = new OrchestrationControl();
   const sessions = new SessionService(db, pty, control);
-  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS });
-  return { dbFile, db, projId, agentId, enqueued, resumes, control, sessions, watcher, setForceQueued: (v) => { forceQueued = v; } };
+  const durableCalls = [];
+  const dep = enqueueDurableNudge === undefined
+    ? (id, role, text, taskId) => { durableCalls.push({ id, role, text, taskId }); } // default: production shape
+    : enqueueDurableNudge === null
+      ? undefined // explicit opt-out → the watcher falls back to raw pty.enqueueStdin
+      : enqueueDurableNudge;
+  const watcher = new CrashRecoveryWatcher({ db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge: dep });
+  return { dbFile, db, projId, agentId, enqueued, durableCalls, resumes, control, sessions, watcher, setForceQueued: (v) => { forceQueued = v; } };
 }
 
 function seedSession(e, id, { role = "manager", processState = "exited", engineSessionId = "eng-" + id, resumability = "resumable", parentSessionId = null, taskId = null, branch = null, rateLimitedUntil = null } = {}) {
@@ -104,8 +115,37 @@ function cleanup(e) {
   e.watcher.tick(at(60_000));
   check("(1) the exited manager is AUTO-RESUMED on the next watcher tick (no human relay)", e.resumes.length === 1 && e.resumes[0] === "mgr-1");
   check("(1) the resume attempt is recorded (shared crash-recovery bound)", evKinds(e, "mgr-1", "session_resume_attempt").length === 1);
-  const nudge = e.enqueued.find((x) => x.id === "mgr-1" && /auto-recovered/.test(x.text));
+  // card 0d5b0b13: production shape (makeEnv's default wired enqueueDurableNudge) — this is the ONLY place
+  // in the repo this worker_report_undelivered-tailored manager nudge text is pinned; see (1b) below for the
+  // same pin on the fallback (no-dep) branch.
+  const nudge = e.durableCalls.find((x) => x.id === "mgr-1" && /auto-recovered/.test(x.text));
   check("(1) the resumed manager is nudged to review/merge the waiting worker", !!nudge && /worker_list/.test(nudge.text) && /review/.test(nudge.text));
+  check("(1) raw pty.enqueueStdin is NOT also called for this nudge (no double-dispatch)", !e.enqueued.some((x) => x.id === "mgr-1" && /auto-recovered/.test(x.text)));
+  cleanup(e);
+}
+
+// ============================ (1b) card 0d5b0b13's ONE explicit no-dep test ============================
+// With `enqueueDurableNudge` EXPLICITLY absent (the `null` opt-out sentinel), the watcher falls back to the
+// raw `pty.enqueueStdin` dispatch — proving that branch still works, and re-pinning the SAME
+// worker_report_undelivered-tailored nudge text there too, so a careless edit can't delete the only
+// coverage of that string by touching just one of the two dispatch branches.
+{
+  const e = makeEnv({ enqueueDurableNudge: null }); // explicit opt-out → exercises the raw fallback branch
+  seedSession(e, "mgr-1b", { role: "manager", processState: "exited" });
+  seedTask(e, "tk-1b");
+  seedSession(e, "wkr-1b", { role: "worker", processState: "live", parentSessionId: "mgr-1b", taskId: "tk-1b" });
+
+  const res = await e.sessions.workerReport("wkr-1b", { status: "done", summary: "WORK-DONE" });
+  check("(1b) the report is still recorded as orphaned (boarded)", res.reported === true && res.deliveryStatus === "boarded");
+  const trig = evKinds(e, "mgr-1b", "worker_report_undelivered");
+  check("(1b) the worker_report_undelivered trigger is still filed", trig.length === 1);
+
+  e.watcher.tick(at(60_000));
+  check("(1b) the exited manager is still AUTO-RESUMED", e.resumes.length === 1 && e.resumes[0] === "mgr-1b");
+  const nudge = e.enqueued.find((x) => x.id === "mgr-1b" && /auto-recovered/.test(x.text));
+  check("(1b) with no enqueueDurableNudge dep, the SAME review/merge nudge text still lands via raw pty.enqueueStdin (fallback)",
+    !!nudge && /worker_list/.test(nudge.text) && /review/.test(nudge.text));
+  check("(1b) durableCalls stays empty (the fallback branch, not the wired one, actually ran)", e.durableCalls.length === 0);
   cleanup(e);
 }
 
