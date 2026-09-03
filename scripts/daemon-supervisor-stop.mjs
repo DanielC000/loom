@@ -162,6 +162,16 @@ async function main() {
   // confirms it's still our supervisor (finding #1). A pid the file names that we can't positively
   // confirm is a REFUSAL, not a guess. On Windows /T /F also takes down its still-live children (the
   // build/daemon procs) once confirmed.
+  //
+  // RESIDUAL WINDOW (not closed by the check above, card a2f821bf): `isOurSupervisor` confirms identity,
+  // but the actual kill happens a moment later — `commandLineOf` itself shells out (spawnSync to
+  // powershell/ps), and in that gap the confirmed process can exit and the OS can reuse its pid. The kill
+  // below can then, in principle, reach an unrelated process. On Windows this is worse: `/T /F` takes the
+  // whole process tree, not just this one pid. Not closed by narrowing — re-checking right before the
+  // kill, or shrinking the gap, still leaves the same window, only smaller. What WOULD close it is
+  // signalling by a stable handle rather than a recyclable number (a Windows process handle taken at
+  // confirmation time and signalled through it directly; a POSIX pidfd) — neither of which Node exposes
+  // cross-platform today. Not reducible with the APIs available to us here, not structurally impossible.
   if (isAlive(rec.pid)) {
     if (!isOurSupervisor(rec.pid)) {
       console.error(`daemon-supervisor: PID ${rec.pid} from the pid file is alive, but its command line does not confirm it as our supervisor (daemon-supervisor.mjs) — the pid may have been reused by an unrelated process since the file was written. Refusing to kill an unverified process. If you're sure it's the stuck supervisor, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
