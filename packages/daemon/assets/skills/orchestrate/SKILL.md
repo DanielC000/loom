@@ -584,6 +584,9 @@ what you checked. Found none? Treat it as live.
      squash, so the usual path-set digest can't apply) — not a defect. And measure savings in gate
      **wall-clock**, never gate-run count — a "reduced" gate is a fraction the length of a full one, so
      counting runs can show a saving exactly where batching cost more time than it saved.
+   - **Before batching, run the retitle check named in the card-titling bullet above** (`ownTipSubject`
+     vs. the card title) on every candidate — a batch never picks up a retitle. Any branch that fails it
+     merges solo instead; batch the rest normally.
    - **Never card, retitle, plan, or dispatch off an intermediate `progress` report — wait for `done`,
      then verify against the tree.** A progress report is the least reliable artifact a worker produces:
      it narrates intent that may not have survived contact with the code, and it's written at the point
