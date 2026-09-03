@@ -99,7 +99,8 @@ task(s) with a clear definition of done, move it out of the intake lane into the
 through like any other card. **Retitle on intake — no raw owner placeholder survives into a working
 column.** When you refine a raw wish (from the intake lane, or a raw placeholder in `backlog`), `tasks_update`
 its TITLE to a proper, descriptive Conventional-Commits title: whether you (a) refine it in place and
-implement it directly (the title becomes the squash commit subject on the mainline, so it MUST be conventional)
+implement it directly (for a SOLO merge the title becomes the squash commit subject on the mainline — see
+the card-titling bullet below for the `merge_batch` exception — so it MUST be conventional)
 or (b) keep it as a decomposed umbrella (the title must still be descriptive; the child cards carry their
 own conventional titles). **Safety:** if an item is ambiguous, irreversible, or outward-facing beyond
 your autonomy bar, refine it into a task and **escalate** per the escalation bar below — don't guess, and
@@ -502,10 +503,14 @@ what you checked. Found none? Treat it as live.
      docs still teach the workaround gets no adoption: it effectively did not ship.
    - **Title cards in Conventional Commits form** — `type(scope): summary` (lowercase type, imperative
      mood, no trailing period, ≤~72-char subject). **DROP the old `[Type, Priority]` bracket** — priority
-     lives in the card's priority field, not the title. WHY: the squash merge uses the card title verbatim
-     as the commit subject on the mainline, so a conventional title *is* a conventional commit. Allowed types:
-     `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. (A title that slips through
-     is coerced by a merge-code safety-net, but title it right — don't lean on the net.)
+     lives in the card's priority field, not the title. WHY: for a SOLO merge, the squash merge uses the
+     card title verbatim as the commit subject on the mainline, so a conventional title *is* a conventional
+     commit, and a title that slips through is coerced by a merge-code safety-net. Allowed types:
+     `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. Title it right — don't lean on
+     the net. **A BATCHED landing (`merge_batch`) is different: it never rewrites or coerces a subject at
+     all — each worker's own commit subjects land verbatim.** Before routing a worker into a batch instead
+     of a solo confirm, title-check its own tip commit the same way — `worker_merge`'s review step exposes
+     it as `ownTipSubject`/`ownTipSubjectConventional`.
    - **The scope is REQUIRED**, and it comes from the **project's own documented list** — a "**Commit
      scopes**" section in that project's `CLAUDE.md`. Pick the scope that names the subsystem the change
      lands in. If the project has **no such list yet**, **DERIVE one at intake** from the repo's real
@@ -593,10 +598,11 @@ what you checked. Found none? Treat it as live.
      worse, since nobody re-examines something already marked done. Before you adopt a claim you're
      building on — including one that only asks you to retract, close, or mark done — mark it tested /
      untested / not-relied-upon.
-   - **Retitle a retracted or reclassified card BEFORE its branch merges.** When a card's premise didn't
-     survive — the "bug" proved not to exist, the work changed nature — but you still merge its branch
-     (say, to keep a regression test as coverage), update the card title FIRST so the squash subject
-     describes what actually landed: a `fix(x): …` becomes e.g. `test(x): regression coverage for …
+   - **Retitle a retracted or reclassified card BEFORE its branch merges — for a SOLO merge** (the
+     card-titling bullet above names the `merge_batch` exception, where this doesn't apply). When a card's
+     premise didn't survive — the "bug" proved not to exist, the work changed nature — but you still merge
+     its branch (say, to keep a regression test as coverage), update the card title FIRST so the squash
+     subject describes what actually landed: a `fix(x): …` becomes e.g. `test(x): regression coverage for …
      (premise retracted, not a bug)`. The title becomes permanent mainline history; merging under the
      dead premise records a fix for a bug that never existed, misleading everyone who later reads the
      log to answer "is X already fixed?".
@@ -782,11 +788,13 @@ what you checked. Found none? Treat it as live.
    card scoped from an eval or inference of a "missing" capability — confirm the feature isn't already
    merged (`git log` / grep the code) before spawning a builder to (re)discover it.
    **Record merged work by its durable MAINLINE identity, not an ephemeral branch SHA.** When you note a
-   task as merged/shipped, record the mainline squash-commit SUBJECT — which, under the card-title =
-   commit-subject convention, equals the card title — not the worker-branch SHA. A squash merge collapses
-   the branch's commits into one NEW mainline commit, so the old branch SHA is never on the mainline and a
-   later "already shipped?" check by that SHA reports a false "not merged". The subject survives on durable
-   mainline history, so a successor's shipped-state check is a reliable `git log --grep "<subject>"`.
+   task as merged via a SOLO confirm, record the mainline squash-commit SUBJECT — which, under the
+   card-title = commit-subject convention (the card-titling bullet above names the `merge_batch`
+   exception, where there is no single title-derived subject to record — use a content grep instead), equals
+   the card title — not the worker-branch SHA. A squash merge collapses the branch's commits into one NEW
+   mainline commit, so the old branch SHA is never on the mainline and a later "already shipped?" check by
+   that SHA reports a false "not merged". The subject survives on durable mainline history, so a
+   successor's shipped-state check is a reliable `git log --grep "<subject>"`.
    **Date-stamp load-bearing state you record** (`verified: <date> against <mainline>`) so a successor reads
    its age, not just its claim — an unstamped "X is done" can't be told apart from one that silently expired.
    **Other vault notes — shallow taxonomy, not flat.** Your resume doc (and any note the project's

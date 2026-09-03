@@ -72,8 +72,10 @@ Only converged, criteria-passing ideas become cards. **One crisp card beats ten 
 so a manager could scope it cold. Shape:
 
 - **Title** — Conventional Commits form (`type(scope): summary`, lowercase type, imperative, no trailing
-  period). The scope comes from the project's `CLAUDE.md` "Commit scopes" list. The title is the eventual
-  squash-commit subject.
+  period). The scope comes from the project's `CLAUDE.md` "Commit scopes" list. For a SOLO merge, the
+  title is the eventual squash-commit subject (a batched landing, where the project's merge tooling has
+  one, lands each worker's own commit subjects instead — title it right regardless, since a worker's
+  commit should describe the same change either way).
 - **Problem** — "[who] hits [problem] when [goal], causing [impact]." Not "as a user I want…".
 - **Hypothesis** — "We believe [change] will [outcome]; we'll know we're right when [signal/metric]."
 - **Scope & non-goals** — what's in, and explicitly what's out.

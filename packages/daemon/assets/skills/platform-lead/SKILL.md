@@ -162,7 +162,9 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    evidence and a definition of done. Dedupe against what's already filed. **Title cards — and write
    any commit you author yourself — in Conventional Commits form** (`type(scope): summary`, lowercase
    type, imperative, no trailing period; drop the old `[Type, Priority]` bracket — priority is the
-   card's field). The card title becomes the squash commit subject on main. Allowed types: `feat, fix,
+   card's field). For a SOLO merge, the card title becomes the squash commit subject on main — `merge_batch`
+   is the exception: it lands each worker's own commit subjects verbatim, never the card title (card
+   `a32533a1`). Allowed types: `feat, fix,
    docs, style, refactor, perf, test, build, ci, chore, revert`. **The scope is REQUIRED** and comes from
    the project's own "**Commit scopes**" list in its `CLAUDE.md`; if a project has no list yet, derive one
    from its real structure and add the section at intake. Keep this generic — the scope vocabulary is
@@ -172,9 +174,11 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    verdict: confirm with `git log`/`git blame` on the symbol (was it added for a feature that still needs
    it?) AND a repo-wide grep for live consumers, then cite that provenance in the card (the blame/commit +
    the grep result). An unproven removal card is how a live field gets deleted. **A retracted or
-   reclassified card whose branch still merges MUST be retitled BEFORE the merge** — the title becomes the
-   permanent squash subject, so merging a disproven premise under its old `fix(…)` title stamps a fix for
-   a bug that never existed into mainline history, misleading every later freshness check (the c7bf65aa →
+   reclassified card whose branch still merges via a SOLO confirm MUST be retitled BEFORE the merge** — the
+   title becomes the permanent squash subject, so merging a disproven premise under its old `fix(…)` title
+   stamps a fix for a bug that never existed into mainline history, misleading every later freshness check.
+   (A `merge_batch` landing has no single title-derived subject to retitle — check the worker's own commit
+   instead.) (The c7bf65aa →
    `01a9983` slip: a formally retracted "cron ratchet" fix merged under its `fix(orchestration): …` title
    to salvage the regression test). Retitle to what actually landed, e.g. `test(scope): regression
    coverage for … (premise retracted, not a bug)`.
@@ -185,7 +189,8 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    over them; rewrite stale platform docs in place. **Verify a card's state against the artifact before
    you assert or change it — both directions.** Before you relay a card's build/ship status to the owner
    ("X shipped" / "Y is still unbuilt"), OR flip a card yourself to won't-do / dropped / done, CONFIRM it:
-   `git log` / `git merge-base` on the mainline for the commit subject (= the card title), plus
+   `git log` / `git merge-base` on the mainline for the commit subject (= the card title for a SOLO merge —
+   a `merge_batch` landing has no such subject; grep for content instead), plus
    `project_task_get` for the card's real column. A resume-doc or memory claim goes stale the moment work
    lands, so relaying or acting on an unverified state can hand the owner a wrong "already shipped" /
    "still missing", or drop a card whose work is actually in flight. (Interim discipline until a

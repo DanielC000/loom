@@ -12755,6 +12755,22 @@ export class SessionService {
    * something surfaced here as if it were a real title). `coerced` is a plain string comparison against
    * what {@link toConventionalSubject} does to the raw title — NOT a judgment of whether the title is
    * accurate; see the card for why a heuristic accuracy check is explicitly out of scope.
+   *
+   * Card a32533a1: `commitSubject`/`tasklessSubjectPreview` above preview ONLY the SOLO squash path — the
+   * card title (or the branch's tip commit, coerced) rewritten via {@link toConventionalSubject}. A
+   * BATCHED landing (`merge_batch`) never rewrites or coerces anything: it lands each candidate branch's
+   * OWN commit subjects verbatim (see `batch-merge.ts`'s own doc). Until this card a manager had no way to
+   * see, before choosing solo vs. batch, what a batch would actually commit for a TASKED worker (the
+   * taskless path already exposed its own tip subject via `tasklessSubjectPreview`, just never coerced the
+   * same way batch leaves it — see below). `ownTipSubject`/`ownTipSubjectConventional` close that gap:
+   * `ownTipSubject` is the branch's tip commit subject, UNCOERCED (byte-for-byte what a batch would commit
+   * for this branch), computed the SAME way for every worker regardless of task — reusing {@link
+   * deriveTasklessSubject}, whose own implementation was already task-agnostic even though its name and
+   * call site here used to gate it behind "no task". `ownTipSubjectConventional` is a plain, honest
+   * `toConventionalSubject(ownTipSubject) === ownTipSubject` fact (mirrors `coerced`'s own framing) — a
+   * manager can title-check THIS field the way they already title-check `coerced` before a solo confirm,
+   * before deciding to route this worker into a `merge_batch` instead. Absent (like `tasklessSubjectPreview`)
+   * only when the branch has no readable commit at all.
    */
   async reviewWorkerMerge(
     managerSessionId: string, workerSessionId: string,
@@ -12763,6 +12779,7 @@ export class SessionService {
     filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
     patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
     behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean; tasklessSubjectPreview?: string;
+    ownTipSubject?: string; ownTipSubjectConventional?: boolean;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
@@ -12794,6 +12811,16 @@ export class SessionService {
     // the same "never drift from what actually lands" property `commitSubject` already carries above.
     const tasklessRawSubject = rawTitle ? undefined : await deriveTasklessSubject(repoPath, worker.branch, { timeoutMs: this.gitOpMs });
     const tasklessSubjectPreview = tasklessRawSubject ? toConventionalSubject(tasklessRawSubject) : undefined;
+    // Card a32533a1: computed UNCONDITIONALLY (not gated on `!rawTitle` the way tasklessRawSubject above
+    // is) — a TASKED worker's branch also has its own tip commit, and that's what a `merge_batch` would
+    // land verbatim for it, regardless of the card title. Reuses the same tip-commit read the taskless
+    // path above already performs when there's no task (avoid a second git call in that case).
+    const ownTipSubject = rawTitle
+      ? await deriveTasklessSubject(repoPath, worker.branch, { timeoutMs: this.gitOpMs })
+      : tasklessRawSubject;
+    const ownTipSubjectConventional = ownTipSubject !== undefined
+      ? toConventionalSubject(ownTipSubject) === ownTipSubject
+      : undefined;
     // RETRACTED-PREMISE backstop (card cf60a32a — the mechanical half of `0fa32321`): a 4th warn-never-block
     // sibling, distinct from `coerced` above — `coerced` is blind to a title that's ALREADY valid
     // Conventional form (e.g. `fix(x): …`) whose BODY was since retracted, since toConventionalSubject is a
@@ -12883,6 +12910,7 @@ export class SessionService {
       ...(behindMain ? { behindMain } : {}),
       ...(subjectPreview ?? {}),
       ...(tasklessSubjectPreview ? { tasklessSubjectPreview } : {}),
+      ...(ownTipSubject !== undefined ? { ownTipSubject, ownTipSubjectConventional } : {}),
     };
   }
 

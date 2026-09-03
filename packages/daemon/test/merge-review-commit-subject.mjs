@@ -21,6 +21,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       no subject fabricated from the branch name.
 //   (E) The confirmed merge's OWN result (confirmWorkerMerge) echoes the SAME `commitSubject` that was
 //       previewed at review time, for case (B) — proving the preview never drifts from what actually lands.
+//   (F) Card a32533a1 — `ownTipSubject`/`ownTipSubjectConventional` (the batch-bound preview, computed for
+//       a TASKED worker too, not just a taskless one): a TASKED worker whose branch's own tip commit is
+//       BARE PROSE (never conventional) gets `ownTipSubject` === that raw commit message and
+//       `ownTipSubjectConventional === false` — the exact, uncoerced subject a `merge_batch` would land for
+//       this branch, regardless of what `commitSubject` (the card-title-derived SOLO preview) says.
+//   (G) NEGATIVE CONTROL for (F): a TASKED worker whose branch's own tip commit is ALREADY conventional
+//       form gets `ownTipSubject` === that commit message verbatim and `ownTipSubjectConventional === true`
+//       — proving the flag isn't hardcoded false and genuinely discriminates on the commit's own form.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-review-commit-subject.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -70,6 +78,7 @@ const A = { projId: `mrcs-a-proj-${sfx}`, agentId: `mrcs-a-top-${sfx}`, taskId: 
 const B = { projId: `mrcs-b-proj-${sfx}`, agentId: `mrcs-b-top-${sfx}`, taskId: `mrcs-b-task-${sfx}`, mgrId: `mrcs-b-mgr-${sfx}`, workerId: `mrcs-b-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-bracket-${sfx}`), title: "[Bug, P2] Fix paste" };
 const C = { projId: `mrcs-c-proj-${sfx}`, agentId: `mrcs-c-top-${sfx}`, taskId: `mrcs-c-task-${sfx}`, mgrId: `mrcs-c-mgr-${sfx}`, workerId: `mrcs-c-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-prose-${sfx}`), title: "Refresh the dashboard" };
 const D = { projId: `mrcs-d-proj-${sfx}`, agentId: `mrcs-d-top-${sfx}`, taskId: `mrcs-d-task-${sfx}`, mgrId: `mrcs-d-mgr-${sfx}`, workerId: `mrcs-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-taskless-${sfx}`) };
+const E = { projId: `mrcs-e-proj-${sfx}`, agentId: `mrcs-e-top-${sfx}`, taskId: `mrcs-e-task-${sfx}`, mgrId: `mrcs-e-mgr-${sfx}`, workerId: `mrcs-e-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-own-conv-${sfx}`), title: "Refresh the dashboard" };
 
 try {
   // ── (A) ALREADY-CONVENTIONAL: commitSubject unchanged, coerced:false ───────────────────────────────────
@@ -84,6 +93,12 @@ try {
     check("(A) commitSubject === the already-conventional title", review.commitSubject === A.title);
     check("(A) rawTitle === the raw title", review.rawTitle === A.title);
     check("(A) coerced is false", review.coerced === false);
+    // ── (F) ownTipSubject/ownTipSubjectConventional for a TASKED worker (card a32533a1) ──────────────────
+    // This worker's OWN tip commit ("add feature") is bare prose — never conventional — regardless of its
+    // card title being already-conventional. Proves ownTipSubject tracks the BRANCH's own commit, not the
+    // task title `commitSubject` above previews.
+    check("(F) ownTipSubject === the branch's own tip commit (bare prose, NOT the card title)", review.ownTipSubject === "add feature");
+    check("(F) ownTipSubjectConventional is false for the bare-prose tip commit", review.ownTipSubjectConventional === false);
   }
 
   // ── (B) LEGACY BRACKET: mapped type, coerced:true ───────────────────────────────────────────────────────
@@ -147,9 +162,26 @@ try {
     check("(D) tasklessSubjectPreview is the branch's tip commit, coerced (chore: prefix) — NOT the branch name",
       review?.tasklessSubjectPreview === "chore: orphan change");
   }
+
+  // ── (G) NEGATIVE CONTROL for (F): TASKED worker whose OWN tip commit is ALREADY conventional form ──────
+  initRepo(E.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
+    E.worktreePath = worktreePath; E.branch = branch;
+    const ownSubject = "fix(daemon): repair the paste double-fire";
+    commitChange(worktreePath, "paste2.ts", "export const v = 5;\n", ownSubject);
+    seed(E, { withTask: true });
+
+    const review = await sessions.reviewWorkerMerge(E.mgrId, E.workerId);
+    // Card title ("Refresh the dashboard") is bare prose, so the SOLO preview still coerces to chore: —
+    // proving ownTipSubjectConventional isn't just echoing `coerced`'s own verdict about the card title.
+    check("(G) commitSubject (solo/card-title preview) is still coerced", review.coerced === true);
+    check("(G) ownTipSubject === the branch's own tip commit, VERBATIM (not the card title, not re-coerced)", review.ownTipSubject === ownSubject);
+    check("(G) ownTipSubjectConventional is TRUE for an already-conventional tip commit — proves the flag genuinely discriminates, not hardcoded false", review.ownTipSubjectConventional === true);
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C, D]) {
+  for (const p of [A, B, C, D, E]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -159,7 +191,10 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — worker_merge's review step now surfaces the exact prospective squash-commit subject " +
     "(already-conventional unchanged, legacy-bracket mapped, bare-prose chore:-prefixed, each with an " +
-    "honest `coerced` flag), degrades cleanly (no fabricated subject) for a taskless worker, and " +
-    "worker_merge_confirm's own result echoes the identical subject that actually landed."
+    "honest `coerced` flag), degrades cleanly (no fabricated subject) for a taskless worker, " +
+    "worker_merge_confirm's own result echoes the identical subject that actually landed, and " +
+    "ownTipSubject/ownTipSubjectConventional (card a32533a1) now surface the branch's OWN, uncoerced tip " +
+    "commit subject for a TASKED worker too — the exact byte-for-byte subject a merge_batch would land, " +
+    "genuinely discriminating conventional vs. non-conventional regardless of the card title's own form."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
