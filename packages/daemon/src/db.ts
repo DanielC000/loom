@@ -6290,6 +6290,16 @@ export class Db {
       .get(projectId) as { c: number };
     const over = c - maxNotes;
     if (over <= 0) return;
+    // DECISION (card ec0be17e, 2026-09-02): this ordering was reviewed and deliberately left as-is.
+    // The never-retrieved tier is NOT sorted newest-first — the `created_at ASC` tie-break within that
+    // tier makes the OLDEST never-retrieved row die first and the newest die last. So a row written
+    // moments ago is not "most fragile" here; it's protected by every never-retrieved row older than it,
+    // and only becomes evictable once it's the oldest member of that tier — i.e. once it has had the
+    // most opportunities to be retrieved and wasn't. A grace period and pure-FIFO-by-created_at were both
+    // considered and rejected: a grace period degrades to this same created_at tie-break once the cap
+    // forces eviction inside the window, and pure FIFO discards the retrieval signal entirely (a
+    // frequently-retrieved note would die before a never-retrieved one). Do not re-litigate this without
+    // reading that card first.
     this.db.prepare(
       `DELETE FROM project_memory WHERE id IN (
          SELECT id FROM project_memory WHERE project_id = @projectId AND pinned = 0 AND key != @excludeKey
