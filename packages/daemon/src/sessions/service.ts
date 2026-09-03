@@ -15485,9 +15485,11 @@ export class SessionService {
   /**
    * Card dbc6f660 — batch the merge gate: gate up to `orchestration.maxConcurrentWorkers` ready branches
    * (resolveConfig-resolved, never a caller-supplied param — K is fixed, not agent-settable) on ONE repo
-   * ONCE, landing
-   * each as its own squashed commit (byte-shape-identical to a solo confirm — see git/batch-merge.ts's own
-   * header doc). Assembly happens git-side (batch-merge.ts, reusing {@link mergeBranch} unchanged); this
+   * ONCE, landing each branch's OWN commits INDIVIDUALLY (card 6801c0a1 — NOT squashed, NOT byte-shape-
+   * identical to a solo confirm; only the solo path still squashes — see git/batch-merge.ts's own header
+   * doc for the full correction + rationale). Assembly happens git-side (batch-merge.ts, a rebase/cherry-
+   * pick primitive dedicated to this batched path — it does NOT reuse {@link mergeBranch}, which stays
+   * reserved for the solo squash path, untouched); this
    * method is the orchestration glue: resolve/validate candidates, wire the shared gate run, and dispatch
    * each outcome to the SAME finalize paths a solo merge already uses — never new finalize logic:
    *  - a branch the batch actually LANDED on canonical main is finished via {@link finishAlreadyMerged}
@@ -17624,7 +17626,7 @@ export class SessionService {
     //     history fits inside MERGED_LOOKUP_SCAN_LIMIT (this repo: 1470 commits vs a 5000 limit) — a repo
     //     bigger than the limit degrades gracefully back to per-session fallback walks, unchanged from
     //     before this fix, never a false "not landed".
-    let preFixTrailerNoticeCount = 0; // aggregated across this whole pass — see findLandedSquashCommit's onPreFixTrailerNotice param
+    let noPathSetTrailerNoticeCount = 0; // aggregated across this whole pass — see findLandedSquashCommit's onPreFixTrailerNotice param. Renamed from `preFixTrailerNoticeCount` (card 6801c0a1): counts a trailer-absence signal with TWO possible causes now, not one — see the once-per-pass log below.
     // Card c33f94b2 DoD-1: every failed-to-finish reconciliation this boot, named (worker/branch/task/
     // project) — not just a bare count. `wedged:true` entries are the structurally-permanent repoKey
     // class (see below); `wedged:false` are ordinary/transient failures ("retry next boot" is honest for
@@ -17739,7 +17741,7 @@ export class SessionService {
           ? viaMap.sha
           : viaMap.scanComplete
             ? null
-            : await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { preFixTrailerNoticeCount++; });
+            : await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { noPathSetTrailerNoticeCount++; });
         if (!landedSha) continue;
         // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
         // lookup this pass exists to do) — free to persist, no extra git call.
@@ -17772,12 +17774,16 @@ export class SessionService {
         wedgedThisBoot.map((d) => `worker ${d.sessionId.slice(0, 8)} (branch ${d.branch ?? "?"}, project "${d.projectName}", wedged since ${d.wedgedSince}, ${d.attempts} attempt(s))`).join("; "));
     }
     // Aggregated ONCE per pass, not per session (card 6ee48e4d) — mirrors scanMergedCommitMap's own
-    // once-per-scan log for the identical fact, so a boot with many pre-fix-trailer landings can't flood
-    // the log the way the old per-call console.info did.
-    if (preFixTrailerNoticeCount > 0) {
+    // once-per-scan log for the identical FACT (a landed commit carrying no Loom-Worker-PathSet trailer),
+    // so a boot with many such landings can't flood the log the way the old per-call console.info did.
+    // That fact now has TWO causes, not one (card 6801c0a1: a batched landing's tip commit omits this
+    // trailer BY DESIGN, alongside the original pre-f621f185 legacy-history cause) — this diagnostic
+    // still can't and doesn't try to tell them apart, same as its worktrees.ts mirror.
+    if (noPathSetTrailerNoticeCount > 0) {
       // eslint-disable-next-line no-console
-      console.info(`[reconcile] ${preFixTrailerNoticeCount} worker(s) had a landed squash predating the ` +
-        "Loom-Worker-PathSet trailer — trusted Loom-Worker-Branch presence alone (card f621f185)");
+      console.info(`[reconcile] ${noPathSetTrailerNoticeCount} worker(s) had a landed squash with no ` +
+        "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a card-6801c0a1 batched landing " +
+        "that omits it by design) — trusted Loom-Worker-Branch presence alone");
     }
 
     // A2. Resolve branch-gone dangling merges from the EVENT trail (the residual PRE-squash-era shape

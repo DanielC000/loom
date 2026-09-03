@@ -4469,10 +4469,13 @@ export function __workerDiffCacheSizeForTest(): number {
  *    indefinitely, but only proves the SAME SET OF FILES landed, not the same CONTENT — see that
  *    function's own doc for exactly what it does and doesn't rule out. Weaker than `"content"`; do not
  *    render it with the same confidence.
- *  - `"trailer-only"` — the branch was gone AND the commit predates the `Loom-Worker-PathSet` trailer
- *    (pre-f621f185 history). The answer rests on `Loom-Worker-Branch:` trailer PRESENCE alone — no
- *    content or path check at all. The weakest of the three; render this qualified, not as a second
- *    confident tick.
+ *  - `"trailer-only"` — the branch was gone AND the landed commit carries no `Loom-Worker-PathSet`
+ *    trailer. TWO causes produce this, indistinguishable from this field alone: (1) pre-f621f185 legacy
+ *    history — the commit predates the trailer's existence — or (2) card 6801c0a1 — a BATCHED landing's
+ *    tip commit, which OMITS the trailer by design (its `sha^..sha` only spans that one commit, not the
+ *    whole branch, so a full-branch-range digest would verify FALSE there; see git/batch-merge.ts's own
+ *    header doc). The answer rests on `Loom-Worker-Branch:` trailer PRESENCE alone — no content or path
+ *    check at all. The weakest of the three; render this qualified, not as a second confident tick.
  */
 export type MergedVerificationMode = "content" | "pathset" | "trailer-only";
 
@@ -4584,21 +4587,27 @@ async function scanMergedCommitMap(
   } catch {
     return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
   }
-  // Log the pre-fix-history count ONCE PER SCAN, not per lookup: getTaskMergedInfo runs per TASK on every
-  // polled board read (up to 100 rows/page), and essentially every card merged before this fix lacks the
-  // trailer — a per-lookup log line would flood the daemon log on a path polled continuously by the web UI
-  // (worsens board-8dd1dd1c-class log-retention pressure). This scan is already cache-gated (rebuilt only
-  // on a HEAD move, not per poll), so logging here reports "how many landed branches in this repo predate
-  // Loom-Worker-PathSet" at the natural once-per-actual-scan cadence instead — still never silent, just not
-  // per row. findLandedSquashCommit's OWN log (a decision path — merge/reconcile, not a polled read) is
-  // unaffected and stays per-call.
-  let preFixCount = 0;
-  for (const entry of map.values()) if (entry.pathSetDigest === null) preFixCount++;
-  if (preFixCount > 0) {
+  // Log the no-PathSet-trailer count ONCE PER SCAN, not per lookup: getTaskMergedInfo runs per TASK on
+  // every polled board read (up to 100 rows/page), and a card merged before card f621f185 (or landed via
+  // a card-6801c0a1 batch, which OMITS this trailer on its tip commit BY DESIGN — see git/batch-merge.ts's
+  // own header doc) lacks the trailer — a per-lookup log line would flood the daemon log on a path polled
+  // continuously by the web UI (worsens board-8dd1dd1c-class log-retention pressure). This scan is already
+  // cache-gated (rebuilt only on a HEAD move, not per poll), so logging here reports "how many landed
+  // branches in this repo carry no Loom-Worker-PathSet trailer" at the natural once-per-actual-scan
+  // cadence instead — still never silent, just not per row. NOT all pre-fix history any more (renamed from
+  // `preFixCount`, card 6801c0a1): a batched landing's tip commit adds a SECOND, deliberate cause with the
+  // identical trailer-absence signature — this count (and its log line) cannot and does not try to tell
+  // the two apart; see MergedVerificationMode's own `"trailer-only"` doc for the full breakdown.
+  // findLandedSquashCommit's OWN log (a decision path — merge/reconcile, not a polled read) is unaffected
+  // and stays per-call.
+  let noPathSetTrailerCount = 0;
+  for (const entry of map.values()) if (entry.pathSetDigest === null) noPathSetTrailerCount++;
+  if (noPathSetTrailerCount > 0) {
     // eslint-disable-next-line no-console
-    console.info(`[git] scanMergedCommitMap: ${preFixCount} landed branch(es) in ${repoPath} carry no ` +
-      "Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone for those once their branch " +
-      "is gone, until re-merged (card f621f185)");
+    console.info(`[git] scanMergedCommitMap: ${noPathSetTrailerCount} landed branch(es) in ${repoPath} carry no ` +
+      "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a card-6801c0a1 batched landing that " +
+      "omits it by design) — trusting Loom-Worker-Branch presence alone for those once their branch is " +
+      "gone, until re-merged");
   }
   return { map, truncated: recordCount >= MERGED_LOOKUP_SCAN_LIMIT };
 }

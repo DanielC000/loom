@@ -1,17 +1,23 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// BATCH MERGE GATE (card dbc6f660 — gate N ready branches once, land each as its own squashed commit).
+// BATCH MERGE GATE (card dbc6f660 — gate N ready branches once; card 6801c0a1 — land each branch's OWN
+// commits INDIVIDUALLY, never squashed, only the branch's LAST commit carrying the Loom-Worker-Branch
+// trailer — see git/batch-merge.ts's own header doc for the full correction).
 // REAL git on temp repos, no claude, no live daemon, no Db/SessionService — the batching primitive
 // (git/batch-merge.ts) is gate-mechanism-agnostic, so it's fully exercised with a fake `runGate` callback.
 //
-// Proves the four DoD-6 scenarios:
-//   (1) GREEN K=3 — a batch of 3 clean branches lands 3 commits on canonical main, each carrying its own
-//       Loom-Worker-Branch trailer, and zero merge commits.
+// Proves:
+//   (1) GREEN K=3 — a batch of 3 clean (single-commit) branches lands 3 commits on canonical main, each
+//       carrying its own Loom-Worker-Branch trailer, and zero merge commits.
 //   (2) RED K=3 — a failing batch gate falls back: canonical main is left COMPLETELY untouched, and every
 //       candidate is reported so the caller can re-gate each individually.
 //   (3) CONFLICT DROP — a branch that conflicts with an earlier one in the SAME batch is dropped without
 //       failing the batch; the other two still land.
 //   (4) FORFEIT — canonical main advancing DURING the (simulated) gate is caught at the fast-forward step
 //       and refused, never landing unverified content; canonical main ends up exactly at the advanced sha.
+//   (5) SHAPE (card 6801c0a1 DoD-4) — K=2, branch A has 3 commits + branch B has 1: main gains 4 commits,
+//       in order, zero merge commits; only A's LAST commit carries A's trailer.
+//   (6) MERGE-COMMIT-IN-RANGE — a branch carrying its own merge commit (a real stale-base auto-forward
+//       shape) is dropped cleanly rather than mis-landed.
 // Also covers computeBatchSize's fixed K = min(ready, maxWorkers) rule.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/batch-merge.mjs
@@ -45,6 +51,19 @@ async function cutBranch(repo, label, file, content) {
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, file), content);
   execSync(`git add . && git ${GIT_ID} commit -q -m "${label}"`, { cwd: worktreePath });
+  return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
+}
+
+/** Cut a fresh worker branch and land MULTIPLE commits onto it, oldest first — card 6801c0a1 DoD-4: proves
+ *  a branch with N commits lands N commits on main, not 1 (the old squash-per-branch shape this card
+ *  replaced would have collapsed all of them into one). */
+async function cutBranchMultiCommit(repo, label, commits) {
+  const taskId = `bm-task-${label}-${sfx}`;
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  for (const { file, content, message } of commits) {
+    fs.writeFileSync(path.join(worktreePath, file), content);
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${message}"`, { cwd: worktreePath });
+  }
   return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
 }
 
@@ -179,6 +198,86 @@ try {
     check("(4) the unrelated human commit is intact", fs.existsSync(path.join(repo, "unrelated-human-commit.txt")));
   }
 
+  // ── (5) DoD-4 SHAPE TEST (card 6801c0a1) — K=2, branch A has 3 commits, branch B has 1: main must gain
+  //     4 commits, IN ORDER, with ZERO merge commits — the whole point of this card: a batched landing
+  //     preserves each branch's own commits individually, never squashing them into one-per-branch. ─────
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-shape-${sfx}`);
+    makeRepo(repo);
+    const a = await cutBranchMultiCommit(repo, "shape-a", [
+      { file: "shape-a-1.txt", content: "a1\n", message: "feat(test): shape a commit 1" },
+      { file: "shape-a-2.txt", content: "a2\n", message: "feat(test): shape a commit 2" },
+      { file: "shape-a-3.txt", content: "a3\n", message: "feat(test): shape a commit 3" },
+    ]);
+    const b = await cutBranch(repo, "shape-b", "shape-b.txt", "b1\n");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-shape-${sfx}`);
+
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [a, b], passGate);
+
+    check("(5) ok:true", result.ok === true);
+    check("(5) 2 branches landed (not per-commit)", result.landed.length === 2 && result.dropped.length === 0);
+    // THE DISCRIMINATING ASSERTION: 4 commits, not 2. This is the exact check that FAILS against the
+    // original shipped assembly (`b577f43`, `git merge --squash` per branch — see this file's own header
+    // doc for the correction) — that implementation would have landed exactly 2 commits here (one per
+    // branch), collapsing A's 3 commits into 1. POSITIVE-CONTROLLED: verified RED against a `git checkout
+    // HEAD -- git/batch-merge.ts` revert to that shipped squash implementation (rebuilt + re-run,
+    // `rev-list --count` read 2, not 4), then GREEN again after restoring this card's implementation — see
+    // this card's worker report for the transcript.
+    check("(5) canonical main gained exactly 4 new commits (3 from A + 1 from B, none squashed)",
+      git(repo, `rev-list --count ${baseMainSha}..HEAD`) === "4");
+    check("(5) zero merge commits on main", git(repo, `log --merges ${baseMainSha}..HEAD --format=%H`) === "");
+    const shapeSubjects = git(repo, `log --reverse --format=%s ${baseMainSha}..HEAD`).split("\n");
+    check("(5) commits land IN ORDER: A's 3 (oldest-first), then B's 1", JSON.stringify(shapeSubjects) === JSON.stringify([
+      "feat(test): shape a commit 1", "feat(test): shape a commit 2", "feat(test): shape a commit 3", "shape-b",
+    ]));
+    const shapeShas = git(repo, `log --reverse --format=%H ${baseMainSha}..HEAD`).split("\n");
+    const shapeBodies = shapeShas.map((s) => git(repo, `log -1 --format=%B ${s}`));
+    check("(5) exactly ONE of A's commits carries A's Loom-Worker-Branch trailer (the tip, not all 3)",
+      shapeBodies.filter((body) => body.includes(`Loom-Worker-Branch: ${a.branch}`)).length === 1);
+    check("(5) A's trailer lands on A's LAST commit specifically, not an earlier one",
+      shapeBodies[2].includes(`Loom-Worker-Branch: ${a.branch}`) &&
+      !shapeBodies[0].includes("Loom-Worker-Branch") && !shapeBodies[1].includes("Loom-Worker-Branch"));
+    check("(5) B's single commit carries B's own trailer", shapeBodies[3].includes(`Loom-Worker-Branch: ${b.branch}`));
+    // NEGATIVE CONTROL: a branch name this batch never had must NOT appear in any trailer — proves the
+    // `.includes` checks above are discriminating, not vacuously true on any string.
+    check("(5) negative control: a fabricated branch name is absent from every trailer",
+      !shapeBodies.some((body) => body.includes("Loom-Worker-Branch: totally-fake-branch-shape-test")));
+    for (const f of ["shape-a-1.txt", "shape-a-2.txt", "shape-a-3.txt", "shape-b.txt"]) {
+      check(`(5) ${f} present on canonical main after fast-forward`, fs.existsSync(path.join(repo, f)));
+    }
+  }
+
+  // ── (6) MERGE-COMMIT-IN-RANGE — a branch carrying its own merge commit (e.g. a real stale-base
+  //     auto-forward, `mergeMainIntoWorktree`, unioning main mid-work) is DROPPED cleanly, not partially
+  //     or incorrectly landed — cherry-pick refuses a merge commit outright, so this must fail closed. ──
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-mergecommit-${sfx}`);
+    makeRepo(repo);
+    const { worktreePath: wtM, branch: brM } = await createWorktree(repo, projId, `bm-task-mc-${sfx}`);
+    fs.writeFileSync(path.join(wtM, "mc-1.txt"), "mc1\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "mc commit 1"`, { cwd: wtM });
+    // Canonical main advances independently, then gets unioned into the worker's OWN worktree — exactly
+    // what a real stale-base auto-forward produces: a genuine merge commit on the worker's own branch.
+    fs.writeFileSync(path.join(repo, "mc-main-advance.txt"), "advanced\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "mc: main advances independently"`, { cwd: repo });
+    const mainAdvanceSha = git(repo, "rev-parse HEAD");
+    execSync(`git ${GIT_ID} merge --no-edit ${mainAdvanceSha}`, { cwd: wtM });
+    const m = { workerSessionId: `bm-wkr-mc-${sfx}`, taskId: `bm-task-mc-${sfx}`, branch: brM, taskTitle: "feat(test): mc" };
+    const other = await cutBranch(repo, "mc-other", "mc-other.txt", "other\n");
+
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-mc-${sfx}`);
+    const assembled = await assembleBatchBranches(batchWt, [m, other]);
+
+    check("(6) the merge-commit branch is dropped, not landed", assembled.dropped.some((d) => d.branch === brM));
+    check("(6) the drop reason names the merge commit",
+      !!assembled.dropped.find((d) => d.branch === brM)?.reason.includes("merge commit"));
+    check("(6) the OTHER branch (no merge commit) still lands cleanly",
+      assembled.landed.some((l) => l.branch === other.branch));
+    check("(6) canonical main untouched by assembly alone", git(repo, "rev-parse HEAD") === baseMainSha);
+  }
+
   // ── fastForwardCanonicalMain: a no-op batch (nothing landed on top) is a safe success, not a refusal ──
   {
     const repo = path.join(os.tmpdir(), `loom-bm-noop-${sfx}`);
@@ -192,6 +291,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a green batch lands each branch as its own squashed commit with no merge commits; a red batch falls back with canonical main untouched; a conflicting branch drops out without failing the batch; and main advancing mid-gate is caught at the fast-forward and refused rather than landing unverified."
+  ? "\n✅ ALL PASS — a green batch lands each branch's own commits INDIVIDUALLY (never squashed) with no merge commits, each branch's LAST commit carrying its Loom-Worker-Branch trailer; a red batch falls back with canonical main untouched; a conflicting branch (or one carrying its own merge commit) drops out without failing the batch; and main advancing mid-gate is caught at the fast-forward and refused rather than landing unverified."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1,26 +1,68 @@
 import type { SimpleGit } from "simple-git";
 import { withTimeout, boundedSimpleGit } from "./bounded.js";
-import { mergeBranch } from "./worktrees.js";
+import { findLandedSquashCommit, type MergeEmptyKind } from "./worktrees.js";
+import { nonInteractiveEnv } from "./writer.js";
 
 /**
- * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each as its own squashed commit.
+ * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each on main.
  *
  * OWNER-SPECIFIED DESIGN (see the task card + `.loom/research/batched-merge-gate-feasibility-2026-09-03.md`
- * for the full study): cut a dedicated batch worktree `B` from canonical main's current tip, squash-merge
- * each ready branch into `B` in turn (one clean commit per branch, exactly today's shape — every commit
- * still carries its own `Loom-Worker-Branch` trailer), gate `B` ONCE, and on green fast-forward canonical
- * main to `B`'s tip. Canonical main is mutated exactly once, at that fast-forward.
+ * for the full study): cut a dedicated batch worktree `B` from canonical main's current tip, land each
+ * ready branch into `B` in turn, gate `B` ONCE, and on green fast-forward canonical main to `B`'s tip.
+ * Canonical main is mutated exactly once, at that fast-forward.
  *
- * Deliberately reuses {@link mergeBranch} UNCHANGED for every squash — it's a generic "squash `branch`
- * onto whatever HEAD `repoPath` currently has" primitive, so pointing it at the batch worktree instead of
- * canonical main produces a byte-shape-identical commit (same subject derivation, same trailers, same
- * merge-danger-window bracketing) with zero changes to that function or anything downstream of it
- * (`scanMergedCommitMap`, `findLandedSquashCommit`, boot-reconcile, the merge-residue latches, the
- * content/pathset verification ladder) — main's commit shape after a batch is identical to today's.
+ * 🔴 CARD 6801c0a1 CORRECTION — READ BEFORE TOUCHING THIS FILE: the ORIGINAL shape shipped here (`b577f43`)
+ * squash-merged each candidate via {@link mergeBranch} (reused unchanged), landing ONE commit per branch —
+ * byte-shape-identical to a solo `worker_merge_confirm`. That was the WRONG commit shape: the owner
+ * explicitly asked (verbatim, twice, on card 6801c0a1) for a BATCHED landing to preserve each branch's own
+ * commits INDIVIDUALLY on main, squashing away only the MERGE commits (there are none here to begin with —
+ * this file never creates one). **Solo `worker_merge_confirm` is UNCHANGED and still squashes** — that
+ * behavior is explicitly kept; only the BATCHED path (this file) changed.
+ *
+ * `assembleBatchBranches` now REBASES (cherry-picks) each candidate's own commit range
+ * (`merge-base(batchTip, branch)..branch`) onto the batch tip, ONE COMMIT AT A TIME, in original order —
+ * so a branch contributing 3 commits lands 3 commits on main, not 1. No merge commits are ever created
+ * (cherry-pick never does). This module deliberately does NOT reuse {@link mergeBranch} (`git merge
+ * --squash`) any more for this path — that primitive is fundamentally the wrong shape (it collapses N
+ * commits to 1 by construction) and stays reserved for the solo path, untouched.
+ *
+ * TRAILER PLACEMENT (the card's "real open question"): once a branch contributes N commits instead of 1,
+ * "which commit carries `Loom-Worker-Branch`" is no longer answered for free — `scanMergedCommitMap`
+ * (`git/worktrees.ts`, off-limits to modify without escalating — see the card) maps branch -> ONE commit
+ * via a single-match `git log --grep` scan. **Chosen: (a) the trailer lands on the branch's LAST (tip)
+ * commit ONLY, written AFTER that commit is cherry-picked (a rebase rewrites SHAs, so the trailer can only
+ * be attached to the commit's FINAL sha, not inherited from the original).** This preserves the existing
+ * one-branch-one-trailer invariant `scanMergedCommitMap`/`findLandedSquashCommit` already depend on —
+ * zero changes needed to either reader. The non-tip commits from a batched branch carry NO
+ * `Loom-Worker-Branch` trailer at all (exactly like any of a repo's other ordinary, non-landing commits) —
+ * this is intentional, not a gap: a single trailer per branch is exactly what every existing reader
+ * expects, and a branch's ship-state has always been "found via ITS trailer commit", never "every commit
+ * this branch happens to touch".
+ *
+ * ⚠️ **`Loom-Worker-PathSet` is deliberately OMITTED on a batched landing's tip commit** (unlike the solo
+ * squash path, which stamps one). That trailer's OWN verification contract (`verifyPersistedPathSet`,
+ * `git/worktrees.ts`) assumes the commit it's attached to IS the whole branch's diff (`sha^..sha` spans
+ * everything the branch changed — true for a one-commit squash, false for a multi-commit tip that only
+ * carries its OWN last commit's diff). Stamping a full-branch-range digest on a commit whose own `sha^..sha`
+ * is much narrower would make that trailer LIE about what it claims to prove, silently breaking `pathset`-
+ * tier verification once the branch ref is deleted. Omitting it is SAFE, not a regression: `findLandedSquashCommit`
+ * already has a graceful degrade for a trailer commit with no `Loom-Worker-PathSet` — it falls back to
+ * `Loom-Worker-Branch` presence alone (the same `trailer-only` tier every pre-`f621f185` commit gets), just
+ * a weaker verification tier once the branch is gone, never a false answer either way.
+ *
+ * ⚠️ A branch whose own commit range contains a MERGE commit (e.g. a stale-base auto-forward that unioned
+ * main into the worker's worktree mid-work — `mergeMainIntoWorktree`) is DROPPED, not cherry-picked:
+ * `git cherry-pick` refuses a merge commit outright without an explicit `-m <parent>` this generic landing
+ * has no principled way to choose. Detected up front and dropped with a specific reason (see
+ * {@link landBranchCommitsIndividually}) — safe, not a data-loss gap: the branch falls back to the
+ * ordinary individual `worker_merge_confirm` path, which already handles this case via its own union step.
  *
  * RED BATCH / CONFLICT POLICY (owner directive — do not "improve" on this without re-reading the card):
- *  - A branch that won't squash cleanly into the batch (a conflict, or any other squash failure) is
- *    DROPPED and the batch continues with the rest — never aborts the whole batch.
+ *  - A branch that won't land cleanly into the batch (a conflict on ANY of its own commits, a merge commit
+ *    in its range, or any other cherry-pick/commit failure) is DROPPED WHOLESALE — every commit it already
+ *    landed into the batch tip during this attempt is rolled back (the batch tip is reset to where it stood
+ *    before this branch was attempted) — never a partial landing of some-but-not-all of one branch's own
+ *    commits, and never aborts the whole batch.
  *  - A RED gate on the assembled batch is NOT bisected. The caller falls back to gating every ORIGINAL
  *    candidate individually (today's path) — measured cheaper than recursive bisection at the worker-cap-
  *    bounded batch sizes this repo can ever reach (K<=4; see the feasibility study).
@@ -41,6 +83,35 @@ function boundedGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit
   return { git, timeoutMs };
 }
 
+/** Same seam as {@link boundedGit}, PLUS `nonInteractiveEnv()` on the default factory — matching
+ *  `git/worktrees.ts`'s own `boundedMergeGit` convention for a git WRITE (a cherry-pick's own commit step
+ *  is exactly that class of call). `gitFactory`, when supplied (the test seam), is used as-is — mirrors
+ *  `worktrees.ts`'s identical reasoning: a test injecting a fake doesn't need env scrubbing applied to it. */
+function boundedMergeGit(repoPath: string, deps: BatchGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const git = deps.gitFactory ? deps.gitFactory(repoPath, timeoutMs) : boundedSimpleGit(repoPath, timeoutMs, nonInteractiveEnv());
+  return { git, timeoutMs };
+}
+
+/** Generic, non-personal identity used ONLY when the batch worktree has no git identity configured at
+ *  all — DUPLICATED from (not shared with) `git/worktrees.ts`'s own `FALLBACK_GIT_IDENTITY`, matching this
+ *  codebase's established convention that each commit-creating path decides its own identity policy (see
+ *  that constant's own doc comment). A cherry-pick's commit step needs a resolvable identity exactly like
+ *  `git merge --no-edit` does — a CI runner or a fresh end-user host may have none configured. */
+const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
+
+/** Whether `git`'s cwd has BOTH `user.name` and `user.email` resolvable (any scope) — verbatim copy of
+ *  `git/worktrees.ts`'s own `hasConfiguredGitIdentity`, narrowed to `raw` for the same reason. */
+async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<boolean> {
+  try {
+    const name = (await git.raw(["config", "user.name"])).trim();
+    const email = (await git.raw(["config", "user.email"])).trim();
+    return !!name && !!email;
+  } catch {
+    return false;
+  }
+}
+
 /** One ready branch offered to a batch — the caller (SessionService) resolves this from a worker session. */
 export interface BatchCandidate {
   workerSessionId: string;
@@ -50,11 +121,18 @@ export interface BatchCandidate {
 }
 
 export interface BatchLandedBranch extends BatchCandidate {
+  /** The branch's TIP commit as landed on the batch worktree — the ONE commit (of possibly several this
+   *  branch contributed) that carries the `Loom-Worker-Branch` trailer. NOT a squash commit, and NOT
+   *  necessarily this branch's only new commit — see this file's own header doc for why the trailer lives
+   *  here specifically. */
   sha: string;
+  /** The tip commit's own subject line (the worker's OWN commit message, unmodified) — NOT a synthesized
+   *  squash subject and NOT the task title (compare the solo squash path, which rewrites the subject to
+   *  the task title; a batched landing preserves each worker commit exactly as authored). */
   subject: string;
   /** True when this candidate's content was already present (typically already-landed-elsewhere in the
    *  SAME batch's own ancestry, or already on main before the batch started) — no new commit was needed,
-   *  `sha` names the commit that already carries its content. Mirrors {@link mergeBranch}'s own
+   *  `sha` names the commit that already carries its content. Mirrors the solo squash path's own
    *  `ALREADY_MERGED` classification. */
   noop?: boolean;
 }
@@ -78,16 +156,195 @@ export function computeBatchSize(readyCount: number, maxWorkers: number): number
   return Math.max(0, Math.min(readyCount, maxWorkers));
 }
 
+/** {@link landBranchCommitsIndividually}'s return shape — deliberately mirrors the solo squash path's own
+ *  `mergeBranch` return (same field names/meanings for `ok`/`conflict`/`sha`/`subject`/`noop`/`reason`/
+ *  `emptyKind`) so {@link assembleBatchBranches}'s classification loop below barely changed shape when this
+ *  file stopped calling `mergeBranch` — only `sha`/`subject` now describe the branch's TIP commit (see
+ *  {@link BatchLandedBranch}'s own doc), not a squash. */
+interface LandResult {
+  ok: boolean;
+  conflict?: boolean;
+  sha?: string;
+  subject?: string;
+  noop?: boolean;
+  reason?: string;
+  emptyKind?: MergeEmptyKind;
+}
+
 /**
- * Squash-merge each candidate branch into `batchWorktreePath`, IN ORDER — each squash lands on top of the
- * previous one, so a later candidate's diff is computed against a tree that already contains every earlier
- * LANDED candidate's content (this is what makes the batch's single gate a real test of the combined tree,
- * not an approximation of it).
+ * Land ONE candidate branch's own commits, INDIVIDUALLY, onto `batchWorktreePath`'s current HEAD — the
+ * per-branch assembly step card 6801c0a1 rewrote (see this file's own header doc for the full rationale).
  *
- * A candidate that won't squash cleanly (a real conflict against an earlier candidate in this same batch,
- * or any other squash failure) is DROPPED — recorded with its reason and the loop continues with the rest.
- * This never throws and never aborts the batch: assembly failure is a per-branch outcome, not a batch-wide
- * one (owner directive — "drop, don't fail").
+ * Mechanism: cherry-pick every commit in `merge-base(HEAD, branch)..branch`, OLDEST FIRST, each as its own
+ * commit (never squashed, never a merge commit). The LAST (tip) commit gets the `Loom-Worker-Branch:
+ * <branch>` trailer appended to its message (see the header doc for why the tip, and why NOT
+ * `Loom-Worker-PathSet`) — every earlier commit from this branch lands with its ORIGINAL message,
+ * unmodified.
+ *
+ * ALL-OR-NOTHING PER BRANCH: if ANY commit in the range fails to cherry-pick (a real conflict, or any
+ * other failure), the cherry-pick is aborted and the batch worktree is HARD-RESET back to exactly where it
+ * stood before this branch was attempted — so a branch never lands PART of its own commit range. This
+ * mirrors the owner's "drop, don't fail" directive at the PER-BRANCH granularity the old squash-based
+ * assembly got for free (a squash is atomic by construction; a multi-commit cherry-pick sequence is not,
+ * so this function has to enforce that atomicity itself). The batch worktree has no concurrent writer of
+ * its own during assembly (it's freshly cut, single-purpose, gated only AFTER this returns) — unlike the
+ * canonical repo's own squash path, there is no "might be a human's WIP" concern here, so a plain
+ * `reset --hard` is safe without the canonical path's own dirty-tree preconditions.
+ */
+async function landBranchCommitsIndividually(
+  batchWorktreePath: string, branch: string, deps: BatchGitDeps,
+): Promise<LandResult> {
+  const { git, timeoutMs } = boundedMergeGit(batchWorktreePath, deps);
+
+  let branchTip: string;
+  try {
+    branchTip = (await withTimeout(
+      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch land)",
+    )).trim();
+  } catch (e) {
+    return { ok: false, reason: `failed to resolve branch tip: ${(e as Error).message}` };
+  }
+
+  let batchHeadBefore: string;
+  try {
+    batchHeadBefore = (await withTimeout(
+      git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch worktree, pre-land)",
+    )).trim();
+  } catch (e) {
+    return { ok: false, reason: `failed to read batch worktree HEAD: ${(e as Error).message}` };
+  }
+
+  let mergeBase: string;
+  try {
+    mergeBase = (await withTimeout(
+      git.raw(["merge-base", "HEAD", branchTip]), timeoutMs, "git merge-base (batch land)",
+    )).trim();
+  } catch (e) {
+    return { ok: false, reason: `failed to compute merge-base: ${(e as Error).message}` };
+  }
+
+  if (mergeBase === branchTip) {
+    // The branch's own tip is already an ancestor of the batch's current HEAD — nothing new to land
+    // (typically: already landed by an earlier candidate in THIS batch, or already on main before the
+    // batch was cut). Classify exactly like the solo path's own noop branch.
+    const landedSha = await findLandedSquashCommit(batchWorktreePath, branch, "HEAD", deps);
+    return landedSha
+      ? { ok: true, noop: true, emptyKind: "ALREADY_MERGED", sha: landedSha }
+      : { ok: true, noop: true, emptyKind: "STAGE_EMPTY_RETRY" };
+  }
+
+  let commitShas: string[];
+  try {
+    const out = await withTimeout(
+      git.raw(["rev-list", "--reverse", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list (batch land, commit range)",
+    );
+    commitShas = out.split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch (e) {
+    return { ok: false, reason: `failed to enumerate branch's commit range: ${(e as Error).message}` };
+  }
+  if (commitShas.length === 0) {
+    return { ok: false, reason: "empty commit range — nothing to land" };
+  }
+
+  // A worker's own branch can carry a MERGE commit in this range — e.g. a stale-base auto-forward
+  // (`mergeMainIntoWorktree`) that unioned main into the worker's worktree mid-work. `git cherry-pick`
+  // refuses a merge commit outright (needs an explicit `-m <parent>`, which this generic per-branch
+  // landing has no principled way to pick), so check for one UP FRONT and drop with a specific,
+  // diagnosable reason rather than letting the loop below fail on a generic git error a few calls in —
+  // same DROP outcome either way (safe: the branch falls back to the individual worker_merge_confirm
+  // path, which handles this case natively), just a clearer, cheaper failure.
+  let hasMergeCommit: boolean;
+  try {
+    hasMergeCommit = (await withTimeout(
+      git.raw(["rev-list", "--merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --merges (batch land, merge-commit probe)",
+    )).trim() !== "";
+  } catch (e) {
+    return { ok: false, reason: `${branch}: failed to probe for merge commits in range: ${(e as Error).message}` };
+  }
+  if (hasMergeCommit) {
+    return { ok: false, reason: `${branch}: its own commit range contains a merge commit — individual-commit batch landing doesn't support that; falling back to individual gating` };
+  }
+
+  const identityArgs = (await hasConfiguredGitIdentity(git))
+    ? []
+    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+
+  const rollback = async (): Promise<void> => {
+    try { await withTimeout(git.raw(["cherry-pick", "--abort"]), timeoutMs, "git cherry-pick --abort (batch land)"); } catch { /* best-effort */ }
+    try { await withTimeout(git.raw(["reset", "--hard", batchHeadBefore]), timeoutMs, "git reset --hard (batch land rollback)"); } catch { /* best-effort */ }
+  };
+
+  for (let i = 0; i < commitShas.length; i++) {
+    const sha = commitShas[i]!;
+    const isLast = i === commitShas.length - 1;
+    // Every commit except the tip cherry-picks (and auto-commits) with NO message change — the worker's
+    // own subject/body lands verbatim. The tip cherry-picks with `--no-commit` so the trailer can be
+    // appended to its message before the one deliberate manual commit call below.
+    try {
+      await withTimeout(
+        git.raw([...identityArgs, "cherry-pick", ...(isLast ? ["--no-commit"] : []), sha]),
+        timeoutMs, "git cherry-pick (batch land)",
+      );
+    } catch (e) {
+      let conflicted = false;
+      try {
+        conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (batch land)")).trim() !== "";
+      } catch { /* treat as a non-conflict failure below */ }
+      await rollback();
+      return conflicted
+        ? { ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` }
+        : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
+    }
+    if (!isLast) continue;
+    // Tip commit: append the trailer to its ORIGINAL message and commit manually, preserving the original
+    // author (name/email/date) explicitly — a bare `git commit` here would otherwise stamp the CURRENT
+    // committer identity as author too, losing the worker's own authorship.
+    let originalMessage: string;
+    let authorName: string;
+    let authorEmail: string;
+    let authorDate: string;
+    try {
+      originalMessage = (await withTimeout(git.raw(["log", "-1", "--format=%B", sha]), timeoutMs, "git log -1 (batch land, original message)")).replace(/\s+$/, "");
+      authorName = (await withTimeout(git.raw(["log", "-1", "--format=%an", sha]), timeoutMs, "git log -1 (batch land, author name)")).trim();
+      authorEmail = (await withTimeout(git.raw(["log", "-1", "--format=%ae", sha]), timeoutMs, "git log -1 (batch land, author email)")).trim();
+      authorDate = (await withTimeout(git.raw(["log", "-1", "--format=%aI", sha]), timeoutMs, "git log -1 (batch land, author date)")).trim();
+    } catch (e) {
+      await rollback();
+      return { ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` };
+    }
+    const finalMessage = `${originalMessage}\n\nLoom-Worker-Branch: ${branch}\n`;
+    try {
+      await withTimeout(
+        git.raw([...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage]),
+        timeoutMs, "git commit (batch land, tip)",
+      );
+    } catch (e) {
+      await rollback();
+      return { ok: false, reason: `${branch}: commit failed while landing tip commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
+    }
+  }
+
+  try {
+    const landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
+    const landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
+    return { ok: true, sha: landedSha, subject: landedSubject };
+  } catch (e) {
+    return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * Land each candidate branch's OWN commits, individually, onto `batchWorktreePath`, IN ORDER — each
+ * branch's commits land on top of the previous branch's, so a later candidate's diff is computed against a
+ * tree that already contains every earlier LANDED candidate's content (this is what makes the batch's
+ * single gate a real test of the combined tree, not an approximation of it). See
+ * {@link landBranchCommitsIndividually} for the per-branch mechanism (cherry-pick, not squash — card
+ * 6801c0a1) and this file's own header doc for why.
+ *
+ * A candidate that won't land cleanly (a real conflict on any of its own commits against an earlier
+ * candidate in this same batch, or any other cherry-pick/commit failure) is DROPPED — recorded with its
+ * reason and the loop continues with the rest. This never throws and never aborts the batch: assembly
+ * failure is a per-branch outcome, not a batch-wide one (owner directive — "drop, don't fail").
  */
 export async function assembleBatchBranches(
   batchWorktreePath: string, candidates: BatchCandidate[], deps: BatchGitDeps = {},
@@ -95,9 +352,9 @@ export async function assembleBatchBranches(
   const landed: BatchLandedBranch[] = [];
   const dropped: BatchDroppedBranch[] = [];
   for (const c of candidates) {
-    const r = await mergeBranch(batchWorktreePath, c.branch, c.taskTitle ?? undefined, deps);
+    const r = await landBranchCommitsIndividually(batchWorktreePath, c.branch, deps);
     if (!r.ok) {
-      dropped.push({ ...c, reason: r.reason ?? "squash failed", conflict: !!r.conflict });
+      dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
       continue;
     }
     if (r.noop) {
@@ -107,12 +364,12 @@ export async function assembleBatchBranches(
         // STAGE_EMPTY_RETRY (or an ALREADY_MERGED with no resolvable sha) — genuinely nothing this batch
         // can prove either way; let the individual fallback path (today's confirmWorkerMerge, which has
         // its own idempotency handling for this exact classification) sort it out rather than guessing here.
-        dropped.push({ ...c, reason: `empty diff (${r.emptyKind ?? "unknown"}) — nothing to merge` });
+        dropped.push({ ...c, reason: `empty diff (${r.emptyKind ?? "unknown"}) — nothing to land` });
       }
       continue;
     }
     if (!r.sha || !r.subject) {
-      dropped.push({ ...c, reason: "merge reported ok with no sha/subject" });
+      dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
     landed.push({ ...c, sha: r.sha, subject: r.subject });
@@ -215,7 +472,7 @@ export async function runBatchedMerge(
 ): Promise<RunBatchedMergeResult> {
   const { landed, dropped } = await assembleBatchBranches(batchWorktreePath, candidates, deps);
   if (landed.length === 0) {
-    return { ok: false, landed, dropped, baseMainSha, reason: "nothing squashed cleanly into the batch — every candidate was dropped" };
+    return { ok: false, landed, dropped, baseMainSha, reason: "nothing landed cleanly into the batch — every candidate was dropped" };
   }
   const gate = await runGate(batchWorktreePath, baseMainSha, landed.length);
   if (!gate.passed) {
