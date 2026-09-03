@@ -2137,6 +2137,24 @@ export interface ProjectMemoryEntry {
 }
 
 /**
+ * One note's INBOUND `[[wikilink]]` backlinks (card e4e180ad), structured for navigation rather than the
+ * prose annotation lines the agent-facing `memory_read`/`memory_list` tools render (see the daemon's
+ * `mcp/memory.ts` `ProjectMemoryEntryWithLinks.backlinks: string[]`) — this is the shape
+ * `GET /api/projects/:id/memory` (card d371a9bf) serves the human Memory UI so it can link straight to
+ * each inbound key instead of parsing text. `totalFound` is the TRUE count before the cap (mirrors the
+ * daemon's `findInboundBacklinks`) — `totalFound > keys.length` means truncated, never silent.
+ */
+export interface ProjectMemoryBacklinks {
+  keys: string[];
+  totalFound: number;
+}
+
+/** {@link ProjectMemoryEntry} plus its resolved {@link ProjectMemoryBacklinks} — the REST shape for the
+ *  human Memory UI (card d371a9bf). Deliberately NOT `requestAnnotations`/`everDelivered` — see that
+ *  card's decision block for why those two stay agent-only. */
+export type ProjectMemoryEntryWithBacklinks = ProjectMemoryEntry & { backlinks: ProjectMemoryBacklinks };
+
+/**
  * LEGACY owner-gated / HOLD title heuristic — RETAINED ONLY for the one-time boot backfill that seeds the
  * structured `Task.held` flag from pre-existing cards (db.backfillHeldFromTitlesOnce). It is NO LONGER the
  * live idle-watchdog discount signal: that now keys SOLELY off `Task.held` (set explicitly by the owner via

@@ -1,6 +1,6 @@
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { ProjectMemoryEntry } from "@loom/shared";
+import type { ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { SectionLabel, Segmented, Meter, Chip, Badge } from "../components/ui";
@@ -166,8 +166,44 @@ function NoteRow({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
   );
 }
 
+// ── Backlinks — inbound [[wikilink]]s from other notes (card d371a9bf, the human-UI half of e4e180ad's
+// agent-facing field): the fix for a reader landing on a capped note with no lead to its overflow
+// companion. `keys` is always present (never omitted) — an empty list is a MEASURED zero ("nothing
+// links here"), rendered as its own explicit state rather than an absent section. `totalFound >
+// keys.length` means the REST layer's cap truncated the list — named explicitly ("showing N of M"),
+// mirroring the same contract the agent-facing tools already use, never silent.
+function BacklinksSection({ backlinks, onOpenKey }: { backlinks: ProjectMemoryEntryWithBacklinks["backlinks"]; onOpenKey: (key: string) => void }) {
+  return (
+    <div style={{ padding: "12px 16px", borderTop: `1px solid ${color.border}` }}>
+      <SectionLabel style={{ margin: "0 0 8px" }}>Linked from</SectionLabel>
+      {backlinks.keys.length === 0 ? (
+        <span style={{ fontSize: 11.5, color: color.textMuted }}>No notes link here.</span>
+      ) : (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {backlinks.keys.map((k) => (
+              <button key={k} onClick={() => onOpenKey(k)} title={`Open [[${k}]]`}
+                style={{
+                  background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm,
+                  color: color.cyan, fontFamily: font.mono, fontSize: 11, padding: "2px 7px", cursor: "pointer",
+                }}>
+                [[{k}]]
+              </button>
+            ))}
+          </div>
+          {backlinks.totalFound > backlinks.keys.length && (
+            <span style={{ display: "block", marginTop: 6, fontSize: 10.5, color: color.textMuted }}>
+              showing {backlinks.keys.length} of {backlinks.totalFound} inbound links
+            </span>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── The note-detail panel ────────────────────────────────────────────────────────────────────────────
-function NoteDetail({ entry, max, onClose }: { entry: ProjectMemoryEntry; max: number; onClose: () => void }) {
+function NoteDetail({ entry, max, onClose, onOpenKey }: { entry: ProjectMemoryEntryWithBacklinks; max: number; onClose: () => void; onOpenKey: (key: string) => void }) {
   const t = magTone(entry.retrievalCount, max);
   return (
     <div style={{
@@ -192,6 +228,7 @@ function NoteDetail({ entry, max, onClose }: { entry: ProjectMemoryEntry; max: n
       <div style={{ padding: "15px 16px 18px", overflowY: "auto" }}>
         <Markdown src={entry.text} />
       </div>
+      <BacklinksSection backlinks={entry.backlinks} onOpenKey={onOpenKey} />
       <div style={{ padding: "10px 16px", borderTop: `1px solid ${color.border}`, background: color.panel2, display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: color.textMuted }}>
         <span aria-hidden style={{ width: 6, height: 6, borderRadius: 6, background: color.textMuted, flexShrink: 0 }} />
         <span>Read-only — written &amp; forgotten by the fleet&apos;s memory MCP</span>
@@ -350,7 +387,7 @@ export default function Memory() {
     bodyContent = (
       <div className="memory-body-grid" style={{ display: "grid", gridTemplateColumns: selected ? "minmax(0, 1.35fr) minmax(0, 1fr)" : "1fr", gap: 26, alignItems: "start" }}>
         {listBody}
-        {selected && <NoteDetail entry={selected} max={maxRecall} onClose={() => setOpenKey(null)} />}
+        {selected && <NoteDetail entry={selected} max={maxRecall} onClose={() => setOpenKey(null)} onOpenKey={setOpenKey} />}
       </div>
     );
   }

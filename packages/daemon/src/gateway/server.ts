@@ -24,6 +24,7 @@ import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { filterRetainedWorktreesByProject } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
+import { findInboundBacklinks } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
@@ -3814,10 +3815,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // dozens to low-hundreds of short ≤4KB notes). HUMAN-only loopback read, same trust posture as the
   // sibling /board + /vault project reads; READ-ONLY — no write/forget surface here (curation stays the
   // memory MCP's job).
+  //
+  // `backlinks` (card d371a9bf, the human-UI half of card e4e180ad's agent-facing field) is resolved
+  // HERE, per row, via `findInboundBacklinks` directly — deliberately NOT by repointing this route at
+  // `mcp/memory.ts`'s `listProjectMemoryEntries` wrapper, which would also drag in `requestAnnotations`
+  // and `everDelivered`: d371a9bf's own decision block excludes both (the first is redundant with the
+  // Requests UI already shown above; the second is undecidable between never-matched and
+  // matched-then-evicted, so it would mislead a human reader). Shaped as structured
+  // `{ keys, totalFound }` (`ProjectMemoryBacklinks`), not the prose annotation LINES
+  // `ProjectMemoryEntryWithLinks.backlinks: string[]` renders for agents — the UI needs a bare key to
+  // link to, not text to parse. Capped at `findInboundBacklinks`'s own default (`MAX_BACKLINKS`), same
+  // "N of M" truncation contract the agent-facing tools already use — never silent.
   app.get("/api/projects/:id/memory", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return deps.db.listProjectMemory(p.id);
+    return deps.db.listProjectMemory(p.id).map((entry) => {
+      const { matches, totalFound } = findInboundBacklinks(deps.db, p.id, entry.key);
+      return { ...entry, backlinks: { keys: matches.map((m) => m.key), totalFound } };
+    });
   });
   // Transcript = Claude's session JSONL rendered to clean turns (canonical history). For an ARCHIVED
   // session the live JSONL is usually gone, so prefer the on-exit snapshot; fall through to the live
