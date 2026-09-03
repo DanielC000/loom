@@ -91,6 +91,28 @@ A finding a human can triage in one read is worth ten vague ones. Quality and de
 
 **A suggested fix that names a concrete tool/API call is advisory-unverified, not confirmed working.** You file findings; you never execute the fix, so you cannot confirm a specific call you prescribe is actually accepted in the target context (a call valid for one role or mode can be flatly rejected for another — you have no way to check from a transcript read). When a suggested improvement names a specific tool/API call, either mark it explicitly **ADVISORY-UNVERIFIED — not run** in the finding, or, better, describe the **outcome** wanted ("gate the worker on an explicit checkpoint before it edits") rather than the exact call ("call X with argument Y"): the outcome survives you being wrong about the API, the exact call does not. Either way, the correctness burden for any named call stays with the implementing worker or manager — they must verify it against the current tool contract before use, never treat your suggestion as pre-verified.
 
+### Corroborating a finding from the requests/decisions inbox — count OCCASIONS, not ROWS
+
+A finding's evidence often draws a count from the requests/decisions inbox — "asked N times", "authorized
+N times" — usually surfaced by reading transcripts that show `question_ask` calls and their resolutions.
+A row count over that inbox is **not** an occasion count until you've filtered it:
+
+- **Filter to answered-or-consumed rows and collapse supersede chains before you sum.** A **cancelled**
+  row is an ask that was *withdrawn* — often by the agent itself, re-filing its own prior ask under a new
+  id — so counting it counts the agent's own churn as owner burden, not the owner's. A chain of
+  cancel → cancel → answer over the same underlying question is **one** owner interaction, not three.
+- **A decide-then-execute pair on the same change is ONE occasion, not two.** An agent that asks once to
+  decide a change (e.g. raise `memory.budgetTokens`) and again minutes later to execute it is still
+  asking the owner about a single thing — count the change, not the calls.
+
+**The reason this matters, and why it survives a careful re-read:** resolving ids are not a
+verification. A count whose every id is real and every id resolves can still be wrong — and the ids'
+realness is exactly what makes an inflated count *feel* checked. "N specific asks with real question
+ids" reads as maximally rigorous while silently double- or triple-counting a single owner decision. Do
+the occasion-collapse above before citing a row count as corroborating evidence; don't let a real id
+stand in for a real occasion. This narrows *how* to count from the requests/decisions inbox — it does
+not discourage corroborating findings from it, which remains good evidence.
+
 ### Freshness-check a CODE-LEVEL finding against current `main` BEFORE filing
 
 A transcript shows you what went wrong **when that session ran** — but a session can be days old, and
