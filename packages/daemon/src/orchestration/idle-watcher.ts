@@ -162,7 +162,33 @@ export class IdleWatcher {
    * it can never grow unboundedly across recycles/restarts.
    */
   private lastIdleScanAt = new Map<string, number>();
+  /**
+   * Skip-reason change-tracker (card cdd10965 — the observability gap: a SKIPPED session used to leave
+   * zero trace, indistinguishable from "the watchdog never ticked"). Scoped to the MANAGER/PLATFORM loop
+   * in tick() ONLY — tickIdleWorkers/tickAnsweredStuckQuestions already log their own delivery failures
+   * and are a different loop with a different specimen; this does not cover them. Same in-memory,
+   * pruned-to-live-managers pattern as lastIdleScanAt above (a daemon restart just re-logs the current
+   * reason once more, harmless). Bounds log volume to state TRANSITIONS rather than one line per tick per
+   * live manager: measured, an actively-orchestrating manager flips `busy`↔`under-window` (or
+   * `busy`↔`live-busy-worker`) roughly twice per turn, i.e. ~2 lines × ~120 bytes ≈ 240 bytes per turn —
+   * immaterial against the per-turn submit-write/prompt-echo/MCP-handshake traffic already in this log;
+   * a genuinely idle manager produces ~1 line per idle episode, not one per 60s tick.
+   */
+  private lastSkipReason = new Map<string, string>();
   constructor(private deps: IdleWatcherDeps) {}
+
+  /**
+   * Emit `[idle-watcher] skip <id> reason=<reason>` ONLY when `reason` differs from the last one recorded
+   * for this session — see lastSkipReason's own doc for the volume rationale and scope (manager/platform
+   * loop only). Session id + a bare reason code ONLY, never message content, a card title, or a count
+   * (DoD-3 — this log is shared across every tenant on the host).
+   */
+  private logSkipIfChanged(sessionId: string, reason: string): void {
+    if (this.lastSkipReason.get(sessionId) === reason) return;
+    this.lastSkipReason.set(sessionId, reason);
+    // eslint-disable-next-line no-console
+    console.log(`[idle-watcher] skip ${sessionId} reason=${reason}`);
+  }
 
   tick(now: Date = new Date()): void {
     const { db, pty, control, recycleRatio } = this.deps;
@@ -181,22 +207,28 @@ export class IdleWatcher {
     // its memory to the live fleet instead of accumulating an entry per manager id ever seen.
     const liveManagerIds = new Set(managers.map((mm) => mm.id));
     for (const id of this.lastIdleScanAt.keys()) if (!liveManagerIds.has(id)) this.lastIdleScanAt.delete(id);
+    for (const id of this.lastSkipReason.keys()) if (!liveManagerIds.has(id)) this.lastSkipReason.delete(id);
 
     for (const m of managers) {
       const project = db.getProject(m.projectId);
-      if (!project) continue;
+      if (!project) { this.logSkipIfChanged(m.id, "no-project"); continue; } // defensive/TOCTOU — see logSkipIfChanged callers' doc below
       const cfg = resolveConfig(project.config).orchestration;
       const idleMinutes = cfg.idleNudgeMinutes;
-      if (idleMinutes === 0) continue; // disabled for this project
+      if (idleMinutes === 0) { this.logSkipIfChanged(m.id, "disabled"); continue; } // disabled for this project
 
       // Reset-on-activity: a manager that produced genuine orchestration work AFTER its last nudge is
       // back at the wheel — re-arm it (watching / unanswered 0 / snooze clear) before we evaluate.
+      // NOTE on the three `!state` sites below: unreachable by my reading of db.ts:5224-5235 —
+      // getIdleNudgeState returns undefined ONLY when the session row itself is missing, but `m` came
+      // from listLiveManagers()/listLivePlatformSessions() moments ago, so the row necessarily exists
+      // (TOCTOU aside). Kept as a distinct reason code anyway (card cdd10965 amendment): if this ever
+      // DOES fire in production, that's a real bug signal worth naming, not silencing.
       let state = db.getIdleNudgeState(m.id);
-      if (!state) continue;
+      if (!state) { this.logSkipIfChanged(m.id, "no-idle-state"); continue; }
       if (state.lastIdleNudgeAt && this.producedActivitySince(m.id, state.lastIdleNudgeAt)) {
         db.resetIdleNudgeState(m.id);
         state = db.getIdleNudgeState(m.id);
-        if (!state) continue;
+        if (!state) { this.logSkipIfChanged(m.id, "no-idle-state"); continue; }
       }
 
       // Timed snooze expiry: a manager that reported `waiting` is silent only UNTIL snooze_until
@@ -208,17 +240,19 @@ export class IdleWatcher {
       if (state.policy === "snoozed" && state.snoozeUntil && nowIso >= state.snoozeUntil) {
         db.resetIdleNudgeState(m.id);
         state = db.getIdleNudgeState(m.id);
-        if (!state) continue;
+        if (!state) { this.logSkipIfChanged(m.id, "no-idle-state"); continue; }
       }
 
       // --- the full trigger predicate (skip silently if ANY fails) ---
-      if (m.busy) continue;                                              // mid-turn → not idle
-      if (state.policy !== "watching") continue;                         // snoozed (within window) / suppressed
-      if (state.snoozeUntil && nowIso < state.snoozeUntil) continue;     // defensive: active snooze on a watching row
+      if (m.busy) { this.logSkipIfChanged(m.id, "busy"); continue; }                      // mid-turn → not idle
+      if (state.policy !== "watching") { this.logSkipIfChanged(m.id, state.policy); continue; } // snoozed (within window) / suppressed
+      // defensive: active snooze on a watching row — unreachable by my reading (policy!=="watching" above
+      // already excludes any snoozed row; a "watching" row should always have snoozeUntil cleared).
+      if (state.snoozeUntil && nowIso < state.snoozeUntil) { this.logSkipIfChanged(m.id, "active-snooze"); continue; }
       // NOTE: the unanswered≥cap case is NOT a skip here — it ESCALATES at the nudge-decision point below
       // (it must pass the SAME predicate a nudge does: unpaused, no live worker, not recycle-pending,
       // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
-      if (control.isPaused(m.id)) continue;                              // human-paused
+      if (control.isPaused(m.id)) { this.logSkipIfChanged(m.id, "human-paused"); continue; }
 
       // OWN pending owner Request (card cb56cf80, narrowed by card 8e87f3b5): a manager/Lead correctly
       // parked on an OPEN owner-facing question_ask IT ITSELF filed is not idle — it's blocked on the
@@ -243,14 +277,17 @@ export class IdleWatcher {
       // than sit idle waiting on nothing.
       const liveWorkers = db.listWorkers(m.id).filter((w) => w.processState === "live");
       const liveBusyWorkers = liveWorkers.filter((w) => w.busy).length;
-      if (liveBusyWorkers > 0) continue;
+      if (liveBusyWorkers > 0) { this.logSkipIfChanged(m.id, "live-busy-worker"); continue; }
 
       // Competing recycle nudge: a near-full manager should recycle, not spawn. Mirror ContextWatcher's
       // own per-project threshold (env force override, else THIS project's resolved recycleAtContextRatio,
       // already computed above as cfg) so idle precedence never disagrees with the recycle trigger.
       const effectiveRecycleRatio = recycleRatio > 0 ? recycleRatio : cfg.recycleAtContextRatio;
       if (effectiveRecycleRatio > 0 && m.ctxInputTokens != null) {
-        if (m.ctxInputTokens / contextWindowForModel(m.model) >= effectiveRecycleRatio) continue;
+        if (m.ctxInputTokens / contextWindowForModel(m.model) >= effectiveRecycleRatio) {
+          this.logSkipIfChanged(m.id, "recycle-pending");
+          continue;
+        }
       }
 
       // Idle long enough? The re-nudge cadence is gated on the LATER of lastActivity and the last
@@ -259,9 +296,9 @@ export class IdleWatcher {
       const lastNudgeMs = state.lastIdleNudgeAt ? Date.parse(state.lastIdleNudgeAt) : 0;
       const idleSinceMs = Math.max(lastActivityMs, lastNudgeMs);
       const idleForMin = (nowMs - idleSinceMs) / 60_000;
-      if (idleForMin < idleMinutes) continue;
+      if (idleForMin < idleMinutes) { this.logSkipIfChanged(m.id, "under-window"); continue; }
 
-      if (!pty.isAlive(m.id)) continue;
+      if (!pty.isAlive(m.id)) { this.logSkipIfChanged(m.id, "not-alive"); continue; }
 
       // ESCALATE-INSTEAD-OF-NUDGE (Task 4): we're at the nudge-decision point, so the manager has
       // already cleared the FULL nudge predicate (unpaused, no live worker, not recycle-pending,
@@ -279,6 +316,9 @@ export class IdleWatcher {
         db.setIdleNudgePolicy(m.id, "suppressed");
         // eslint-disable-next-line no-console
         console.log(`[idle-watcher] ESCALATED idle manager ${m.id} (${state.unanswered} unanswered nudges → suppressed)`);
+        // Not a new log line (already logged above) — just stamp the change-tracker so a LATER skip that
+        // happens to share a reason from before this escalation isn't silently suppressed as "unchanged".
+        this.lastSkipReason.set(m.id, "escalated");
         continue;
       }
 
@@ -312,7 +352,7 @@ export class IdleWatcher {
       // can never exceed that manager's configured nudge cadence, for any config.
       const effectiveScanThrottleMinutes = Math.min(IDLE_SCAN_THROTTLE_MINUTES, idleMinutes);
       const lastScanMs = this.lastIdleScanAt.get(m.id) ?? 0;
-      if (nowMs - lastScanMs < effectiveScanThrottleMinutes * 60_000) continue;
+      if (nowMs - lastScanMs < effectiveScanThrottleMinutes * 60_000) { this.logSkipIfChanged(m.id, "scan-throttled"); continue; }
       this.lastIdleScanAt.set(m.id, nowMs);
 
       const cols = resolveConfig(project.config).kanbanColumns;
@@ -430,7 +470,15 @@ export class IdleWatcher {
       // the escalation is a distinct human-facing signal, never itself gated by this predicate.
       const nothingElseActionable =
         strandedWorkers.length === 0 && !hasReviewCards && openCards.length === 0 && undocumentedManualDeferrals.length === 0;
-      if (nothingElseActionable && (nonTerminal.length > 0 || hasOwnPendingRequest)) continue;
+      if (nothingElseActionable && (nonTerminal.length > 0 || hasOwnPendingRequest)) {
+        // Card cdd10965's first-party specimen: a truly-empty board parked ONLY on the session's own
+        // pending owner Request (cb56cf80's original carve-out) is diagnostically distinct from "real
+        // cards exist but none of them are actionable" — name the two apart rather than folding both into
+        // one generic "nothing-actionable".
+        const reason = nonTerminal.length === 0 && hasOwnPendingRequest ? "own-pending-request" : "nothing-actionable";
+        this.logSkipIfChanged(m.id, reason);
+        continue;
+      }
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's
@@ -501,11 +549,16 @@ export class IdleWatcher {
         // State what was OBSERVED, not an inferred cause (mirrors context-watcher.ts's own wording).
         // eslint-disable-next-line no-console
         console.log(`[idle-watcher] nudge to manager ${m.id} was NOT accepted (${threw ? "enqueueStdin threw" : "enqueueStdin reported neither delivered nor queued"}) — not recording a sent nudge, not counting a strike`);
+        // Not a new log line (already logged above) — see the escalate branch's own comment on why this
+        // sentinel matters: without it, a later skip sharing a stale reason from before this attempt would
+        // be silently suppressed as "unchanged".
+        this.lastSkipReason.set(m.id, "nudge-not-accepted");
         continue;
       }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} actionable, unanswered→${state.unanswered + 1})`);
+      this.lastSkipReason.set(m.id, "nudged"); // same sentinel rationale as above
     }
 
     this.tickIdleWorkers(nowMs, nowIso);
