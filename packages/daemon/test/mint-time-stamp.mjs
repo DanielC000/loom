@@ -173,9 +173,14 @@ try {
     check("(C) setup: the peer message was queued (target manager busy) when sent", rC.deliveryStatus === "queued");
 
     const chunkC = lastPastedChunk(host.writtenText(mgrB));
-    const prefixMatch = chunkC.match(/^\[loom:from-manager · Project A · projectId:(\S+) · sessionId:(\S+)\]\n/);
-    check("(C) the pre-existing peer_message frame prefix is byte-identical (projectId + sessionId stamped, untouched)",
+    // Card 788781da: the frame now ALSO carries the two last-inbound staleness stamps (both "none" here —
+    // mgrA has no prior inbound correspondence from projB) — additive, so the pre-existing projectId/
+    // sessionId stamp is still present unchanged, just no longer immediately followed by `]`.
+    const prefixMatch = chunkC.match(/^\[loom:from-manager · Project A · projectId:(\S+) · sessionId:(\S+) · last-inbound-this-session:(\S+) · last-inbound-project:(\S+)\]\n/);
+    check("(C) the pre-existing peer_message frame prefix is present unchanged (projectId + sessionId stamped, untouched)",
       !!prefixMatch && prefixMatch[1] === projA && prefixMatch[2] === mgrA);
+    check("(C) the new last-inbound stamps both read \"none\" (mgrA has never received an inbound peer_message from projB)",
+      !!prefixMatch && prefixMatch[3] === "none" && prefixMatch[4] === "none");
     check("(C) a delayed peer_message ALSO carries the mint-time stamp", MINT_RE.test(chunkC) && chunkC.includes("PEER_DELAYED_DIRECTIVE"));
   }
 

@@ -5840,6 +5840,42 @@ export class Db {
        ORDER BY ts, rowid`,
     ).all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
+  /**
+   * Card 788781da — the actual hand-off instant for a `session_message_queued` id, once resolved; `null`
+   * while still queued/unresolved. Mirrors `isQueuedMessageDelivered`'s existence check but returns the
+   * DELIVERY TIMESTAMP rather than a boolean, so `messagePeerManager`'s inbound-staleness stamp can date a
+   * "queued" cross-project send that later drained, instead of only being able to say yes/no. A
+   * `session_message_delivered` marker fired WITH a `reason` (superseded/obsolete — see
+   * `resolveQueuedMessage`'s own doc) never actually delivered the text, so it's excluded — the earliest
+   * reason-less marker (there should only ever be one, per `isQueuedMessageDelivered`'s own idempotency
+   * guard) is the real hand-off.
+   */
+  getQueuedMessageDeliveredAt(msgId: string): string | null {
+    const r = this.db.prepare(
+      `SELECT ts FROM orchestration_events
+         WHERE kind = 'session_message_delivered' AND json_extract(detail_json, '$.msgId') = ?
+           AND json_extract(detail_json, '$.reason') IS NULL
+       ORDER BY ts, rowid LIMIT 1`,
+    ).get(msgId) as { ts: string } | undefined;
+    return r?.ts ?? null;
+  }
+  /**
+   * Card 788781da — every `cross_project_message` event addressed FROM `fromProjectId` TO `toProjectId`,
+   * regardless of which (possibly since-recycled) session sent or received it — the PROJECT-scoped half of
+   * `messagePeerManager`'s inbound-staleness stamp (its `last-inbound-project` field answers "was the
+   * project ever told", which must survive a recipient recycle; see that method's own doc). Unindexed
+   * `json_extract` scan over the whole table — accepted on the same precedent as `findGateOpEventsByOpId`:
+   * this only runs once per OUTGOING `peer_message` send, itself rate-limited, never a hot path.
+   */
+  listCrossProjectMessagesFromTo(fromProjectId: string, toProjectId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      `SELECT * FROM orchestration_events
+         WHERE kind = 'cross_project_message'
+           AND json_extract(detail_json, '$.originProjectId') = ?
+           AND json_extract(detail_json, '$.targetProjectId') = ?
+       ORDER BY ts, rowid`,
+    ).all(fromProjectId, toProjectId) as Row[]).map(toOrchestrationEvent);
+  }
 
   // --- tasks ---
   listTasks(projectId: string): Task[] {

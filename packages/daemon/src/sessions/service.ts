@@ -9944,6 +9944,68 @@ export class SessionService {
   }
 
   /**
+   * Card 788781da — resolve a `cross_project_message` event's own ACTUAL delivery instant, or `null` when
+   * it hasn't landed yet. "Delivered" (never "queued") per this card's own §INBOUND: `deliveryStatus`
+   * "delivered-live" was handed to a turn the instant it was sent (`ts` IS the delivery instant, same stamp
+   * `messageWorker`'s own immediate path uses); "boarded" was told to the target project the instant its
+   * board card was created (`ts` again); "queued" is NOT yet delivered until a `session_message_delivered`
+   * marker exists for its `msgId` (see `db.getQueuedMessageDeliveredAt`) — a bare send-time `ts` on a still-
+   * queued entry would claim "they have it" before it landed, exactly the false-confidence failure one
+   * level down that this card's §INBOUND section calls out. Deliberately does NOT walk the give-up/re-mint
+   * retry chain `resolveDirectiveOutcome` (mcp/orchestration.ts) does for a sender's OWN outbound directive
+   * — this field is an advisory staleness hint, not a delivery guarantee, and a message that needed a retry
+   * is the rare case; the simplification fails toward UNDER-claiming (an older/absent timestamp, never a
+   * false "delivered").
+   */
+  private crossProjectMessageDeliveredAt(e: OrchestrationEvent): string | null {
+    const status = e.detail?.deliveryStatus;
+    if (status === "delivered-live" || status === "boarded") return e.ts;
+    const msgId = e.detail?.msgId;
+    if (status === "queued" && typeof msgId === "string") {
+      return this.db.getQueuedMessageDeliveredAt(msgId);
+    }
+    return null;
+  }
+
+  /**
+   * Card 788781da §SCOPE, `last-inbound-this-session`: the most recent DELIVERED `peer_message` THIS EXACT
+   * session (`sessionId`) has received FROM `fromProjectId` — "does the AUTHOR know?" Deliberately scoped
+   * to the literal session id, NEVER its recycle lineage (`db.listEventsForWorker` only, no widening): a
+   * predecessor's inbound history is invisible here on purpose — that's what makes DoD-4's recycle case
+   * (session stamp `none`, project stamp carries the predecessor's receipt) actually possible; a lineage-
+   * widened read would silently reintroduce the "they were told, this author wasn't" false-confidence bug
+   * one layer down. `null` means "none" (never corresponded from this project, from this session's own
+   * point of view) — the caller renders that literally, never omitting the field (which instead means
+   * "absent": a frame written before this guard existed).
+   */
+  private lastInboundPeerMessageThisSession(sessionId: string, fromProjectId: string): string | null {
+    let latest: string | null = null;
+    for (const e of this.db.listEventsForWorker(sessionId)) {
+      if (e.kind !== "cross_project_message" || e.detail?.originProjectId !== fromProjectId) continue;
+      const deliveredAt = this.crossProjectMessageDeliveredAt(e);
+      if (deliveredAt && (!latest || deliveredAt > latest)) latest = deliveredAt;
+    }
+    return latest;
+  }
+
+  /**
+   * Card 788781da §SCOPE, `last-inbound-project`: the most recent DELIVERED `peer_message` `toProjectId`
+   * has EVER received FROM `fromProjectId`, across every session that project has ever run — "was the
+   * project ever told?" Survives a recycle (unlike the session-scoped sibling above) because it never keys
+   * on a session id at all: `db.listCrossProjectMessagesFromTo` matches purely on the two project ids
+   * carried in each event's own `detail`. `null` means "none" — same absent-vs-none contract as the
+   * session-scoped sibling.
+   */
+  private lastInboundPeerMessageProject(toProjectId: string, fromProjectId: string): string | null {
+    let latest: string | null = null;
+    for (const e of this.db.listCrossProjectMessagesFromTo(fromProjectId, toProjectId)) {
+      const deliveredAt = this.crossProjectMessageDeliveredAt(e);
+      if (deliveredAt && (!latest || deliveredAt > latest)) latest = deliveredAt;
+    }
+    return latest;
+  }
+
+  /**
    * Manager↔manager cross-project channel (orchestration `peer_message`, board card 2349d90c) — a manager
    * addressing a message to a LINKED peer project's LIVE manager. This is the manager's SECOND (and only
    * other) structured cross-project write, alongside `platformEscalate`; unlike that hardcoded-target
@@ -9973,6 +10035,33 @@ export class SessionService {
    * message is never lost — the peer's manager picks it up as a normal task on its next boot/attach).
    * Audited both directions via a single `cross_project_message` event (this method's caller is the ONLY
    * place that appends it, so origin/target are always recorded together).
+   *
+   * Card 788781da — the frame ALSO stamps two server-computed "last inbound FROM the recipient's project"
+   * timestamps, so a crossing pair (A sends, B sends before receiving A's) stops being indistinguishable
+   * from a reply: the sender's own staleness becomes a property of the transport, not of the author's
+   * diligence. Computed HERE, at SEND time — not earlier, at compose time — because that gap is exactly the
+   * staleness being measured. §SCOPE (this card's own body): the thing that reads a thread is a SESSION, not
+   * a project, so BOTH are stamped and neither substitutes for the other:
+   *   - `last-inbound-this-session` — does THIS AUTHOR (the literal session sending right now) know? Via
+   *     `lastInboundPeerMessageThisSession`, scoped to this exact session id, never lineage-widened — a
+   *     predecessor's inbound history is invisible here ON PURPOSE (see that method's own doc).
+   *   - `last-inbound-project` — was the PROJECT ever told, surviving a recycle? Via
+   *     `lastInboundPeerMessageProject`, which never keys on a session id at all.
+   * §INBOUND: "inbound" means DELIVERED (immediate hand-off, or a later hand-off confirmed by a
+   * `session_message_delivered` marker), never merely QUEUED — see `crossProjectMessageDeliveredAt`'s own
+   * doc. Each renders literally as `none` (this project/session has never received a peer_message from the
+   * target) when `null` — distinct from a reader seeing the field ABSENT entirely, which only ever means
+   * "this frame predates the guard." Additive: an ordinary, never-corresponded exchange's frame carries
+   * both fields reading `none`, otherwise byte-identical to before this card; no existing consumer is
+   * required to parse them (`PEER_MESSAGE_FRAME_RE`'s `[^\]]*` already tolerates whatever sits inside the
+   * brackets). DoD-7: the boarded-fallback task body (no live target manager) carries the SAME two stamps,
+   * in its own "From" block — a human reading a boarded card off a linked project's board benefits from the
+   * exact same staleness signal a live frame would have given a manager. DoD's own "consider surfacing
+   * `position` too" is decided NO for this card: `position` is already returned to the caller (unrelated to
+   * inbound staleness) and is out of this card's scope — not added here.
+   * Cross-project privacy: this exposes only a correspondence TIMESTAMP between two projects the owner has
+   * ALREADY explicitly linked (`db.areProjectsLinked`, checked above) — no message content, consistent with
+   * the frame's existing projectId/sessionId disclosure.
    */
   messagePeerManager(
     managerSessionId: string,
@@ -9999,10 +10088,16 @@ export class SessionService {
 
     const originProject = this.db.getProject(originProjectId);
     const originName = originProject?.name ?? originProjectId;
+    // Card 788781da: computed HERE, at send time — see this method's own doc above for why that instant
+    // (not compose time) is what makes the staleness meaningful, and for the §SCOPE/§INBOUND definitions.
+    const lastInboundThisSession = this.lastInboundPeerMessageThisSession(managerSessionId, targetProjectId);
+    const lastInboundProject = this.lastInboundPeerMessageProject(originProjectId, targetProjectId);
     // Stamp the origin projectId + sending manager sessionId onto the frame: nothing else exposes a
     // linked peer's project id to the recipient, so without this a recipient manager could never reply
     // via peer_message (which requires a targetProjectId) without a full human relay.
-    const framed = `[loom:from-manager · ${originName} · projectId:${originProjectId} · sessionId:${managerSessionId}]\n${text}`;
+    const framed =
+      `[loom:from-manager · ${originName} · projectId:${originProjectId} · sessionId:${managerSessionId} · ` +
+      `last-inbound-this-session:${lastInboundThisSession ?? "none"} · last-inbound-project:${lastInboundProject ?? "none"}]\n${text}`;
 
     // manager↔manager ONLY: match role==="manager" explicitly — a live worker/platform/auditor session in
     // the target project must never be matched, even if it's the only live session there.
@@ -10046,6 +10141,10 @@ export class SessionService {
         "",
         `- **From project:** ${originName} (\`${originProjectId}\`)`,
         `- **From (manager session):** \`${managerSessionId}\``,
+        // Card 788781da DoD-7: the same staleness stamps a live frame carries — a human reading this
+        // boarded card gets the same signal a manager reading the delivered frame would have.
+        `- **Sender's last inbound from this project (this session):** ${lastInboundThisSession ?? "none"}`,
+        `- **Sender's last inbound from this project (project-wide):** ${lastInboundProject ?? "none"}`,
         "",
         "## Message",
         "",

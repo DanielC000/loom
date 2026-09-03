@@ -87,7 +87,7 @@ try {
     check("(1) setup: the peer_message HELD (busy target) and was persisted durably", sent.deliveryStatus === "queued" && db.listUnresolvedQueuedMessagesForWorker(mgrBOld).length === 1);
     const preRecord = db.listUnresolvedQueuedMessagesForWorker(mgrBOld)[0];
     check("(1) setup: the pre-recycle record carries the ORIGINAL, unlabeled peer frame",
-      preRecord.detail?.text?.startsWith(`[loom:from-manager · Project A · projectId:${pA} · sessionId:${mgrA}]\n`) &&
+      preRecord.detail?.text?.startsWith(`[loom:from-manager · Project A · projectId:${pA} · sessionId:${mgrA} · last-inbound-this-session:none · last-inbound-project:none]\n`) &&
       !preRecord.detail?.text?.includes("loom:inherited-by-recycle"));
 
     const fresh = await sessions.recycleManager(mgrBOld, "successor: nothing else in flight, drain the queue");
@@ -100,7 +100,7 @@ try {
     check("(1) DoD-1: the successor's copy is labeled INHERITED, naming the predecessor session",
       text.startsWith(`[loom:inherited-by-recycle · predecessor:${mgrBOld.slice(0, 8)}]\n`));
     check("(1) DoD-3: the ORIGINAL peer frame survives byte-identical, ahead of the labeled body",
-      text.includes(`[loom:from-manager · Project A · projectId:${pA} · sessionId:${mgrA}]\nfarewell — closing out this thread, thanks for the help`));
+      text.includes(`[loom:from-manager · Project A · projectId:${pA} · sessionId:${mgrA} · last-inbound-this-session:none · last-inbound-project:none]\nfarewell — closing out this thread, thanks for the help`));
     check("(1) the re-minted record still preserves the ORIGINAL sender (mgrA), not a sentinel",
       reminted[0]?.detail?.sender === mgrA);
     check("(1) NEGATIVE CONTROL (polarity): the successor sees the label, never a BARE message — the exact defect the card measured",

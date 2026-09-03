@@ -176,16 +176,16 @@ try {
   check("(5) a linked target WITH a live manager delivers live (deliveryStatus delivered-live)",
     delivered.deliveryStatus === "delivered-live" && !delivered.error);
   const lastEnq = host.enqueued[host.enqueued.length - 1];
-  check("(6) delivered to MGR_B specifically, framed [loom:from-manager · Project A · projectId:pA · sessionId:MGR_A], kind:\"agent\" (one-per-turn)",
+  check("(6) delivered to MGR_B specifically, framed [loom:from-manager · Project A · projectId:pA · sessionId:MGR_A · last-inbound-this-session:none · last-inbound-project:none], kind:\"agent\" (one-per-turn)",
     host.enqueued.length === enqBeforeB + 1 && lastEnq.id === "MGR_B" && lastEnq.kind === "agent" &&
-    lastEnq.text.startsWith("[loom:from-manager · Project A · projectId:pA · sessionId:MGR_A]\n") &&
+    lastEnq.text.startsWith("[loom:from-manager · Project A · projectId:pA · sessionId:MGR_A · last-inbound-this-session:none · last-inbound-project:none]\n") &&
     lastEnq.text.includes("what's your webhook payload shape?"));
 
   // ====== (6b) the stamped id lets the RECIPIENT reply via peer_message with NO human relay ======
   // Prove the round-trip: parse the origin projectId out of the delivered frame (exactly as a recipient
   // manager would read it off its inbound turn) and use it as `targetProjectId` on a peer_message call
   // made AS the recipient (MGR_B) — this is the whole point of the stamp: a reply with no human relay.
-  const stampMatch = lastEnq.text.match(/^\[loom:from-manager · .* · projectId:(\S+) · sessionId:(\S+)\]/);
+  const stampMatch = lastEnq.text.match(/^\[loom:from-manager · .* · projectId:(\S+) · sessionId:(\S+) · last-inbound-this-session:\S+ · last-inbound-project:\S+\]/);
   check("(6b) the delivered frame carries a parseable projectId + sessionId stamp",
     !!stampMatch && stampMatch[1] === "pA" && stampMatch[2] === "MGR_A");
   const mgrBClient = await connect(orch.buildServer("MGR_B", "manager"));
