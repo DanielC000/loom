@@ -708,7 +708,20 @@ what you checked. Found none? Treat it as live.
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was
      already merged — no action), and `[loom:auto-recovered]` / `[loom:crash-recovered]` — these last two
      mean **Loom has ALREADY recovered the worker** (resumed it in place after a dead-drop or crash), so do
-     **NOT** re-spawn or stop it; the worker is back and driving.
+     **NOT** re-spawn or stop it; the worker is back and driving. **`[loom:daemon-restarted]` is a
+     different path from those two:** it's tied to a DELIBERATE rebuild + restart, never a crash — it can
+     reach any manager, the one that requested the restart and every other bystander manager alike, not
+     just workers. When it fires, it's delivered as a durable, queued notice, landing at your next turn
+     boundary rather than instantly. But a resumed manager the restart genuinely didn't touch — no
+     workers resumed under it, no queued messages replayed, no unconsumed answer waiting, no pending
+     board work stranded — resumes SILENTLY, with no notice at all; that's the normal, healthy outcome,
+     not a gap in delivery. So absence has two legitimate readings, not one: a notice queued and still on
+     its way, or a genuinely unaffected resume with nothing ever coming — don't treat silence as "wait
+     for it." ⭐ **Neither your
+     engine session id nor your context staying intact is evidence either way** — a resumed session keeps
+     both regardless of whether a restart touched it, so "same session, same context" tells you nothing
+     about whether you were affected. The tag itself is the only reliable signal; look for it, don't infer
+     continuity from anything else.
    - **No gate/build command configured? REQUEST the human set one — never hand-roll it.** Configuring
      the project's gate command is a HUMAN-ONLY action: it's an exec/RCE surface, so it is never
      agent-writable and you must not self-configure or improvise one. When the project you orchestrate has
