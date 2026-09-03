@@ -87,6 +87,60 @@ function nonRunReason(outcome: GateOutcome): string {
   return "No gate process spawned for this run.";
 }
 
+// ── batched merge gates (card 10fd660b) ─────────────────────────────────────────
+// A batched merge (`merge_batch`) lands N worker branches under ONE gate, so it has NO single branch:
+// its row/run carries `branch: null` + `taskId: null` BY DESIGN, and that null pair is the batch
+// signature other readers already key on. Rendering a batch off `branch` therefore degraded three
+// different ways at once - the lane hero dropped its identity line entirely, the queue card fell
+// through to the bare agent name, and the history table printed a bare em-dash, which is exactly what a
+// broken/missing-data row looks like. All three now read the batch fields instead and share ONE chip,
+// so a batch is recognisable at a glance wherever it appears. Nothing here synthesizes a branch name.
+const BATCH_LABEL = "batch";
+
+// The identity line a batch gets INSTEAD of a branch name: "3 branches" / "3 of 4 branches".
+// `landed` is the POST-ASSEMBLY count and `requested` is `batchBranches.length` - two DIFFERENT numbers
+// (a conflict can drop a branch while the batch is assembled), so the fraction is shown only when they
+// actually differ, and neither is ever derived from the other (card cf0e2e3b's denominator trap).
+function batchSummary(landed: number | null, requested: number | null): string {
+  const branches = (n: number) => `${n} branch${n === 1 ? "" : "es"}`;
+  if (landed == null) return requested == null ? "batched merge" : `${branches(requested)} requested`;
+  if (requested != null && requested > landed) return `${landed} of ${branches(requested)}`;
+  return branches(landed);
+}
+
+// A FILLED micro-chip, deliberately not a second outlined one: this page's outlined chips (kind,
+// priority) answer "what sort of run is this", and a batch marker answers "what is this run's subject" -
+// it belongs on the identity line, reading as a label rather than competing with the kind tag beside it.
+function BatchTag() {
+  return (
+    <span style={{
+      fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase",
+      padding: "1px 5px", borderRadius: radius.sm, background: color.phosphorDim, color: color.phosphor, flex: "none",
+    }}>
+      {BATCH_LABEL}
+    </span>
+  );
+}
+
+// The one-line batch identity shared by BOTH active-lane sites (the running hero and the queued card).
+// The branch names ride in the title so the count never has to widen a width-constrained lane card.
+function BatchIdentity({ landed, branches, style }: { landed: number | null; branches: string[] | null; style?: CSSProperties }) {
+  return (
+    <div
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 11, color: color.textDim, fontFamily: font.mono, ...style }}
+      title={branches && branches.length > 0 ? `Branches in this batch:\n${branches.join("\n")}` : undefined}
+    >
+      <BatchTag />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{batchSummary(landed, branches?.length ?? null)}</span>
+    </div>
+  );
+}
+
+// The always-visible half of the batch affordance, mirroring NON_RUN_NOTE's own pattern: the per-row chip
+// says WHICH rows, this says what an empty Branch cell means. Shown only while a batched row is loaded.
+const BATCH_NOTE =
+  "lands several worker branches under one gate, so it has no single branch to name. Expand the count to see which branches went in.";
+
 // A long-running lane cue mirroring the mockup: warn (amber) once a running gate passes this, since the
 // default gateCommandTimeoutMs is minutes and a lane held this long is worth the eye.
 const LONG_RUN_WARN_SECONDS = 420;
@@ -394,7 +448,9 @@ function LaneSlot({
           </span>
         </div>
         <div style={{ fontSize: 14, color: color.text, marginBottom: 2 }}>{gate.projectName}</div>
-        {gate.branch && <div style={{ fontSize: 11, color: color.textDim, fontFamily: font.mono }}>{gate.branch}</div>}
+        {gate.batched
+          ? <BatchIdentity landed={gate.branchCount} branches={gate.batchBranches} />
+          : gate.branch && <div style={{ fontSize: 11, color: color.textDim, fontFamily: font.mono }}>{gate.branch}</div>}
         <div style={{ fontSize: 11, color: color.textMuted, marginTop: 5 }}>
           {gate.workerLabel ?? "—"}
           {gate.priority ? ` · ${gate.priority.toUpperCase()}` : ""}
@@ -428,7 +484,9 @@ function QueueCard({ gate, position, now, isHol }: { gate: GateRun; position: nu
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{gate.projectName}</div>
         <div style={{ fontSize: 10, color: color.textMuted, fontFamily: font.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {gate.branch ?? gate.workerLabel ?? "—"}
+          {gate.batched
+            ? <BatchIdentity landed={gate.branchCount} branches={gate.batchBranches} style={{ fontSize: 10, color: color.textMuted }} />
+            : (gate.branch ?? gate.workerLabel ?? "—")}
         </div>
       </div>
       {gate.priority && <PriorityTag priority={gate.priority} />}
@@ -496,6 +554,11 @@ function HistoryTable({
           WHICH rows, this says WHAT it means — a hover tooltip alone would leave the distinction
           invisible to anyone who never hovers. Shown only while a non-run row is actually loaded, so
           it never becomes permanent chrome on a table that has none. */}
+      {rows.some((r) => r.batched) && (
+        <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.border}`, fontSize: 11, lineHeight: 1.55, color: color.textDim, maxWidth: "78ch", whiteSpace: "normal" }}>
+          <BatchTag />{" "}{BATCH_NOTE}
+        </div>
+      )}
       {rows.some((r) => !r.gateRan) && (
         <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.border}`, fontSize: 11, lineHeight: 1.55, color: color.textDim, maxWidth: "78ch", whiteSpace: "normal" }}>
           <span style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: color.cyan }}>{NON_RUN_LABEL}</span>
@@ -520,7 +583,9 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
       </td>
       <td style={tdStyle}><span style={{ fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: kindC }}>{KIND_LABEL[row.gateType]}</span></td>
       <td style={tdStyle}>{row.projectName ?? (row.projectId ? projectName(row.projectId) : "—")}</td>
-      <td style={{ ...tdStyle, color: color.textDim, fontFamily: font.mono }}>{row.branch ?? "—"}</td>
+      {row.batched
+        ? <BatchBranchCell row={row} />
+        : <td style={{ ...tdStyle, color: color.textDim, fontFamily: font.mono }}>{row.branch ?? "—"}</td>}
       <td style={{ ...tdStyle, color: color.textDim, fontFamily: font.mono }} title={row.failingTest ?? undefined}>
         {row.workerLabel ?? "—"}
         {row.failingTest && <span style={{ color: color.red }}> · {row.failingTest}</span>}
@@ -545,6 +610,63 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
       </td>
       <td style={{ ...tdStyle, color: color.textMuted, fontFamily: font.mono }}>{relTime(row.endedAt, now)}</td>
     </tr>
+  );
+}
+
+// The Branch cell for a BATCHED row. The count alone already beats the old em-dash (it can no longer be
+// mistaken for missing data), but a batch's whole point is WHICH branches landed together, so the count
+// doubles as a disclosure control that lists them in place. Collapsed by default - the table's job is a
+// scannable run index, and N permanently-expanded lists would bury it.
+function BatchBranchCell({ row }: { row: GateHistoryRow }) {
+  const [open, setOpen] = useState(false);
+  const branches = row.batchBranches ?? [];
+  const requested = row.batchBranches?.length ?? null;
+  const canExpand = branches.length > 0;
+  // ⚠️ `requested` and `row.branchCount` are DIFFERENT numbers by construction (see batchSummary): the
+  // array is the pre-assembly REQUESTED set, the count is what actually LANDED. A gap between them means
+  // a branch conflicted out while the batch was assembled.
+  const droppedCount = row.branchCount != null && requested != null ? requested - row.branchCount : 0;
+  return (
+    <td style={{ ...tdStyle, color: color.textDim, fontFamily: font.mono, whiteSpace: "normal" }}>
+      {canExpand ? (
+        <button
+          type="button"
+          className="loom-btn loom-btn-ghost"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          title={open ? "Hide the branches in this batch" : "Show the branches in this batch"}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 5px", margin: "-3px -5px",
+            borderRadius: radius.sm, font: "inherit", color: color.textDim, cursor: "pointer",
+          }}
+        >
+          <BatchTag />
+          <span>{batchSummary(row.branchCount, requested)}</span>
+          <span aria-hidden="true" style={{ fontSize: 9, color: color.textDim }}>{open ? "▾" : "▸"}</span>
+        </button>
+      ) : (
+        // No recorded branch list (a row from before `branches` was stamped). The count still identifies
+        // it as a batch; there is simply nothing to expand, so no dead control is offered.
+        <BatchIdentity landed={row.branchCount} branches={null} />
+      )}
+      {open && canExpand && (
+        <>
+          <ul style={{ listStyle: "none", margin: `${space(2)} 0 0`, padding: `0 0 0 ${space(2)}`, borderLeft: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 3 }}>
+            {branches.map((b) => (
+              <li key={b} style={{ fontSize: 11, color: color.textDim }}>{b}</li>
+            ))}
+          </ul>
+          {droppedCount > 0 && (
+            <div style={{ marginTop: space(2), fontSize: 10, lineHeight: 1.5, color: color.amber, maxWidth: "52ch", whiteSpace: "normal", fontFamily: font.head }}>
+              {/* Honest about the limit of what this row records: the event carries the REQUESTED set and a
+                  LANDED COUNT, never a landed set, so naming which branch dropped would be a guess. */}
+              {droppedCount} of these did not land (a conflict at assembly). This row records how many
+              landed, not which.
+            </div>
+          )}
+        </>
+      )}
+    </td>
   );
 }
 
