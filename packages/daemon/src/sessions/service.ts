@@ -18135,14 +18135,16 @@ export class SessionService {
     // Aggregated ONCE per pass, not per session (card 6ee48e4d) — mirrors scanMergedCommitMap's own
     // once-per-scan log for the identical FACT (a landed commit carrying no Loom-Worker-PathSet trailer),
     // so a boot with many such landings can't flood the log the way the old per-call console.info did.
-    // That fact now has TWO causes, not one (card 6801c0a1: a batched landing's tip commit omits this
-    // trailer BY DESIGN, alongside the original pre-f621f185 legacy-history cause) — this diagnostic
-    // still can't and doesn't try to tell them apart, same as its worktrees.ts mirror.
+    // As of card 9198c7a4 a batched landing's tip commit stamps this trailer from its ENTIRE contribution
+    // same as a solo squash, so this fact has only ONE ordinary cause now (pre-f621f185 legacy history) —
+    // plus the rare best-effort stamp failure (logged at the stamp site itself when it happens). This
+    // diagnostic still can't and doesn't try to tell those apart, same as its worktrees.ts mirror.
     if (noPathSetTrailerNoticeCount > 0) {
       // eslint-disable-next-line no-console
       console.info(`[reconcile] ${noPathSetTrailerNoticeCount} worker(s) had a landed squash with no ` +
-        "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a card-6801c0a1 batched landing " +
-        "that omits it by design) — trusted Loom-Worker-Branch presence alone");
+        "Loom-Worker-PathSet trailer (pre-f621f185 legacy history, or a best-effort Base/PathSet stamp " +
+        "that failed to land — logged at the stamp site when it happens) — trusted Loom-Worker-Branch " +
+        "presence alone");
     }
 
     // A2. Resolve branch-gone dangling merges from the EVENT trail (the residual PRE-squash-era shape
