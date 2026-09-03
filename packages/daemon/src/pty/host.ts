@@ -1582,7 +1582,8 @@ export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_
  * anyway (today's behavior — the possible "not connected" race, not a wedge). Comfortably under
  * READY_FALLBACK_MS (20s): a normal MCP HTTP handshake is sub-second, so this only needs to absorb
  * fleet-wide restart contention, not stand in as a second readiness fallback. Env-overridable so tests
- * don't wait out the default.
+ * don't wait out the default. Card a57b07af: the SAME bound now also gates scheduleKickoffGuarantee's
+ * turn-1 delivery, for the same reason — see that function's own doc for the measurement that justified it.
  */
 const MCP_READY_TIMEOUT_MS = Number(process.env.LOOM_MCP_READY_TIMEOUT_MS) || 9_000;
 
@@ -10352,89 +10353,119 @@ export class PtyHost {
    * covered by the SAME resume mechanics, not this one), so `startupPrompt` stays null there and
    * markReady's own capture never calls this at all in that case — genuinely byte-identical now, since
    * `startupPrompt`, unlike `lastPrompt`, is never written by a resume's own pre-ready drain.
+   *
+   * Card a57b07af: for a role that mounts loom-orchestration (manager/worker/assistant — mirrors
+   * SessionService.usesOrchestrationMcp), the actual delivery inside the setTimeout below now additionally
+   * awaits `waitForMcpSeen` — the SAME readiness gate the resume-continuation nudge already uses (card
+   * df5e37e7), closing the asymmetry the Code Review that filed this card found: turn 1 calls MCP tools
+   * almost immediately (a worker's first real action is typically `tasks_get`), so it deserves the same
+   * protection against racing the CLI's own async MCP handshake that a resume nudge already gets. Applied
+   * only after measuring (see the wait's own inline comment): 494/494 real production turn-1 kickoff
+   * spawns already had `mcpSeen` true at this point, so the added wait resolves synchronously in the
+   * overwhelming common case and only pays real, bounded (MCP_READY_TIMEOUT_MS) latency during genuine
+   * handshake contention. A role that never mounts loom-orchestration skips the wait entirely — it would
+   * otherwise wait out the full timeout for a signal that can never fire.
    */
   private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
     setTimeout(() => {
-      const l = this.live.get(sessionId);
-      if (!l?.alive || l.firstTurnStarted) return; // something else already started a turn on this SAME tick (see this function's own doc) — no-op
-      // Card 78a16dc5 (mirrors resumeAfterRateLimit's card-81f9c887 fix): `firstTurnStarted` is set ONLY
-      // by the UserPromptSubmit hook, which CAN be lost (see the Stop/StopFailure handler's own comment) —
-      // so this can fire while a turn genuinely already ran and its Stop's own drainPending() just started
-      // writing a QUEUED message. A direct submit() here would race THAT in-flight writeChunked chain —
-      // its own staggered pty.write()s would interleave with this one's, splicing two different messages
-      // together mid-word (the observed corruption).
-      //
-      // `busy` alone is NOT the right signal for "a write is genuinely in flight": it is ALSO true from
-      // spawn()'s own OPTIMISTIC set (the common, intended case this delivery exists for — a fresh spawn
-      // whose kickoff hasn't attempted to submit yet) with NO submit() ever having run — deferring on bare
-      // `busy` would wrongly hold the kickoff in `pending` FOREVER in exactly that case, since nothing will
-      // ever fire a Stop to drain it (worker-kickoff-guarantee.mjs's H1a/H1e/H1f pinned this regression).
-      // The precise signal is `submitGeneration > 0 && !enterConfirmed`: `submitGeneration` only advances
-      // inside submit() itself (never by the spawn-time optimistic setBusy), so `0` means "no submit() has
-      // EVER run for this pty" (direct-write is unconditionally safe — nothing to race); `enterConfirmed`
-      // is reset false at the TOP of every submit() and only flips true once that turn's Enter is verified
-      // (UserPromptSubmit/Stop/StopFailure) — so `>0 && !confirmed` means "the most recent submit's
-      // writeChunked chain may still be stepping, or is at least not yet verified done" — the actual
-      // interleave hazard. `stopping`/`drainHeld`/`rateLimited` are separate, orthogonal reasons a direct
-      // write is unsafe (a dying/held/parked pty) that submit() itself does not check.
-      //
-      // Either way, route through the SAME serialized primitive every other write uses when a direct write
-      // isn't safe RIGHT NOW: enqueueStdin still GUARANTEES delivery (held FIFO, drained atomically at the
-      // next safe boundary — never dropped), it just never races an in-flight write. kind:"agent" — this is
-      // substantive directed content (the kickoff itself), not a bracket-tagged Loom nudge, so it drains
-      // alone (not coalesced) and is exempt from the [loom:*] shape guard below (scoped to "warning" only).
-      // Tolerated rare duplicate (CR-noted): if `rateLimited` is what makes this branch unsafe, resumeAfterRateLimit
-      // will INDEPENDENTLY replay `lastPrompt` once unparked — and lastPrompt is USUALLY still this exact
-      // kickoff (nothing else has submitted yet). That means the kickoff can be delivered TWICE (the
-      // enqueued copy below, plus resumeAfterRateLimit's own replay) rather than lost — strictly better
-      // than pre-fix (which could interleave/corrupt it), and rare enough (needs a lost UserPromptSubmit
-      // hook AND a rate-limit park on the SAME never-confirmed turn) not to special-case further here.
-      const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
-      if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
+      // Card a57b07af: gate delivery on `mcpSeen` for the same roles the resume-continuation nudge already
+      // gates on (SessionService.usesOrchestrationMcp — manager/worker/assistant; re-derived from `role`
+      // here since PtyHost has no access to that helper). MEASURED (card a57b07af DoD-1, against this
+      // exact log line's own timestamp vs. each session's first observed `/mcp-orch` hit, over the full
+      // retained daemon-output.log history): 494/494 real production turn-1 kickoff spawns for these roles
+      // already had `mcpSeen` true at this precise tick, by 1.19s-2.32s (mean ~1.42s) — zero counterexamples.
+      // So `waitForMcpSeen` resolves synchronously in the overwhelming common case; it only pays real
+      // latency, bounded by MCP_READY_TIMEOUT_MS (same as the resume nudge), during genuine handshake
+      // contention (e.g. a fleet-wide restart) — which is exactly the case this closes the asymmetry for.
+      // A role that never mounts loom-orchestration (platform/setup/run/auditor/workspace-auditor/shell)
+      // would otherwise wait out the full timeout for a signal that can never fire, so those skip the wait.
+      const l0 = this.live.get(sessionId);
+      const gateOnMcp = l0?.role === "manager" || l0?.role === "worker" || l0?.role === "assistant";
+      const proceed = (): void => {
+        const l = this.live.get(sessionId);
+        // Re-checked here (not just before the wait) because `waitForMcpSeen` can take up to
+        // MCP_READY_TIMEOUT_MS — anything could have happened to this pty in the meantime.
+        if (!l?.alive || l.firstTurnStarted) return; // something else already started a turn (see this function's own doc) — no-op
+        // Card 78a16dc5 (mirrors resumeAfterRateLimit's card-81f9c887 fix): `firstTurnStarted` is set ONLY
+        // by the UserPromptSubmit hook, which CAN be lost (see the Stop/StopFailure handler's own comment) —
+        // so this can fire while a turn genuinely already ran and its Stop's own drainPending() just started
+        // writing a QUEUED message. A direct submit() here would race THAT in-flight writeChunked chain —
+        // its own staggered pty.write()s would interleave with this one's, splicing two different messages
+        // together mid-word (the observed corruption).
+        //
+        // `busy` alone is NOT the right signal for "a write is genuinely in flight": it is ALSO true from
+        // spawn()'s own OPTIMISTIC set (the common, intended case this delivery exists for — a fresh spawn
+        // whose kickoff hasn't attempted to submit yet) with NO submit() ever having run — deferring on bare
+        // `busy` would wrongly hold the kickoff in `pending` FOREVER in exactly that case, since nothing will
+        // ever fire a Stop to drain it (worker-kickoff-guarantee.mjs's H1a/H1e/H1f pinned this regression).
+        // The precise signal is `submitGeneration > 0 && !enterConfirmed`: `submitGeneration` only advances
+        // inside submit() itself (never by the spawn-time optimistic setBusy), so `0` means "no submit() has
+        // EVER run for this pty" (direct-write is unconditionally safe — nothing to race); `enterConfirmed`
+        // is reset false at the TOP of every submit() and only flips true once that turn's Enter is verified
+        // (UserPromptSubmit/Stop/StopFailure) — so `>0 && !confirmed` means "the most recent submit's
+        // writeChunked chain may still be stepping, or is at least not yet verified done" — the actual
+        // interleave hazard. `stopping`/`drainHeld`/`rateLimited` are separate, orthogonal reasons a direct
+        // write is unsafe (a dying/held/parked pty) that submit() itself does not check.
+        //
+        // Either way, route through the SAME serialized primitive every other write uses when a direct write
+        // isn't safe RIGHT NOW: enqueueStdin still GUARANTEES delivery (held FIFO, drained atomically at the
+        // next safe boundary — never dropped), it just never races an in-flight write. kind:"agent" — this is
+        // substantive directed content (the kickoff itself), not a bracket-tagged Loom nudge, so it drains
+        // alone (not coalesced) and is exempt from the [loom:*] shape guard below (scoped to "warning" only).
+        // Tolerated rare duplicate (CR-noted): if `rateLimited` is what makes this branch unsafe, resumeAfterRateLimit
+        // will INDEPENDENTLY replay `lastPrompt` once unparked — and lastPrompt is USUALLY still this exact
+        // kickoff (nothing else has submitted yet). That means the kickoff can be delivered TWICE (the
+        // enqueued copy below, plus resumeAfterRateLimit's own replay) rather than lost — strictly better
+        // than pre-fix (which could interleave/corrupt it), and rare enough (needs a lost UserPromptSubmit
+        // hook AND a rate-limit park on the SAME never-confirmed turn) not to special-case further here.
+        const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
+        if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
+          // eslint-disable-next-line no-console
+          console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
+          this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
+          return;
+        }
         // eslint-disable-next-line no-console
-        console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
-        this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
-        return;
-      }
-      // eslint-disable-next-line no-console
-      console.log(`[pty] ${sessionId} ready with no turn started — submitting the kickoff`);
-      // Code Review Major finding (card 0050a17e): this is a DIRECT submit() (mirrors resumeAfterRateLimit's
-      // "rate-limit-replay", the OTHER direct caller `Live.giveUpOrigin`'s doc names) — historically its
-      // `origin` was left undefined, since a lost give-up here was reachable only after the vendor CLI's
-      // OWN auto-submit had already failed once. Now that this direct submit() is the PRIMARY delivery path
-      // for EVERY spawn, an unconfirmed give-up (Enter never confirms within SUBMIT_MAX_ATTEMPTS — a real,
-      // measured risk: pinned memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records
-      // a 232-second confirmation lag) would otherwise DISCARD the kickoff with nothing to restore — give-up
-      // is likeliest exactly for the large pastes this card exists to enable. A synthetic single-element
-      // origin routes this write through the SAME requeueGiveUpOrigin recovery every enqueueStdin-originated
-      // turn already gets: on a give-up, the kickoff is re-queued at the front of `pending` (held pending a
-      // late confirming hook — see requeueGiveUpOrigin's own doc), not lost. `source:"system"`/`kind:"agent"`
-      // mirror the enqueueStdin call in the branch just above (the "unsafe to write directly" sibling path),
-      // which ALREADY gets a correct origin for free via drainPending's own `drained` array.
-      //
-      // Card a8f8a8f2: `onGiveUpExhausted` (card ccb407eb's hook — see `QueuedMessage.onGiveUpExhausted`'s
-      // own doc) was left UNWIRED here — `GIVE_UP_REQUEUE_LIMIT` is 1, so a SECOND unconfirmed give-up on
-      // this same kickoff took the residual bare-drop path `requeueGiveUpOrigin` documents (console.error
-      // only), losing the entire task dispatch with nothing durable or visible surfacing it except the
-      // generic idle-watchdog eventually noticing the idle, never-started session — slow and indirect,
-      // not a signal at the exact seam that failed. Wired to `events.onKickoffGiveUpExhausted` (DB-agnostic,
-      // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can decide what to
-      // do — card 7772176d: that is now a bounded re-mint before park+notify, not park+notify immediately;
-      // see `SessionService.handleKickoffGiveUpExhausted`'s own doc for the current shape.
-      // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` captured into locals (not inlined twice) so the
-      // give-up hook reports the EXACT SAME ids the QueuedMessage itself carries — this is what lets the
-      // implementer record a durable "parked" event keyed to the same `rootMsgId` a later content-matched
-      // `onGiveUpConfirmed` will report, closing the retraction gap `onKickoffGiveUpExhausted`'s own doc
-      // describes.
-      const kickoffMsgId = randomUUID();
-      const kickoffLogicalId = randomUUID();
-      this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
-        [{
-          id: kickoffMsgId, text: kickoff, source: "system", kind: "agent", logicalId: kickoffLogicalId,
-          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId, kickoff),
-        }]);
-      // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
-      // depth, not load-bearing. Card 0050a17e.
+        console.log(`[pty] ${sessionId} ready with no turn started — submitting the kickoff`);
+        // Code Review Major finding (card 0050a17e): this is a DIRECT submit() (mirrors resumeAfterRateLimit's
+        // "rate-limit-replay", the OTHER direct caller `Live.giveUpOrigin`'s doc names) — historically its
+        // `origin` was left undefined, since a lost give-up here was reachable only after the vendor CLI's
+        // OWN auto-submit had already failed once. Now that this direct submit() is the PRIMARY delivery path
+        // for EVERY spawn, an unconfirmed give-up (Enter never confirms within SUBMIT_MAX_ATTEMPTS — a real,
+        // measured risk: pinned memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records
+        // a 232-second confirmation lag) would otherwise DISCARD the kickoff with nothing to restore — give-up
+        // is likeliest exactly for the large pastes this card exists to enable. A synthetic single-element
+        // origin routes this write through the SAME requeueGiveUpOrigin recovery every enqueueStdin-originated
+        // turn already gets: on a give-up, the kickoff is re-queued at the front of `pending` (held pending a
+        // late confirming hook — see requeueGiveUpOrigin's own doc), not lost. `source:"system"`/`kind:"agent"`
+        // mirror the enqueueStdin call in the branch just above (the "unsafe to write directly" sibling path),
+        // which ALREADY gets a correct origin for free via drainPending's own `drained` array.
+        //
+        // Card a8f8a8f2: `onGiveUpExhausted` (card ccb407eb's hook — see `QueuedMessage.onGiveUpExhausted`'s
+        // own doc) was left UNWIRED here — `GIVE_UP_REQUEUE_LIMIT` is 1, so a SECOND unconfirmed give-up on
+        // this same kickoff took the residual bare-drop path `requeueGiveUpOrigin` documents (console.error
+        // only), losing the entire task dispatch with nothing durable or visible surfacing it except the
+        // generic idle-watchdog eventually noticing the idle, never-started session — slow and indirect,
+        // not a signal at the exact seam that failed. Wired to `events.onKickoffGiveUpExhausted` (DB-agnostic,
+        // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can decide what to
+        // do — card 7772176d: that is now a bounded re-mint before park+notify, not park+notify immediately;
+        // see `SessionService.handleKickoffGiveUpExhausted`'s own doc for the current shape.
+        // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` captured into locals (not inlined twice) so the
+        // give-up hook reports the EXACT SAME ids the QueuedMessage itself carries — this is what lets the
+        // implementer record a durable "parked" event keyed to the same `rootMsgId` a later content-matched
+        // `onGiveUpConfirmed` will report, closing the retraction gap `onKickoffGiveUpExhausted`'s own doc
+        // describes.
+        const kickoffMsgId = randomUUID();
+        const kickoffLogicalId = randomUUID();
+        this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
+          [{
+            id: kickoffMsgId, text: kickoff, source: "system", kind: "agent", logicalId: kickoffLogicalId,
+            onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId, kickoff),
+          }]);
+        // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
+        // depth, not load-bearing. Card 0050a17e.
+      };
+      if (gateOnMcp) { void this.waitForMcpSeen(sessionId).then(proceed); } else { proceed(); }
     }, 0);
   }
 

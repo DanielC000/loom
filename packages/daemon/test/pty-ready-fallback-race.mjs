@@ -151,6 +151,13 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
     const fa = fakes[fakes.length - 1];
+    // Card a57b07af: a "worker"-role kickoff now also gates delivery on `mcpSeen` (mirrors the resume
+    // nudge's existing gate) — mark it seen up front, exactly as the real CLI's own MCP handshake already
+    // does well before `ready` in production (see that card's measurement). Otherwise this scenario's own
+    // assertions about WHEN delivery happens would instead be timing out `waitForMcpSeen` (default 9s,
+    // unrelated to anything this file is testing) rather than exercising the mode-cycle race this file
+    // exists to cover.
+    host.markMcpSeen(A);
     fa.feed(ACCEPT_EDITS_FOOTER); // boot footer already painted before SessionStart, realistic ordering
     host.deliverHook(A, { hook_event_name: "SessionStart", session_id: "eng-A" }); // starts cycleToMode's 700ms settle
 

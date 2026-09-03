@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -41,8 +42,19 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_READY_FALLBACK_MS = "20000"; // not exercised here — keep it well out of the way
 process.env.LOOM_MCP_READY_TIMEOUT_MS = "300"; // short bound so the timeout-fallback scenarios run fast
+// Scenarios 10-12's fake pty never feeds a footer, so logLandedMode polls MODE_LOG_MAX_ATTEMPTS(8) times
+// before settling with mode:"unknown" — kept fast (worst case 8*5=40ms) so it settles comfortably BEFORE
+// the 300ms MCP_READY_TIMEOUT_MS above, leaving a clean window to distinguish "still gated on mcpSeen"
+// from "just hasn't settled yet".
+process.env.LOOM_MODE_LOG_POLL_MS = "5";
 
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, MODE_LOG_POLL_MS, MODE_LOG_MAX_ATTEMPTS } = await import("../dist/pty/host.js");
+// Worst-case time logLandedMode takes to settle on an unfed footer (mode stays "unknown" the whole time) —
+// derived from the SAME real constants host.ts itself polls with, not a bare guessed literal. Scenarios
+// 10-11 below need a window comfortably PAST this (so "not yet delivered" genuinely distinguishes "still
+// gated on mcpSeen" from "just hasn't settled yet") and comfortably UNDER MCP_READY_TIMEOUT_MS(300ms).
+const SETTLE_CEILING_MS = MODE_LOG_POLL_MS * MODE_LOG_MAX_ATTEMPTS;
+const NEGATIVE_WINDOW_MS = SETTLE_CEILING_MS + 100;
 
 const fakes = [];
 function makeFakePty() {
@@ -68,6 +80,18 @@ const spawnOpts = (id) => ({
   permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
   geometry: { cols: 120, rows: 40 }, sessionEnv: {},
 });
+
+// Card a57b07af: a FRESH startup-prompt spawn (no resumeId — mirrors a real worker_spawn/recycle), for
+// scenarios 10-12 exercising scheduleKickoffGuarantee's own new mcpSeen gate rather than the resume-
+// continuation nudge's (already covered above).
+const kickoffSpawnOpts = (id, role, startupPrompt) => ({
+  sessionId: id, cwd: tmpHome, startupPrompt, role,
+  permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+  geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+});
+const writtenOf = (fake) => fake.writes.join("");
+const countIn = (fake, marker) => writtenOf(fake).split(marker).length - 1;
+const PASTE_START = "\x1b[200~";
 
 // The EXACT pattern sessions/service.ts's deferredNudge uses — replicated here so scenarios 7-9 exercise
 // the primitive the same way resumeFleetOnBoot/recoverCrashOrphanedWorkers actually consume it.
@@ -174,6 +198,68 @@ try {
   fg.exit(1);
   await sleep(50);
   check("9: a session that died before markMcpSeen never receives the deferred nudge", host.getPending(G).length === 0);
+
+  // ============ 10) Card a57b07af: scheduleKickoffGuarantee's OWN mcpSeen gate — a "worker"-role fresh
+  // spawn's turn-1 kickoff is NOT delivered until markMcpSeen fires, then delivers promptly once it does
+  // (mirrors scenario 7's shape, against the kickoff path instead of the resume-nudge path). ============
+  const H = "sess-mcp-H";
+  const KICKOFF_H = "orchestrate task tk-H";
+  host.spawn(kickoffSpawnOpts(H, "worker", KICKOFF_H));
+  const fh = fakes[fakes.length - 1];
+  host.deliverHook(H, { hook_event_name: "SessionStart" }); // markReady -> logLandedMode -> scheduleKickoffGuarantee's proceed, gated on waitForMcpSeen
+  let ctrlSeq = 0;
+  const spawnUngatedControl = async (label) => {
+    const id = `control-mcp-ready-${ctrlSeq++}-${label.replace(/[^a-z0-9]+/gi, "-")}`;
+    host.spawn(kickoffSpawnOpts(id, null, `control kickoff (${label})`)); // role:null — never gated, proves the check itself can go true
+    const fake = fakes[fakes.length - 1];
+    host.deliverHook(id, { hook_event_name: "SessionStart" });
+    const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: 2000 });
+    try { host.stop(id, "hard"); } catch { /* ignore */ }
+    return went;
+  };
+  const noPrematureDeliveryH = await assertNeverWithControl({
+    label: "10: kickoff NOT delivered while mcpSeen is still unset (gated)",
+    check: () => countIn(fh, PASTE_START) >= 1,
+    windowMs: NEGATIVE_WINDOW_MS,
+    positiveControl: () => spawnUngatedControl("10 positive control"),
+  });
+  check("10: kickoff NOT delivered yet — MCP not seen", noPrematureDeliveryH);
+  host.markMcpSeen(H);
+  await waitUntil(() => countIn(fh, PASTE_START) === 1);
+  check("10: kickoff delivered promptly once markMcpSeen fires",
+    countIn(fh, PASTE_START) === 1 && writtenOf(fh).includes(KICKOFF_H));
+
+  // ============ 11) Same shape, timeout fallback: the kickoff still delivers (bounded by
+  // MCP_READY_TIMEOUT_MS) even if MCP is never seen — never wedges turn 1. ============
+  const I = "sess-mcp-I";
+  const KICKOFF_I = "orchestrate task tk-I";
+  host.spawn(kickoffSpawnOpts(I, "assistant", KICKOFF_I));
+  const fi = fakes[fakes.length - 1];
+  host.deliverHook(I, { hook_event_name: "SessionStart" });
+  const noPrematureDeliveryI = await assertNeverWithControl({
+    label: "11: nothing delivered yet — MCP not seen (before the timeout fallback)",
+    check: () => countIn(fi, PASTE_START) >= 1,
+    windowMs: NEGATIVE_WINDOW_MS,
+    positiveControl: () => spawnUngatedControl("11 positive control"),
+  });
+  check("11: nothing delivered yet", noPrematureDeliveryI);
+  await waitUntil(() => countIn(fi, PASTE_START) === 1, 2000);
+  check("11: fallback delivers the kickoff anyway once the timeout elapses (never wedges)",
+    countIn(fi, PASTE_START) === 1 && writtenOf(fi).includes(KICKOFF_I));
+
+  // ============ 12) A role that never mounts loom-orchestration (e.g. "platform") is NOT gated at all —
+  // the kickoff delivers on the normal next-tick schedule, never waiting out MCP_READY_TIMEOUT_MS. ============
+  const J = "sess-mcp-J";
+  const KICKOFF_J = "orchestrate task tk-J";
+  host.spawn(kickoffSpawnOpts(J, "platform", KICKOFF_J));
+  const fj = fakes[fakes.length - 1];
+  host.deliverHook(J, { hook_event_name: "SessionStart" });
+  // 200ms: past the worst-case settle (40ms) but well SHORT of the 300ms MCP_READY_TIMEOUT_MS — if this
+  // role were (wrongly) gated on mcpSeen, delivery could not land inside this window at all (it would
+  // only land at the 300ms fallback), so this genuinely proves "ungated", not just "eventually delivers".
+  await waitUntil(() => countIn(fj, PASTE_START) === 1, 200);
+  check("12: a non-orchestration role's kickoff delivers ungated, without ever seeing markMcpSeen",
+    countIn(fj, PASTE_START) === 1 && writtenOf(fj).includes(KICKOFF_J));
 
   await sleep(50); // let any straggling microtask/unhandledRejection surface before the final check
   check("no unhandled promise rejections were produced across all scenarios", unhandledRejections === 0);
