@@ -6922,9 +6922,12 @@ export class Db {
    * on `questions.session_id` enforces this — see question-orphan-no-successor.mjs). Not a regression:
    * before this fix the question was ALREADY unreachable from a fresh successor even with the row
    * intact; this only narrows the window where recovery is *possible* down to "the predecessor row
-   * hasn't been GC'd yet," rather than closing it further. The recycle path is immune — reparentQuestions
-   * moves the row onto the successor's own session_id, so it's never at the mercy of the predecessor
-   * row's lifetime.
+   * hasn't been GC'd yet," rather than closing it further. The MANAGER recycle path (recycleManager) is
+   * immune — reparentQuestions moves the row onto the successor's own session_id, so it's never at the
+   * mercy of the predecessor row's lifetime. ⚠️ `recyclePlatformLead` does NOT call reparentQuestions (its
+   * own comment: "Mirrors recycleManager, minus the worker re-parent" — this is a second, silent omission
+   * beyond the worker one it names) — a recycled Lead's predecessor's questions stay at the mercy of the
+   * predecessor row's lifetime exactly like the non-recycle case above.
    */
   pullAnsweredQuestionsForAgent(agentId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
@@ -6939,19 +6942,28 @@ export class Db {
     })();
   }
   /**
-   * Whether AGENT LINEAGE `agentId` has ANY still-`pending` (unanswered) question_ask outstanding —
-   * the idle-watcher's session-level suppression predicate (card cb56cf80): a manager/Lead correctly
-   * parked on its OWN open owner-facing Request should not be idle-nudged, regardless of whether that
-   * Request carries a `taskId` (owner Requests are often filed with `taskId:null`, invisible to the
-   * per-card `listQuestionsForTask` discount). Lineage-scoped via `sessions.agent_id` — the SAME
-   * ownership join `pullAnsweredQuestionsForAgent` uses — so a fresh (non-recycle) successor session
-   * still sees a predecessor's still-open Request. Deliberately NON-CONSUMING (never touches `state`).
+   * Whether SESSION `sessionId` itself has ANY still-`pending` (unanswered) question_ask outstanding —
+   * the idle-watcher's session-level suppression predicate (card cb56cf80, narrowed by card 8e87f3b5): a
+   * manager/Lead correctly parked on its OWN open owner-facing Request should not be idle-nudged,
+   * regardless of whether that Request carries a `taskId` (owner Requests are often filed with
+   * `taskId:null`, invisible to the per-card `listQuestionsForTask` discount).
+   *
+   * SESSION-scoped, deliberately NOT agent-lineage-scoped (card 8e87f3b5 fixed a real incident): the prior
+   * `sessions.agent_id` join — the same ownership join `pullAnsweredQuestionsForAgent` uses to recover a
+   * predecessor's ANSWERED Request for a fresh successor — was reused here for a PENDING (still-unanswered)
+   * one, but a pending Request has no answer to recover; joining by agent_id instead let ONE unanswered
+   * Request permanently silence idle-nudging for the agent's entire lineage, including a fresh successor
+   * that never filed it and knows nothing about it. Scoping to `session_id = ?` means only the session
+   * that actually filed the pending Request is suppressed — or, on the MANAGER recycle path, was
+   * reparented onto it via `reparentQuestions` (recycleManager only; ⚠️ `recyclePlatformLead` does NOT
+   * call reparentQuestions — a recycled Lead's successor is therefore NOT suppressed by its predecessor's
+   * still-pending Request, same as a fresh non-recycle successor). A fresh non-recycle successor is
+   * unaffected and nudges normally. Deliberately NON-CONSUMING (never touches `state`).
    */
-  hasPendingQuestionForAgent(agentId: string): boolean {
+  hasPendingQuestionForSession(sessionId: string): boolean {
     const row = this.db.prepare(
-      `SELECT 1 FROM questions q JOIN sessions s ON s.id = q.session_id
-       WHERE s.agent_id = ? AND q.state = 'pending' LIMIT 1`,
-    ).get(agentId);
+      `SELECT 1 FROM questions WHERE session_id = ? AND state = 'pending' LIMIT 1`,
+    ).get(sessionId);
     return row !== undefined;
   }
   /**

@@ -220,14 +220,20 @@ export class IdleWatcher {
       // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
       if (control.isPaused(m.id)) continue;                              // human-paused
 
-      // OWN pending owner Request (card cb56cf80): a manager/Lead correctly parked on an OPEN
-      // owner-facing question_ask it filed is not idle — it's blocked on the owner, and the answer
-      // already fires a push-nudge as the wake, so an idle nudge here is pure noise. Lineage-scoped
-      // (db.hasPendingQuestionForAgent, the same sessions.agent_id join pullAnsweredQuestionsForAgent
-      // uses) and taskId-INDEPENDENT — unlike the per-card listQuestionsForTask discount below, this
-      // catches Requests filed with taskId:null, which owner Requests very often are. A session with
-      // no pending own-Request (or whose Request has since been answered) still nudges normally.
-      if (db.hasPendingQuestionForAgent(m.agentId)) continue;
+      // OWN pending owner Request (card cb56cf80, narrowed by card 8e87f3b5): a manager/Lead correctly
+      // parked on an OPEN owner-facing question_ask IT ITSELF filed is not idle — it's blocked on the
+      // owner, and the answer already fires a push-nudge as the wake, so an idle nudge here is pure noise
+      // WHEN THERE'S NOTHING ELSE TO DO. SESSION-scoped (db.hasPendingQuestionForSession) and taskId-
+      // INDEPENDENT — unlike the per-card listQuestionsForTask discount below, this catches Requests filed
+      // with taskId:null, which owner Requests very often are. Deliberately NOT a `continue` here: card
+      // 8e87f3b5 found this used to fully silence the manager even when OTHER actionable board work sat
+      // untouched (own-Request suppression should never dominate unrelated dispatchable work). Folded
+      // into the "genuinely nothing actionable" skip below instead, alongside openCards/stranded-worker/
+      // review-lane/deferral — so a session with its own pending Request AND other actionable work still
+      // gets nudged for that other work, while one with NO other actionable work stays silently suppressed
+      // (cb56cf80's original intent, preserved for that case). A session with no pending own-Request (or
+      // whose Request has since been answered) is unaffected either way.
+      const hasOwnPendingRequest = db.hasPendingQuestionForSession(m.id);
 
       // Live BUSY worker — a manager waiting on a building/turning worker is legitimately idle (don't
       // nudge). Board card b9d479b0 (two-path asymmetry): this used to skip on ANY live worker, busy OR
@@ -411,7 +417,20 @@ export class IdleWatcher {
       // checking on its stranded worker. The undocumented-deferral case is the SAME shape: it must not be
       // swallowed by this skip either, or a board that's ENTIRELY undocumented-deferred cards would never
       // once get flagged (card c90e9525's central defect, reproduced inside this very skip if left out).
-      if (strandedWorkers.length === 0 && !hasReviewCards && nonTerminal.length > 0 && openCards.length === 0 && undocumentedManualDeferrals.length === 0) continue;
+      //
+      // Card 8e87f3b5: the session's OWN pending owner Request (hasOwnPendingRequest, computed above) folds
+      // in HERE rather than short-circuiting earlier — it only silences the nudge when there's genuinely
+      // nothing else actionable either (nothingElseActionable), so a session parked on its own Request WITH
+      // other actionable work in play still gets nudged for that work. It also OVERRIDES the "truly empty
+      // board still nudges" carve-out immediately above: a session correctly parked on its own Request with
+      // zero cards at all is exactly cb56cf80's original "blocked on the owner, stay quiet" case, not a
+      // dropped-the-loop case that should `idle_report 'done'`. NOTE: this skip is evaluated AFTER the
+      // ESCALATE-INSTEAD-OF-NUDGE block above, so a session that slept through its unanswered-nudge cap
+      // still escalates to the human even while its own-Request suppression would otherwise apply here —
+      // the escalation is a distinct human-facing signal, never itself gated by this predicate.
+      const nothingElseActionable =
+        strandedWorkers.length === 0 && !hasReviewCards && openCards.length === 0 && undocumentedManualDeferrals.length === 0;
+      if (nothingElseActionable && (nonTerminal.length > 0 || hasOwnPendingRequest)) continue;
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's

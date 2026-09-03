@@ -5530,8 +5530,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Best-effort push nudge — mirrors the answer route's nudge above EXACTLY (same agent-lineage
     // resolution, same enqueueStdin rail), so a manager parked awaiting question_pull is told WHY its ask
     // went quiet instead of only self-healing much later via the idle watchdog once
-    // hasPendingQuestionForAgent flips false (with no explanation of what happened). The dismissal is
-    // ALREADY durably persisted above — a torn-down asking-manager pty must never turn this into a 500.
+    // hasPendingQuestionForSession flips false for whichever session actually filed it (with no
+    // explanation of what happened). The dismissal is ALREADY durably persisted above — a torn-down
+    // asking-manager pty must never turn this into a 500.
     try {
       const asker = deps.db.getSession(updated.sessionId);
       const target = (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;

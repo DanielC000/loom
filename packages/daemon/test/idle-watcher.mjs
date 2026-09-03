@@ -359,10 +359,13 @@ function cleanup(e) {
 }
 {
   // Mixed: a pending-request card + a genuine card → still nudges, count excludes only the gated one.
-  // The Request is filed by a session under an UNRELATED agent lineage (not "mgr-pending-mixed" itself)
-  // so this isolates the per-card discount from the SESSION-level suppression card cb56cf80 added below
-  // (18) — that one only fires for a session's OWN pending Request, which would otherwise fully suppress
-  // this manager regardless of its other actionable cards, confounding this test's card-count assertion.
+  // The Request is filed by a role-LESS session under an UNRELATED agent lineage (not "mgr-pending-mixed"
+  // itself, and not a manager `listLiveManagers` would even consider — mirrors the (10)-area "plain-idle"
+  // pattern above) so this isolates the per-card discount from BOTH the (a) session-scoping and (c)
+  // no-other-actionable-work axes of the session-level own-Request suppression (card cb56cf80, narrowed
+  // by card 8e87f3b5) — a role:"manager" asker sharing this test's actionable card would now (correctly,
+  // per the 8e87f3b5 fix) itself get idle-nudged too, confounding this test's card-count assertion, which
+  // is about the PER-CARD discount alone.
   const e = makeEnv();
   seedManager(e, "mgr-pending-mixed");
   seedCard(e, "todo");
@@ -372,7 +375,7 @@ function cleanup(e) {
   e.db.insertSession({
     id: "mgr-pending-mixed-asker", projectId: e.projId, agentId: askerAgentId, engineSessionId: "eng-asker", title: null, cwd: e.projId,
     processState: "live", resumability: "resumable", busy: false,
-    createdAt: minutesAgo(60), lastActivity: minutesAgo(60), lastError: null, role: "manager",
+    createdAt: minutesAgo(60), lastActivity: minutesAgo(60), lastError: null, role: null,
     ctxInputTokens: null, ctxTurns: null, model: null,
   });
   e.alive.add("mgr-pending-mixed-asker");
@@ -1080,16 +1083,33 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
-// ==== (18) session-level suppression on an OWN pending owner Request, lineage-scoped (card cb56cf80) ====
+// ==== (18) session-level suppression on an OWN pending owner Request (card cb56cf80, NARROWED by card
+// 8e87f3b5 to SESSION-scoped + "no other actionable work" — the original agent-LINEAGE-scoped version let
+// one unanswered Request permanently silence idle-nudging for the WHOLE agent lineage, including a fresh
+// successor that never filed it, and fully suppressed the nudge even when other actionable board work sat
+// untouched). ====
 {
   // (18a) an OPEN (pending) owner-facing question_ask FILED BY the session itself — even with taskId:null,
-  // invisible to the per-card listQuestionsForTask discount — suppresses the idle nudge for that filer.
+  // invisible to the per-card listQuestionsForTask discount — suppresses the idle nudge for that filer
+  // WHEN THERE IS NO OTHER ACTIONABLE WORK (cb56cf80's original intent, preserved for this case).
   const e = makeEnv();
   seedManager(e, "mgr-own-pending-request");
-  seedTodo(e, 5); // genuine actionable board work — would normally nudge
   seedQuestion(e, "mgr-own-pending-request", null, "pending");
   e.watcher.tick(NOW);
-  check("(18a) a session with its OWN pending (taskId:null) Request is NOT idle-nudged", e.enqueued.length === 0);
+  check("(18a) a session with its OWN pending (taskId:null) Request and NO other actionable work is NOT idle-nudged", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // (18a2) card 8e87f3b5's (c) fix: the SAME own pending Request must NOT suppress the nudge when there IS
+  // other actionable board work — own-Request suppression should never dominate unrelated dispatchable
+  // work. (Previously this fully suppressed, byte-identical to (18a) — the exact bug this card fixes.)
+  const e = makeEnv();
+  seedManager(e, "mgr-own-pending-with-work");
+  seedTodo(e, 5); // genuine actionable board work, unrelated to the Request (taskId:null)
+  seedQuestion(e, "mgr-own-pending-with-work", null, "pending");
+  e.watcher.tick(NOW);
+  check("(18a2) a session with its OWN pending Request but OTHER actionable work IS still idle-nudged",
+    e.enqueued.some((x) => x.id === "mgr-own-pending-with-work" && x.text.includes("5 actionable")));
   cleanup(e);
 }
 {
@@ -1113,7 +1133,7 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 {
-  // (18d) lineage-scoped, not global: a PENDING Request filed by an unrelated agent lineage must NOT
+  // (18d) session-scoped, not global: a PENDING Request filed by an unrelated agent/session must NOT
   // suppress a different session's own nudge.
   const e = makeEnv();
   seedManager(e, "mgr-unrelated-pending");
@@ -1129,32 +1149,65 @@ const DROPPED_BOARD = {
   e.alive.add("mgr-other-agent");
   seedQuestion(e, "mgr-other-agent", null, "pending");
   e.watcher.tick(NOW);
-  check("(18d) a PENDING Request filed by an unrelated agent lineage does NOT suppress this session's nudge",
+  check("(18d) a PENDING Request filed by an unrelated agent/session does NOT suppress this session's nudge",
     e.enqueued.some((x) => x.id === "mgr-unrelated-pending"));
   cleanup(e);
 }
 {
-  // (18e) the same suppression covers a PLATFORM (Lead) session too — the finding explicitly covers "manager/Lead".
+  // (18e) the same suppression covers a PLATFORM (Lead) session too, with NO other actionable work.
   const e = makeEnv();
   seedPlatform(e, "plat-own-pending-request");
-  seedTodo(e, 3);
   seedQuestion(e, "plat-own-pending-request", null, "pending");
   e.watcher.tick(NOW);
-  check("(18e) a platform (Lead) session with its OWN pending Request is NOT idle-nudged either", e.enqueued.length === 0);
+  check("(18e) a platform (Lead) session with its OWN pending Request and NO other actionable work is NOT idle-nudged either",
+    e.enqueued.length === 0);
   cleanup(e);
 }
 {
-  // (18f) agent-LINEAGE reachability: a fresh (non-recycle) successor session on the SAME agentId must
-  // still see a still-exited predecessor's own pending Request as ITS OWN (mirrors
-  // pullAnsweredQuestionsForAgent's reachability definition).
+  // (18e2) the (c) fix applies to platform sessions too: other actionable work still nudges despite the
+  // Lead's own pending Request.
+  const e = makeEnv();
+  seedPlatform(e, "plat-own-pending-with-work");
+  seedTodo(e, 3);
+  seedQuestion(e, "plat-own-pending-with-work", null, "pending");
+  e.watcher.tick(NOW);
+  check("(18e2) a platform session with its OWN pending Request but OTHER actionable work IS still idle-nudged",
+    e.enqueued.some((x) => x.id === "plat-own-pending-with-work"));
+  cleanup(e);
+}
+{
+  // (18f) THE CARD 8e87f3b5 REGRESSION TEST (DoD-3's exact scenario): a fresh (non-recycle) successor
+  // session on the SAME agentId, idle with ≥1 actionable card, must be nudged despite a still-exited
+  // PREDECESSOR's own stale pending Request — it never filed that Request and knows nothing about it.
+  // NOTE: this test alone does NOT discriminate the (a) session-scoping fix from the (c) no-other-work
+  // fix — with (c) applied but the predicate still agent-LINEAGE-scoped, `openCards.length` is 4 here, so
+  // `nothingElseActionable` is false and the nudge fires anyway regardless of which scope hasOwnPendingRequest
+  // uses. (18f2) below, with a TRULY EMPTY board, is the test that actually isolates (a).
   const e = makeEnv();
   seedManager(e, "mgr-predecessor", { live: false }); // exited, row still present (FK target for the question)
-  seedQuestion(e, "mgr-predecessor", null, "pending"); // filed by the (now-exited) predecessor
-  seedManager(e, "mgr-successor"); // fresh session, SAME e.agentId
+  seedQuestion(e, "mgr-predecessor", null, "pending"); // filed by the (now-exited) predecessor, STALE
+  seedManager(e, "mgr-successor"); // fresh session, SAME e.agentId, never filed anything itself
   seedTodo(e, 4);
   e.watcher.tick(NOW);
-  check("(18f) a fresh non-recycle successor on the SAME agent lineage is ALSO suppressed by a predecessor's own pending Request",
-    e.enqueued.length === 0);
+  check("(18f) a fresh non-recycle successor with actionable work is idle-nudged DESPITE a predecessor's stale pending Request",
+    e.enqueued.some((x) => x.id === "mgr-successor" && x.text.includes("4 actionable")));
+  cleanup(e);
+}
+{
+  // (18f2) THE SOLE (a)-DISCRIMINATOR (see (18f)'s note above): the successor's OWN session_id is what
+  // matters, not the row's mere existence for the agent — a predecessor's stale pending Request has ZERO
+  // bearing on the successor even with a TRULY EMPTY board (the "no cards at all → still nudge,
+  // idle_report 'done'" case). With a TRULY EMPTY board, `openCards.length === 0` regardless of scope, so
+  // `nothingElseActionable` is true either way — an agent-LINEAGE-scoped hasOwnPendingRequest would still
+  // read true for the successor here (same agentId as the predecessor) and WRONGLY suppress it; only the
+  // SESSION-scoped check correctly reads false and lets the empty-board carve-out fire.
+  const e = makeEnv();
+  seedManager(e, "mgr-predecessor2", { live: false });
+  seedQuestion(e, "mgr-predecessor2", null, "pending");
+  seedManager(e, "mgr-successor2"); // no cards seeded at all
+  e.watcher.tick(NOW);
+  check("(18f2) the successor nudges normally on an empty board — the predecessor's stale Request has zero bearing on it",
+    e.enqueued.some((x) => x.id === "mgr-successor2"));
   cleanup(e);
 }
 
@@ -1263,11 +1316,17 @@ const DROPPED_BOARD = {
 {
   // Legacy 8-char task_id-PREFIX rows (pre-a3f1319f) — listQuestionsForTask tolerated these; the batched
   // listPendingQuestionTaskIds replacement must discount a card the same way, not just for full-id rows.
+  // Uses a REAL UUID (not seedCard's `tk-todo-XXXX` helper id) — a real task id's first 8 chars are a
+  // hex block followed by a `-` at position 9 (the actual legacy-prefix shape); `tk-todo-` is ALSO
+  // exactly 8 chars but its own 8th char IS the dash, so slicing it and re-appending `-` produces a
+  // double-dash that can never match the id's real single dash — a degenerate id that (card 8e87f3b5
+  // investigation) was silently masking this test's own prefix-match assertion behind the unrelated
+  // session-level own-Request suppression, which used to skip before the per-card discount ever ran.
   const e = makeEnv();
   seedManager(e, "mgr-legacy-prefix");
-  seedCard(e, "todo");
-  const task = e.db.listTasks(e.projId)[0];
-  seedQuestion(e, "mgr-legacy-prefix", task.id.slice(0, 8), "pending"); // legacy prefix-linked row
+  const taskId = randomUUID();
+  e.db.insertTask({ id: taskId, projectId: e.projId, title: "legacy-prefix task", body: "", columnKey: "todo", position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+  seedQuestion(e, "mgr-legacy-prefix", taskId.slice(0, 8), "pending"); // legacy prefix-linked row
   e.watcher.tick(NOW);
   check("(21) a PENDING request linked by a legacy 8-char task_id PREFIX still discounts the card", e.enqueued.length === 0);
   cleanup(e);
@@ -1298,6 +1357,6 @@ const DROPPED_BOARD = {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge lineage-scoped across a fresh non-recycle successor, resuming normally once answered or when there's no pending own-Request, without being fooled by an unrelated agent's pending Request (card cb56cf80)."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
