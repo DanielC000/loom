@@ -27,10 +27,12 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
  *  non-primary repo WITHOUT a per-card tasks_get — the same "summary hides a dispatch-relevant flag"
  *  gotcha already burned an orchestrator on `held`/`deferred`, and matters more here once repoKey drives
  *  worktree creation (phase 2). Also carries `deferred`/`deferredUntilTaskId` (card 793ac76d) so a
- *  manager triaging the board sees WHY a card is deferred without a per-card tasks_get — `deferred` was
- *  not previously in this summary at all; adding it here is scoped to what this card needs (`held` stays
- *  out, a separate pre-existing gap, not this card's concern). */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason">;
+ *  manager triaging the board sees WHY a card is deferred without a per-card tasks_get. Also carries
+ *  `held`/`heldBy` (card 245c0837) — `held` is the owner's SOLE brake (`worker_spawn` refuses a held
+ *  card), and its prior absence here meant a default `tasks_list`/`list_all_tasks` read an owner-held
+ *  card as indistinguishable from a plain actionable one. `heldBy` is server-stamped provenance, safe
+ *  to project on a read; never accept it on a write. */
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "held" | "heldBy">;
 
 /**
  * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
@@ -326,6 +328,7 @@ export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
   deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck === true,
   deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null,
+  held: t.held === true, heldBy: t.heldBy ?? null,
 });
 
 /**

@@ -2469,8 +2469,14 @@ export class PlatformMcpRouter {
           "filter, aggregates the non-terminal cards of every live project (incl. the reserved home) — pass " +
           "includeDone:true to include terminal/done cards too, and/or columns to narrow to specific column " +
           "keys (mirrors tasks_list's excludeDone/columns filters). DEFAULT returns a lightweight SUMMARY per " +
-          "card (id, title, columnKey, position, priority, updatedAt, merged) so the aggregate stays bounded; the " +
+          "card (id, title, columnKey, position, priority, updatedAt, merged, repoKey, deferred, " +
+          "deferredUntilTaskId, deferredStuck, deferredAt, deferredReason, held, heldBy — the SAME " +
+          "projection tasks_list uses) so the aggregate stays bounded; the " +
           "unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — page it). " +
+          "`held` is the owner's SOLE brake — `worker_spawn` refuses to dispatch onto a held:true card — " +
+          "and `heldBy` (`\"human\"|\"agent\"|null`) is server-stamped provenance of who set it; both are " +
+          "now projected here (card 245c0837), so a cross-project survey no longer requires a per-card " +
+          "tasks_get to see a hold. " +
           "`merged` is each card's git-derived ship state — {sha,date,verification?} of its squash-merge commit " +
           "on that card's project repo, else null. null means NOT PROVEN merged (never merged, landed outside " +
           "the scan window, or a git read failure), never an authoritative 'never merged' — this is the field " +
