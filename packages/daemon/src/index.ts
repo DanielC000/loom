@@ -298,8 +298,11 @@ async function main(): Promise<void> {
   const pty = new PtyHost({
     // Card 932f13d4: `previousEngineId` is non-null only on a genuine mid-session ROTATION (not a
     // session's first capture) — `sessions` (forward reference, same pattern as onBusy/onGiveUpConfirmed
-    // below) persists a durable audit row for it BEFORE the overwrite below lands, since `setEngineSessionId`
-    // is the point of no return for the old id. See SessionService.handleEngineSessionRotated's own doc.
+    // below) persists a durable audit row for it. The old id is already safe by the time it reaches HERE:
+    // host.ts captured it into this `previousEngineId` PARAMETER before ever invoking this callback, so
+    // the DB overwrite on the line below cannot destroy it regardless of which order these two calls run
+    // in — this callback is simply where the id arrives, not a race against `setEngineSessionId`. See
+    // SessionService.handleEngineSessionRotated's own doc.
     onEngineSessionId: (sessionId, engineId, previousEngineId) => {
       db.setEngineSessionId(sessionId, engineId);
       if (previousEngineId) sessions.handleEngineSessionRotated(sessionId, previousEngineId, engineId);
