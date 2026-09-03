@@ -55,6 +55,33 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+// Card a250487d (mirrors pty-giveup-false-negative.mjs's `waitForCount`/`awaitClockPast`, added by
+// 2ea7de01): scenario (B) below used to time its synthetic post-Enter output off a t0-relative computed
+// deadline (`writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT / 3`, only ~50ms of designed slack) racing the REAL
+// attempt-2 Enter write — reached via a multi-hop setTimeout chain (ENTER_DELAY, attempt-1's own
+// VERIFY_TIMEOUT retry check, then up to SETTLE_MAX_POLLS reassert-settle polls) that only guarantees a
+// MINIMUM delay per hop. These two helpers replace that guess with an actual observation: wait for the
+// write count to reach the target, then spin until the real clock has genuinely ticked past the EXACT
+// millisecond that write landed (Date.now() is only 1ms-resolution and host.ts's own `enterWrittenAt` is
+// captured in the same synchronous tick as the write, so emitting immediately after merely OBSERVING the
+// write can land in the same millisecond and defeat the discriminator's intentionally-strict `>` check).
+async function waitForCount(getCount, target, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (getCount() < target) {
+    if (Date.now() - t0 > timeoutMs) throw new Error(`waitForCount: timed out waiting for count to reach ${target} (stuck at ${getCount()})`);
+    await sleep(2);
+  }
+}
+async function awaitClockPast(t) {
+  // Fail loudly, not silently: `entryCount` counts every `\r` byte anywhere in any write while
+  // `enterWriteTimes` only records a write that IS exactly `\r` — if those two ever disagree (a write
+  // someday carries `\r` inside a larger payload), `waitForCount` can be satisfied while the corresponding
+  // `enterWriteTimes[...]` entry is still `undefined`. `Date.now() <= undefined` is a NaN comparison
+  // (always false), so an unguarded spin would return IMMEDIATELY — silently degrading this anchor back
+  // into exactly the guessed-deadline race this card removed, with no error and no failing assertion.
+  if (!Number.isFinite(t)) throw new Error(`awaitClockPast: anchor is not a finite timestamp (${t}) — enterWriteTimes likely out of sync with entryCount`);
+  while (Date.now() <= t) await sleep(1);
+}
 
 const submitLog = [];
 const realConsoleLog = console.log.bind(console);
@@ -84,6 +111,15 @@ process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
+// Card a250487d: scenario (B)'s "GIVE-UP SUPPRESSED" check used to gate on `sleepUntil(t0, giveUpAt() +
+// VERIFY_TIMEOUT / 2)` === `giveUpAt() + 75` here — comfortably clear of host.ts's production-default
+// GIVE_UP_CONFIRM_SETTLE_POLL_MS*_MAX_POLLS exhaustion (15*20=300ms, unshrunk by this file), unlike the
+// sibling file's own instance of this shape (2ea7de01) where the margin landed on the EXACT SAME nominal
+// instant as that exhaustion. Converted anyway to anchor off the OBSERVED attempt-2 Enter write (see
+// waitForCount/awaitClockPast above) rather than a t0-relative sum of writeAt()'s own nominal hops, which
+// can itself drift under host load — same margin value (60ms) as 2ea7de01 chose for the identical
+// production constant, swept below to confirm it still sits clear of where recovery actually resolves.
+const GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS = 60;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -191,12 +227,17 @@ function annotatedVariant(tag, rest, mintedAtGen, currentGen, mintedAtWallClock)
     createPty(opts) {
       const base = super.createPty(opts);
       const writes = [];
+      // Card a250487d: the exact Date.now() of each bare-Enter ("\r") write, in order — lets scenario (B)
+      // spin past the REAL millisecond a specific attempt's Enter landed (see awaitClockPast) instead of
+      // racing it, mirroring pty-giveup-false-negative.mjs's own `enterWriteTimes` (added by 2ea7de01).
+      const enterWriteTimes = [];
       let onDataCb = null;
       const fake = {
         ...base,
-        write: (d) => { writes.push(d); },
+        write: (d) => { writes.push(d); if (d === "\r") enterWriteTimes.push(Date.now()); },
         onData: (cb) => { onDataCb = cb; return { dispose() {} }; },
         writes,
+        enterWriteTimes,
         emitData: (d) => { if (onDataCb) onDataCb(d); },
       };
       fakes.push(fake);
@@ -212,6 +253,7 @@ function annotatedVariant(tag, rest, mintedAtGen, currentGen, mintedAtWallClock)
   host.spawn({ sessionId: SID, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
   host.deliverHook(SID, { hook_event_name: "SessionStart" });
   const fake = fakes[fakes.length - 1];
+  const entryCount = () => fake.writes.join("").split("\r").length - 1;
 
   // ===== Turn 1: confirm+end normally so firstTurnStarted flips true (healIfStuck now uses the =====
   // ===== constructor-injected busyStaleMs above, not FIRST_TURN_STALE_MS, for the rest of this session ====
@@ -235,9 +277,16 @@ function annotatedVariant(tag, rest, mintedAtGen, currentGen, mintedAtWallClock)
   // ===== Force the false-suppress: synthesize engine output shortly after the FINAL Enter write, but =====
   // ===== before that attempt's own verify-timeout elapses — lastOutputAt > enterWrittenAt, WITHOUT any ====
   // ===== turn ever actually confirming (identical mechanic to pty-healifstuck-clear.mjs scenario 1/2) =====
-  await sleepUntil(t0, writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT / 3);
+  // Card a250487d: wait for the OBSERVED second `\r` (not the old t0-relative computed deadline), THEN
+  // spin until the real clock has genuinely ticked past the EXACT millisecond that write landed — see
+  // waitForCount/awaitClockPast's own doc above (mirrors 2ea7de01's fix on the sibling file).
+  await waitForCount(entryCount, MAX_ATTEMPTS);
+  await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
   fake.emitData("\x1b[<u\x1b[>1u\x1b[>4;2m");
-  await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+  // Cross this attempt's own verify-timeout, anchored off the SAME observed write plus
+  // GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS (see that constant's own doc for why 60ms sits safely inside
+  // the 300ms production confirm-settle window instead of racing it).
+  await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1] + VERIFY_TIMEOUT + GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS);
   check("(B) GIVE-UP SUPPRESSED: busy is still true past the normal give-up point (suppression fired, not a genuine drop)", busyLog[SID]?.at(-1) === true);
 
   // ===== Let healIfStuck's stale-busy window (busyStaleMs, small override) elapse, then drive the heal =====
