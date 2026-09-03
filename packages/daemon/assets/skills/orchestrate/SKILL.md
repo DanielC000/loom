@@ -573,6 +573,17 @@ what you checked. Found none? Treat it as live.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **2+ workers ready to merge on the SAME repo? Reach for `merge_batch` instead of sequential
+     `worker_merge_confirm` calls** — it gates the whole group in one run instead of one gate per
+     branch. Fewer than 2 eligible candidates is never wrong to pass in: it just falls through to the
+     ordinary per-branch path. A red gate falls back to individual gating automatically, no bisection
+     (read `fallback`; nothing to re-call) — but if main advances mid-gate the whole batch forfeits and
+     re-gates individually too, so one branch's wasted gate becomes up to K: worth weighing before
+     batching large groups habitually. Two things people misread: `mergedVerification:"trailer-only"`
+     on a batched landing is the weakest tier **by design** (each branch lands its own commits, not a
+     squash, so the usual path-set digest can't apply) — not a defect. And measure savings in gate
+     **wall-clock**, never gate-run count — a "reduced" gate is a fraction the length of a full one, so
+     counting runs can show a saving exactly where batching cost more time than it saved.
    - **Never card, retitle, plan, or dispatch off an intermediate `progress` report — wait for `done`,
      then verify against the tree.** A progress report is the least reliable artifact a worker produces:
      it narrates intent that may not have survived contact with the code, and it's written at the point
