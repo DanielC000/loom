@@ -6922,12 +6922,11 @@ export class Db {
    * on `questions.session_id` enforces this — see question-orphan-no-successor.mjs). Not a regression:
    * before this fix the question was ALREADY unreachable from a fresh successor even with the row
    * intact; this only narrows the window where recovery is *possible* down to "the predecessor row
-   * hasn't been GC'd yet," rather than closing it further. The MANAGER recycle path (recycleManager) is
-   * immune — reparentQuestions moves the row onto the successor's own session_id, so it's never at the
-   * mercy of the predecessor row's lifetime. ⚠️ `recyclePlatformLead` does NOT call reparentQuestions (its
-   * own comment: "Mirrors recycleManager, minus the worker re-parent" — this is a second, silent omission
-   * beyond the worker one it names) — a recycled Lead's predecessor's questions stay at the mercy of the
-   * predecessor row's lifetime exactly like the non-recycle case above.
+   * hasn't been GC'd yet," rather than closing it further. BOTH recycle paths — recycleManager and
+   * recyclePlatformLead — are immune: each calls reparentQuestions, which moves the row onto the
+   * successor's own session_id, so neither is ever at the mercy of the predecessor row's lifetime (card
+   * bb4ff73e added the call to recyclePlatformLead, which had silently omitted it — its own comment only
+   * named the worker re-parent as missing).
    */
   pullAnsweredQuestionsForAgent(agentId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
@@ -6954,11 +6953,11 @@ export class Db {
    * one, but a pending Request has no answer to recover; joining by agent_id instead let ONE unanswered
    * Request permanently silence idle-nudging for the agent's entire lineage, including a fresh successor
    * that never filed it and knows nothing about it. Scoping to `session_id = ?` means only the session
-   * that actually filed the pending Request is suppressed — or, on the MANAGER recycle path, was
-   * reparented onto it via `reparentQuestions` (recycleManager only; ⚠️ `recyclePlatformLead` does NOT
-   * call reparentQuestions — a recycled Lead's successor is therefore NOT suppressed by its predecessor's
-   * still-pending Request, same as a fresh non-recycle successor). A fresh non-recycle successor is
-   * unaffected and nudges normally. Deliberately NON-CONSUMING (never touches `state`).
+   * that actually filed the pending Request is suppressed — or, on either recycle path (recycleManager
+   * or recyclePlatformLead), was reparented onto it via `reparentQuestions` (card bb4ff73e closed the gap
+   * where recyclePlatformLead didn't call it — a recycled Lead's successor is now suppressed by its
+   * predecessor's still-pending Request exactly like a recycled manager's successor). A fresh non-recycle
+   * successor is unaffected and nudges normally. Deliberately NON-CONSUMING (never touches `state`).
    */
   hasPendingQuestionForSession(sessionId: string): boolean {
     const row = this.db.prepare(

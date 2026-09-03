@@ -12402,6 +12402,11 @@ export class SessionService {
     // + durable onDeliver come with it; durable records are re-minted onto the successor — see
     // carryPendingToSuccessor. Mirrors recycleManager, minus the worker re-parent (the Lead has none).
     this.db.reparentWakes(oldLeadId, fresh.id);
+    // Card bb4ff73e: move the predecessor's decision-inbox questions onto the successor too — otherwise
+    // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
+    // predecessor asked, unreachable from the successor's own session id (mirrors recycleManager's
+    // identical reparentQuestions call, card 8701bdbb).
+    this.db.reparentQuestions(oldLeadId, fresh.id);
     const carried = this.pty.flushPending(oldLeadId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldLeadId);
     this.carryPendingToSuccessor(oldLeadId, fresh.id, carried, carriedDurable);
