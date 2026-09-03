@@ -399,6 +399,18 @@ It may still be starting — check 'loom status'${logPath ? ` or the log at ${lo
 // still undecided — resolved just below, before either signal step runs, into one of THREE outcomes: a
 // stale-record cleanup, a fall-through to the signal ladder, or an outright refusal (see that block's own
 // comment for which is which).
+//
+// RESIDUAL WINDOW (not closed by the above, card a2f821bf): identity is confirmed BEFORE the signal is
+// chosen, not AT the instant it is issued. Between a passing check (the hook responding, or the
+// port-probe resolving to something other than "refused") and the actual `process.kill`/`taskkill` call
+// below, the confirmed process can exit and the OS can reuse its pid — the signal can then, in principle,
+// reach an unrelated process. On Windows this is worse: the hard-kill path is `taskkill /T /F`, which
+// takes the WHOLE process tree, not just the one pid. Not closed by narrowing — a retry, a re-check
+// immediately before signalling, or a shorter gap all leave the same window, just smaller. What WOULD
+// close it is signalling by a stable handle rather than a recyclable number (a Windows process handle
+// opened at confirmation time and signalled through it directly; a POSIX pidfd) — neither of which Node
+// exposes cross-platform today. Not reducible with the APIs available to us here, not structurally
+// impossible.
 async function stop() {
   const rec = readPidFile();
   if (!rec) { console.log("loom: no daemon is running (no PID file)."); return 0; }
