@@ -4014,6 +4014,22 @@ export class OrchestrationMcpRouter {
         }
       },
     );
+
+    server.registerTool(
+      "merge_batch",
+      {
+        description: "Card dbc6f660 — batch the merge gate: gate up to the project's configured `orchestration.maxConcurrentWorkers` (Settings UI: \"Max workers / manager\", resolved fresh via resolveConfig, platform default 3) READY worker branches on ONE repo in a SINGLE run, instead of one gate per branch. This cap is FIXED, not a parameter of this tool — batch size is deliberately not agent-settable. Cuts a dedicated batch worktree off canonical main's current tip, squash-merges each candidate branch into it IN ORDER — same one-commit-per-branch shape a solo worker_merge_confirm produces, same Loom-Worker-Branch trailer, nothing changes about how a landed commit looks on main — runs the gate ONCE on the assembled tree, and on green fast-forwards canonical main to it (main is mutated exactly once, at that fast-forward). Every workerSessionId must be YOUR OWN worker, on the SAME repo — a mismatch refuses the whole call before touching anything. Fewer than 2 eligible candidates (after stranded-work/cap filtering) is not worth batching and falls straight to the ordinary per-branch path. A branch that won't squash cleanly into the batch (a real conflict against an earlier candidate in this SAME batch) is DROPPED — recorded in `fallback` with its reason — and the batch proceeds with the rest; the dropped branch then gets its own ordinary worker_merge_confirm. A RED gate on the assembled batch is NEVER bisected — every original candidate falls back to being gated individually, exactly today's behavior (this is measured cheaper than bisection at this batch-size range). A FORFEIT (canonical main advanced between the batch being cut and the fast-forward — a human or another writer landed something mid-gate) is also a full fallback to individual gating, and is recorded as a distinct `batch_merge_forfeited` event — this is the one failure mode batching makes strictly worse than today (one branch's gate wasted becomes up to the cap), so watch for it if you batch large groups often. `landed` names every branch that actually merged via the shared batch gate (workerSessionId, taskId, branch, sha) — each one already went through the SAME finalize path (worktree cleanup, task move, notification) a solo ALREADY_MERGED confirm uses, no separate action needed. `fallback` names every OTHER candidate (dropped, over the cap, stranded, or — on a red gate/forfeit — the whole batch) that this call already routed through an ordinary worker_merge_confirm on your behalf — you do not need to re-call it yourself, just read `fallback` to see what happened to each. `reason` is set on a top-level refusal (validation failure, nothing eligible, no gateCommand configured) or to explain why the whole batch went to fallback.",
+        inputSchema: strictShape({ workerSessionIds: z.array(z.string()).min(1) }),
+      },
+      async ({ workerSessionIds }) => {
+        try {
+          for (const workerSessionId of workerSessionIds) selfHealWorkerLink(workerSessionId, "merge_batch");
+          return ok(await sessions.mergeBatch(managerSessionId, workerSessionIds));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
     registerGateStatus(server, sessions);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);

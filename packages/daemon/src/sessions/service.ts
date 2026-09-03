@@ -17,6 +17,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo } from "../git/worktrees.js";
+import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
@@ -1175,9 +1176,18 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
  *  self-gate call site, `base` is `WORKER_GATE_ENV_OVERRIDE`, which carries the `LOOM_GATE_TEST_CONCURRENCY:
  *  "3"` host-starvation pin (see that const's own doc above — one unpinned gate at 8 lanes starved the host
  *  on 2026-07-15). Replacing this spread with a plain `{ LOOM_GATE_OP_ID: opId }` assignment would silently
- *  drop that pin for every caller that passes a `base`. */
-function gateOpIdEnvOverride(opId: string, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...base, LOOM_GATE_OP_ID: opId };
+ *  drop that pin for every caller that passes a `base`.
+ *
+ *  `batchSize` (card dbc6f660, accepted peer request from Codescape) ALSO stamps `LOOM_GATE_BATCH_SIZE` —
+ *  REQUIRED (not optional), so no call site can forget it: Codescape's gate-variance baseline lives on a
+ *  duration column that would otherwise silently mix a 1-branch run with an up-to-4-branch batched one, with
+ *  nothing in the row telling them apart. Stamped on EVERY gate child, not merely batched ones — an ordinary
+ *  solo merge passes `1`, a worker self-check or deploy gate (neither is a merge, neither has a branch
+ *  count) passes `0`, a real batch passes the ACTUAL post-assembly landed-branch count (never the requested
+ *  K — see runBatchedMerge's own doc). A field present on every row means absence has exactly ONE meaning
+ *  ("produced by a build older than this change"), never a second, ambiguous one. */
+function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize) };
 }
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
@@ -3990,7 +4000,7 @@ export class SessionService {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
         getDeployConcurrentGatesMax = getMaxConcurrentGates;
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId), undefined, undefined, hooks);
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0), undefined, undefined, hooks);
       },
       "high",
     );
@@ -14402,7 +14412,7 @@ export class SessionService {
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
           // event, not a second independently-computed signal.
           const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), undefined, undefined, mirroredHooks);
+          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks);
           // CARD c24dd48a: a passing gate is about to hand off to this method's own squash phase
           // (`mergeBranch`, below, outside this call) — keep the per-repo admission guard held so a queued
           // same-repo sibling isn't admitted into the gap between this gate settling and that squash
@@ -14535,7 +14545,7 @@ export class SessionService {
                 // cancelSignal; only the WORKER-gate call site forwards a live one. Wiring merge-gate
                 // cancellation through `runGateSequential` itself, if ever wanted, is a separate change —
                 // out of this card's scope, and not needed to fix the liveness-visibility gap this closes.
-                const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false, undefined, hooks);
+                const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks);
                 // CARD c24dd48a / b9e07a4a: same "about to hand off to squash" hold as the first attempt —
                 // THIS is the fix: a pass here now keeps the per-repo guard held all the way to
                 // `mergeBranch`, instead of leaving the window this retry runs in unguarded.
@@ -14709,7 +14719,7 @@ export class SessionService {
               // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
               // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
               await reunionAtAdmission();
-              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId), false, undefined, hooks);
+              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks);
               // CARD c24dd48a: same "about to hand off to squash" hold as the first attempt above — see
               // that call site's identical comment.
               if (r.passed) holdRepoGuardOnExit();
@@ -15416,6 +15426,219 @@ export class SessionService {
     return warning
       ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true, warning }
       : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };
+  }
+
+  /**
+   * Card dbc6f660 — batch the merge gate: gate up to `orchestration.maxConcurrentWorkers` ready branches
+   * (resolveConfig-resolved, never a caller-supplied param — K is fixed, not agent-settable) on ONE repo
+   * ONCE, landing
+   * each as its own squashed commit (byte-shape-identical to a solo confirm — see git/batch-merge.ts's own
+   * header doc). Assembly happens git-side (batch-merge.ts, reusing {@link mergeBranch} unchanged); this
+   * method is the orchestration glue: resolve/validate candidates, wire the shared gate run, and dispatch
+   * each outcome to the SAME finalize paths a solo merge already uses — never new finalize logic:
+   *  - a branch the batch actually LANDED on canonical main is finished via {@link finishAlreadyMerged}
+   *    (its content is now provably already on main — exactly the ALREADY_MERGED shape that method exists
+   *    for — so it finalizes with NO extra gate run).
+   *  - every OTHER candidate (dropped by assembly, over the batch cap, stranded, or — on a red gate/forfeit
+   *    — the WHOLE batch) falls back to today's unchanged {@link confirmWorkerMergeTracked}, one at a time.
+   *
+   * Deliberately simpler than confirmWorkerMergeTracked's own gate call: no single-file retry, no
+   * transient-kill auto-retry, no reduced-gate command swap-in. Those stay exactly as they are on the
+   * (still fully exercised) per-branch fallback path — a batch gate is one straightforward run of the
+   * assembled tree. `computeEmitCompareGate` IS still called here, but ONLY to RECORD eligibility on the
+   * batch's own `build_gate` event (card dbc6f660's "measured interaction" note) — never to swap in a
+   * reduced command; the Lead's follow-up measurement found reduction-aware batch SELECTION doesn't pay at
+   * this K, so the assembler stays dumb: whatever is ready, up to the cap, unconditionally.
+   *
+   * CROSS-PROJECT CONTRACT (card 0f1920e0, re-affirmed on dbc6f660): `LOOM_GATE_OP_ID` is NOT renamed or
+   * dropped here — `runGate` below stamps it via the SAME `gateOpIdEnvOverride` every other gate call site
+   * uses, passing the ACTUAL post-assembly landed-branch count (never the requested K) as its new
+   * `LOOM_GATE_BATCH_SIZE` (accepted peer request, same card): a real batch stamps that count, an ordinary
+   * solo merge stamps `1`, a worker self-check/deploy gate stamps `0` — see `gateOpIdEnvOverride`'s own doc
+   * for why this is unconditional on EVERY gate child, not merely batched ones. Batching also RE-MEANS
+   * `LOOM_GATE_OP_ID`'s own per-run unit (one opId now covers up to `maxConcurrentWorkers` branches, not one) — the
+   * per-branch `branches` list on this method's `build_gate`/`batch_merge_forfeited` events is what keeps
+   * that recoverable. `gate_history`'s `branch` column is NOT set by this event's own
+   * `detail` — it's a JOIN onto the SUBJECT session's `sessions.branch` (see `Db.listGateEvents`) — and a
+   * batch event is filed under the MANAGER (there is no single subject worker), so `gate_history.branch`
+   * reads **null** for a batch gate row, same as any other manager-subject event. This is a DELIBERATE,
+   * honest consequence of there being no single branch to name, not an oversight — the real per-branch set
+   * lives in `detail.branches`.
+   */
+  async mergeBatch(managerSessionId: string, workerSessionIds: string[]): Promise<{
+    ok: boolean;
+    landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string }[];
+    fallback: { workerSessionId: string; reason: string }[];
+    reason?: string;
+  }> {
+    if (workerSessionIds.length === 0) return { ok: false, landed: [], fallback: [], reason: "no worker session ids given" };
+    interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; }
+    let repoPath: string | undefined;
+    let projectId: string | undefined;
+    const resolved: Candidate[] = [];
+    for (const workerSessionId of workerSessionIds) {
+      const worker = this.db.getSession(workerSessionId);
+      if (!worker || worker.parentSessionId !== managerSessionId) {
+        return { ok: false, landed: [], fallback: [], reason: `worker ${workerSessionId}: not your worker` };
+      }
+      if (!worker.branch) return { ok: false, landed: [], fallback: [], reason: `worker ${workerSessionId}: worker has no branch` };
+      const project = this.db.getProject(worker.projectId);
+      if (!project) return { ok: false, landed: [], fallback: [], reason: `worker ${workerSessionId}: project not found` };
+      const repo = resolveRepoByKey(project, worker.repoKey);
+      if (repoPath === undefined) { repoPath = repo.path; projectId = project.id; }
+      else if (repoPath !== repo.path) {
+        return { ok: false, landed: [], fallback: [], reason: `worker ${workerSessionId} targets a different repo (${repo.path}) than the rest of this batch (${repoPath}) — batch candidates must share one repo` };
+      }
+      const task = worker.taskId ? this.db.getTask(worker.taskId) : undefined;
+      resolved.push({ workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch, taskTitle: task?.title ?? null, repoKey: worker.repoKey ?? null });
+    }
+    if (!repoPath || !projectId) return { ok: false, landed: [], fallback: [], reason: "could not resolve a shared repo for this batch" };
+    const finalRepoPath = repoPath;
+    const finalProjectId = projectId;
+    // ONE resolveConfig call for the whole method (card dbc6f660 correction — a manager-supplied `maxWorkers`
+    // param used to bypass this entirely, both an ad-hoc default disagreeing with the resolved value AND a
+    // caller-settable K, which is adaptive-K by another route; the owner fixed K and ruled that out). Mirrors
+    // the existing `maxConcurrentWorkers` read at spawnWorker's own admission check (this file, "Max workers /
+    // manager" in the Settings UI) — same field, same resolveConfig call, never a hardcoded fallback.
+    const project = this.db.getProject(finalProjectId)!;
+    const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
+
+    // STRANDED-WORK BACKSTOP (mirrors confirmWorkerMerge's own pre-gate check): a worker whose real commits
+    // sit on some OTHER self-created branch would squash NOTHING into the batch — pull it out to the
+    // fallback path up front rather than silently wasting a batch slot on an empty diff.
+    const candidates: Candidate[] = [];
+    const strandedFallback: { workerSessionId: string; reason: string }[] = [];
+    for (const r of resolved) {
+      const worker = this.db.getSession(r.workerSessionId)!;
+      const worktreePath = worker.worktreePath ?? worker.cwd;
+      const stranded = await detectStrandedWork(finalRepoPath, worktreePath, r.branch, { timeoutMs: this.gitOpMs });
+      if (stranded.stranded) { strandedFallback.push({ workerSessionId: r.workerSessionId, reason: `stranded work on '${stranded.branch}' — refusing the empty batch slot; re-point the branch then re-confirm` }); continue; }
+      candidates.push(r);
+    }
+
+    const K = computeBatchSize(candidates.length, Math.max(1, orchestration.maxConcurrentWorkers));
+    const chosen = candidates.slice(0, K);
+    const overflow = candidates.slice(K);
+
+    const runFallback = async (list: { workerSessionId: string; reason: string }[]): Promise<{ workerSessionId: string; reason: string }[]> => {
+      for (const f of list) {
+        try { await this.confirmWorkerMergeTracked(managerSessionId, f.workerSessionId); }
+        catch { /* best-effort — the manager still sees this worker in `fallback` and can re-confirm by hand */ }
+      }
+      return list;
+    };
+
+    if (chosen.length < 2) {
+      // Nothing to batch (0 or 1 eligible candidate) — a solo confirm buys nothing over the ordinary path.
+      const fallback = await runFallback([
+        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "fewer than 2 eligible candidates — batching buys nothing over a solo confirm" })),
+        ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+        ...strandedFallback,
+      ]);
+      return { ok: false, landed: [], fallback, reason: "nothing eligible to batch" };
+    }
+
+    const target = resolveRepoByKey(project, chosen[0]!.repoKey);
+    const gate = target.gateCommand;
+    const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    if (!gate) {
+      const fallback = await runFallback([
+        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "no gateCommand configured for this repo — nothing to share a gate over" })),
+        ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+        ...strandedFallback,
+      ]);
+      return { ok: false, landed: [], fallback, reason: "no gateCommand configured" };
+    }
+
+    const opId = randomUUID();
+    const branchIdentities = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch }));
+    const evtBatch = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind,
+      detail: { ...detail, opId, branches: branchIdentities },
+    });
+
+    const baseMainSha = (await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "";
+    let batchWorktreePath: string | undefined;
+    const batchTaskId = `batch-${opId}`;
+    try {
+      const wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
+      batchWorktreePath = wt.worktreePath;
+
+      const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number): Promise<BatchGateResult> => {
+        // Diagnostic-only reduction eligibility (see this method's own header doc) — never acted on.
+        // NAMED `batchEmitCompare`, deliberately NOT the bare name confirmWorkerMerge's own classification
+        // local uses: emit-compare-branch-capture-order-guard.mjs scans this file for exactly one line
+        // assigning that bare name from computeEmitCompareGate (the single-branch call site, whose own
+        // pre-wait branch-head-capture ordering it protects) — a second, differently-named local here avoids
+        // a false collision with that guard; it protects an unrelated invariant this batch path has no
+        // equivalent of (this call classifies the ALREADY-ASSEMBLED, frozen batch worktree, not a live
+        // branch that can move during a queue wait).
+        const batchEmitCompare = await computeEmitCompareGate(finalRepoPath, worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
+        const descriptor: GateDescriptor = { gateType: "merge", projectId: finalProjectId, sessionId: managerSessionId, taskId: null, branch: null, opId, repoPath: finalRepoPath, worktreePath };
+        let holdOnPass = false;
+        let r: GateSequentialResult;
+        try {
+          r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, descriptor, async (_startedAt, _cancelSignal, hooks, _getMax, holdRepoGuardOnExit) => {
+            const gr = await runGateSequential(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks);
+            if (gr.passed) { holdOnPass = true; holdRepoGuardOnExit(); }
+            return gr;
+          }, "high");
+        } catch (err) {
+          if (err instanceof GateCancelledError) return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+          throw err;
+        }
+        evtBatch("build_gate", {
+          // `branchCount` is the ACTUAL post-assembly landed count (`landedCount`, == LOOM_GATE_BATCH_SIZE
+          // on this run's gate child) — never `chosen.length`, the requested K, which can over-report after
+          // a conflict drop-out (DoD-4).
+          passed: r.passed, batched: true, branchCount: landedCount,
+          ...(batchEmitCompare?.eligible ? { emitCompareReduced: true, emitCompareTestFiles: batchEmitCompare.changedTestFiles } : {}),
+        });
+        return { passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps } };
+      };
+
+      const batchCandidates: BatchCandidate[] = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
+      const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
+
+      // Always release the repo-admission guard extension the gate callback above took on a pass — the
+      // guard must not outlive this call regardless of what the fast-forward/finalize below does with it.
+      this.gateSemaphore.endSquash(finalRepoPath, opId);
+
+      if (result.forfeited) {
+        evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, reason: result.reason });
+      }
+
+      if (!result.ok) {
+        const fallback = await runFallback([
+          ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: result.reason ?? "batch failed" })),
+          ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+          ...strandedFallback,
+        ]);
+        return { ok: false, landed: [], fallback, reason: result.reason };
+      }
+
+      const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string }[] = [];
+      for (const lb of result.landed) {
+        const worker = this.db.getSession(lb.workerSessionId);
+        if (!worker) continue;
+        const c = chosen.find((x) => x.workerSessionId === lb.workerSessionId);
+        await this.finishAlreadyMerged({
+          managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
+          worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
+          projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
+        });
+        landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha });
+      }
+      const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
+      const fallback = await runFallback([
+        ...droppedFallback,
+        ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
+        ...strandedFallback,
+      ]);
+      return { ok: true, landed, fallback };
+    } finally {
+      if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
+    }
   }
 
   /**
@@ -16281,7 +16504,7 @@ export class SessionService {
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
                 // keep reading the SAME live signal they always have.
                 const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks);
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks);
               },
               "low",
             );
