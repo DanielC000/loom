@@ -35,8 +35,9 @@ and you want this protection, add markers via your own project's config (additiv
 session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
 daemon capability, not a doc convention — you don't need to build anything to use it.
 
-**One rule that dies at rotation deserves its own line: a handoff must also carry what you disclosed to
-a peer, not only what you consumed from one or withdrew.** A terminal-state line ("zero live workers at
-my last read") describes your state at the moment of handoff — it is not a record of what you disclosed
-during the seat, and a successor must never read it as one. State the shape yourself; this doctrine only
-requires the axis exist.
+**Before adding a new rule to this file, check it against one axis: does it have its own moment of need
+that fires independently of a rotation being due?** A procedure you follow *when you rotate* fits here.
+A standing obligation — something that must hold on every rewrite of the doc, with no trigger of its own
+— does not: this file is read on demand, only when a rotation comes due, so a rule whose real moment of
+need is unrelated to that event may never get read at all. That kind belongs in the core doctrine itself,
+even as just a line or two, not here.

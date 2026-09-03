@@ -773,6 +773,10 @@ what you checked. Found none? Treat it as live.
    append log — that a successor can read COLD: what's merged,
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
+   **It must also carry what you disclosed to a peer, not only what you consumed from one or withdrew** —
+   a terminal-state line ("no live workers at my last read") describes your state at handoff, not what you
+   told someone else during the seat, and a successor must never read it as one. State that shape
+   explicitly every time you write the doc, not only when a rotation happens to be due.
    **Size budget + rotate-and-archive — never lose old notes.** Keep the ACTIVE doc comfortably inside
    ONE `Read` page: target ~150 lines, hard-cap ~400 lines (~40KB) — an oversized doc breaks a cold
    successor's very first read. **Count lines from the `Read` tool's own line numbers** — if you've
