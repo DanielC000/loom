@@ -109,16 +109,35 @@ process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
 process.env.LOOM_GIVE_UP_HOLD_MS = "5000";
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+// Card cbf8dcdb: scenario (B) claims to reach `requeueGiveUpOrigin` via `healIfStuck`'s out-of-band
+// busy-stuck path (the call site scenario (A) doesn't cover) — but with host.ts's production-default
+// GIVE_UP_CONFIRM_SETTLE_POLL_MS*_MAX_POLLS window (15*20=300ms, left UNSHRUNK by this file until now),
+// `sendEnterAndVerify`'s OWN confirm-settle exhaustion is STRUCTURALLY SHORTER than the BUSY_STALE_MS
+// override below (500ms) can ever satisfy from the same observed-Enter-write anchor, so it always resolves
+// `requeueGiveUpOrigin` from ITS OWN call site first — `healIfStuck` (driven by the manual `host.reconcile()`
+// below) then finds the session already idle and does nothing. The result was a misattribution, not a
+// flake: the assertion below passed by reading a STALE "GIVE-UP RECOVERY: re-queued" log line emitted by
+// the wrong call site (see the `submitLog.length = 0` clear immediately before that assertion, added by
+// the same card — without it this discriminator can't tell the two sites apart at all).
+// FIX: lengthen ONLY the settle window's DURATION (MAX_POLLS), not its polling cadence (POLL_MS stays at
+// its production default) — comfortably past the point BUSY_STALE_MS's own staleness condition can trip
+// (busySince/lastOutputAt both > BUSY_STALE_MS stale), so `healIfStuck`'s out-of-band `submitGeneration`
+// bump lands WHILE `sendEnterAndVerify`'s poll loop is still in flight for this generation, tripping its
+// own `live.submitGeneration !== gen` bail check — the SAME structural race-resolution DoD-3(a) describes,
+// with wide margins on both sides rather than a tight nominal-instant race (see the arithmetic in the
+// (B) block below, near the `host.reconcile()` call).
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = "150"; // 15ms * 150 = 2250ms — see comment above
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 // Card a250487d: scenario (B)'s "GIVE-UP SUPPRESSED" check used to gate on `sleepUntil(t0, giveUpAt() +
-// VERIFY_TIMEOUT / 2)` === `giveUpAt() + 75` here — comfortably clear of host.ts's production-default
-// GIVE_UP_CONFIRM_SETTLE_POLL_MS*_MAX_POLLS exhaustion (15*20=300ms, unshrunk by this file), unlike the
-// sibling file's own instance of this shape (2ea7de01) where the margin landed on the EXACT SAME nominal
-// instant as that exhaustion. Converted anyway to anchor off the OBSERVED attempt-2 Enter write (see
-// waitForCount/awaitClockPast above) rather than a t0-relative sum of writeAt()'s own nominal hops, which
-// can itself drift under host load — same margin value (60ms) as 2ea7de01 chose for the identical
-// production constant, swept below to confirm it still sits clear of where recovery actually resolves.
+// VERIFY_TIMEOUT / 2)` === `giveUpAt() + 75` here — comfortably clear of where THIS discriminator resolves
+// (unaffected by the GIVE_UP_CONFIRM_SETTLE_MAX_POLLS lengthening above, since it fires before either give-up
+// path resolves either way), unlike the sibling file's own instance of this shape (2ea7de01) where the
+// margin landed on the EXACT SAME nominal instant as the (unmodified, in that file) confirm-settle exhaustion.
+// Converted anyway to anchor off the OBSERVED attempt-2 Enter write (see waitForCount/awaitClockPast above)
+// rather than a t0-relative sum of writeAt()'s own nominal hops, which can itself drift under host load —
+// same margin value (60ms) as 2ea7de01 chose for the identical production constant, swept below to confirm
+// it still sits clear of where recovery actually resolves.
 const GIVE_UP_DISCRIMINATOR_CHECK_MARGIN_MS = 60;
 
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -293,6 +312,10 @@ function annotatedVariant(tag, rest, mintedAtGen, currentGen, mintedAtWallClock)
   // ===== directly — this is the OTHER requeueGiveUpOrigin call site, reached via a completely different ====
   // ===== path than scenario (A)'s SUBMIT_MAX_ATTEMPTS exhaustion =============================================
   await sleepUntil(t0, giveUpAt() + BUSY_STALE_MS + BUSY_STALE_MS / 2);
+  // Card cbf8dcdb DoD-4: clear BEFORE this assertion — without this, a passing check here is unfalsifiable
+  // against the (A)-shaped call site's OWN "GIVE-UP RECOVERY: re-queued" line (see LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS's
+  // own doc above for why that line can no longer land here at all, but this clear is the independent, load-bearing guard).
+  submitLog.length = 0;
   host.reconcile();
   check("(B) healIfStuck's give-up restore fired (the OTHER requeueGiveUpOrigin call site)", submitLog.some((l) => l.includes(`[submit] ${SID} `) && l.includes("GIVE-UP RECOVERY: re-queued")));
   check("(B setup) the recovery notice is requeued, sitting ambiguous", host.getPendingEntries(SID).some((m) => m.text === RECOVERY_TEXT));
