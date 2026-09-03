@@ -434,17 +434,77 @@ function makeRepo(repo) {
         !JSON.stringify(view).includes("rgo-foreign-secret-path"));
       check("(unit, repoGuardOnly) opId/projectId/projectName still present (the sanctioned set)",
         foreign.opId === "rgo-op-1" && foreign.projectId === P2 && foreign.projectName === "RGO Foreign");
+      // Card 61aa6f1d: the four-field omission above is now announced with an explicit marker, matching
+      // GateQueueEntry/GateIntentEntry — a caller following the documented `"redacted" in entry` idiom no
+      // longer gets a silent `false` for a foreign entry on this array.
+      check("(unit, repoGuardOnly) card 61aa6f1d: a FOREIGN-project entry carries an explicit redacted:true marker", foreign.redacted === true);
 
       // From P2's OWN view, the same entry carries full detail — including repoPath.
       const ownView = sessions.gateQueueForManager(P2);
       const own = ownView.repoGuardOnly[0];
       check("(unit, repoGuardOnly) from P2's own view, repoPath/taskId/branch ARE present",
         own.repoPath === "/tmp/rgo-foreign-secret-path/repo" && own.taskId === "foreign-task" && own.branch === "loom/foreign");
+      check("(unit, repoGuardOnly) card 61aa6f1d: an OWN-project entry carries NO `redacted` marker at all", !("redacted" in own));
     } finally {
       release();
     }
     const afterRelease = sessions.gateQueueForManager(P1);
     check("(unit, repoGuardOnly) empty once released (no leaked entry)", afterRelease.repoGuardOnly.length === 0);
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
+// ── (unit, squashing) card 61aa6f1d: same redacted:true parity for SquashQueueEntry — before this fix,
+// `squashing` (like `repoGuardOnly` above) already redacted repoPath/taskId/branch/workerLabel for a
+// foreign-project entry but never announced it, so the documented `"redacted" in entry` idiom
+// (GateQueueEntry's own doc, :165) silently returned `false` for a foreign squashing entry too. ─────────
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P1 = `gq-sq-own-${Date.now()}`, P2 = `gq-sq-foreign-${Date.now()}`;
+    db.insertProject({ id: P1, name: "SQ Own", repoPath: "/tmp/sq-own", vaultPath: "/tmp/sq-own", config: {}, createdAt: now, archivedAt: null });
+    db.insertProject({ id: P2, name: "SQ Foreign", repoPath: "/tmp/sq-foreign-secret-path", vaultPath: "/tmp/sq-foreign-secret-path", config: {}, createdAt: now, archivedAt: null });
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+
+    // Same shape as gate-semaphore-concurrency.mjs's own (squash-visibility) block: a merge past its own
+    // gate command, still holding its repo guard through its own squash (holdRepoGuardOnExit), so it's
+    // GONE from snapshot()/repoGuardOnlySnapshot() and visible ONLY via squashOnlySnapshot().
+    await sessions.gateSemaphore.runExclusive(1, {
+      gateType: "merge", projectId: P2, sessionId: "sq-foreign-sess", taskId: "sq-foreign-task",
+      branch: "loom/sq-foreign", repoPath: "/tmp/sq-foreign-secret-path/repo", opId: "sq-foreign-op",
+    }, async (_startedAt, _cancelSignal, _hooks, _getMax, holdRepoGuardOnExit) => {
+      holdRepoGuardOnExit();
+      return "gate-done";
+    });
+    try {
+      const view = sessions.gateQueueForManager(P1); // P1 is NOT the owner of this hold
+      check("(unit, squashing) exactly 1 squashing entry visible", view.squashing.length === 1);
+      const foreign = view.squashing[0];
+      check("(unit, squashing) foreign entry OMITS taskId/branch/workerLabel/repoPath entirely (never redacted-to-null)",
+        !("taskId" in foreign) && !("branch" in foreign) && !("workerLabel" in foreign) && !("repoPath" in foreign));
+      check("(unit, squashing) the foreign repo path never appears anywhere in the snapshot",
+        !JSON.stringify(view).includes("sq-foreign-secret-path"));
+      check("(unit, squashing) opId/projectId/projectName still present (the sanctioned set)",
+        foreign.opId === "sq-foreign-op" && foreign.projectId === P2 && foreign.projectName === "SQ Foreign");
+      // Card 61aa6f1d — POSITIVE-CONTROLLED (see this file's git history: this check was verified RED
+      // against pre-fix code, where `SquashQueueEntry` never carried this field at all).
+      check("(unit, squashing) card 61aa6f1d: a FOREIGN-project entry carries an explicit redacted:true marker", foreign.redacted === true);
+
+      // From P2's OWN view, the same entry carries full detail — including repoPath — and NO marker.
+      const ownView = sessions.gateQueueForManager(P2);
+      const own = ownView.squashing[0];
+      check("(unit, squashing) from P2's own view, repoPath/taskId/branch ARE present",
+        own.repoPath === "/tmp/sq-foreign-secret-path/repo" && own.taskId === "sq-foreign-task" && own.branch === "loom/sq-foreign");
+      check("(unit, squashing) card 61aa6f1d: an OWN-project entry carries NO `redacted` marker at all", !("redacted" in own));
+    } finally {
+      sessions.gateSemaphore.endSquash("/tmp/sq-foreign-secret-path/repo", "sq-foreign-op");
+    }
+    const afterEnd = sessions.gateQueueForManager(P1);
+    check("(unit, squashing) empty once endSquash fires (no leaked entry)", afterEnd.squashing.length === 0);
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   }

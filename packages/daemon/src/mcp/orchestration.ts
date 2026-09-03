@@ -771,10 +771,13 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "`queued`: an inert-diff-skip merge (db9b0130) holding or waiting on a same-repo sibling's per-repo " +
         "guard without ever admitting through the ordinary cap/registry above. Each entry is " +
         "{id, phase:\"holding\"|\"queued\", since, elapsedMs, queuePosition, opId, projectId, " +
-        "projectName, repoPath?, taskId?, branch?, workerLabel?} - `repoPath`/`taskId`/`branch`/" +
+        "projectName, repoPath?, taskId?, branch?, workerLabel?, redacted?} - `repoPath`/`taskId`/`branch`/" +
         "`workerLabel` are OWN-PROJECT ONLY (never redacted-to-null - simply absent for a foreign entry, " +
         "same as `running`/`queued`'s own redaction; `repoPath` is an absolute host filesystem path, never " +
-        "disclosed cross-project). Explains a queued `merge`-kind entry above reporting " +
+        "disclosed cross-project); a foreign entry ALSO carries `redacted: true` (card 61aa6f1d, matching " +
+        "`running`/`queued`'s own `redacted` field) so that four-field omission reads as deliberate rather " +
+        "than an ambiguous gap — never present (let alone `false`) on the caller's own entries. Explains a " +
+        "queued `merge`-kind entry above reporting " +
         "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
         "contending holder is here, not there. " +
         "ALSO returns `squashing` (card 93b568e6) — a THIRD, independent array, separate from BOTH " +
@@ -784,9 +787,11 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "a squashing merge was enumerated NOWHERE in this tool's result — `activeCount`/`running`/`queued`/" +
         "`repoGuardOnly` could ALL read empty for a repo whose merge was still genuinely in progress, and " +
         "an empty read was silently indistinguishable from 'nothing is running'. Each entry is " +
-        "{opId, projectId, projectName, since, elapsedMs, repoPath?, taskId?, branch?, workerLabel?} — " +
+        "{opId, projectId, projectName, since, elapsedMs, repoPath?, taskId?, branch?, workerLabel?, " +
+        "redacted?} — " +
         "same cross-project redaction as `repoGuardOnly` (`repoPath`/`taskId`/`branch`/`workerLabel` " +
-        "own-project only, never redacted-to-null, simply absent for a foreign entry). `since`/`elapsedMs` " +
+        "own-project only, never redacted-to-null, simply absent for a foreign entry; a foreign entry ALSO " +
+        "carries `redacted: true`, card 61aa6f1d, same as `repoGuardOnly` above). `since`/`elapsedMs` " +
         "measure from the instant the gate command settled (NOT from admission — see `gate_status`'s " +
         "`admittedAt` for that), i.e. how long the squash itself has been running. A repo appearing here " +
         "explains a queued `merge`-kind entry above reporting `repoContended:true` with NO matching " +

@@ -243,6 +243,12 @@ export interface RepoGuardOnlyQueueEntry {
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
+  /** Card 61aa6f1d: present ONLY on a foreign-project entry (never `false`, never present on the
+   *  caller's own) — mirrors {@link GateQueueEntry.redacted} exactly. Before this field existed, this
+   *  type already redacted `repoPath`/`taskId`/`branch`/`workerLabel` for a foreign project (same rule as
+   *  `GateQueueEntry`) but never announced it — `"redacted" in entry` silently read `false` for a foreign
+   *  entry too, the exact false negative `GateQueueEntry.redacted` (card 80d54122) exists to prevent. */
+  redacted?: true;
 }
 
 /** Card 93b568e6: one entry in {@link GateQueueSnapshot.squashing} — the read-side shape of a
@@ -263,6 +269,11 @@ export interface SquashQueueEntry {
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
+  /** Card 61aa6f1d: present ONLY on a foreign-project entry (never `false`, never present on the
+   *  caller's own) — mirrors {@link GateQueueEntry.redacted} exactly. Before this field existed, this
+   *  type already redacted `repoPath`/`taskId`/`branch`/`workerLabel` for a foreign project (same rule as
+   *  `RepoGuardOnlyQueueEntry`) but never announced it — see that field's own doc for the full rationale. */
+  redacted?: true;
 }
 
 /** One live declaration in {@link GateQueueSnapshot.declarations} (card a5d1ae04) — the read-side shape of
@@ -4570,6 +4581,10 @@ export class SessionService {
         entry.taskId = e.taskId;
         entry.branch = e.branch;
         entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+      } else {
+        // Card 61aa6f1d: announce the omission above rather than leaving it a silent absence — see
+        // RepoGuardOnlyQueueEntry.redacted's own doc.
+        entry.redacted = true;
       }
       return entry;
     });
@@ -4590,6 +4605,10 @@ export class SessionService {
         entry.taskId = e.taskId;
         entry.branch = e.branch;
         entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+      } else {
+        // Card 61aa6f1d: announce the omission above rather than leaving it a silent absence — see
+        // SquashQueueEntry.redacted's own doc.
+        entry.redacted = true;
       }
       return entry;
     });
