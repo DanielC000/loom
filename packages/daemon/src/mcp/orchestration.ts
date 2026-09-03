@@ -4551,7 +4551,11 @@ export class OrchestrationMcpRouter {
           "suspicion and you can't trust a signal that only an agent inside it can read. " +
           "DERIVED fields are fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
           "never cached/persisted) — `processBuiltSha`/`processBuiltDirty` alone are captured once at " +
-          "process start by design (never a fresh read; see their own field docs). `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/" +
+          "process start by design (never a fresh read; see their own field docs). Card 9aa4e2c9: " +
+          "`processStartedAt` is a SIMILAR, deliberate exception — it reads `performance.timeOrigin`, a " +
+          "value the runtime fixes once at process start, so it is STABLE and safely comparable/joinable " +
+          "across separate reads of the same boot (unlike the mtime/git-derived fields above, which " +
+          "legitimately differ read to read as the tree changes). `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/" +
           "`packages/shared/src` commits — this is CORRECT and DELIBERATE for what it answers (\"does the " +
           "daemon PROCESS need a restart\"), and an assets/docs/vault-only merge correctly never counts " +
           "toward it. ⛔ Card e8697dd3: do NOT read that as \"an assets-only merge never needs a restart\" " +

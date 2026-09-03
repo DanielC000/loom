@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import { loomRepoRoot } from "./paths.js";
 import { nonInteractiveEnv } from "./git/writer.js";
 import { DEPLOY_PACKAGES } from "./deploy-packages.js";
@@ -166,9 +167,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * a build that landed nearly six hours AFTER the process began, that the process could not possibly be
  * executing — and every gate-kind DB row this process wrote in between (1880 of them) was missing a field
  * a merge at `07:30:24Z` unconditionally adds, proving the process really was still running pre-merge code
- * the whole time. `processStartedAt` fixes this: computed fresh at call time from `process.uptime()` (never
- * cached — same DoD #4 discipline as everything else in this module), it is the moment this process's OWN
- * currently-loaded code was read from disk. `runningCodeBuiltAt` is `min(distBuiltAt, processStartedAt)` —
+ * the whole time. `processStartedAt` fixes this: it is the moment this process's OWN currently-loaded code
+ * was read from disk. Card 9aa4e2c9 — unlike every other clock in this module, it is read ONCE from
+ * `performance.timeOrigin` (a value the runtime fixes at process start and never changes), NOT recomputed
+ * per call under the DoD #4 "never cache" discipline — that discipline is right for a clock that genuinely
+ * changes between calls (a dist mtime, mainline HEAD); a process's own start time does not, and the earlier
+ * approach (`Date.now() - process.uptime() * 1000`, subtracting a wall clock from a monotonic one) drifted
+ * by a few ms between calls in the SAME boot, which broke the property callers actually rely on: that two
+ * reads of the same boot agree. `runningCodeBuiltAt` is `min(distBuiltAt, processStartedAt)` —
  * the EARLIER of the two is always a safe upper bound on what the process could actually be executing: if
  * the dist is newer than the process, the process cannot have loaded that newer code no matter what its
  * mtime says, so the process's own start time is the honest clock; if the process is newer than the dist
@@ -234,8 +240,11 @@ export interface DeployStalenessResult {
    * transparency (see `distAheadOfProcess`). */
   distBuiltAt: string | null;
   /** ISO instant this process itself started — i.e. when its OWN currently-loaded code was read off disk
-   * (Node imports a module's file once and never re-reads it). Card 8ff7ccde. Derived fresh at call time
-   * from `process.uptime()`, never cached. */
+   * (Node imports a module's file once and never re-reads it). Card 8ff7ccde. Card 9aa4e2c9: a STABLE
+   * value, read once from `performance.timeOrigin` (fixed by the runtime at process start) — deliberately
+   * NOT recomputed per call the way every other clock in this module is; two reads of the same boot are
+   * guaranteed to return the identical string, so this value IS safely joinable/comparable across reads
+   * and across parties, unlike a clock this module derives fresh each time. */
   processStartedAt: string | null;
   /** `min(distBuiltAt, processStartedAt)` — the clock `commitsBehind`/`stale` are actually computed
    * against. Card 8ff7ccde: the earlier of the two is always a safe bound on what this process could
@@ -643,12 +652,19 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   const distBuiltAt = new Date(buildMaxMs).toISOString();
 
   // Card 8ff7ccde: when this process itself started (i.e. when its OWN currently-loaded code was read off
-  // disk) — derived fresh at call time from `process.uptime()`, exactly like every other clock in this
-  // module (DoD #4: never cached/memoized). `runningCodeBuiltAt` is the earlier of the two clocks — a safe
+  // disk). Card 9aa4e2c9 — this is a DELIBERATE, NAMED EXCEPTION to this module's own DoD #4 ("never
+  // cached/memoized"): that discipline is right for every other clock here (a dist mtime, mainline HEAD)
+  // because those genuinely change between calls, but a process's own start time does not — recomputing it
+  // as `Date.now() - process.uptime() * 1000` (the old approach) subtracts a WALL clock from a MONOTONIC
+  // one and drifts by a few ms between calls in the SAME boot, which breaks the one thing callers actually
+  // need from this field: that two reads of the same boot agree. `performance.timeOrigin` is captured ONCE
+  // by the runtime at process start and is fixed for the process's lifetime — the exact primitive this
+  // field wants, so it is read directly rather than derived, and is exempt from the "recompute every call"
+  // rule the rest of this module follows. `runningCodeBuiltAt` is the earlier of the two clocks — a safe
   // bound on what this process could actually be executing (see the module doc for why).
   const processStartedAtMs = processStartedAtOverride
     ? new Date(processStartedAtOverride).getTime()
-    : Date.now() - process.uptime() * 1000;
+    : performance.timeOrigin;
   const processStartedAt = new Date(processStartedAtMs).toISOString();
   const runningCodeBuiltAtMs = Math.min(buildMaxMs, processStartedAtMs);
   const runningCodeBuiltAt = new Date(runningCodeBuiltAtMs).toISOString();

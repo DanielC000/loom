@@ -100,6 +100,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         answer that case instead.
 //   (23d) an unresolvable processBuiltSha ⇒ null, never a fabricated verdict.
 //
+// Card 9aa4e2c9 — `processStartedAt` must be a STABLE, joinable stamp: the SAME string on every read of
+// the same (never-restarted) boot, not a value that drifts because the old formula
+// (`Date.now() - process.uptime()*1000`) subtracted a WALL clock from a MONOTONIC one:
+//   (24a) POSITIVE CONTROL: the REMOVED formula, reproduced under a controlled clock-rate mismatch
+//         (no real waiting — a real interval this short can't reliably show physical oscillator drift, so
+//         the divergence is injected directly, same technique as (12b)'s monkeypatched fs.readdirSync) —
+//         proves the shape of check below is capable of failing, not vacuous.
+//   (24b) THE FIX: two real calls into the shipped computeDeployStaleness (no override — exercises the
+//         actual `performance.timeOrigin` branch), under the SAME mocked clock skew that broke (24a),
+//         return an IDENTICAL processStartedAt — proves the fix is structurally immune, not merely
+//         avoiding the specific numbers (24a) used.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/deploy-staleness.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -840,6 +852,45 @@ try {
 
   try { fs.rmSync(caRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(caDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (24) Card 9aa4e2c9 — processStartedAt STABILITY across calls =====================
+  {
+    const originalDateNow = Date.now;
+    const originalUptime = process.uptime;
+    try {
+      // ---- (24a) POSITIVE CONTROL — reproduce the REMOVED `Date.now() - process.uptime()*1000` formula
+      // under a controlled wall/monotonic clock-rate mismatch: the wall clock advances 1000ms between the
+      // two "reads" while the monotonic clock advances only 500ms — exactly the shape the module doc's
+      // mechanism section describes (two independent clocks disagreeing). Values are chosen to multiply
+      // exactly in IEEE-754 double precision (500.5 * 1000 has no rounding error), so the asserted 500ms
+      // gap is exact, not an artifact of float noise.
+      const baseWallMs = 1_800_000_000_000;
+      let call = 0;
+      Date.now = () => (call === 0 ? baseWallMs : baseWallMs + 1000);
+      process.uptime = () => (call === 0 ? 500 : 500.5);
+      const oldFormula = () => Date.now() - process.uptime() * 1000;
+      call = 0;
+      const oldT1 = oldFormula();
+      call = 1;
+      const oldT2 = oldFormula();
+      check("(24a) POSITIVE CONTROL: the REMOVED `Date.now() - process.uptime()*1000` formula genuinely drifts (500ms) under a real wall/monotonic clock-rate mismatch — proves the check below is capable of failing, not vacuous", oldT2 - oldT1 === 500);
+
+      // ---- (24b) THE FIX, exercised for real — two calls into the ACTUAL shipped computeDeployStaleness
+      // (via the raw import, so NO processStartedAt override — this hits the real `performance.timeOrigin`
+      // branch), under the SAME mocked Date.now/process.uptime skew that (24a) just proved drifts the old
+      // formula. `performance.timeOrigin` never reads either mocked global, so this proves the fix is
+      // structurally immune to this clock-skew class, not merely avoiding the specific numbers in (24a).
+      call = 0;
+      const r24First = computeDeployStalenessRaw({ distEntry, repoRoot: repo });
+      call = 1;
+      const r24Second = computeDeployStalenessRaw({ distEntry, repoRoot: repo });
+      check("(24b) THE FIX: two calls in the same process return an IDENTICAL processStartedAt despite the SAME Date.now/process.uptime skew that (24a) just proved drifts the old formula" + reasonSuffix(r24First),
+        r24First.processStartedAt !== null && r24First.processStartedAt === r24Second.processStartedAt);
+    } finally {
+      Date.now = originalDateNow;
+      process.uptime = originalUptime;
+    }
+  }
 } finally {
   // Sweeps EVERY fixture root registered via trackDir() above, not just this section's own —
   // the per-section rmSync calls above only run on the happy path; a thrown error anywhere in the
@@ -851,6 +902,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer, and (card f26339d7) distBuiltSha reads the build-time-baked sha FRESH every call while processBuiltSha is a PURE echo of the caller-supplied processBuiltSha option (no caching inside computeDeployStaleness itself — see AMENDMENT 1), distBuiltShaDiffersFromProcess correctly flags a rebuild-without-restart in one call with no cache-timing race, both degrade to null/false gracefully when build-info.json or the override is absent, and deploySignatureMismatch correctly flags a simulated turbo cache-replay (mtime says fresh, the process's own baked sha proves it's genuinely behind) while staying false on a clean, matching process. (The 'captured once at REAL process start, frozen despite a later on-disk change' property this amendment introduces is proven separately, against the actual production module, by served-status-process-sha.mjs.) (Card 3d7dccb9) builtContentMatchesHead correctly resolves the one case a sha comparison can't — a real, non-ancestor divergent commit with identical shipped content reads NOT-stale-by-content, the same divergent shape with a real content difference still reads stale, both proven on a genuine git branch (not a hypothetical sha), the ordinary-ancestor case never spends the extra git calls (stays null), and an unresolvable sha degrades to null rather than a fabricated verdict."
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer, and (card f26339d7) distBuiltSha reads the build-time-baked sha FRESH every call while processBuiltSha is a PURE echo of the caller-supplied processBuiltSha option (no caching inside computeDeployStaleness itself — see AMENDMENT 1), distBuiltShaDiffersFromProcess correctly flags a rebuild-without-restart in one call with no cache-timing race, both degrade to null/false gracefully when build-info.json or the override is absent, and deploySignatureMismatch correctly flags a simulated turbo cache-replay (mtime says fresh, the process's own baked sha proves it's genuinely behind) while staying false on a clean, matching process. (The 'captured once at REAL process start, frozen despite a later on-disk change' property this amendment introduces is proven separately, against the actual production module, by served-status-process-sha.mjs.) (Card 3d7dccb9) builtContentMatchesHead correctly resolves the one case a sha comparison can't — a real, non-ancestor divergent commit with identical shipped content reads NOT-stale-by-content, the same divergent shape with a real content difference still reads stale, both proven on a genuine git branch (not a hypothetical sha), the ordinary-ancestor case never spends the extra git calls (stays null), and an unresolvable sha degrades to null rather than a fabricated verdict. (Card 9aa4e2c9) processStartedAt is a STABLE, joinable stamp read once from performance.timeOrigin — proven by first showing the REMOVED Date.now()-minus-process.uptime() formula genuinely drifts under a controlled clock-rate mismatch (a positive control that can fail), then showing two real calls to the shipped code under that SAME mismatch return an identical value."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
