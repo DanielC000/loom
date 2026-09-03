@@ -1608,6 +1608,21 @@ export interface GateRun {
   since: string;
   /** 1-based queue position (running entries: null). */
   queuePosition: number | null;
+  /** Card 10fd660b — the BATCHED-merge shape (`merge_batch`, card dbc6f660): one gate run that lands N
+   *  worker branches together. Such a run legitimately has NO single branch, so `branch`/`taskId` above
+   *  are `null` BY DESIGN (that null pair is the batch signature other readers already key on) and MUST
+   *  NOT be back-filled with a synthesized value — read these three fields instead. `false`/`null` on
+   *  every ordinary solo gate, which keeps rendering off `branch` exactly as before.
+   *  ⚠️ `branchCount` is the POST-ASSEMBLY LANDED count, NOT the requested one — a batch can drop a
+   *  branch at assembly (a conflict), so it can be SMALLER than `batchBranches.length`. ⛔ Never use
+   *  `batchBranches.length` as the landed count (the trap recorded on card cf0e2e3b): that array is the
+   *  REQUESTED set, captured before assembly. `null` only on a row/run recorded before the count was
+   *  stamped. Note neither field can express a WHOLESALE FORFEIT (main advanced mid-gate): the gate
+   *  itself still passed and is recorded as such, and the forfeit is a separate `batch_merge_forfeited`
+   *  event this feed does not read. */
+  batched: boolean;
+  branchCount: number | null;
+  batchBranches: string[] | null;
 }
 
 /** The active-gates payload: the semaphore's live occupancy + the per-run detail. `cap` is the resolved
@@ -1852,6 +1867,21 @@ export interface GateHistoryRow {
    *  file(s) … + N changed test file(s)" is the MIXED arm — the count is real; ">0 compiled file(s)" with
    *  no changed-test-file clause is the emit-identity-alone arm. */
   emitCompareTestFiles: string[] | null;
+  /** Card 10fd660b — the BATCHED-merge shape (`merge_batch`, card dbc6f660): one gate run that lands N
+   *  worker branches together. Such a run legitimately has NO single branch, so `branch`/`taskId` above
+   *  are `null` BY DESIGN (that null pair is the batch signature other readers already key on) and MUST
+   *  NOT be back-filled with a synthesized value — read these three fields instead. `false`/`null` on
+   *  every ordinary solo gate, which keeps rendering off `branch` exactly as before.
+   *  ⚠️ `branchCount` is the POST-ASSEMBLY LANDED count, NOT the requested one — a batch can drop a
+   *  branch at assembly (a conflict), so it can be SMALLER than `batchBranches.length`. ⛔ Never use
+   *  `batchBranches.length` as the landed count (the trap recorded on card cf0e2e3b): that array is the
+   *  REQUESTED set, captured before assembly. `null` only on a row/run recorded before the count was
+   *  stamped. Note neither field can express a WHOLESALE FORFEIT (main advanced mid-gate): the gate
+   *  itself still passed and is recorded as such, and the forfeit is a separate `batch_merge_forfeited`
+   *  event this feed does not read. */
+  batched: boolean;
+  branchCount: number | null;
+  batchBranches: string[] | null;
 }
 
 /** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so

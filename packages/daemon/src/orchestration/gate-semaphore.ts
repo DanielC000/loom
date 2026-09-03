@@ -127,6 +127,15 @@ export interface GateDescriptor {
   sessionId: string;
   taskId?: string | null;
   branch?: string | null;
+  /** Card 10fd660b — set ONLY by the batched-merge gate (`mergeBatch`, sessions/service.ts), so the Gates
+   *  page's ACTIVE lane can render a batch as a batch instead of losing its identity line entirely (a
+   *  batch descriptor carries `taskId:null`/`branch:null` by design). `batchBranches` is the REQUESTED
+   *  branch-name set, known when the descriptor is built; `batchLandedCount` is the POST-ASSEMBLY landed
+   *  count, known only once `runBatchedMerge` calls back into the gate — so it is spread onto a COPY of
+   *  the descriptor at the `runExclusive` call site, never mutated in place. Both absent on every other
+   *  gate (solo merge, worker self-check, deploy), which is what keeps those runs byte-identical. */
+  batchBranches?: string[] | null;
+  batchLandedCount?: number | null;
   /** The PendingOpRegistry opId this gate run belongs to (card edc1ec12's `gate_status(opId)` read tool) —
    *  a caller holding the opId a `run_gate`/`worker_merge_confirm` pending response returned can look this
    *  run up in {@link GateSemaphore.snapshot}'s entries without needing the semaphore's own internal `id`.
@@ -205,6 +214,10 @@ export interface GateSnapshotEntry {
   sessionId: string;
   taskId: string | null;
   branch: string | null;
+  /** Echoed from {@link GateDescriptor.batchBranches} / {@link GateDescriptor.batchLandedCount} — see
+   *  their shared doc. Null on every non-batched run. */
+  batchBranches: string[] | null;
+  batchLandedCount: number | null;
   /** "running" once it holds a lane; "queued" while it's still waiting for one. */
   phase: "running" | "queued";
   /** Epoch-ms anchor for the UI's live elapsed clock: startedAt (running) or enqueuedAt (queued). */
@@ -1192,6 +1205,8 @@ export class GateSemaphore {
       sessionId: e.descriptor.sessionId,
       taskId: e.descriptor.taskId ?? null,
       branch: e.descriptor.branch ?? null,
+      batchBranches: e.descriptor.batchBranches ?? null,
+      batchLandedCount: e.descriptor.batchLandedCount ?? null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,

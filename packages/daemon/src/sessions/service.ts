@@ -4168,6 +4168,13 @@ export class SessionService {
         priority: task?.priority ?? null,
         since: new Date(e.since).toISOString(),
         queuePosition: e.queuePosition,
+        // Card 10fd660b: a BATCHED merge gate registers with `taskId:null`/`branch:null` (no single
+        // branch exists), so without these the active lane hero renders NO identity line at all and
+        // the queue card falls through to the bare agent name. See GateRun's own doc for the
+        // landed-vs-requested split; `false`/`null` on every other run keeps them byte-identical.
+        batched: e.batchBranches != null,
+        branchCount: e.batchLandedCount,
+        batchBranches: e.batchBranches,
       };
     });
     return { cap, activeCount: snap.active, queuedCount: snap.queued, gates };
@@ -15882,7 +15889,11 @@ export class SessionService {
         // equivalent of (this call classifies the ALREADY-ASSEMBLED, frozen batch worktree, not a live
         // branch that can move during a queue wait).
         const batchEmitCompare = await computeEmitCompareGate(finalRepoPath, worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
-        const descriptor: GateDescriptor = { gateType: "merge", projectId: finalProjectId, sessionId: managerSessionId, taskId: null, branch: null, opId, repoPath: finalRepoPath, worktreePath };
+        // Card 10fd660b: `taskId`/`branch` stay null (a batch genuinely has neither) — `batchBranches` is what
+        // lets the Gates page's active lane render this as a batch rather than an anonymous merge. It is the
+        // REQUESTED set; the landed count only exists once `runGate` is called back with it, so that half is
+        // spread on at the `runExclusive` site below.
+        const descriptor: GateDescriptor = { gateType: "merge", projectId: finalProjectId, sessionId: managerSessionId, taskId: null, branch: null, opId, repoPath: finalRepoPath, worktreePath, batchBranches: branchIdentities.map((b) => b.branch) };
         let holdOnPass = false;
         let r: GateSequentialResult;
         // Card 3d2afb53: the SAME admission-instant/concurrency-neighbourhood capture confirmWorkerMerge's
@@ -15920,7 +15931,7 @@ export class SessionService {
           state: "pending", surfacedPending: false,
         });
         try {
-          r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, descriptor, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+          r = await this.gateSemaphore.runExclusive(orchestration.maxConcurrentGates, { ...descriptor, batchLandedCount: landedCount }, async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
             gateStartedAt = startedAt;
             concurrentAtStart = this.gateSemaphore.snapshot().active;
             getConcurrentGatesMax = getMaxConcurrentGates;

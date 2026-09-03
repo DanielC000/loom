@@ -7857,6 +7857,26 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     ? verdictPayload.emitCompareIdenticalCount : null;
   const emitCompareTestFiles = emitCompareReduced === true && Array.isArray(verdictPayload.emitCompareTestFiles)
     ? verdictPayload.emitCompareTestFiles as string[] : null;
+  // Card 10fd660b: project the BATCHED-merge shape the Gates page had no way to see. A `merge_batch`
+  // run carries `branch:null`/`taskId:null` HONESTLY (no single branch exists) and its subject session
+  // is the MANAGER, so the JOIN above yields `branch:null` + a bare agent-name `workerLabel` — a shape
+  // indistinguishable from a broken row until these three fields exist. ⛔ Deliberately does NOT
+  // back-fill `branch` with a synthesized value (a joined string, the first branch, the batch worktree
+  // name): that null pair IS the batch discriminator other readers key on, and faking it would corrupt
+  // them. Read straight off this event's own `detail` — `mergeBatch`'s `evtBatch` stamps `batched:true`
+  // + `branchCount` in the payload and `branches` on EVERY batch event (see its own call site).
+  const batched = detail.batched === true;
+  // ⚠️ `detail.branchCount` is `landedCount`, the POST-ASSEMBLY count — NEVER `detail.branches.length`,
+  // which is the REQUESTED set captured before assembly and over-reports after a conflict drop-out
+  // (the denominator trap recorded on card cf0e2e3b). The two are projected as SEPARATE fields for
+  // exactly that reason; a consumer that wants "3 of 4" reads both, never one twice.
+  const branchCount = batched && typeof detail.branchCount === "number" ? detail.branchCount : null;
+  const batchBranches = batched && Array.isArray(detail.branches)
+    ? (detail.branches as unknown[]).flatMap((b) => {
+        const name = (b as { branch?: unknown } | null)?.branch;
+        return typeof name === "string" && name.length > 0 ? [name] : [];
+      })
+    : null;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
@@ -7882,6 +7902,9 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     emitCompareReduced,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
+    batched,
+    branchCount,
+    batchBranches,
   };
 }
 

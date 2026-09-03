@@ -781,8 +781,96 @@ function seed(db) {
   }
 }
 
+// ── (unit, card 10fd660b) batched/branchCount/batchBranches — the mapper, against synthetic `build_gate`
+// fixtures shaped exactly like the ones `mergeBatch`'s own `evtBatch("build_gate", ...)` writes. A batched
+// merge legitimately carries `branch:null` + `taskId:null` (no single branch exists) and its subject
+// session is the MANAGER, so before this card its row was indistinguishable from a broken/missing-data
+// row: the Gates page rendered it as a bare em-dash. Covers a PASSING batch, a REJECTED batch (the
+// fields must survive a rejection, same discipline as durationMs), a batch that DROPPED a branch at
+// assembly (requested > landed — the denominator these two fields exist to keep separate), a LEGACY
+// batch row missing both stamps (must read null, never fabricated), and — THE POSITIVE CONTROL — an
+// ordinary SOLO row, which must be byte-identical to before: batched:false, both new fields null, and
+// its real branch still resolved through the JOIN. ───────────────────────────────────────────────────
+{
+  const dbs = [];
+  try {
+    const db = new Db();
+    dbs.push(db);
+    const P = `gh-batch-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    db.insertProject({ id: P, name: "Batch Fixtures", repoPath: `/tmp/${P}`, vaultPath: `/tmp/${P}`, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    const a = `${P}-a`;
+    db.insertAgent({ id: a, projectId: P, name: "Orchestrator", startupPrompt: "", position: 0 });
+    const t = `${P}-task`;
+    db.insertTask({ id: t, projectId: P, title: "Solo control task", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const mgr = `${P}-mgr`, w = `${P}-wkr`;
+    // The MANAGER carries NO branch — exactly the real batch shape: `mergeBatch` keys its event to the
+    // manager, so `listGateEvents`' JOIN resolves `s.branch` to null with nothing synthesized in its place.
+    db.insertSession({ id: mgr, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertSession({ id: w, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t, worktreePath: `/tmp/${P}-wt`, branch: "loom/solo-control-branch" });
+
+    // `evtBatch` stamps `branches` (the REQUESTED identities) on EVERY batch event and `branchCount`
+    // (`landedCount`, the POST-ASSEMBLY count) in the build_gate payload — mirrored verbatim here.
+    const branchIdentity = (n) => ({ workerSessionId: `${P}-w${n}`, taskId: `${P}-t${n}`, branch: `loom/batch-${n}` });
+    const seedBatch = (offsetMs, durationMs, detail) => {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date(Date.now() - offsetMs).toISOString(), managerSessionId: mgr,
+        taskId: null, kind: "build_gate",
+        detail: { opId: randomUUID(), durationMs, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 1, ...detail },
+      });
+    };
+    // (1) A PASSING batch, K=3, all three landed.
+    seedBatch(5000, 511000, { passed: true, batched: true, branchCount: 3, branches: [1, 2, 3].map(branchIdentity) });
+    // (2) A REJECTED batch, K=2 — the batch fields must survive a rejection exactly as durationMs does.
+    seedBatch(4000, 522000, { passed: false, batched: true, branchCount: 2, branches: [4, 5].map(branchIdentity) });
+    // (3) A batch that DROPPED a branch at assembly: 4 REQUESTED, 3 LANDED. ⚠️ This is the fixture that
+    // would pass vacuously if the mapper derived the landed count from `branches.length` (card cf0e2e3b's
+    // denominator trap) — the two numbers are deliberately made to disagree so that bug cannot hide.
+    seedBatch(3000, 533000, { passed: true, batched: true, branchCount: 3, branches: [6, 7, 8, 9].map(branchIdentity) });
+    // (4) A LEGACY batch row: flagged batched, but neither count nor list stamped. Must read null for both.
+    seedBatch(2000, 544000, { passed: true, batched: true });
+    // (5) THE POSITIVE CONTROL — an ordinary SOLO worker gate on the same project, keyed to a real worker
+    // session with a real branch. Must be untouched by everything above.
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 1000).toISOString(), managerSessionId: mgr, workerSessionId: w,
+      taskId: t, kind: "build_gate",
+      detail: { opId: randomUUID(), passed: true, durationMs: 555000, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 1 },
+    });
+
+    const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
+    check("(unit, card 10fd660b) all 5 fixture rows returned", page.items.length === 5);
+    const byDuration = (ms) => page.items.find((r) => r.durationMs === ms);
+    const passBatch = byDuration(511000), rejectBatch = byDuration(522000);
+    const droppedBatch = byDuration(533000), legacyBatch = byDuration(544000), solo = byDuration(555000);
+    check("(unit, card 10fd660b) precondition: all 5 fixtures resolved to 5 distinct rows", new Set([passBatch, rejectBatch, droppedBatch, legacyBatch, solo]).size === 5 && [passBatch, rejectBatch, droppedBatch, legacyBatch, solo].every(Boolean));
+
+    check("(unit, card 10fd660b) (1) a passing batch reads batched:true", passBatch?.batched === true);
+    check("(unit, card 10fd660b) (1) a passing batch carries branchCount:3 (the LANDED count)", passBatch?.branchCount === 3);
+    check("(unit, card 10fd660b) (1) a passing batch carries batchBranches, the REQUESTED branch names in order", Array.isArray(passBatch?.batchBranches) && passBatch.batchBranches.join(",") === "loom/batch-1,loom/batch-2,loom/batch-3");
+    check("(unit, card 10fd660b — NEVER SYNTHESIZE A BRANCH) (1) a batch row's own `branch`/`taskId` stay null; the null pair IS the batch signature other readers key on", passBatch?.branch === null && passBatch?.taskId === null);
+
+    check("(unit, card 10fd660b) (2) a REJECTED batch keeps batched/branchCount/batchBranches intact (same discipline as durationMs)", rejectBatch?.batched === true && rejectBatch?.branchCount === 2 && rejectBatch?.batchBranches?.length === 2);
+    check("(unit, card 10fd660b) (2) that rejected batch is still outcome:\"reject\"/passed:false — the new fields change no existing derivation", rejectBatch?.outcome === "reject" && rejectBatch?.passed === false);
+
+    check("(unit, card 10fd660b — THE DENOMINATOR CONTROL) (3) a batch that dropped a branch reads branchCount:3 (LANDED), NOT 4 — batchBranches.length is the REQUESTED set and must never stand in for it", droppedBatch?.branchCount === 3 && droppedBatch?.batchBranches?.length === 4);
+
+    check("(unit, card 10fd660b — NEVER FABRICATE) (4) a legacy batch row with neither stamp reads branchCount:null and batchBranches:null, while still reading batched:true", legacyBatch?.batched === true && legacyBatch?.branchCount === null && legacyBatch?.batchBranches === null);
+
+    check("(unit, card 10fd660b — THE POSITIVE CONTROL) (5) an ordinary SOLO row reads batched:false with both new fields null", solo?.batched === false && solo?.branchCount === null && solo?.batchBranches === null);
+    check("(unit, card 10fd660b — THE POSITIVE CONTROL) (5) that solo row's real branch still resolves through the JOIN, unchanged", solo?.branch === "loom/solo-control-branch");
+
+    // A PRE-EXISTING (seed()) row from before this card shipped must also read the un-batched shape — the
+    // legacy case is not special-cased differently from the synthetic solo control just proven above.
+    const { P1 } = seed(db);
+    const legacyPassed = db.listGateEvents({ projectId: P1, limit: 100, offset: 0 }).items.find((r) => r.durationMs === 61234);
+    check("(unit, card 10fd660b) a PRE-EXISTING (seed()) row reads batched:false with both new fields null", legacyPassed?.batched === false && legacyPassed?.branchCount === null && legacyPassed?.batchBranches === null);
+  } finally {
+    for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code. Since card 6ca4b1a0, a row also carries emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles sourced from pending_gate_ops (never the raw event alone), correctly distinguishing both reduction arms, an explicit proven-not-reduced false, and a never-fabricated null."
   + " Since card eb9348b0, a merge row's own failingTest is recovered from that SAME joined verdict payload (gateDetail.failingTest) as a fallback whenever the raw event has none, proven against both a synthetic fixture and a REAL confirmWorkerMergeTracked write — with negative controls proving a pass verdict, a no-tombstone row, and a pre-existing legacy row all still read null, never a fabricated value."
+  + " Since card 10fd660b, a BATCHED merge row also carries batched/branchCount/batchBranches, so a batch is no longer indistinguishable from missing data — with branchCount held to the POST-ASSEMBLY LANDED count and batchBranches to the REQUESTED set (a fixture where the two deliberately disagree proves neither is derived from the other), a legacy batch row reading null rather than a fabricated count, and a SOLO positive control proving an ordinary row is unchanged: batched:false, both fields null, its real branch still resolved."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
