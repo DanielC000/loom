@@ -589,6 +589,93 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         extractFailingTest(`${REAL_PASS_LINE}\n${REAL_FAIL_LINE}`) === REAL_FAIL_LINE);
     }
   }
+
+  // Card 11737292 — LIVE specimen (op `321a5e6b`'s `[loom:merge-rejected]` nudge): `gate-status.mjs`'s own
+  // mocked gate verdict (`outputTail: "FAIL  some_test.mjs"`) leaked, VERBATIM and unindented, into a real
+  // gate run's captured stream (via sessions/service.ts's own `[gate opId=…] … passed=false …` diagnostic
+  // console.log, then test-daemon.mjs's own FAILURES: epilogue re-echoing it) — and was reported as the
+  // failing test, even though no such file exists. Fix: a bare `FAIL  <token>` line (nothing else on it)
+  // is cross-checked against the real filesystem when `cwd` is supplied.
+  {
+    // Synthetic layout mirroring this daemon's own packages/daemon/test/ convention, WITHOUT actually
+    // being inside this repo's tree — proves the check works off `cwd` alone, not off actually running
+    // inside packages/daemon.
+    const withLayoutDir = mkdtempManaged("loom-gr-failtoken-layout-");
+    const testDir = path.join(withLayoutDir, "packages", "daemon", "test");
+    fs.mkdirSync(testDir, { recursive: true });
+    fs.writeFileSync(path.join(testDir, "real-test.mjs"), "// real file\n");
+    const noLayoutDir = mkdtempManaged("loom-gr-failtoken-nolayout-");
+
+    // (K1) THE SPECIMEN, REPRODUCED: cwd HAS the packages/daemon/test/ layout, but the named file does
+    // NOT exist there — this is EXACTLY op 321a5e6b's shape (a real gate run, a mocked filename that was
+    // never a real test). Must now report undefined (an honest miss), never the phantom name.
+    {
+      const tracker = createFailingTestTracker(withLayoutDir);
+      tracker.feed(Buffer.from("FAIL  some_test.mjs\n", "utf-8"));
+      check("(K1 — THE FIX) a bare FAIL line naming a NONEXISTENT file under packages/daemon/test/ is discarded, not reported",
+        tracker.result() === undefined,
+        () => JSON.stringify(tracker.result()));
+    }
+
+    // (K2) POSITIVE CONTROL — WITHOUT cwd (mirrors every pre-existing caller, and this daemon's own
+    // pre-fix behavior before `cwd` threading existed): the SAME line IS reported. Proves the check in K1
+    // is actually doing something — not vacuously passing because the pattern itself stopped matching.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from("FAIL  some_test.mjs\n", "utf-8"));
+      check("(K2 — POSITIVE CONTROL) the SAME line, with no cwd supplied, still reports it verbatim — proves K1's undefined comes from the existence check, not a pattern change",
+        tracker.result() === "FAIL  some_test.mjs");
+    }
+
+    // (K3) BEHAVIOR PRESERVED — a bare FAIL line naming a REAL file under packages/daemon/test/ must
+    // still be reported exactly as today (a genuine single-file failure named this way is not fiction).
+    {
+      const tracker = createFailingTestTracker(withLayoutDir);
+      tracker.feed(Buffer.from("FAIL  real-test.mjs\n", "utf-8"));
+      check("(K3) a bare FAIL line naming a REAL file under packages/daemon/test/ is still reported",
+        tracker.result() === "FAIL  real-test.mjs");
+    }
+
+    // (K4) BEHAVIOR PRESERVED — a project whose cwd has no packages/daemon/test/ layout at all (i.e. not
+    // this daemon's own repo) must be completely unaffected: the existence check is a no-op there, exactly
+    // like identifyRetriableTestFile's own fail-closed-elsewhere posture.
+    {
+      const tracker = createFailingTestTracker(noLayoutDir);
+      tracker.feed(Buffer.from("FAIL  some_test.mjs\n", "utf-8"));
+      check("(K4) with no packages/daemon/test/ under cwd at all, the bare FAIL line is reported unchanged (other projects' own conventions are untouched)",
+        tracker.result() === "FAIL  some_test.mjs");
+    }
+
+    // (K5) A genuine failure elsewhere in the SAME stream still wins — discarding the phantom line must
+    // never suppress a real one that happens to arrive first.
+    {
+      const tracker = createFailingTestTracker(withLayoutDir);
+      tracker.feed(Buffer.from("FAIL  some_test.mjs\nAssertionError: expected 2 to equal 3\n", "utf-8"));
+      check("(K5) a phantom bare FAIL line is discarded, but a genuine AssertionError line later in the SAME stream still wins",
+        tracker.result() === "AssertionError: expected 2 to equal 3");
+    }
+
+    // (K6) A bare FAIL line with a trailing `(exit ` suffix (this daemon's own real per-file harness
+    // wrapper convention, see HARNESS_FAIL_WRAPPER_RE) is NOT the "nothing else on the line" shape K1
+    // discards — it must still be reported, cwd or not, existent file or not (the wrapper's own convention
+    // is trusted independently, by design — see that regex's own doc).
+    {
+      const tracker = createFailingTestTracker(withLayoutDir);
+      tracker.feed(Buffer.from("FAIL  some_test.mjs  (exit 1)\n", "utf-8"));
+      check("(K6) a FAIL line WITH the harness's own (exit N) suffix is untouched by the existence check, even naming a nonexistent file",
+        tracker.result() === "FAIL  some_test.mjs  (exit 1)");
+    }
+
+    // (K7) END-TO-END through a REAL spawn + runGateStep (not the tracker directly) — proves `cwd` is
+    // actually threaded through from the real caller, not just exercised via a direct unit call above.
+    {
+      fs.writeFileSync(path.join(withLayoutDir, "print-phantom.mjs"), "console.log('FAIL  some_test.mjs');\nprocess.exitCode = 1;\n");
+      const res = await runGateStep("node print-phantom.mjs", withLayoutDir, 15_000);
+      check("(K7) end-to-end via runGateStep: a real spawn printing the exact specimen line, in a cwd with the packages/daemon/test/ layout, reports failingTest undefined",
+        res.status === 1 && res.failingTest === undefined,
+        () => JSON.stringify({ status: res.status, failingTest: res.failingTest }));
+    }
+  }
 }
 // dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).

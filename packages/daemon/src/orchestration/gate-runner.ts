@@ -74,12 +74,46 @@ const OUTPUT_TAIL_BYTES = 4096;
  *  already had. **Card 6c84b87b:** these two accessors do NOT read this file's `FAILING_TEST_PATTERNS`
  *  tiers at all — see {@link HARNESS_FAIL_WRAPPER_RE}'s own doc for why the retry needs a narrower,
  *  differently-anchored match than the diagnostic tiers do. */
+/** The `FAIL`/`not ok` tier of {@link FAILING_TEST_PATTERNS}, named separately so `scanLine` (below) can
+ *  identify a match against THIS specific tier by reference (`===`), independent of its array position. */
+const FAIL_NOT_OK_TIER_RE = /^\s*(FAIL|✗|✖|not ok)\b.*/i;
 const FAILING_TEST_PATTERNS: RegExp[] = [
   /\bUNCAUGHT\b.*/,
-  /^\s*(FAIL|✗|✖|not ok)\b.*/i,
+  FAIL_NOT_OK_TIER_RE,
   /AssertionError.*/,
   /error TS\d+:.*/,
 ];
+
+/**
+ * Card 11737292 — a LIVE specimen (op `321a5e6b`'s `[loom:merge-rejected]` nudge) reported `failing: FAIL
+ *  some_test.mjs` for a file that does not exist. Root cause: `gate-status.mjs`'s own tests inject a MOCK
+ *  gate verdict (`outputTail: "FAIL  some_test.mjs"`) to exercise `sessions/service.ts`'s real
+ *  `[gate opId=…] … passed=false …` diagnostic `console.log` — which dumps that mock's `outputTail`
+ *  VERBATIM, unindented, as its own line. When `gate-status.mjs` itself later failed for an unrelated
+ *  reason (an `exit timeout` in the specimen), `test-daemon.mjs`'s own `FAILURES:` epilogue re-echoed that
+ *  captured line into the OUTER gate run's stream, where {@link createFailingTestTracker}'s `FAIL`/`not ok`
+ *  tier matched it exactly like a real per-file marker.
+ *
+ *  A genuine per-file harness wrapper line always carries a trailing `(exit ` suffix
+ *  ({@link HARNESS_FAIL_WRAPPER_RE}) and a `check()`-printed assertion line is always a multi-word prose
+ *  label (see that helper's own convention, `gate-status.mjs`'s own `check` definition) — neither shape is
+ *  a BARE single token. `FAIL  some_test.mjs` is: nothing follows the token, so this is the one shape that
+ *  can never legitimately be either of those two real conventions. Cross-checking that token against the
+ *  real filesystem (mirroring {@link identifyRetriableTestFile}'s own `fs.existsSync` gate, same fail-closed
+ *  posture: a project without this daemon's own `packages/daemon/test/` layout skips the check entirely,
+ *  same as that function's own no-op-elsewhere behavior) catches the exact specimen — `some_test.mjs` is a
+ *  placeholder name that has never existed on disk — while leaving every genuine bare-name match (a real
+ *  file, e.g. from a project that DOES use this convention) untouched. */
+function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
+  const m = /^\s*(?:FAIL|✗|✖|not ok)\s+(\S+)\s*$/i.exec(line);
+  if (!m) return false; // has prose/extra content beyond one token — not this shape, don't second-guess it
+  const token = m[1]!;
+  if (!/^[A-Za-z0-9_.-]+$/.test(token)) return false; // never a path/shell metacharacter — not one of ours
+  const testDir = path.join(cwd, "packages", "daemon", "test");
+  if (!fs.existsSync(testDir)) return false; // not this project's own layout — nothing to verify against
+  const candidate = path.join(testDir, token.endsWith(".mjs") ? token : `${token}.mjs`);
+  return !fs.existsSync(candidate);
+}
 
 /**
  * Card 6c84b87b: the ONLY line shape {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount`
@@ -213,8 +247,13 @@ const FAILING_TEST_CARRY_CAP_BYTES = 8192;
  * Fixing this for real needs test-daemon.mjs to tag each lane's own lines with an attributable marker (a
  * lane or file id) before they ever reach this scanner — a change to the test HARNESS, not this tracker,
  * and out of scope for this card.
+ *
+ * Card 11737292: `cwd` is OPTIONAL and purely a cross-check — see {@link isUnverifiableBareFailToken}'s own
+ * doc for exactly what it guards against and why omitting it (every existing caller that doesn't have a
+ * `cwd` handy, e.g. a hermetic test driving this scanner directly on synthetic input) is unaffected: the
+ * check simply never runs, identical to today's behavior.
  */
-export function createFailingTestTracker(): {
+export function createFailingTestTracker(cwd?: string): {
   feed(chunk: Buffer): void;
   result(): string | undefined;
   matchCount(): number;
@@ -260,7 +299,16 @@ export function createFailingTestTracker(): {
     if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; }
     if (HARNESS_NOT_EXECUTED_RE.test(line)) notExecutedSeen = true;
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
-      if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return; }
+      const pattern = FAILING_TEST_PATTERNS[i]!;
+      if (pattern.test(line)) {
+        // Card 11737292: a bare `FAIL  <token>` line (nothing else on it) whose token doesn't correspond to
+        // a real test file is exactly the shape a test's own mocked/dumped gate verdict produces when it
+        // leaks into real stdout — see isUnverifiableBareFailToken's own doc. Discard rather than record: a
+        // real per-file marker or check() line never has this shape, so this can never suppress a genuine
+        // match, and letting this line match NO tier lets a genuine failure elsewhere still win.
+        if (pattern === FAIL_NOT_OK_TIER_RE && cwd && isUnverifiableBareFailToken(line, cwd)) return;
+        lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return;
+      }
     }
   };
   const flushCarryOnce = (): void => {
@@ -535,7 +583,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // Card 55cba5c5: scans the FULL stream for the failing-test marker, independent of the ring's own
   // OUTPUT_TAIL_BYTES eviction above — see createFailingTestTracker's doc for why the ring alone isn't
   // enough (a tail dominated by trailing warnings/a pnpm epilogue truncates the marker right out of it).
-  const failingTestTracker = createFailingTestTracker();
+  const failingTestTracker = createFailingTestTracker(cwd);
   // Card 6ffee3e2: independent front-anchored capture of test-daemon.mjs's own FAILURES: block — see
   // createFailureBlockTracker's own doc for why this recovers content the trailing ring above cannot.
   const failureBlockTracker = createFailureBlockTracker();
