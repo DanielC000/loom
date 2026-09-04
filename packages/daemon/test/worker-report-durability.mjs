@@ -38,11 +38,15 @@ class PtyStub {
   constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); this.sent = []; }
   setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
   setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
-  enqueueStdin(id, text, _source = "system", onDeliver, _route, kind = "warning") {
-    this.sent.push({ id, text, kind });
+  // Card d09d58e7: `tail` (11th positional) is captured too, for its `reportEventId` field — the SAME
+  // options-object tail shape `enqueueDurableMessage`/`redriveQueuedMessage` pass (pty/host.ts's
+  // `EnqueueStdinTail`).
+  enqueueStdin(id, text, _source = "system", onDeliver, _route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, tail) {
+    const reportEventId = tail && typeof tail === "object" ? tail.reportEventId : undefined;
+    this.sent.push({ id, text, kind, reportEventId });
     if (!this.live.has(id)) return { delivered: false };                    // not alive → dropped (no position)
     if (!this.busy.has(id)) return { delivered: true };                     // idle → immediate (onDeliver NOT fired)
-    const a = this.q.get(id) ?? []; a.push({ text, onDeliver, kind }); this.q.set(id, a);
+    const a = this.q.get(id) ?? []; a.push({ text, onDeliver, kind, reportEventId }); this.q.set(id, a);
     return { delivered: false, position: a.length };
   }
   drainOne(id) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(); return m; }
@@ -86,6 +90,8 @@ try {
   const res = await sessionsPre.workerReport(wkr, { status: "done", summary: "DID THE THING" });
   check("(1) busy manager → report HELD, not delivered now ('queued')", res.deliveryStatus === "queued");
   check("(1) the report reached the manager's in-memory FIFO", ptyPre.getPending(mgr).some((t) => t.includes("DID THE THING")));
+  const reportEvent = env.db.listEventsForWorker(wkr).filter((e) => e.kind === "worker_report").find((e) => e.detail?.summary === "DID THE THING");
+  check("(1b) setup: a worker_report event was minted for this report", !!reportEvent);
 
   // THE FIX (write side): the held report must be PERSISTED as a durable session_message_queued record —
   // not just sitting in the (about-to-vanish-on-restart) in-memory FIFO. A bare pty.enqueueStdin never
@@ -95,6 +101,10 @@ try {
   check("(2) THE FIX (write side): the held report is a durable session_message_queued record — not just an in-memory FIFO entry", !!rec);
   check("(2b) the durable record carries kind:\"agent\" (drains alone, never coalesced)", rec?.detail?.kind === "agent");
   check("(2c) the durable record's sender is the REPORTING WORKER (not a bare \"system\" sentinel)", rec?.detail?.sender === wkr);
+  // Card d09d58e7 DoD-1: the durable record must ALSO persist reportEventId — before this fix it was
+  // in-memory-only, so ANY reconstruction of this record (a boot/resume redrive, a give-up re-mint, a
+  // recycle carry) produced an untagged entry `purgeQueuedByReportEventIds` could never match.
+  check("(2d) card d09d58e7 DoD-1: the durable record persists the SAME reportEventId worker_report minted", rec?.detail?.reportEventId === reportEvent?.id);
 
   // ---- SIMULATED DAEMON RESTART: the in-memory FIFO is gone (a NEW pty + NEW SessionService), SAME db. ----
   // A bare enqueueStdin's held message would be UNRECOVERABLE here — that's the exact drop this card fixes.
@@ -106,6 +116,11 @@ try {
   const redriven = ptyPost.sent.find((s) => s.id === mgr && s.text.includes("DID THE THING"));
   check("(3b) the redriven report reached the manager", !!redriven);
   check("(3c) the redriven report keeps kind:\"agent\" (never silently reclassified to \"warning\" on redrive)", redriven?.kind === "agent");
+  // Card d09d58e7 DoD-3: `redriveQueuedMessage` (the SINGLE engine both recoverUndeliveredMessagesOnBoot
+  // and the live-flip resume path funnel through) must read reportEventId back off the durable row and
+  // restore it onto the re-enqueued entry — otherwise a report redriven across a restart lands untagged
+  // even though DoD-1 persisted it, and worker_report_get can never purge it.
+  check("(3d) card d09d58e7 DoD-3: the redriven entry restores the SAME reportEventId onto the re-enqueued message", redriven?.reportEventId === reportEvent?.id);
 
   // Drain to the manager's next turn boundary — resolves the durable record.
   const drained = ptyPost.drainOne(mgr);
@@ -119,6 +134,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_report's manager-bound push is durable: a report held behind a busy manager persists a session_message_queued record (kind:\"agent\", sender:the reporting worker), survives a simulated daemon restart, and redrives via the boot scan without losing its kind, resolving once delivered."
+  ? "\n✅ ALL PASS — worker_report's manager-bound push is durable: a report held behind a busy manager persists a session_message_queued record (kind:\"agent\", sender:the reporting worker, and (card d09d58e7) its own reportEventId), survives a simulated daemon restart, and redrives via the boot scan without losing its kind or its reportEventId, resolving once delivered."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

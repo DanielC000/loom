@@ -6300,6 +6300,13 @@ export class SessionService {
       const routeDetail = e.detail?.route as { channel?: unknown; chatId?: unknown } | undefined;
       const route: CompanionRoute | undefined = routeDetail && typeof routeDetail.channel === "string" && typeof routeDetail.chatId === "string"
         ? { channel: routeDetail.channel, chatId: routeDetail.chatId } : undefined;
+      // Card d09d58e7: read back `reportEventId` the SAME way as kind/giveUpHeldUntil/rootMsgId/chainDepth/
+      // route above — a legacy record (appended before this card) carries no `reportEventId` key, so this
+      // defaults to undefined and redrives as an untagged nudge exactly as it always has. Without this, a
+      // worker-report nudge redriven across a boot/resume (recoverUndeliveredMessagesOnBoot /
+      // redriveUndeliveredMessagesForRecipient, both funnel through this method) would land UNTAGGED even
+      // after DoD-1's persistence fix, since nothing here ever read the persisted field back out.
+      const reportEventId = typeof e.detail?.reportEventId === "string" ? e.detail.reportEventId : undefined;
       // Card bcaeab8d: Path D is the one redelivery route that could NEVER carry the possible-duplicate
       // banner — unlike B/C (gated on giveUpGen/chainDepth, a reliable in-process signal of "this exact
       // attempt already failed to confirm once"), a redrive has NO such signal available across a daemon
@@ -6327,8 +6334,9 @@ export class SessionService {
         // DURABLE `resolveQueuedMessage` call above keeps `sender` raw for attribution, unaffected.
         }, route, kind, undefined, undefined, undefined, sender, {
           giveUpHeldUntil,
-          onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
+          onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind, reportEventId),
           logicalId: rootMsgId, // card 4a0af485 CR follow-up #6 — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
+          reportEventId, // card d09d58e7 — restore the tag onto the re-enqueued entry itself so `purgeQueuedByReportEventIds` can match a redriven copy exactly like a fresh one
         },
       );
       if (r.delivered || r.position !== undefined) {
@@ -8616,7 +8624,7 @@ export class SessionService {
       // mapping now happens inside `enqueueStdin`, not here.
       ctx.route, kind, undefined, undefined, undefined, ctx.sender, {
         giveUpHeldUntil: ctx.giveUpHeldUntil,
-        onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
+        onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind, ctx.reportEventId),
         logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
         mintedAtWallClock: ctx.mintedAtWallClock,
         reportEventId: ctx.reportEventId,
@@ -8640,11 +8648,16 @@ export class SessionService {
       // 61a012ce: `route` joins that list as a fifth field, same reasoning — a legacy record (or any caller
       // that omits it) has no `route` key once JSON-serialized (undefined values are dropped), so it
       // redrives as a plain nudge exactly as it always has.
+      // Card d09d58e7: `reportEventId` joins the same list — before this fix it was IN-MEMORY-ONLY (never
+      // persisted here), so any reconstruction of this record (a give-up re-mint, a recycle carry, a boot/
+      // resume redrive) silently produced an UNTAGGED entry `purgeQueuedByReportEventIds` can never match,
+      // leaving a read report's queued nudge undead. `undefined` (every non-workerReport caller) is dropped
+      // by JSON serialization exactly like `route`, so this is additive-only.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
         kind: "session_message_queued",
-        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route },
+        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route, reportEventId: ctx.reportEventId },
       });
     }
     // msgId is returned UNCONDITIONALLY (not just on the held path) so a caller that needs to correlate
@@ -8806,7 +8819,7 @@ export class SessionService {
 
   private handleGiveUpExhausted(
     recipientId: string, text: string, msgId: string, rootMsgId: string, chainDepth: number,
-    sender: string, taskId: string | null, kind: QueuedMessageKind,
+    sender: string, taskId: string | null, kind: QueuedMessageKind, reportEventId?: string,
   ): void {
     if (chainDepth < GIVE_UP_REMINT_LIMIT) {
       // Re-mint FIRST so `remintedAs` below is the REAL new msgId (enqueueDurableMessage mints its own,
@@ -8818,8 +8831,12 @@ export class SessionService {
       // new direction. `text` here is the pristine original (this callback's own closure — never mutated by
       // any in-session requeue `m.text` may have undergone at the pty layer), so this can only ever apply
       // the tag once per re-mint.
+      // Card d09d58e7: `reportEventId` carries forward too — without it, a worker-report nudge that gives up
+      // in-session re-mints UNTAGGED, so `purgeQueuedByReportEventIds` can never later drop it once
+      // `worker_report_get` reads the report it announces (the SAME defect this card fixes at the
+      // persistence/recycle boundaries). `undefined` for every non-report caller, byte-identical to before.
       const reminted = this.enqueueDurableMessage(recipientId, framePossibleDuplicate(text, rootMsgId), {
-        sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS,
+        sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS, reportEventId,
       });
       // eslint-disable-next-line no-console
       console.warn(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, chainDepth ${chainDepth}) exhausted its in-session budget — re-minted as ${reminted.msgId} (attempt ${chainDepth + 1}/${GIVE_UP_REMINT_LIMIT})`);
@@ -9640,7 +9657,12 @@ export class SessionService {
       const carriedText = PEER_MESSAGE_FRAME_RE.test(text)
         ? `[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${text}`
         : text;
-      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null });
+      // Card d09d58e7: carry `reportEventId` forward — without it, a worker-report nudge still queued on a
+      // recycled manager (the card's own specimen: `recycleManager` -> this loop) re-mints UNTAGGED onto the
+      // successor, so `purgeQueuedByReportEventIds` can never later drop it once `worker_report_get` reads
+      // the report it announces. `undefined` for every non-report record, byte-identical to before.
+      const reportEventId = typeof rec.detail?.reportEventId === "string" ? rec.detail.reportEventId : undefined;
+      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId });
       // Card af995d1d: LINK the old msgId to the new one (see this method's own doc above) so a sender
       // still holding the OLD msgId can resolve it forward instead of reading "pending" forever.
       const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;

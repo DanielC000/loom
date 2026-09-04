@@ -579,12 +579,47 @@ try {
       !!parkedNote && parkedNote.includes("session_transcript"));
   }
 
+  // ===== (12) Card d09d58e7 DoD-2 — a worker-report nudge's OWN `reportEventId` survives an IN-SESSION =====
+  // ===== give-up re-mint through `handleGiveUpExhausted` — NOT the card's specimen mechanism (that is =======
+  // ===== `carryPendingToSuccessor`, covered by worker-report-nudge-purge.mjs's (R) section instead), but ====
+  // ===== a real, independent defect the card's own DoD-2 explicitly names: before the fix, the re-mint call ==
+  // ===== at handleGiveUpExhausted's re-mint branch omitted reportEventId entirely, so a worker-report nudge ==
+  // ===== that gives up in-session (busy manager, no confirming hook in time) would re-mint UNTAGGED even ====
+  // ===== after DoD-1's persistence fix — worker_report_get could never again purge it. ========================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `gue-i-mgr-${sfx}`, wkr = `gue-i-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(mgr); // manager busy → the report nudge is HELD (durable)
+
+    const res = await sessions.workerReport(wkr, { status: "done", summary: "REPORT_GIVES_UP_THEN_LANDS" });
+    check("(12) setup: busy manager → report HELD (durable record created)", res.deliveryStatus === "queued");
+    const reportEvent = db.listEventsForWorker(wkr).filter((e) => e.kind === "worker_report").find((e) => e.detail?.summary === "REPORT_GIVES_UP_THEN_LANDS");
+    check("(12) setup: a worker_report event was minted for this report", !!reportEvent);
+    const origRec = db.listUndeliveredQueuedMessages().find((e) => e.workerSessionId === mgr && e.detail?.text?.includes("REPORT_GIVES_UP_THEN_LANDS"));
+    const origMsgId = origRec?.detail?.msgId;
+    check("(12) setup: the ORIGINAL durable record already carries reportEventId (DoD-1)", origRec?.detail?.reportEventId === reportEvent?.id);
+
+    // Force the REAL host's terminal give-up branch for this held entry — chainDepth 0, below REMINT_LIMIT,
+    // so this must RE-MINT (not park).
+    pty.giveUpOn(mgr);
+    const gaveUpEvt = gaveUpEventsFor(mgr, origMsgId).find((e) => e.detail?.outcome === "reminted");
+    check("(12) THE FIX: a session_message_gave_up event was recorded, outcome reminted", !!gaveUpEvt);
+    const remintedAs = gaveUpEvt?.detail?.remintedAs;
+    const remintRec = db.listUndeliveredQueuedMessages().find((e) => e.detail?.msgId === remintedAs);
+    check("(12) THE FIX (card d09d58e7 DoD-2): the RE-MINTED durable record still carries the ORIGINAL reportEventId — this is the assertion that fails red against the pre-fix handleGiveUpExhausted",
+      remintRec?.detail?.reportEventId === reportEvent?.id);
+    check("(12) the re-minted report text is still pending, ready to land on the next turn boundary", pty.getPending(mgr).some((t) => t.includes("REPORT_GIVES_UP_THEN_LANDS")));
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a give-up-exhausted durable message (both the original agent-message population AND the settle-nudge population that used to have zero durability) is RE-MINTED under an auditable, rootMsgId-linked chain rather than silently dropped, bounded re-minting PARKS (never loops forever) with the outcome durably recorded and surfaced to a live sender, and a healthy delivery with no give-up is never spuriously reminted."
+  ? "\n✅ ALL PASS — a give-up-exhausted durable message (both the original agent-message population AND the settle-nudge population that used to have zero durability) is RE-MINTED under an auditable, rootMsgId-linked chain rather than silently dropped, bounded re-minting PARKS (never loops forever) with the outcome durably recorded and surfaced to a live sender, a healthy delivery with no give-up is never spuriously reminted, and (card d09d58e7) a worker-report nudge's reportEventId survives an in-session give-up re-mint through handleGiveUpExhausted."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

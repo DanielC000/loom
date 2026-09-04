@@ -181,12 +181,62 @@ try {
     check("(I) re-reading the latest report again is a safe no-op (still returns it correctly)", rereadLatest.eventId === report2Event.id);
     check("(I) the queue is untouched by the repeat read (unrelated direction still the only entry)", host.getPendingEntries(mgrId).length === 1);
   }
+
+  // ============================ (R) Card d09d58e7 — THE SPECIMEN: reportEventId survives a manager ==========
+  // ============================ recycle's carryPendingToSuccessor re-mint, and the purge still fires =========
+  //
+  // This is the ACTUAL mechanism behind the card's live specimen (owner-reported manager `0aed0bb3`,
+  // recycled_from `2f5038fc`) — NOT handleGiveUpExhausted (see the card's own corrected root-cause note):
+  // recycleManager calls pty.flushPending + reads db.listUnresolvedQueuedMessagesForWorker directly and
+  // hands both to carryPendingToSuccessor, which SUPERSEDES the predecessor's durable record and RE-MINTS
+  // it onto the successor via enqueueDurableMessage — never touching the give-up machinery at all. Before
+  // this card's fix, that re-mint call (service.ts's carryPendingToSuccessor) omitted reportEventId, so a
+  // still-queued `[loom:worker-report]` nudge landed on the successor UNTAGGED and worker_report_get could
+  // never again purge it — exactly the wasted-turn symptom (card 60b26261's dedup silently not firing).
+  {
+    const mgrId = "r-mgr", wkrId = "r-wkr", taskId = "r-task";
+    insertSession(mgrId, { role: "manager" });
+    insertSession(wkrId, { role: "worker", parentSessionId: mgrId, taskId });
+    spawnReady(mgrId);
+    spawnReady(wkrId);
+
+    const primer = host.enqueueStdin(mgrId, "PRIMER"); // idle -> delivers now, arms busy so the report holds
+    check("(R) setup: primer delivered + armed busy", primer.delivered === true);
+
+    // Worker files `done` while the manager is BUSY (the card's exact specimen shape) -> queues, tagged.
+    const r = await sessions.workerReport(wkrId, { status: "done", summary: "RECYCLE-SURVIVOR-REPORT", noChanges: true });
+    check("(R) setup: report HELD, not delivered now ('queued')", r.deliveryStatus === "queued");
+    const reportEvent = db.listEventsForWorker(wkrId).filter((e) => e.kind === "worker_report").find((e) => e.detail?.summary === "RECYCLE-SURVIVOR-REPORT");
+    check("(R) setup: worker_report event recorded", !!reportEvent);
+    check("(R) setup: the queued nudge sits on the PREDECESSOR manager before recycle", host.getPending(mgrId).some((t) => t.includes("RECYCLE-SURVIVOR-REPORT")));
+
+    // Recycle the manager — carryPendingToSuccessor supersedes the predecessor's durable record and
+    // re-mints it onto the successor.
+    const fresh = await sessions.recycleManager(mgrId, "successor: drain the queue");
+    check("(R) recycle reparented the worker onto the successor", db.getSession(wkrId)?.parentSessionId === fresh.id);
+
+    const supersededMarker = db.listEventsForWorker(mgrId).filter((e) => e.kind === "session_message_delivered" && e.detail?.reason === "superseded");
+    check("(R) the predecessor's durable record was superseded", supersededMarker.length >= 1);
+
+    const remintedRec = db.listUndeliveredQueuedMessages().find((e) => e.workerSessionId === fresh.id && e.detail?.text?.includes("RECYCLE-SURVIVOR-REPORT"));
+    check("(R) THE FIX: the re-minted durable record on the SUCCESSOR still carries the ORIGINAL reportEventId", remintedRec?.detail?.reportEventId === reportEvent.id);
+    check("(R) THE FIX: the re-minted nudge is queued on the SUCCESSOR's own live FIFO, still carrying the text", host.getPending(fresh.id).some((t) => t.includes("RECYCLE-SURVIVOR-REPORT")));
+
+    // Now the successor's own worker_report_get reads the SAME report straight from durable storage —
+    // DoD-4/DoD-5: this MUST purge the re-minted queued copy still sitting on the successor.
+    const freshServer = router.buildServer(fresh.id, "manager");
+    const read = JSON.parse((await freshServer._registeredTools["worker_report_get"].handler({ workerSessionId: wkrId })).content[0].text);
+    check("(R) worker_report_get on the successor returns the SAME report", read.eventId === reportEvent.id && read.summary === "RECYCLE-SURVIVOR-REPORT");
+
+    const afterRead = host.getPending(fresh.id);
+    check("(R) THE FIX (DoD-4): the re-minted nudge is now PURGED from the successor's queue — no wasted turn", !afterRead.some((t) => t.includes("RECYCLE-SURVIVOR-REPORT")));
+  }
 } finally {
   try { db.close(); } catch { /* ignore */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PtyHost.purgeQueuedByReportEventIds selectively drops queued entries by reportEventId (FIFO preserved, unrelated entries untouched, unknown/empty ids and a dead session a safe no-op); the real worker_report_get tool handler now purges the queued nudge for the EXACT report it just read (never by worker id — an unread earlier report's nudge survives), resolves each purged entry's durable record honestly, and repeat reads are idempotent."
+  ? "\n✅ ALL PASS — PtyHost.purgeQueuedByReportEventIds selectively drops queued entries by reportEventId (FIFO preserved, unrelated entries untouched, unknown/empty ids and a dead session a safe no-op); the real worker_report_get tool handler now purges the queued nudge for the EXACT report it just read (never by worker id — an unread earlier report's nudge survives), resolves each purged entry's durable record honestly, repeat reads are idempotent, and (card d09d58e7) a reportEventId-tagged nudge survives a manager recycle's carryPendingToSuccessor re-mint intact, so worker_report_get still purges it on the successor."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
