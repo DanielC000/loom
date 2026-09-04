@@ -165,6 +165,13 @@ const worktrees = [];
       !!queuedEntry && queuedEntry.repoContended === true);
 
     const REPO_MUTEX_WINDOW_MS = 150; // generous relative to a plain in-memory admission decision
+    // WINDOWMS AUDIT (card ffdafa81): STRUCTURE, not a timing margin — `secondStarted` can only flip via
+    // `releaseHolder()` below (line ~185), which this test does not call until well past this observation
+    // window; admission is fully synchronous (`acquire()`'s `this.mergeRepoFree(entry)` check,
+    // gate-semaphore.ts:597), no timer anywhere in the admit/release/grantNext path. INJECTION EVIDENCE:
+    // rebuilt the pre-fix parent of 848f55fb (63fcdc32, predates `activeMergeRepos` entirely) in an
+    // isolated scratch worktree with this test file copied in unmodified — this exact check FAILED on
+    // genuinely unfixed source (the real historical regression card 92e960d1/848f55fb fixed).
     const neverStarted = await assertNeverWithControl({
       label: "(repo-mutex, a) the SECOND same-repo merge never starts while the first holds the repo",
       check: () => secondStarted,
@@ -314,6 +321,12 @@ const worktrees = [];
       sem.snapshot().queued === 1 && sem.snapshot().active === 1);
 
     const QUEUE_PATH_WINDOW_MS = 150;
+    // WINDOWMS AUDIT (card ffdafa81): STRUCTURE — `siblingStarted` can only flip once `grantNext()` admits
+    // it, and `grantNext()`'s own scan (gate-semaphore.ts:989) consults the IDENTICAL synchronous
+    // `mergeRepoFree(w.entry)` check the (repo-mutex, a) scenario above already proved catches a real
+    // violation on unfixed source (see that scenario's own audit note) — `grantNext()` is only ever reached
+    // from `release()`/`releaseMergeRepoGuard()`, both synchronous, no timer involved. The actual release
+    // this test needs (`releaseHolder("holder-done")`, line ~332) does not fire until after this block.
     const neverStarted = await assertNeverWithControl({
       label: "(repo-mutex, e) the sibling STAYS QUEUED after an UNRELATED slot frees — the queue path, not just admission",
       check: () => siblingStarted,
@@ -457,6 +470,10 @@ const worktrees = [];
     const pAcquire = sem.acquireRepoGuardOnly(rgoDesc("/repo/contended", "inert-op")).then((release) => { acquired = true; return release; });
 
     const WINDOW_MS = 150;
+    // WINDOWMS AUDIT (card ffdafa81): STRUCTURE — `acquired` can only flip when `pAcquire` resolves, and
+    // the ONLY resolve path for a QUEUED acquireRepoGuardOnly waiter is `freeRepoPath`'s synchronous
+    // hand-off (gate-semaphore.ts:716-725), reached only from `release()`/`endSquash()`. `endSquash` isn't
+    // called here until line ~492, well after this window — nothing async could resolve `pAcquire` early.
     const neverAcquired = await assertNeverWithControl({
       label: "(repo-guard-only, b) the inert-skip's acquire never resolves while the real gate holds the repo",
       check: () => acquired,
@@ -672,6 +689,14 @@ const worktrees = [];
     const pC = sem.runExclusive(2, { gateType: "merge", projectId: "p", sessionId: "C", repoPath: "/repo/e" },
       async () => { cStarted = true; return "c-done"; });
     const WINDOW_MS = 150;
+    // WINDOWMS AUDIT (card ffdafa81): STRUCTURE — `cStarted` can only flip once C is admitted, gated by the
+    // SAME synchronous `mergeRepoFree`/`activeMergeRepos` check as the two scenarios above. A's stale
+    // `endSquash("/repo/e", "op-A")` (just above) is proven a safe no-op by `freeRepoPath`'s identity check
+    // (gate-semaphore.ts:705-710, `current !== holderId`) since B, not A, now holds the map entry — this is
+    // the exact real historical cascade fixed by card b9e07a4a/commit 37e5395e ("A's gate fails -> hands
+    // off to B -> A's stale endSquash deletes B's live hold -> C admits while B is mid-squash", per that
+    // commit's own message). B's genuine release (`releaseB()`, line ~690) does not fire until after this
+    // block completes.
     const neverStarted = await assertNeverWithControl({
       label: "(repo-guard-only, e) a THIRD same-repo merge stays blocked — A's stale endSquash did NOT free B's live hold",
       check: () => cStarted,
@@ -789,6 +814,14 @@ const worktrees = [];
   sem.endSquash("/repo/R", "opA");
 
   const CAP_WINDOW_MS = 150;
+  // WINDOWMS AUDIT (card ffdafa81): STRUCTURE — `bStarted` can only flip once `grantNext()` admits B,
+  // gated by the synchronous `this.active >= this.lastKnownCap` cap check (gate-semaphore.ts:985) this
+  // scenario exists to prove. INJECTION EVIDENCE: rebuilt the pre-fix parent of e81a0e75 (5de26606, the
+  // commit immediately before the cap check was added to grantNext()) in an isolated scratch worktree with
+  // this test file copied in unmodified — this exact check FAILED on genuinely unfixed source (B
+  // over-admitted past cap 1 while C still held the only slot), the real historical over-admission
+  // regression card d9d5057f/e81a0e75 fixed. C's genuine release (`releaseC()`, below) does not fire until
+  // after this block completes.
   const neverOverAdmitted = await assertNeverWithControl({
     label: "(cap-on-grantNext) B never starts while C still holds the only cap-1 slot — endSquash's grantNext() must not over-admit past cap",
     check: () => bStarted,
