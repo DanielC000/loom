@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  checkMarkers, countNumberedSection, checkRotation, runResumeDocCheck,
+  checkMarkers, countNumberedSection, checkRotation, runResumeDocCheck, containUnderVault,
   HONEST_LIMIT_NOTE, UNCONFIGURED_WARNING,
 } from "../dist/orchestration/rotation-check.js";
 
@@ -211,6 +211,79 @@ function tmpFile(name, content) {
   check("runResumeDocCheck: archivePath + preEditBytes wired through (archive ok, byte-check fails since 'short'.length > 3)", r3.archiveCheck.ok === true && r3.byteCheck.checked === true && r3.byteCheck.ok === false);
   fs.rmSync(docPath2, { force: true });
   fs.rmSync(archivePath, { force: true });
+}
+
+// ── archiveCheck reason names the resolved path it tried (DoD-2, card f596215c) ────────────────────────
+// The observed defect: a resolution failure claimed the archive "does not exist or is unreadable" with
+// no way to tell "genuinely absent" from "resolved somewhere I didn't expect." The reason must now name
+// the exact path the check actually stat'd.
+{
+  const bogusPath = tmpFile("nonexistent.md", null); // path only, never written (mirrors missingDocPath above)
+  const r = checkRotation({
+    activeText: "x", markers: [], commitmentsHeading: "", commitmentsFloor: 0,
+    archive: { exists: false, isFile: false, size: 0, path: bogusPath },
+  });
+  check("archiveCheck reason: a resolution failure names the resolved path it actually tried", r.archiveCheck.reason.includes(bogusPath));
+
+  // A caller that omits `path` (an older/hand-built ArchiveInfo literal) must not throw or produce
+  // "undefined" in the reason — it degrades to an honest placeholder instead.
+  const rNoPath = checkRotation({
+    activeText: "x", markers: [], commitmentsHeading: "", commitmentsFloor: 0,
+    archive: { exists: false, isFile: false, size: 0 },
+  });
+  check("archiveCheck reason: a missing `path` degrades gracefully (no literal 'undefined')", !rNoPath.archiveCheck.reason.includes("undefined"));
+}
+
+// ── containUnderVault + archivePath/rulesPath — the 2×2 (card f596215c) ────────────────────────────────
+// A real resume-doc rotation observed `rulesPath` accepting a vault-relative path while `archivePath`'s
+// IDENTICAL relative style failed with a false "does not exist" reason. Both params route through the
+// SAME `containUnderVault` helper, so this locks in that both path forms behave identically for both
+// params — only one cell of this matrix was ever exercised by the tests above (the flat-tmpdir
+// `archivePath` case has no vault root and never goes through `containUnderVault` at all).
+{
+  const vaultRoot = path.join(os.tmpdir(), `loom-rot-vault-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(path.join(vaultRoot, "Projects", "Loom", "Operations"), { recursive: true });
+  fs.mkdirSync(path.join(vaultRoot, "Projects", "Loom", "Orchestrator Log.archive"), { recursive: true });
+  const activeDocPath = path.join(vaultRoot, "Projects", "Loom", "Orchestrator Log.md");
+  fs.writeFileSync(activeDocPath, "active doc — no markers in here\n", "utf8");
+  fs.writeFileSync(
+    path.join(vaultRoot, "Projects", "Loom", "Operations", "Orchestrator Rules.md"),
+    "RULES_ONLY_MARKER lives only here, never in the active doc\n", "utf8",
+  );
+  fs.writeFileSync(
+    path.join(vaultRoot, "Projects", "Loom", "Orchestrator Log.archive", "2026-09-04-04.md"),
+    "archived content, non-empty\n", "utf8",
+  );
+
+  const rulesRel = "Projects/Loom/Operations/Orchestrator Rules.md";
+  const rulesAbs = path.join(vaultRoot, "Projects", "Loom", "Operations", "Orchestrator Rules.md");
+  const archiveRel = "Projects/Loom/Orchestrator Log.archive/2026-09-04-04.md";
+  const archiveAbs = path.join(vaultRoot, "Projects", "Loom", "Orchestrator Log.archive", "2026-09-04-04.md");
+
+  for (const [label, rulesPathIn, archivePathIn] of [
+    ["rulesPath relative + archivePath relative", rulesRel, archiveRel],
+    ["rulesPath absolute + archivePath absolute", rulesAbs, archiveAbs],
+    ["rulesPath relative + archivePath absolute", rulesRel, archiveAbs],
+    ["rulesPath absolute + archivePath relative", rulesAbs, archiveRel],
+  ]) {
+    const rulesContained = containUnderVault(vaultRoot, rulesPathIn, "rulesPath");
+    const archiveContained = containUnderVault(vaultRoot, archivePathIn);
+    check(`containUnderVault (${label}): rulesPath resolves inside the vault`, rulesContained.ok === true);
+    check(`containUnderVault (${label}): archivePath resolves inside the vault`, archiveContained.ok === true);
+
+    const r = runResumeDocCheck({
+      resumeDocPath: activeDocPath,
+      markers: [{ token: "RULES_ONLY_MARKER" }],
+      commitmentsHeading: "", commitmentsFloor: 0,
+      rulesPath: rulesContained.ok ? rulesContained.value : null,
+      archivePath: archiveContained.ok ? archiveContained.value : null,
+    });
+    check(`runResumeDocCheck (${label}): a marker present ONLY in the rules file is found via rulesPath`, r.markerSources.RULES_ONLY_MARKER === "rules");
+    check(`runResumeDocCheck (${label}): archiveCheck passes on the real, non-empty archive file`, r.archiveCheck.checked === true && r.archiveCheck.ok === true);
+    check(`runResumeDocCheck (${label}): overall ok:true`, r.ok === true);
+  }
+
+  fs.rmSync(vaultRoot, { recursive: true, force: true });
 }
 
 console.log(failures === 0

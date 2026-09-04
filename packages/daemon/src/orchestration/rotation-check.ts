@@ -149,6 +149,12 @@ export interface ArchiveInfo {
   exists: boolean;
   isFile: boolean;
   size: number;
+  /** The RESOLVED path this check actually stat'd (card f596215c) — always folded into a failure reason
+   *  below, so "does not exist" can never be mistaken for a claim about the file the caller NAMED when
+   *  what actually failed was resolution to a different path than they expected. Optional only so an
+   *  older hand-built literal (e.g. a pre-existing test fixture) doesn't need updating; every real caller
+   *  supplies it. */
+  path?: string;
 }
 
 export interface ByteCheckInput {
@@ -219,10 +225,11 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   if (!input.archive) {
     archiveCheck = { checked: false, ok: true };
   } else {
+    const triedPath = input.archive.path ?? "(resolved path not recorded)";
     const failures: string[] = [];
-    if (!input.archive.exists) failures.push("archive path does not exist or is unreadable");
-    else if (!input.archive.isFile) failures.push("archive path is not a regular file");
-    else if (input.archive.size === 0) failures.push("archive file is empty");
+    if (!input.archive.exists) failures.push(`archive path does not exist or is unreadable: ${triedPath}`);
+    else if (!input.archive.isFile) failures.push(`archive path is not a regular file: ${triedPath}`);
+    else if (input.archive.size === 0) failures.push(`archive file is empty: ${triedPath}`);
     archiveCheck = { checked: true, ok: failures.length === 0, reason: failures.length ? failures.join("; ") : undefined };
   }
 
@@ -356,9 +363,9 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   if (opts.archivePath) {
     try {
       const stat = fs.statSync(opts.archivePath);
-      archive = { exists: true, isFile: stat.isFile(), size: stat.size };
+      archive = { exists: true, isFile: stat.isFile(), size: stat.size, path: opts.archivePath };
     } catch {
-      archive = { exists: false, isFile: false, size: 0 };
+      archive = { exists: false, isFile: false, size: 0, path: opts.archivePath };
     }
   }
 
