@@ -128,6 +128,9 @@ try {
     check("(A) gateProximity is undefined — REUSED, no gate spawned for this merge", confirm.gateProximity === undefined);
     const buildGate = eventsOfKind(db, A.mgrId, "build_gate")[0];
     check("(A) build_gate audit event carries reused:true + the same reusedOpId", buildGate?.detail?.reused === true && buildGate?.detail?.reusedOpId === selfCheck.value.opId);
+    // Card 2e52bf99, DoD-1 (a): a SUCCESSFUL reuse must never carry refusal reasons — there is nothing to
+    // explain, and an empty array would be just as misleading as a populated one on a pass.
+    check("(A) build_gate carries NO reuseRefusalReasons on a successful reuse", buildGate?.detail?.reuseRefusalReasons === undefined);
     check("(A) task moved to done", db.getTask(A.taskId).columnKey === "done");
   }
 
@@ -158,6 +161,18 @@ try {
     check("(B) merged:true (the union-merge forwards cleanly, no conflict)", confirm.merged === true);
     check("(B) gateRan:true", confirm.gateRan === true);
     check("(B) reusedOpId is absent", confirm.reusedOpId === undefined);
+    // Card 2e52bf99 — VERIFIED, not assumed: on this (non-preLanded) path the union-merge folds main's
+    // advance into the worktree BEFORE the reuse block ever runs (it always does, unconditionally,
+    // whenever a real gate is configured — see confirmWorkerMerge's own flow above the reuse block), so
+    // by reuse-check time `branch`'s own ref already has the moved main as an ancestor and
+    // `freshBehindMain` reads 0 — condition 7 ("behind-main") genuinely CANNOT independently fire here.
+    // The union-merge's own new commit is what actually surfaces: it changes the worktree's HEAD sha away
+    // from what the self-check's stamp recorded, so the REAL discriminator is condition 6
+    // ("stamp-changed") — exactly what the card's own body already names ("Condition 6 via the
+    // union-merge... it can change the worktree stamp"). (T) below exercises the preLanded path, where
+    // the union-merge is skipped and "behind-main" genuinely fires on its own.
+    const buildGateB = eventsOfKind(db, B.mgrId, "build_gate")[0];
+    check("(B) build_gate reuseRefusalReasons is exactly ['stamp-changed'] — the union-merge absorbs the main advance before condition 7 is ever checked", JSON.stringify(buildGateB?.detail?.reuseRefusalReasons) === JSON.stringify(["stamp-changed"]));
   }
 
   // ── (C) STALE BASE (before the self-check even ran) — must re-gate ─────────────────────────────────
@@ -345,6 +360,11 @@ try {
     check("(H) merged:true", confirm.merged === true);
     check("(H) gateRan:true", confirm.gateRan === true);
     check("(H) reusedOpId is absent", confirm.reusedOpId === undefined);
+    // Card 2e52bf99: the untested candidate the card itself flags — no lastWorkerGateCheck entry at all
+    // (the in-memory Map wiped by the restart) — and NOTHING else wrong (worktree clean, main unmoved), so
+    // the reasons list is exactly ['no-last-check'], not a bundle that would misattribute other causes.
+    const buildGateH = eventsOfKind(db, H.mgrId, "build_gate")[0];
+    check("(H) build_gate reuseRefusalReasons is exactly ['no-last-check']", JSON.stringify(buildGateH?.detail?.reuseRefusalReasons) === JSON.stringify(["no-last-check"]));
   }
 
   // ── (I) THE TOCTOU GUARD ITSELF — mergeBranch's own in-lock re-verification (CR follow-up) ───────────
@@ -1117,6 +1137,79 @@ try {
 
     sessions.gateSemaphore.beginSquash = originalBegin;
     sessions.gateSemaphore.endSquash = originalEnd;
+  }
+  // ── (T) MULTIPLE REUSE CONDITIONS FAIL SIMULTANEOUSLY — card 2e52bf99, the whole point of the card. A
+  //        green, current self-check that would otherwise qualify (conditions 1-4 all pass) is followed by
+  //        BOTH an uncommitted edit to the worktree (dirty — condition 5, which necessarily also flips the
+  //        stamp comparison — condition 6, since the recorded stamp was clean) AND main independently
+  //        advancing past what `branch` itself contains (condition 7). FIRST-FAIL-ONLY instrumentation
+  //        would report just whichever of these happens to be checked first and never reveal the others —
+  //        exactly the whack-a-mole trap the card's own checkpoint warns about (fix the reported cause,
+  //        re-measure, and a DIFFERENT blocker the data never mentioned turns up next). This proves ALL of
+  //        them land in one refusal's reasons.
+  //
+  //        DELIBERATELY on the preLanded path, not the ordinary one (B) uses: as (B)'s own comment above
+  //        now documents (found while writing THIS test), the ordinary path's union-merge folds any main
+  //        advance into the worktree BEFORE the reuse block ever runs, so `freshBehindMain` always reads 0
+  //        there and condition 7 can never independently fire — only condition 6 (stamp-changed) shows a
+  //        main advance on that path. The preLanded path (mirrors (M)/(N)) skips the union-merge entirely,
+  //        so main can genuinely sit ahead of what `branch`'s own ref contains at reuse-check time — the
+  //        one shape where "behind-main" is independently, simultaneously true alongside a dirty worktree.
+  {
+    const T = mk("t", "feature-t.txt");
+    makeRepo(T);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(T.repo, T.projId, T.taskId);
+    T.worktreePath = worktreePath; T.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, T.file), "work for T\n");
+    commitAll(worktreePath, `${T.file}`, GIT_ID);
+
+    // Precondition: this branch's work already landed on main — worktree deliberately retained (mirrors
+    // (M)/(N)'s own setup), so a LATER confirm takes the preLanded path (union-merge skipped).
+    const landed = await mergeBranch(T.repo, branch, "MGRU-T initial land");
+    check("(T) precondition: branch's initial work already landed in main", landed.ok === true);
+
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seed(db, T, "pnpm gate");
+
+    // The self-check runs AFTER the land, against the worktree exactly as it sits (still on its original,
+    // now-landed commit — the land touched `repoPath`, never `worktreePath`).
+    const selfCheck = await sessions.runWorkerGate(T.workerId);
+    check("(T) precondition: self-check settled green and current", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true && selfCheck.value.headCurrent === true);
+
+    // Main advances AGAIN, independently of the worktree/branch — condition 7. On the preLanded path
+    // nothing folds this into `branch`'s own ref, so it stays genuinely, independently true.
+    fs.writeFileSync(path.join(T.repo, "main-advance-t.txt"), "a second main advance, after the land\n");
+    commitAll(T.repo, "main advance t", GIT_ID);
+    // AND a real uncommitted edit lands in the worktree — conditions 5 + 6.
+    fs.writeFileSync(path.join(worktreePath, "uncommitted-t.txt"), "post-gate edit\n");
+
+    const confirm = await sessions.confirmWorkerMerge(T.mgrId, T.workerId);
+    check("(T) confirmWorkerMerge re-ran the gate for real (a real gate on the preLanded path, not the reuse path)", calls === 2);
+    // NOT asserting confirm.gateRan here (unlike (M)/(J)/(P)) — this lands as an idempotent ALREADY_MERGED
+    // no-op (no new commit on the branch beyond the earlier land), and per (N)'s own comment above, that
+    // success path returns via `finishAlreadyMerged`, whose result never carries `gateRan` at all.
+    // `calls === 2` is this scenario's own proof a real gate ran, exactly as (N) already establishes.
+    check("(T) reusedOpId is absent", confirm.reusedOpId === undefined);
+
+    const buildGateT = eventsOfKind(db, T.mgrId, "build_gate")[0];
+    const reasonsT = buildGateT?.detail?.reuseRefusalReasons;
+    check("(T) reuseRefusalReasons is an array", Array.isArray(reasonsT));
+    check("(T) reuseRefusalReasons includes worktree-dirty", Array.isArray(reasonsT) && reasonsT.includes("worktree-dirty"));
+    check("(T) reuseRefusalReasons includes stamp-changed", Array.isArray(reasonsT) && reasonsT.includes("stamp-changed"));
+    check("(T) reuseRefusalReasons includes behind-main", Array.isArray(reasonsT) && reasonsT.includes("behind-main"));
+    // THE DISCRIMINATING ASSERTION: a first-fail-only implementation would report exactly ONE of the three
+    // above (whichever the check order visits first) and never the other two — this proves ALL THREE
+    // survived into one refusal's reasons, not just the first hit.
+    check("(T) all THREE independently-true conditions are recorded together, not just the first (first-fail-only would fail this)", Array.isArray(reasonsT) && reasonsT.length === 3);
+    // And nothing from the UNAFFECTED conditions (1-4, and the resolve-failure variants of 7) leaks in —
+    // lastCheck genuinely existed/matched/passed/was current, and main's HEAD resolved cleanly.
+    check("(T) no conditions 1-4 or unrelated tokens present (only the 3 genuinely-failing ones)",
+      Array.isArray(reasonsT) && !reasonsT.some((r) => ["no-last-check", "branch-mismatch", "last-check-failed", "head-not-current", "main-head-unresolved", "behind-main-unknown", "worktree-dirty-unknown", "stamp-unknown"].includes(r)));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

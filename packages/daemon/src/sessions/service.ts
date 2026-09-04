@@ -13925,6 +13925,13 @@ export class SessionService {
     // doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
+    // Card 2e52bf99: EVERY reuse-condition that refused, not just the first one hit — declared at this
+    // SAME outer scope as `gateRan`/`reusedOpId` for the identical reason (the `evt("build_gate", ...)`
+    // call that reads it sits below the reuse-decision block). `undefined` whenever reuse actually fired
+    // (nothing to explain); otherwise the FULL set of failing conditions, independently derived — see the
+    // reuse-decision block below for why "first failing condition only" would bias any distribution built
+    // from this field toward whichever condition happens to sit earliest in the check order.
+    let reuseRefusalReasons: string[] | undefined;
     // Card db9b0130: whether this merge's gate was skipped because its ENTIRE changed-path set is proven
     // inert (see `isInertMergeDiff`) — declared at THIS outer scope for the same reason `gateRan` is (the
     // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block where this is
@@ -14306,24 +14313,58 @@ export class SessionService {
       // Any gap in this proof (no self-check on record for this exact branch, one that failed or settled
       // racy, a dirty worktree, a moved HEAD, or main having advanced) leaves `reuseResult` unset below and
       // the gate runs for real, unchanged from before this existed.
+      //
+      // REFUSAL DIAGNOSTICS (card 2e52bf99): conditions 1-4 below are pure reads on `lastCheck` (no I/O,
+      // no side effects) — independently evaluated into named consts regardless of whether earlier ones
+      // already disqualify reuse, at zero extra cost. Conditions 5/7 (worktree dirty / behind-main) are
+      // properties of the CURRENT worktree/git state, independent of whether `lastCheck` even exists — so
+      // `freshStamp`/`freshHead`/`freshBehindMain` are now computed UNCONDITIONALLY (hoisted out of the
+      // `if` that used to gate them), not only when 1-4 already pass. This is deliberate, not an oversight:
+      // without it, the single most-suspected refusal cause (no `lastWorkerGateCheck` entry at all — an
+      // in-memory Map wiped by every daemon restart) would explain itself and stop there, and a fix that
+      // makes the entry durable could still land on a branch whose worktree was ALSO dirty or whose main
+      // had ALSO advanced — a second blocker this instrumentation would otherwise have hidden until the
+      // "fix" shipped and failed to move the reuse rate. Condition 6 (stamp-unchanged) stays conditioned on
+      // `lastCheck` existing — it is only MEANINGFUL relative to a recorded stamp, a genuine not-applicable,
+      // not a measurement gap. HOISTING NEVER CHANGES THE DECISION: every value below is computed EXACTLY
+      // ONCE and read by both the reuse `if` (unchanged operators/order/short-circuit) and the reasons
+      // list; nothing between the old inline call sites and this hoisted one mutates the worktree, the
+      // index, or main (the union-merge / preLanded capture above, and the timeout-breaker check, are both
+      // read/decide-only with respect to worktree content from this point on).
       let reuseResult: GateSequentialResult | undefined;
       const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
-      if (lastCheck && lastCheck.branch === branch && lastCheck.passed && lastCheck.headCurrent) {
-        const freshStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-        // CAPTURE-ONCE (card 24cc40f9): resolve main's HEAD a single time and thread that SAME sha into
-        // `countCommitsBehind` as its explicit `base`, so the behind-main proof and the captured gate-base
-        // sha are pinned to one commit BY CONSTRUCTION — not two independent git spawns ~30-150ms apart
-        // that could each observe a different tip if canonical main advances (via a GitWriter REST
-        // commit/checkout, which does not serialize on `withCanonicalIndexLock`) in between them.
-        const freshHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
-        // A HEAD we can't resolve means there is nothing to prove `freshBehindMain` against and nothing
-        // to hand `mergeBranch` as a re-check base — fail CLOSED by not reusing at all, rather than
-        // passing `undefined` through (which `mergeBranch` would read as "no re-check requested", silently
-        // skipping the very protection this exists for).
-        const freshBehindMain = freshHead
-          ? await countCommitsBehind(repoPath, branch, freshHead, { timeoutMs: this.gitOpMs })
-          : undefined;
-        if (freshHead && !freshStamp.dirty && !gateStampsDiffer(lastCheck.stamp, freshStamp) && freshBehindMain === 0) {
+      // `lastCheck !== undefined` (never `!!lastCheck`) deliberately — TS's aliased-condition narrowing
+      // (4.4+) recognizes this exact comparison form and carries the narrowing through every later use of
+      // `hasLastCheck` below, including property access on `lastCheck` inside the reuse `if`.
+      const hasLastCheck = lastCheck !== undefined;
+      const branchMatches = hasLastCheck && lastCheck.branch === branch;
+      const checkPassed = hasLastCheck && lastCheck.passed === true;
+      const checkHeadCurrent = hasLastCheck && lastCheck.headCurrent === true;
+      const freshStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+      // `computeWorktreeGateStamp` never throws (see its own doc) — an unreadable worktree settles as
+      // `{head:null, dirty:false, dirtyHash:null}` rather than an exception, so `freshStamp.dirty` alone
+      // CANNOT distinguish "genuinely clean" from "couldn't tell" — a silent `dirty:false` there would be
+      // exactly the ambiguous-absence shape the reasons vocabulary below refuses to produce.
+      const worktreeReadable = freshStamp.head !== null;
+      // CAPTURE-ONCE (card 24cc40f9): resolve main's HEAD a single time and thread that SAME sha into
+      // `countCommitsBehind` as its explicit `base`, so the behind-main proof and the captured gate-base
+      // sha are pinned to one commit BY CONSTRUCTION — not two independent git spawns ~30-150ms apart
+      // that could each observe a different tip if canonical main advances (via a GitWriter REST
+      // commit/checkout, which does not serialize on `withCanonicalIndexLock`) in between them.
+      const freshHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+      // A HEAD we can't resolve means there is nothing to prove `freshBehindMain` against and nothing
+      // to hand `mergeBranch` as a re-check base — fail CLOSED by not reusing at all, rather than
+      // passing `undefined` through (which `mergeBranch` would read as "no re-check requested", silently
+      // skipping the very protection this exists for).
+      const freshBehindMain = freshHead
+        ? await countCommitsBehind(repoPath, branch, freshHead, { timeoutMs: this.gitOpMs })
+        : undefined;
+      // Only meaningful relative to a recorded `lastCheck.stamp` — `undefined` (not `false`) when there's
+      // nothing to compare against, so the reasons list below can tell "genuinely unchanged" apart from
+      // "no prior stamp to compare".
+      const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
+      if (hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
+        if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0) {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
           // `freshHead`'s single read — main is a process-wide shared resource, and a SIBLING merge on
           // this same repo can still land before this merge's own squash actually runs (this reuse
@@ -14350,6 +14391,33 @@ export class SessionService {
         }
       }
       gateRan = !reuseResult;
+      if (!reuseResult) {
+        // ALL failing conditions, not the first — see this block's own doc above for why. Each push is
+        // independently gated on the SAME consts the decision above reads; nothing here re-evaluates or
+        // reorders anything the decision already computed.
+        const reasons: string[] = [];
+        if (!hasLastCheck) reasons.push("no-last-check");
+        if (hasLastCheck && !branchMatches) reasons.push("branch-mismatch");
+        if (hasLastCheck && !checkPassed) reasons.push("last-check-failed");
+        if (hasLastCheck && !checkHeadCurrent) reasons.push("head-not-current");
+        // AMBIGUOUS-ABSENCE GUARD: an unreadable worktree must never silently read as "clean" (see
+        // `worktreeReadable`'s own doc above) — a distinct `-unknown` token, never a bare omission, so a
+        // reader of the distribution can't mistake "we couldn't measure this" for "this condition passed".
+        if (!worktreeReadable) {
+          reasons.push("worktree-dirty-unknown", "stamp-unknown");
+        } else {
+          if (freshStamp.dirty) reasons.push("worktree-dirty");
+          if (hasLastCheck && stampDiffers === true) reasons.push("stamp-changed");
+        }
+        // Same ambiguous-absence discipline for condition 7, split into its two distinct failure modes:
+        // "couldn't resolve main's HEAD at all" (a git-op failure) is a different root cause from "resolved
+        // it, and main is genuinely ahead" — collapsing them would misattribute a git-infra hiccup as "main
+        // advanced" in the DoD-2 distribution.
+        if (freshHead === undefined) reasons.push("main-head-unresolved");
+        else if (freshBehindMain === undefined) reasons.push("behind-main-unknown");
+        else if (freshBehindMain !== 0) reasons.push("behind-main");
+        reuseRefusalReasons = reasons;
+      }
 
       // INERT-DIFF SKIP (card db9b0130 — owner-proposed: "running the full merge gate for a merge that
       // only contains docs is not needed"). Considered only when reuse did NOT already apply — a reused
@@ -15191,6 +15259,11 @@ export class SessionService {
         // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
         // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
         ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+        // Card 2e52bf99: independent of the ternary above — `reuseRefusalReasons` is captured at the
+        // reuse-decision block itself (before `inertSkip` is ever considered), so it reflects why REUSE
+        // specifically was refused regardless of what a later inert-diff skip does. Absent (never an empty
+        // array) whenever reuse actually fired — see that block's own doc for the full reasons vocabulary.
+        ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}),
         // Card 2154b6ad: a REAL gate still ran (gateRan:true, unlike the inert-diff skip above) but with
         // the runtime test suite swapped out — surfaced here so `gate_history` never reads this as an
         // ordinary full-suite pass with no signal that anything was reduced.
