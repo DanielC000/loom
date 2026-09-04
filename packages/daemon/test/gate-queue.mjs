@@ -116,8 +116,12 @@ function makeRepo(repo) {
     makeRepo(repo2);
     registerForCleanup(repo1); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never these repo dirs
     registerForCleanup(repo2);
-    db.insertProject({ id: P1, name: "Own Project", repoPath: repo1, vaultPath: repo1, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
-    db.insertProject({ id: P2, name: "Foreign Project", repoPath: repo2, vaultPath: repo2, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    // Card fd9edb87: the two projects carry DELIBERATELY DIFFERENT `gateCommandTimeoutMs` overrides, and
+    // neither is the schema default (120000). That is what makes the `snapshotGates` checks below able to
+    // fail: a per-ROW resolution is the only implementation that can report two different numbers here —
+    // one shared read (of the platform config, or of either project) would report one number for both.
+    db.insertProject({ id: P1, name: "Own Project", repoPath: repo1, vaultPath: repo1, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 1_800_000 } }, createdAt: now, archivedAt: null });
+    db.insertProject({ id: P2, name: "Foreign Project", repoPath: repo2, vaultPath: repo2, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 600_000 } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "a1", projectId: P1, name: "dev-1", startupPrompt: "", position: 0 });
     db.insertAgent({ id: "a2", projectId: P2, name: "dev-2", startupPrompt: "", position: 0 });
     const t1 = `${P1}-task`, t2 = `${P2}-task`;
@@ -178,6 +182,30 @@ function makeRepo(repo) {
     check("(unit) from P2's own view, P1's running entry is redacted", !("taskId" in foreign.running[0]) && !("branch" in foreign.running[0]));
     check("(unit) from P2's own view, P1's running entry carries redacted:true", foreign.running[0].redacted === true);
     check("(unit) from P2's own view, P1's running entry STILL carries recentTimeoutStreak:0", foreign.running[0].recentTimeoutStreak === 0);
+
+    // ── Card fd9edb87 — snapshotGates surfaces each run's OWN project gate timeout ────────────────────
+    // The Gates page is a cross-project god-eye view, so its long-run cue must scale PER ROW. That is only
+    // possible if the snapshot carries a per-row bound. This reads the SAME live registry state the queue
+    // checks above just asserted (P1 running, P2 queued) through the sibling god-eye read.
+    const godEye = sessions.snapshotGates();
+    const g1 = godEye.gates.find((g) => g.projectId === P1);
+    const g2 = godEye.gates.find((g) => g.projectId === P2);
+    check("(unit, fd9edb87) snapshotGates sees both live runs", godEye.gates.length === 2 && g1 != null && g2 != null);
+    check("(unit, fd9edb87) the P1 entry carries P1's OWN resolved gateCommandTimeoutMs override", g1.gateTimeoutMs === 1_800_000);
+    check("(unit, fd9edb87) the P2 entry carries P2's OWN resolved gateCommandTimeoutMs override", g2.gateTimeoutMs === 600_000);
+    // THE DISCRIMINATING CHECK: two rows in ONE snapshot report DIFFERENT bounds. A single shared config
+    // read — the exact "swap one hardcoded number for one config-read number" defect this card exists to
+    // prevent — would satisfy every check above that only asserts a number is present, but not this one.
+    check("(unit, fd9edb87) two rows in ONE snapshot carry DIFFERENT bounds (per-row, not one shared read)",
+      g1.gateTimeoutMs !== g2.gateTimeoutMs);
+    // …and neither is the schema default, so "resolved the platform default and ignored the override"
+    // cannot pass as a correct answer either.
+    check("(unit, fd9edb87) neither row fell back to the schema default (120000)",
+      g1.gateTimeoutMs !== 120000 && g2.gateTimeoutMs !== 120000);
+    // A QUEUED row carries it too: the queued lane's own elapsed clock is a wait, not gate execution, but
+    // the bound must not be withheld from the row just because it has not been admitted yet.
+    check("(unit, fd9edb87) the bound is present on the QUEUED row, not only the running one",
+      g2.phase === "queued" && typeof g2.gateTimeoutMs === "number");
 
     await waitUntilInvoked(() => release1, "(unit) w1's fakeGate");
     release1({ passed: true });

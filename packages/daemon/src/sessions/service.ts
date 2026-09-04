@@ -4295,13 +4295,19 @@ export class SessionService {
    * title>"), and the task's priority. Bounded by the number of concurrent + queued gates (single digits
    * at any realistic `maxConcurrentGates`), so the per-entry point lookups here are NOT the N+1 /
    * event-loop concern that governs the paginated HISTORY query — this is a handful of synchronous
-   * in-process SQLite reads. `cap` is the resolved daemon-global `maxConcurrentGates` (default 1) — it has
+   * in-process SQLite reads. Card fd9edb87 adds one PURE, in-memory `resolveConfig` per entry for that
+   * row's own `gateTimeoutMs` (no extra DB read — the project row is already loaded above, and the
+   * platform config is read once outside the loop), so the same bound still holds.
+   * `cap` is the resolved daemon-global `maxConcurrentGates` (default 1) — it has
    * NO per-project layer, so it's resolved with an EMPTY project override (`{}`) which takes resolveConfig's
    * full path and reads the platform value, rather than `undefined` which would return the fast-path default.
    */
   snapshotGates(): GatesActive {
     const snap = this.gateSemaphore.snapshot();
-    const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;
+    // Read the platform config ONCE and reuse it for `cap` and for every entry's own per-project timeout
+    // resolution below — the same read repeated per entry would be pure waste on a hot 2s poll.
+    const platformConfig = this.db.getPlatformConfig();
+    const cap = resolveConfig({}, platformConfig).orchestration.maxConcurrentGates;
     const gates: GateRun[] = snap.entries.map((e) => {
       const project = this.db.getProject(e.projectId);
       const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
@@ -4327,6 +4333,14 @@ export class SessionService {
         batched: e.batchBranches != null,
         branchCount: e.batchLandedCount,
         batchBranches: e.batchBranches,
+        // Card fd9edb87: this run's OWN project's resolved gate timeout, so a cross-project reader can
+        // scale a long-run cue per ROW instead of against one page-level constant. Resolved through the
+        // SAME resolveConfig(project.config, platformConfig) path the merge/worker gates themselves use
+        // (see confirmWorkerMerge/runWorkerGate's own `gateTimeoutMs`), never re-derived or defaulted here
+        // — a per-project override must be what the UI scales against. `null` ONLY when the project row
+        // itself is unreadable (deleted mid-run): a genuine unknown the client must not paper over with a
+        // default. See GateRun.gateTimeoutMs's own doc for which ceiling this is (the RAW configured one).
+        gateTimeoutMs: project ? resolveConfig(project.config, platformConfig).orchestration.gateCommandTimeoutMs : null,
       };
     });
     return { cap, activeCount: snap.active, queuedCount: snap.queued, gates };
