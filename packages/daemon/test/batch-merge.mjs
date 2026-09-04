@@ -98,6 +98,30 @@ async function cutBranchMultiCommit(repo, label, commits) {
   return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
 }
 
+/** Same as {@link cutBranchMultiCommit}, but each commit's AUTHOR date is pinned explicitly (via
+ *  `GIT_AUTHOR_DATE`) instead of following wall-clock creation order — card 4763432b's sort key is the
+ *  author date, not the committer date (which stays wall-clock/monotonic either way), so a test that wants
+ *  to prove the sort actually reorders branches needs author dates it controls independently of the order
+ *  these git calls happen to run in. `commits` entries: `{file, content, message, authorDateIso}`. */
+async function cutBranchMultiCommitWithAuthorDates(repo, label, commits) {
+  const taskId = `bm-task-${label}-${sfx}`;
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  for (const { file, content, message, authorDateIso } of commits) {
+    fs.writeFileSync(path.join(worktreePath, file), content);
+    execSync("git add .", { cwd: worktreePath });
+    execSync(`git ${GIT_ID} commit -q -m "${message}"`, {
+      cwd: worktreePath,
+      env: { ...process.env, GIT_AUTHOR_DATE: authorDateIso },
+    });
+  }
+  return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
+}
+
+/** Single-commit convenience wrapper around {@link cutBranchMultiCommitWithAuthorDates}. */
+async function cutBranchWithAuthorDate(repo, label, file, content, authorDateIso) {
+  return cutBranchMultiCommitWithAuthorDates(repo, label, [{ file, content, message: label, authorDateIso }]);
+}
+
 // ── computeBatchSize: fixed K = min(ready, maxWorkers), never adaptive ─────────────────────────────────
 check("computeBatchSize(5, 4) === 4 (capped by maxWorkers)", computeBatchSize(5, 4) === 4);
 check("computeBatchSize(2, 4) === 2 (capped by ready count)", computeBatchSize(2, 4) === 2);
@@ -473,8 +497,11 @@ try {
   {
     const repo = path.join(os.tmpdir(), `loom-bm-pathset-forged-${sfx}`);
     makeRepo(repo);
-    const wrong = await cutBranch(repo, "ps-forged", "ps-forged.txt", "forged branch work\n");
+    // Card 4763432b: landing order now follows each candidate's own earliest AUTHOR date, not array order
+    // — so `decoy` is created (and thus authored) FIRST and `wrong` SECOND, ensuring `wrong` sorts (and
+    // lands) last regardless of which order they're passed to `runBatchedMerge` in below.
     const decoy = await cutBranch(repo, "ps-decoy", "ps-decoy.txt", "decoy branch work\n");
+    const wrong = await cutBranch(repo, "ps-forged", "ps-forged.txt", "forged branch work\n");
     const baseMainSha = git(repo, "rev-parse HEAD");
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-forged-${sfx}`);
 
@@ -935,6 +962,56 @@ try {
     check("(11b) the drop reason does NOT read as a bare/generic commit failure", !mixedReasonMock.includes("commit failed while landing commit"));
     check("(11b) the drop reason names redundancy (an empty commit already present in the batch tree)",
       mixedReasonMock.includes("empty commit") && mixedReasonMock.includes("already present in the batch tree"));
+  }
+
+  // ── (12) SORT BY EARLIEST AUTHOR DATE (card 4763432b) ─────────────────────────────────────────────────
+  // Three candidates passed in a DELIBERATELY non-chronological order — latest, a multi-commit middle
+  // branch, then earliest. Proves: (a) landing order follows each branch's EARLIEST author date, not the
+  // order candidates were passed in; (b) guard 1 survives sorting — the multi-commit branch's own 2 commits
+  // still land INDIVIDUALLY, in original order, CONTIGUOUSLY (never interleaved with another branch's
+  // commits just because sorting reordered the branches themselves); (c) guard 2 survives — only that
+  // branch's LAST (tip) commit carries its Loom-Worker-Branch trailer, exactly as without sorting.
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-sort-${sfx}`);
+    makeRepo(repo);
+    // sortB: earliest (08:00).
+    const sortB = await cutBranchWithAuthorDate(repo, "sortB", "sort-b.txt", "work b\n", "2020-01-01T08:00:00+00:00");
+    // sortA: 2 commits, earliest author date 09:00 (its own tip commit is 09:05) — sorts BETWEEN B and C by
+    // its EARLIEST commit, never by its tip.
+    const sortA = await cutBranchMultiCommitWithAuthorDates(repo, "sortA", [
+      { file: "sort-a1.txt", content: "a1\n", message: "sortA-1", authorDateIso: "2020-01-01T09:00:00+00:00" },
+      { file: "sort-a2.txt", content: "a2\n", message: "sortA-2", authorDateIso: "2020-01-01T09:05:00+00:00" },
+    ]);
+    // sortC: latest (10:00).
+    const sortC = await cutBranchWithAuthorDate(repo, "sortC", "sort-c.txt", "work c\n", "2020-01-01T10:00:00+00:00");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+
+    // Passed in as [C, A, B] — the reverse of chronological, and not alphabetical either.
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-sort-${sfx}`);
+    const assembled = await assembleBatchBranches(batchWt, [sortC, sortA, sortB]);
+    check("(12) all 3 landed", assembled.landed.length === 3 && assembled.dropped.length === 0);
+    check("(12) landing order is B, A, C (earliest-author-date-first) — NOT the passed-in [C, A, B] order",
+      assembled.landed[0]?.branch === sortB.branch &&
+      assembled.landed[1]?.branch === sortA.branch &&
+      assembled.landed[2]?.branch === sortC.branch);
+
+    // Run the real batch (fresh worktree — batchWt above is now dirty from the standalone assemble call,
+    // same reasoning as case (3) above) and inspect canonical main's actual landed commit sequence.
+    const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-sort-run-${sfx}`);
+    const result = await runBatchedMerge(repo, batchWt2, baseMainSha, [sortC, sortA, sortB], passGate);
+    check("(12) batch succeeds", result.ok === true && result.landed.length === 3);
+    check("(12) main gained exactly 4 new commits (B:1 + A:2 + C:1)", git(repo, `rev-list --count ${baseMainSha}..HEAD`) === "4");
+
+    const shas = git(repo, `log --reverse ${baseMainSha}..HEAD --format=%H`).split("\n").filter(Boolean);
+    check("(12) 4 commits landed on main", shas.length === 4);
+    const subjects = shas.map((sha) => git(repo, `log -1 --format=%s ${sha}`));
+    check("(12) landed order on main: sortB, sortA-1, sortA-2, sortC — A's own 2 commits land CONTIGUOUSLY between B and C, never interleaved (guard 1 survives sorting)",
+      subjects.join(",") === "sortB,sortA-1,sortA-2,sortC");
+    const bodies = shas.map((sha) => git(repo, `log -1 --format=%B ${sha}`));
+    check("(12) only sortA-2 (A's tip, not sortA-1) carries A's Loom-Worker-Branch trailer (guard 2 survives sorting)",
+      !bodies[1]?.includes(`Loom-Worker-Branch: ${sortA.branch}`) && !!bodies[2]?.includes(`Loom-Worker-Branch: ${sortA.branch}`));
+    check("(12) B and C each carry their own trailer on their one commit",
+      !!bodies[0]?.includes(`Loom-Worker-Branch: ${sortB.branch}`) && !!bodies[3]?.includes(`Loom-Worker-Branch: ${sortC.branch}`));
   }
 
   // ── fastForwardCanonicalMain: a no-op batch (nothing landed on top) is a safe success, not a refusal ──

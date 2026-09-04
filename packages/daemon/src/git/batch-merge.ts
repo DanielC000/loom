@@ -488,12 +488,90 @@ async function landBranchCommitsIndividually(
 }
 
 /**
+ * Earliest author date (epoch ms) among ONE candidate branch's own commits — the range that would land,
+ * `merge-base(baseSha, branch)..branch` — used ONLY to ORDER branches for landing (card 4763432b). Never
+ * used to reorder commits WITHIN a branch; see this file's header doc's "HONEST LIMIT" and
+ * {@link sortCandidatesByEarliestAuthorDate}'s own doc for why a sort here can only ever be "branches land
+ * oldest-first", never "commits are chronological".
+ *
+ * Returns `undefined` when the branch's own landing range can't be resolved (an unresolvable branch ref,
+ * or nothing new to land — `mergeBase === branchTip`, the same noop condition
+ * {@link landBranchCommitsIndividually} checks independently). A candidate in that state is about to be
+ * dropped or classified as a noop by the real landing pass for the identical reason, so its sort position
+ * is immaterial — the caller sorts it to the END rather than guessing at a date that doesn't exist.
+ */
+async function earliestAuthorDateMs(
+  git: Pick<SimpleGit, "raw">, baseSha: string, branch: string, timeoutMs: number,
+): Promise<number | undefined> {
+  let branchTip: string;
+  try {
+    branchTip = (await withTimeout(
+      git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (batch sort)",
+    )).trim();
+  } catch {
+    return undefined;
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = (await withTimeout(
+      git.raw(["merge-base", baseSha, branchTip]), timeoutMs, "git merge-base (batch sort)",
+    )).trim();
+  } catch {
+    return undefined;
+  }
+  if (mergeBase === branchTip) return undefined; // nothing new to land — sort position is immaterial
+  let out: string;
+  try {
+    out = await withTimeout(
+      git.raw(["log", `${mergeBase}..${branchTip}`, "--format=%aI"]), timeoutMs, "git log (batch sort, author dates)",
+    );
+  } catch {
+    return undefined;
+  }
+  const dates = out.split("\n").map((s) => s.trim()).filter(Boolean).map((s) => Date.parse(s)).filter((n) => !Number.isNaN(n));
+  return dates.length > 0 ? Math.min(...dates) : undefined;
+}
+
+/**
+ * Sort `candidates` by each branch's own {@link earliestAuthorDateMs} (ascending — oldest work first),
+ * against `baseSha` (the batch worktree's HEAD BEFORE any candidate has landed — always the un-mutated
+ * starting point, never re-derived per candidate, so every branch's earliest-date is measured against the
+ * SAME reference regardless of where it ends up in the sorted order). A candidate whose date can't be
+ * resolved (see {@link earliestAuthorDateMs}) sorts LAST; ties (including two unresolved candidates) keep
+ * their ORIGINAL relative order via an explicit index tie-break (never relying on `Array.prototype.sort`'s
+ * stability alone to document that guarantee at the call site).
+ *
+ * ⚠️ **Card 4763432b's own "HONEST LIMIT":** this guarantees "branches land oldest-first", NEVER "commits
+ * are chronological" — branches are worked in parallel, so two branches' own author-date RANGES can
+ * overlap, and keeping each branch's commits contiguous (a hard invariant this function's caller relies
+ * on — see this file's header doc) makes strict global chronological ordering impossible whenever they do.
+ */
+async function sortCandidatesByEarliestAuthorDate(
+  git: Pick<SimpleGit, "raw">, baseSha: string, candidates: BatchCandidate[], timeoutMs: number,
+): Promise<BatchCandidate[]> {
+  const dated: Array<{ candidate: BatchCandidate; dateMs: number; index: number }> = [];
+  for (let index = 0; index < candidates.length; index++) {
+    const candidate = candidates[index]!;
+    const dateMs = (await earliestAuthorDateMs(git, baseSha, candidate.branch, timeoutMs)) ?? Number.POSITIVE_INFINITY;
+    dated.push({ candidate, dateMs, index });
+  }
+  dated.sort((a, b) => (a.dateMs !== b.dateMs ? a.dateMs - b.dateMs : a.index - b.index));
+  return dated.map((d) => d.candidate);
+}
+
+/**
  * Land each candidate branch's OWN commits, individually, onto `batchWorktreePath`, IN ORDER — each
  * branch's commits land on top of the previous branch's, so a later candidate's diff is computed against a
  * tree that already contains every earlier LANDED candidate's content (this is what makes the batch's
  * single gate a real test of the combined tree, not an approximation of it). See
  * {@link landBranchCommitsIndividually} for the per-branch mechanism (cherry-pick, not squash — card
  * 6801c0a1) and this file's own header doc for why.
+ *
+ * The landing ORDER itself is `candidates` sorted oldest-author-date-first (card 4763432b — see
+ * {@link sortCandidatesByEarliestAuthorDate}) against the batch worktree's HEAD as it stood before this
+ * function touched anything — landing order was previously whatever order the caller happened to pass
+ * `candidates` in, which made main's own commit history read non-chronologically once author dates (rather
+ * than the always-monotonic committer dates sequential cherry-picking produces) were inspected.
  *
  * A candidate that won't land cleanly (a real conflict on any of its own commits against an earlier
  * candidate in this same batch, or any other cherry-pick/commit failure) is DROPPED — recorded with its
@@ -505,7 +583,19 @@ export async function assembleBatchBranches(
 ): Promise<BatchAssembleResult> {
   const landed: BatchLandedBranch[] = [];
   const dropped: BatchDroppedBranch[] = [];
-  for (const c of candidates) {
+  const { git: sortGit, timeoutMs: sortTimeoutMs } = boundedGit(batchWorktreePath, deps);
+  let initialHead: string | undefined;
+  try {
+    initialHead = (await withTimeout(
+      sortGit.raw(["rev-parse", "HEAD"]), sortTimeoutMs, "git rev-parse HEAD (batch sort, initial)",
+    )).trim();
+  } catch {
+    initialHead = undefined; // extremely unlikely (the worktree was just cut) — fall back to caller order below
+  }
+  const orderedCandidates = initialHead
+    ? await sortCandidatesByEarliestAuthorDate(sortGit, initialHead, candidates, sortTimeoutMs)
+    : candidates;
+  for (const c of orderedCandidates) {
     const r = await landBranchCommitsIndividually(batchWorktreePath, c.branch, deps);
     if (!r.ok) {
       dropped.push({ ...c, reason: r.reason ?? "batch land failed", conflict: !!r.conflict });
