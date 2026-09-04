@@ -189,7 +189,11 @@ interface UntilSupersededVerdict {
  * b9515beb friction: a client-side MCP timeout on a minutes-long gate run used to leave the manager
  * unable to tell whether the op landed, and a retry bounced off a hard "already in flight" error instead
  * of finding out. One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`;
- * gate: `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check). The
+ * gate: `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check;
+ * merge-batch: `merge-batch:${managerSessionId}:${sorted, comma-joined workerSessionIds of the resolved
+ * candidate set}` — card f944d4e4, `SessionService.mergeBatchTracked`'s own doc has the full rationale for
+ * why the key is the RESOLVED set, not the raw request, and why `baseMainSha` is deliberately excluded).
+ * The
  * "gate" kind has no separate owning manager: its `managerSessionId` field holds the CALLING WORKER's own
  * session id (the caller and the beneficiary of the completion nudge are the same session), so it needs
  * none of the dead-owner reconciliation the "merge" kind does — there is no cross-session ownership split

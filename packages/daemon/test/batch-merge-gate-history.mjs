@@ -125,7 +125,12 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
-    const result = await sessions.mergeBatch(mgrId, [wA, wB]);
+    // Card f944d4e4: mergeBatch is now mergeBatchTracked, keyed through PendingOpRegistry.attach — a fast
+    // gate command (node -e "process.exit(0)") settles well within the sync-wait budget, so this still
+    // reads back the same flat shape via `r.value` once unwrapped.
+    const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    check("(e2e) card f944d4e4: settles within the sync-wait budget", r.settled === true && r.ok === true);
+    const result = r.settled && r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: "did not settle synchronously" };
     check("(e2e) ok:true", result.ok === true);
     check("(e2e) both branches landed, none fell back", result.landed.length === 2 && result.fallback.length === 0);
     // THE DISCRIMINATING ASSERTION for the service-layer plumbing fix: reverting sessions/service.ts's
@@ -221,7 +226,11 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
-    const result = await sessions.mergeBatch(mgrId, [wA, wB]);
+    // Card f944d4e4: mergeBatch is now mergeBatchTracked — see the green block above for why this still
+    // settles synchronously.
+    const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    check("(e2e, FAIL) card f944d4e4: settles within the sync-wait budget", r.settled === true && r.ok === true);
+    const result = r.settled && r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: "did not settle synchronously" };
     check("(e2e, FAIL) ok:false — the whole batch falls back on a red gate", result.ok === false);
 
     // The red batch's own fallback re-gates each candidate individually (confirmWorkerMergeTracked), so
@@ -291,7 +300,11 @@ try {
       1, { gateType: "merge", projectId: `bmgh-cancel-holder-${sfx}`, sessionId: "bmgh-cancel-holder-sess" }, () => holderPromise,
     );
 
-    const batchPromise = sessions.mergeBatch(mgrId, [wA, wB]);
+    // Card f944d4e4: mergeBatch is now mergeBatchTracked (returns AttachResult<MergeBatchResult>) — the
+    // gate queues and settles well within the sync-wait budget here (cancel + release happen within
+    // milliseconds of the queue precondition being observed), so `batchPromise` still resolves to a
+    // settled value below.
+    const batchPromise = sessions.mergeBatchTracked(mgrId, [wA, wB]);
 
     // Poll until the batch's OWN gate request is genuinely queued behind the holder — deterministic (reads
     // live semaphore state), not a timed guess; bounded so a real regression fails fast rather than hanging
@@ -316,7 +329,9 @@ try {
       releaseHolder();
       await holderRun;
 
-      const result = await batchPromise;
+      const r = await batchPromise;
+      check("(e2e, CANCELLED) card f944d4e4: settles within the sync-wait budget", r.settled === true && r.ok === true);
+      const result = r.settled && r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: "did not settle synchronously" };
       check("(e2e, CANCELLED) ok:false — a cancelled batch gate falls back, same as a red one", result.ok === false);
 
       const stCancelled = queuedEntry.opId ? sessions.gateStatus(queuedEntry.opId) : undefined;
@@ -370,7 +385,11 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
-    const result = await sessions.mergeBatch(mgrId, [wA, wB]);
+    // Card f944d4e4: mergeBatch is now mergeBatchTracked — see the green block above for why this still
+    // settles synchronously.
+    const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    check("(e2e, FORFEIT) card f944d4e4: settles within the sync-wait budget", r.settled === true && r.ok === true);
+    const result = r.settled && r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: "did not settle synchronously" };
     check("(e2e, FORFEIT) ok:false — a genuine forfeit falls back, same top-level shape as a red gate", result.ok === false);
 
     check("(e2e, FORFEIT) precondition: the race gate command actually recorded an advanced sha", fs.existsSync(shaFile));
