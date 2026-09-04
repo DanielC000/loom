@@ -16,16 +16,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       resolveCodescapeBlockText into a delegator over resolveCodescapeInjectionStatus did not change
 //       the rendered text, asserted with `===` (not `.includes`) so a null-vs-empty-string regression
 //       would be caught.
-//   (3) END-TO-END: the daemon-wide "codescape_injection" OrchestrationEventKind (never present in
-//       EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS — an observability-only kind) is appended, with the
-//       right {injected, reason, stamped} detail and the right managerSessionId/workerSessionId/taskId
-//       wiring, at all FIVE real injection call sites — startNew (manager-role branch), startManager
-//       (plain AND scheduler-fired), spawnWorker, recycleWorker, recycleManager — covering a POSITIVE
-//       control (injected, both stamped and unstamped) and a NEGATIVE control per graph-gate reason
+//   (3) END-TO-END: the daemon-wide "discovery_block_injection" OrchestrationEventKind (never present in
+//       EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS — an observability-only kind, and deliberately named
+//       WITHOUT the private feature's name — see (0) below and codescape-privacy-guard.mjs: @loom/shared
+//       ships in full to every end user, unlike the daemon package) is appended, with the right
+//       {injected, reason, stamped} detail and the right managerSessionId/workerSessionId/taskId wiring,
+//       at all FIVE real injection call sites — startNew (manager-role branch), startManager (plain AND
+//       scheduler-fired), spawnWorker, recycleWorker, recycleManager — covering a POSITIVE control
+//       (injected, both stamped and unstamped) and a NEGATIVE control per graph-gate reason
 //       (no-supervisor / not-enabled / no-port / no-project-id). The event NEVER carries the block's own
 //       prose (DoD-4) — only the three fields.
 //   (4) NEGATIVE CONTROL: a role that never reaches the codescape branch (a plain/companion startNew
-//       spawn) records NO "codescape_injection" event at all — proving (3) isn't vacuously passing
+//       spawn) records NO "discovery_block_injection" event at all — proving (3) isn't vacuously passing
 //       because every spawn gets one regardless of role.
 //
 // SCOPE, STATED NOT PAPERED OVER: the asset-unreadable/asset-empty REASONS are proven at the pure-
@@ -80,8 +82,9 @@ function writeManifest(homeDir, entries) {
 
 // ===================== (0) the new kind exists + is correctly excluded from the trigger/gate-history allowlists =====================
 {
-  check("(0) 'codescape_injection' is a real, registered OrchestrationEventKind (build-time Record<K,true> already enforces this; this is the runtime confirmation)", ALL_ORCHESTRATION_EVENT_KINDS.includes("codescape_injection"));
-  check("(0) 'codescape_injection' is NOT in EVENT_TRIGGER_EVENT_KINDS (observability-only, never a user-automation trigger)", !EVENT_TRIGGER_EVENT_KINDS.includes("codescape_injection"));
+  check("(0) 'discovery_block_injection' is a real, registered OrchestrationEventKind (build-time Record<K,true> already enforces this; this is the runtime confirmation)", ALL_ORCHESTRATION_EVENT_KINDS.includes("discovery_block_injection"));
+  check("(0) 'discovery_block_injection' is NOT in EVENT_TRIGGER_EVENT_KINDS (observability-only, never a user-automation trigger)", !EVENT_TRIGGER_EVENT_KINDS.includes("discovery_block_injection"));
+  check("(0) the kind name itself avoids the private feature's name (this file is a TEST, not shipped — but the real @loom/shared kind must, per codescape-privacy-guard.mjs; this just double-checks the constant used below)", !ALL_ORCHESTRATION_EVENT_KINDS.some((k) => /codescape/i.test(k)));
 }
 
 // ===================== (1) readCodescapePromptBlockAsset — pure, against a CONTROLLED fixture path only =====================
@@ -196,7 +199,7 @@ const liveIds = [];
 try {
   process.env.LOOM_DEV = "1";
 
-  const codescapeEventsFor = (sessionId) => db.listEventsForSession(sessionId).filter((e) => e.kind === "codescape_injection");
+  const codescapeEventsFor = (sessionId) => db.listEventsForSession(sessionId).filter((e) => e.kind === "discovery_block_injection");
 
   // --- (3a) startManager (plain): POSITIVE control, STAMPED ---
   const mgr = svc.startManager("agentMgrLive");

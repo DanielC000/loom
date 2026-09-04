@@ -2968,7 +2968,7 @@ export class SessionService {
     if (codescapeStatus) {
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId: session.id, kind: "codescape_injection",
+        managerSessionId: session.id, kind: "discovery_block_injection",
         detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
       });
     }
@@ -3077,7 +3077,7 @@ export class SessionService {
     // Card badba5a8: observability only — record whether the codescape block was injected.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: session.id, kind: "codescape_injection",
+      managerSessionId: session.id, kind: "discovery_block_injection",
       detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
     });
     return { ...session, processState: "live" };
@@ -7427,7 +7427,7 @@ export class SessionService {
       // Card badba5a8: observability only — record whether the codescape block was injected.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: worker.id, taskId, kind: "codescape_injection",
+        managerSessionId, workerSessionId: worker.id, taskId, kind: "discovery_block_injection",
         detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
       });
       // Wasted-dispatch advisory (card 7b5944fc): runs AFTER pty.spawn so it never delays the worker's
@@ -12286,7 +12286,7 @@ export class SessionService {
       // Card badba5a8: observability only — record whether the codescape block was injected.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
-        managerSessionId, workerSessionId: fresh.id, taskId, kind: "codescape_injection",
+        managerSessionId, workerSessionId: fresh.id, taskId, kind: "discovery_block_injection",
         detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
       });
       return { ...fresh, processState: "live" };
@@ -12473,7 +12473,7 @@ export class SessionService {
     // Card badba5a8: observability only — record whether the codescape block was injected.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: fresh.id, kind: "codescape_injection",
+      managerSessionId: fresh.id, kind: "discovery_block_injection",
       detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
     });
 
