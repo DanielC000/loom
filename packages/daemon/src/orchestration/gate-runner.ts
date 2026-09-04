@@ -1031,6 +1031,12 @@ export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | u
  * worst-step ceiling runs hotter than either system measured here (or whose build step is heavy enough
  * that whole-gate and worst-step meaningfully diverge, unlike the ~0.3% coincidence on Loom today) could
  * need a project-specific override this card does not build.
+ * 📌 SECOND CONSUMER OF THE SAME HEALTHY-BAND EVIDENCE (card fd9edb87): the Gates page's own
+ * `LONG_RUN_WARN_FRACTION` (`packages/web/src/pages/Gates.tsx`, 0.80) scales its LIVE lane cue off the same
+ * measured band — but on a DIFFERENT AXIS: that one is the WHOLE RUN's elapsed since admission, this one is
+ * a SINGLE STEP's duration. ⛔ They are deliberately not equal and must not be unified or averaged; whole-run
+ * elapsed is always ≥ the worst step, so at equal fractions the live cue fires EARLIER, which is the safe
+ * direction for a warning. Retuning the band above, or either constant, touches both — check the other.
  */
 export const GATE_PROXIMITY_THRESHOLD = 0.85;
 
