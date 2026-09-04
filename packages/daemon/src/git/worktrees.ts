@@ -3600,6 +3600,23 @@ export const STATIC_GUARD_REPO_PATHS = [
   // its one named exemption (merge-gate-concurrency-verdict.mjs) and why a narrower, `failingTestCount:`-
   // gated rule was chosen over the wider "any failingTest:" shape.
   "packages/daemon/test/failing-test-tier-pairing-guard.mjs",
+  // Card 82662e98: the standing backstop for INERT_MERGE_EXACT_PATHS (README.md, CHANGELOG.md,
+  // CODE_OF_CONDUCT.md, CONTRIBUTING.md, SECURITY.md, above) — asserts, via a read-call-scoped literal
+  // scan of the WHOLE test/ corpus, that none of the five is genuinely read anywhere, and (the positive
+  // control) that the SAME technique correctly flags CLAUDE.md, which genuinely IS read (real specimens:
+  // kickoff-real-spawn.mjs, spawn-command-line-preflight.mjs). Belongs here on the same ground as its
+  // corpus-wide-scan siblings above: a source-TEXT property the reduced/emit-compare path cannot reason
+  // about on its own — `isInertMergeDiff`'s own live per-repo re-verification
+  // ({@link repoTreeReferencesInertPrefix}) requires a read-call name and an anchor on the SAME LINE, and
+  // is PROVABLY BLIND to the exact indirection shape CLAUDE.md's own real reads use (anchor on an earlier
+  // line, filename read through that constant on a later one) — measured directly, not assumed. A future
+  // test that reads one of the five exact-path filenames using that SAME indirection shape would clear
+  // that live scanner exactly like CLAUDE.md's real reads do, so THIS corpus-wide guard — always run,
+  // unconditionally, on every reduced gate — is what actually catches it, not the per-diff re-verification
+  // alone. See the guard's own header for the full mechanism and why it deliberately does not try to
+  // auto-classify a hit as "real" vs. "synthetic fixture" — every pinned hit was hand-verified once, and
+  // any new hit fails the guard loudly rather than being silently trusted.
+  "packages/daemon/test/inert-exact-path-corpus-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
