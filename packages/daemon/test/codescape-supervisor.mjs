@@ -652,8 +652,9 @@ await new Promise((resolve) => hungServer.close(resolve));
   process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "8000";
   const defaultTimeoutSup = new CodescapeSupervisor({ homeDir: defaultTimeoutHomeDir, ingestTimeoutMs: 15_000 });
   await defaultTimeoutSup.start(["/fake/repo/default-timeout"]);
-  // TIMING-GUARD-SAFE: poll-observes-a-later-step — up to 15s of polling (well past the 8s delay, well
-  // short of the 20s default bound) for getPort() to leave null via the delayed report actually arriving.
+  // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN exit condition (getPort() leaving null)
+  // is the exact fact the check below re-observes; up to 15s of polling (well past the 8s delay, well
+  // short of the 20s default bound) for the delayed report to actually arrive.
   for (let i = 0; i < 300 && defaultTimeoutSup.getPort() === null; i++) await sleep(50);
   check("(g0) against the REAL shipped default timeout, an 8s report (slower than the OLD 5s default) still succeeds on the first attempt",
     defaultTimeoutSup.getPortReportCapable() === true && defaultTimeoutSup.getPort() !== null);
@@ -673,9 +674,10 @@ await new Promise((resolve) => hungServer.close(resolve));
   process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "500";
   const slowOkSup = new CodescapeSupervisor({ homeDir: slowOkHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 3_000 });
   await slowOkSup.start(["/fake/repo/slow-ok"]);
-  // TIMING-GUARD-SAFE: poll-observes-a-later-step — waits for getPort() to leave null, which (given
-  // portReportTimeoutMs=3000 >> delayMs=500) can only happen via the delayed report actually arriving, not
-  // via a timeout+restart (that would take at least 3000ms of its own before even scheduling a retry).
+  // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN exit condition (getPort() leaving null)
+  // is the exact fact the checks below re-observe; given portReportTimeoutMs=3000 >> delayMs=500 it can
+  // only become true via the delayed report actually arriving, not via a timeout+restart (that would take
+  // at least 3000ms of its own before even scheduling a retry).
   for (let i = 0; i < 100 && slowOkSup.getPort() === null; i++) await sleep(50);
   check("(g1) a report slower than instant but well within the bound still succeeds",
     slowOkSup.getPort() !== null && slowOkSup.getPortReportCapable() === true);
