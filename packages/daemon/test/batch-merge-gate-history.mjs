@@ -103,7 +103,16 @@ try {
     db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
     const a = await cutBranch(repo, projId, "a", "feature-a.txt", "work a\n");
-    const b = await cutBranch(repo, projId, "b", "feature-b.txt", "work b\n");
+    // b's own commit carries a Claude-Session trailer (card b7f965d2) — a real, doctrine-violating worker
+    // commit shape — so this e2e also proves the SERVICE layer (SessionService.mergeBatch, not just
+    // git/batch-merge.ts underneath it) actually surfaces `strippedTrailerCount` on the returned `landed`
+    // row, not just computes it and drops it (Code Review finding: it used to be dropped at
+    // `sessions/service.ts`'s own `landed.push`).
+    const bTaskId = `bmgh-task-b-${sfx}`;
+    const { worktreePath: bWorktreePath, branch: bBranch } = await createWorktree(repo, projId, bTaskId);
+    fs.writeFileSync(path.join(bWorktreePath, "feature-b.txt"), "work b\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "b" -m "Claude-Session: https://claude.ai/code/session_BMGHTRAILER"`, { cwd: bWorktreePath });
+    const b = { taskId: bTaskId, branch: bBranch, worktreePath: bWorktreePath };
     worktrees.push(a.worktreePath, b.worktreePath);
     const wA = `bmgh-wkr-a-${sfx}`, wB = `bmgh-wkr-b-${sfx}`;
     for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"]]) {
@@ -117,6 +126,13 @@ try {
     const result = await sessions.mergeBatch(mgrId, [wA, wB]);
     check("(e2e) ok:true", result.ok === true);
     check("(e2e) both branches landed, none fell back", result.landed.length === 2 && result.fallback.length === 0);
+    // THE DISCRIMINATING ASSERTION for the service-layer plumbing fix: reverting sessions/service.ts's
+    // `landed.push` back to omitting the field makes this FAIL while every git/batch-merge.ts-level test
+    // (test/batch-merge.mjs) stays green, since that layer computes the field correctly either way.
+    const landedA = result.landed.find((l) => l.branch === a.branch);
+    const landedB = result.landed.find((l) => l.branch === b.branch);
+    check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:0 for the clean branch", landedA?.strippedTrailerCount === 0);
+    check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:1 for the trailer-carrying branch", landedB?.strippedTrailerCount === 1);
 
     const page = db.listGateEvents({ projectId: projId, limit: 50, offset: 0 });
     const row = page.items.find((r) => r.opId != null && page.items.filter((x) => x.opId === r.opId).length === 1) ?? page.items[0];

@@ -120,6 +120,35 @@ export function nonInteractiveEnv(): Record<string, string | undefined> {
 /** A structured outcome the UI can render — never a thrown 500 for an EXPECTED git failure. */
 export type GitWriteResult<T = Record<string, never>> = ({ ok: true } & T) | { ok: false; error: string };
 
+/** Matches one `Claude-Session:` trailer line — the Claude Code harness's own attribution line, which
+ *  this project's CLAUDE.md forbids on mainline commits (a Loom worker's per-task squash merge auto-
+ *  appends `Loom-Worker-Branch:` instead; that rule has no way to reach a message this class of caller
+ *  composes). {@link GitWriter.commit} (below) and the batch cherry-pick landing path
+ *  (`git/batch-merge.ts`, which imports {@link stripClaudeSessionTrailer} from here rather than
+ *  duplicating it) both land a caller-composed message with no other filtering, so this is the ONE place
+ *  either of them strips it. Keyed on this EXACT trailer name only — never touches
+ *  `Loom-Worker-Branch`/`Loom-Worker-Base`/`Loom-Worker-PathSet`, which are load-bearing for
+ *  `scanMergedCommitMap`/path-set verification (git/worktrees.ts); a filter that over-strips would pass
+ *  every obvious check while silently breaking ship-state resolution. */
+const CLAUDE_SESSION_TRAILER_LINE = /^Claude-Session:\s*\S/;
+
+/**
+ * Removes every `Claude-Session:` trailer line from `message`, collapsing the double blank line the
+ * removal leaves behind (mirrors this project's own validated `sed '/^Claude-Session: /d' | cat -s`
+ * history-rewrite recipe). Returns `{ message, stripped }` rather than mutating silently — `stripped`
+ * lets a caller surface a non-blocking warning instead of the removal being invisible to whoever wrote
+ * the trailer in good faith (their own harness told them to).
+ */
+export function stripClaudeSessionTrailer(message: string): { message: string; stripped: boolean } {
+  const lines = message.split("\n");
+  if (!lines.some((l) => CLAUDE_SESSION_TRAILER_LINE.test(l))) return { message, stripped: false };
+  const cleaned = lines
+    .filter((l) => !CLAUDE_SESSION_TRAILER_LINE.test(l))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+  return { message: cleaned, stripped: true };
+}
+
 /** First line of a git/simple-git error — the human-readable reason (dirty tree, no upstream, etc.).
  *  Exported so the READ side (gateway/server.ts's git/log, git/branches, and the reference/registered
  *  repo log routes) can surface the same clean, cause-naming message on a genuine failure instead of
@@ -353,6 +382,13 @@ export class GitWriter {
   ): Promise<GitWriteResult<{ hash: string; warning?: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
     const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
+    const { message: cleanedMessage, stripped } = stripClaudeSessionTrailer(message);
+    // Re-check emptiness AFTER the strip — a message consisting of nothing but a Claude-Session trailer
+    // passes the guard above but strips to "", which would otherwise reach `git.commit("")` and fail with
+    // git's own "Aborting commit due to empty commit message" instead of this writer's clean, structured
+    // "commit message required" — same shape as the original guard, just evaluated on what will actually
+    // be committed.
+    if (!cleanedMessage.trim()) return { ok: false, error: "commit message required" };
     return this.withVaultPauseLease(() =>
       withCanonicalIndexLock(this.repoPath, async () => {
         try {
@@ -362,9 +398,13 @@ export class GitWriter {
           if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
           await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
-          const warning = this.oversizedStagedWarning(staged.files, maxFileBytes);
-          const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
+          const oversizedWarning = this.oversizedStagedWarning(staged.files, maxFileBytes);
+          const res = await withTimeout(git.commit(cleanedMessage.trim()), this.localMs, "git commit");
           const hash = res.commit || (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
+          const strippedWarning = stripped
+            ? "Removed a Claude-Session: trailer from the commit message — this project's mainline commits don't carry harness attribution."
+            : undefined;
+          const warning = [oversizedWarning, strippedWarning].filter((w): w is string => !!w).join(" ") || undefined;
           return warning ? { ok: true, hash, warning } : { ok: true, hash };
         } catch (e) {
           return { ok: false, error: gitError(e) };

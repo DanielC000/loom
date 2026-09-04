@@ -5,7 +5,7 @@ import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER befor
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { GitWriter, nonInteractiveEnv } from "../dist/git/writer.js";
+import { GitWriter, nonInteractiveEnv, stripClaudeSessionTrailer } from "../dist/git/writer.js";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -28,6 +28,30 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("LANG=C overrides an inherited non-English LANG", overridden.LANG === "C");
   if (savedLcAll === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = savedLcAll;
   if (savedLang === undefined) delete process.env.LANG; else process.env.LANG = savedLang;
+}
+
+// 0b. stripClaudeSessionTrailer (card b7f965d2) — pure function, no repo needed. Positive-controlled: a
+//     message WITH the trailer must actually lose it; a message WITHOUT one must round-trip unchanged
+//     (byte-identical — proves the function is not silently rewriting messages that never had one).
+{
+  const withTrailer = "fix(x): summary\n\nBody paragraph one.\n\nClaude-Session: https://claude.ai/code/session_ABC123\n\nLoom-Worker-Branch: loom/deadbeef\n";
+  const r = stripClaudeSessionTrailer(withTrailer);
+  check("stripClaudeSessionTrailer: reports stripped:true when the trailer is present", r.stripped === true);
+  check("stripClaudeSessionTrailer: removes the Claude-Session line", !r.message.includes("Claude-Session"));
+  check("stripClaudeSessionTrailer: preserves Loom-Worker-Branch (never touches it)", r.message.includes("Loom-Worker-Branch: loom/deadbeef"));
+  check("stripClaudeSessionTrailer: preserves the body prose", r.message.includes("Body paragraph one."));
+  check("stripClaudeSessionTrailer: collapses the doubled blank line the removal leaves behind (no 3+ consecutive newlines)", !/\n{3,}/.test(r.message));
+
+  const noTrailer = "fix(x): summary\n\nBody paragraph one.\n\nLoom-Worker-Branch: loom/deadbeef\n";
+  const r2 = stripClaudeSessionTrailer(noTrailer);
+  check("stripClaudeSessionTrailer: reports stripped:false when absent", r2.stripped === false);
+  check("stripClaudeSessionTrailer: byte-identical when there is nothing to strip (negative control)", r2.message === noTrailer);
+
+  // NEGATIVE CONTROL on the matcher itself: a line that merely CONTAINS the substring "Claude-Session"
+  // mid-sentence (not as a trailer key at line-start) must NOT be treated as the trailer.
+  const substringOnly = "docs: mention Claude-Session trailers in passing\n\nSome text about Claude-Session handling.\n";
+  const r3 = stripClaudeSessionTrailer(substringOnly);
+  check("stripClaudeSessionTrailer: a mid-line mention (not a trailer) is left alone", r3.stripped === false && r3.message === substringOnly);
 }
 
 const root = fs.realpathSync(mkdtempManaged("loom-git-writer-"));
@@ -166,6 +190,43 @@ const w = new GitWriter(repo);
   fs.writeFileSync(path.join(repo, "small.txt"), "small\n");
   const smallCommit = await w.commit("add a normal-sized file", { maxFileBytes: 1024 });
   check("normal-sized commit carries no warning", smallCommit.ok === true && smallCommit.warning === undefined);
+
+  // 11. Claude-Session trailer stripping (card b7f965d2) — GitWriter.commit() is the DOMINANT leak path
+  //     (git_commit MCP tool + any other direct caller land a message verbatim otherwise); this asserts
+  //     the strip happens end-to-end, not just in the pure-function unit tests above.
+  fs.writeFileSync(path.join(repo, "trailer.txt"), "carries an attribution trailer\n");
+  const withTrailerMsg = "fix(daemon): a real change\n\nExplains why.\n\nClaude-Session: https://claude.ai/code/session_XYZ789\n";
+  const trailerCommit = await w.commit(withTrailerMsg);
+  check("commit() with a Claude-Session trailer still succeeds", trailerCommit.ok === true && typeof trailerCommit.hash === "string");
+  // THE DISCRIMINATING ASSERTION — must FAIL against pre-fix code, which lands `message.trim()` verbatim.
+  check("commit() strips the Claude-Session trailer from the landed message", !git("log", "-1", "--pretty=%B").includes("Claude-Session"));
+  check("commit() preserves the rest of the message (subject + body)", git("log", "-1", "--pretty=%B").includes("fix(daemon): a real change") && git("log", "-1", "--pretty=%B").includes("Explains why."));
+  check("commit() surfaces a warning naming the strip", trailerCommit.warning?.includes("Claude-Session") === true);
+
+  // Negative control: a message with NO trailer lands byte-identical to today — the strip must not touch
+  // an ordinary message it has nothing to remove from.
+  fs.writeFileSync(path.join(repo, "no-trailer.txt"), "ordinary commit, no trailer\n");
+  const plainCommit = await w.commit("fix(daemon): an ordinary commit with no trailer");
+  check("commit() with no trailer carries no strip warning", plainCommit.ok === true && plainCommit.warning === undefined);
+  check("commit() with no trailer lands the message unchanged", git("log", "-1", "--pretty=%B").trim() === "fix(daemon): an ordinary commit with no trailer");
+
+  // Loom-Worker-* trailers must SURVIVE — the strip is keyed on the exact "Claude-Session:" name only.
+  fs.writeFileSync(path.join(repo, "worker-trailer.txt"), "carries a real Loom-Worker-Branch trailer\n");
+  const withBothMsg = "fix(daemon): worker-shaped commit\n\nBody.\n\nClaude-Session: https://claude.ai/code/session_KEEP000\n\nLoom-Worker-Branch: loom/abc123\n";
+  const bothCommit = await w.commit(withBothMsg);
+  const bothBody = git("log", "-1", "--pretty=%B");
+  check("commit() strips Claude-Session even alongside a real Loom-Worker-Branch trailer", bothCommit.ok === true && !bothBody.includes("Claude-Session"));
+  check("commit() NEVER strips Loom-Worker-Branch — only the exact Claude-Session key", bothBody.includes("Loom-Worker-Branch: loom/abc123"));
+
+  // A message consisting of NOTHING but the trailer strips to empty — must be the writer's own clean
+  // "commit message required" refusal, not a raw git failure ("Aborting commit due to empty commit
+  // message") reaching the caller as an opaque `gitError()` string. THE DISCRIMINATING ASSERTION: fails
+  // against code that only checks emptiness BEFORE stripping.
+  const headBeforeTrailerOnly = git("rev-parse", "HEAD").trim();
+  fs.writeFileSync(path.join(repo, "trailer-only.txt"), "would-be committed by a trailer-only message\n");
+  const trailerOnlyCommit = await w.commit("Claude-Session: https://claude.ai/code/session_ONLYTRAILER");
+  check("commit() with a message that strips to empty is refused, not passed to git", trailerOnlyCommit.ok === false && trailerOnlyCommit.error === "commit message required");
+  check("commit() with a message that strips to empty did NOT commit — HEAD unchanged", git("rev-parse", "HEAD").trim() === headBeforeTrailerOnly);
 }
 // root's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).

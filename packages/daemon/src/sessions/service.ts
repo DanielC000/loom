@@ -16058,7 +16058,7 @@ export class SessionService {
         return { ok: false, landed: [], fallback, reason: result.reason };
       }
 
-      const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string }[] = [];
+      const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[] = [];
       for (const lb of result.landed) {
         const worker = this.db.getSession(lb.workerSessionId);
         if (!worker) continue;
@@ -16068,7 +16068,10 @@ export class SessionService {
           worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
           projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
         });
-        landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha });
+        // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
+        // Claude-Session trailer that got stripped before landing — surface it to the calling manager
+        // rather than leaving it as a console.warn only the host log would show.
+        landed.push({ workerSessionId: lb.workerSessionId, taskId: lb.taskId, branch: lb.branch, sha: lb.sha, strippedTrailerCount: lb.strippedTrailerCount });
       }
       const droppedFallback = result.dropped.map((d) => ({ workerSessionId: d.workerSessionId, reason: d.reason }));
       const fallback = await runFallback([

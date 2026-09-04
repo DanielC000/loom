@@ -1,7 +1,7 @@
 import type { SimpleGit } from "simple-git";
 import { withTimeout, boundedSimpleGit } from "./bounded.js";
 import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } from "./worktrees.js";
-import { nonInteractiveEnv } from "./writer.js";
+import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 
 /**
  * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each on main.
@@ -166,6 +166,12 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  `sha` names the commit that already carries its content. Mirrors the solo squash path's own
    *  `ALREADY_MERGED` classification. */
   noop?: boolean;
+  /** How many of this branch's OWN commits carried a `Claude-Session:` trailer that
+   *  {@link stripClaudeSessionTrailer} removed before landing — 0 when none did (the common case).
+   *  Non-zero is worth surfacing rather than silently mutating a worker's message: it means a worker
+   *  put harness attribution on its own commit, against this project's CLAUDE.md, and this landing path
+   *  is what caught it. Omitted (not present) on a `noop` landing, which reuses an already-landed sha. */
+  strippedTrailerCount?: number;
 }
 
 export interface BatchDroppedBranch extends BatchCandidate {
@@ -200,6 +206,7 @@ interface LandResult {
   noop?: boolean;
   reason?: string;
   emptyKind?: MergeEmptyKind;
+  strippedTrailerCount?: number;
 }
 
 /**
@@ -207,12 +214,20 @@ interface LandResult {
  * per-branch assembly step card 6801c0a1 rewrote (see this file's own header doc for the full rationale).
  *
  * Mechanism: cherry-pick every commit in `merge-base(HEAD, branch)..branch`, OLDEST FIRST, each as its own
- * commit (never squashed, never a merge commit). The LAST (tip) commit gets `Loom-Worker-Branch: <branch>`
- * PLUS `Loom-Worker-Base`/`Loom-Worker-PathSet` (card d62dad73 phase 2) appended to its message, added via a
- * follow-up `git commit --amend` once the tip's real sha exists — every earlier commit from this branch
- * lands with its ORIGINAL message, unmodified. See the header doc's "WHY THE DIGEST IS COMPUTED FROM THE
- * LANDED RANGE..." section for why the base must be `batchHeadBefore` (this branch's own pre-cherry-pick
- * batch tip), never the branch's own pre-landing diff.
+ * commit (never squashed, never a merge commit), ALWAYS via `--no-commit` so its message passes through
+ * {@link stripClaudeSessionTrailer} (card b7f965d2) before the one manual `git commit` that lands it —
+ * this project's CLAUDE.md forbids that harness attribution trailer on EVERY worker commit, not just
+ * whichever one happens to end a branch, and this is the only path that lands a worker's own commit
+ * bodies verbatim, so it's the only place that trailer can otherwise reach mainline unfiltered (the solo
+ * squash path, by contrast, never touches a worker's own commit bodies at all — see mergeBranchLocked).
+ * Every commit's original author identity (name/email/date) is read and passed explicitly to that manual
+ * commit, matching what cherry-pick's own auto-commit would have preserved. The LAST (tip) commit
+ * ADDITIONALLY gets `Loom-Worker-Branch: <branch>` appended, PLUS `Loom-Worker-Base`/`Loom-Worker-PathSet`
+ * (card d62dad73 phase 2) via a follow-up `git commit --amend` once the tip's real sha exists — every
+ * earlier commit from this branch lands with its (trailer-stripped) message and nothing else appended.
+ * See the header doc's "WHY THE DIGEST IS COMPUTED FROM THE LANDED RANGE..." section for why the PathSet
+ * base must be `batchHeadBefore` (this branch's own pre-cherry-pick batch tip), never the branch's own
+ * pre-landing diff.
  *
  * ALL-OR-NOTHING PER BRANCH: if ANY commit in the range fails to cherry-pick (a real conflict, or any
  * other failure), the cherry-pick is aborted and the batch worktree is HARD-RESET back to exactly where it
@@ -307,15 +322,16 @@ async function landBranchCommitsIndividually(
     try { await withTimeout(git.raw(["reset", "--hard", batchHeadBefore]), timeoutMs, "git reset --hard (batch land rollback)"); } catch { /* best-effort */ }
   };
 
+  let strippedTrailerCount = 0;
   for (let i = 0; i < commitShas.length; i++) {
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
-    // Every commit except the tip cherry-picks (and auto-commits) with NO message change — the worker's
-    // own subject/body lands verbatim. The tip cherry-picks with `--no-commit` so the trailer can be
-    // appended to its message before the one deliberate manual commit call below.
+    // EVERY commit cherry-picks with `--no-commit` (never auto-commits) so its message passes through
+    // `stripClaudeSessionTrailer` before the one manual `git commit` that lands it — see this function's
+    // own doc for why that can't be limited to just the tip.
     try {
       await withTimeout(
-        git.raw([...identityArgs, "cherry-pick", ...(isLast ? ["--no-commit"] : []), sha]),
+        git.raw([...identityArgs, "cherry-pick", "--no-commit", sha]),
         timeoutMs, "git cherry-pick (batch land)",
       );
     } catch (e) {
@@ -328,10 +344,9 @@ async function landBranchCommitsIndividually(
         ? { ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` }
         : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
     }
-    if (!isLast) continue;
-    // Tip commit: append the trailer to its ORIGINAL message and commit manually, preserving the original
-    // author (name/email/date) explicitly — a bare `git commit` here would otherwise stamp the CURRENT
-    // committer identity as author too, losing the worker's own authorship.
+    // Read the ORIGINAL message + author identity (name/email/date), then commit manually — preserving
+    // authorship explicitly, since a bare `git commit` here would otherwise stamp the CURRENT committer
+    // identity as author too, losing the worker's own authorship (true for every commit, not just the tip).
     let originalMessage: string;
     let authorName: string;
     let authorEmail: string;
@@ -345,16 +360,19 @@ async function landBranchCommitsIndividually(
       await rollback();
       return { ok: false, reason: `${branch}: failed to read original commit metadata for ${sha.slice(0, 7)}: ${(e as Error).message}` };
     }
-    const finalMessage = `${originalMessage}\n\nLoom-Worker-Branch: ${branch}\n`;
+    const { message: cleanedMessage, stripped } = stripClaudeSessionTrailer(originalMessage);
+    if (stripped) strippedTrailerCount++;
+    const finalMessage = isLast ? `${cleanedMessage}\n\nLoom-Worker-Branch: ${branch}\n` : `${cleanedMessage}\n`;
     try {
       await withTimeout(
         git.raw([...identityArgs, "commit", "--author", `${authorName} <${authorEmail}>`, "--date", authorDate, "-m", finalMessage]),
-        timeoutMs, "git commit (batch land, tip)",
+        timeoutMs, "git commit (batch land)",
       );
     } catch (e) {
       await rollback();
-      return { ok: false, reason: `${branch}: commit failed while landing tip commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
+      return { ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
     }
+    if (!isLast) continue;
     // Stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` via a follow-up amend (card d62dad73 phase 2),
     // computed from the LANDED range (batchHeadBefore..the commit just created) — NOT from this branch's
     // own pre-landing diff, which can genuinely differ with no conflict involved (a clean rename-following
@@ -384,10 +402,16 @@ async function landBranchCommitsIndividually(
     }
   }
 
+  if (strippedTrailerCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] landBranchCommitsIndividually: stripped a Claude-Session: trailer from ${strippedTrailerCount} ` +
+      `of ${branch}'s own commit(s) before landing — this project's mainline commits don't carry harness attribution`);
+  }
+
   try {
     const landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
     const landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
-    return { ok: true, sha: landedSha, subject: landedSubject };
+    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount };
   } catch (e) {
     return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
   }
@@ -432,7 +456,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount });
   }
   return { landed, dropped };
 }

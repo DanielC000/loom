@@ -542,6 +542,77 @@ try {
     check("(7e) verification still resolves to \"pathset\" post-deletion despite the upstream rename", board?.verification === "pathset");
   }
 
+  // ── (8) Claude-Session TRAILER STRIPPING (card b7f965d2) — this is the batch cherry-pick path's own
+  //     exposure: it lands a worker's own commit bodies verbatim, so a worker's own (doctrine-violating)
+  //     `Claude-Session:` trailer would otherwise reach mainline unfiltered on EVERY commit it touched,
+  //     not just a branch's tip. Covers a multi-commit branch where every commit carries the trailer, a
+  //     branch with none (byte-identical continuity), and that Loom-Worker-* trailers always survive. ──
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-trailer-${sfx}`);
+    makeRepo(repo);
+    // Built via separate -m paragraphs per commit (not one embedded-newline string) — real newlines
+    // inside a single quoted execSync arg are a cmd.exe hazard on Windows (same reason (7d)'s forged
+    // amend above builds its message the same way).
+    const taintedTaskId = `bm-task-trailer-tainted-${sfx}`;
+    const { worktreePath: taintedWt, branch: taintedBranch } = await createWorktree(repo, projId, taintedTaskId);
+    fs.writeFileSync(path.join(taintedWt, "trailer-1.txt"), "t1\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "feat(test): trailer commit 1" -m "Claude-Session: https://claude.ai/code/session_FAKE001"`, { cwd: taintedWt });
+    fs.writeFileSync(path.join(taintedWt, "trailer-2.txt"), "t2\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "fix(test): trailer commit 2" -m "Body text." -m "Claude-Session: https://claude.ai/code/session_FAKE002"`, { cwd: taintedWt });
+    const tainted = { workerSessionId: `bm-wkr-trailer-tainted-${sfx}`, taskId: taintedTaskId, branch: taintedBranch, taskTitle: "feat(test): trailer-tainted", worktreePath: taintedWt };
+    check("(8) precondition: both of the tainted branch's own commits carry a Claude-Session trailer before landing",
+      git(taintedWt, `log --format=%B ${taintedBranch}`).split("Claude-Session").length - 1 === 2);
+    // Capture the SOURCE author dates before landing — %at (epoch seconds), oldest-first, matching the
+    // landed order below. This is the newly-introduced mechanism for a NON-tip commit specifically: it
+    // previously got its date implicitly from cherry-pick's own auto-commit, and now goes through an
+    // explicit `--date` on a manual `git commit` instead — precisely what would regress silently.
+    // `--reverse ${taintedBranch}` walks the WHOLE history reachable from the branch (init + both tainted
+    // commits) — slice to the last 2 (oldest-first among just the new ones) rather than range-scoping
+    // against a not-yet-captured base sha.
+    const taintedSourceDates = git(taintedWt, `log --reverse --format=%at ${taintedBranch}`).split("\n").slice(-2);
+    check("(8) precondition: captured 2 source author dates from the tainted branch", taintedSourceDates.length === 2);
+    const clean = await cutBranch(repo, "trailer-clean", "trailer-clean.txt", "no trailer here\n");
+    const baseMainSha = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-trailer-${sfx}`);
+
+    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [tainted, clean], passGate);
+    check("(8) precondition: both branches landed", result.ok === true && result.landed.length === 2 && result.dropped.length === 0);
+    const allBodies = git(repo, `log --reverse --format=%B ${baseMainSha}..HEAD`);
+    // THE DISCRIMINATING ASSERTION — must FAIL against pre-fix code (which cherry-picks non-tip commits
+    // via auto-commit, landing the worker's original message, trailer and all).
+    check("(8) NO landed commit carries a Claude-Session trailer, tainted branch included", !allBodies.includes("Claude-Session"));
+    check("(8) the tainted branch's tip STILL carries its Loom-Worker-Branch trailer (strip never touches it)",
+      allBodies.includes(`Loom-Worker-Branch: ${tainted.branch}`));
+    check("(8) the tainted branch's non-tip commit body text survives (only the trailer line is gone)",
+      allBodies.includes("Body text."));
+    const taintedLanded = result.landed.find((l) => l.branch === tainted.branch);
+    const cleanLanded = result.landed.find((l) => l.branch === clean.branch);
+    check("(8) landed result reports strippedTrailerCount:2 for the tainted branch (both its commits)",
+      taintedLanded?.strippedTrailerCount === 2);
+    check("(8) landed result reports strippedTrailerCount:0 for the clean branch (nothing to strip)",
+      cleanLanded?.strippedTrailerCount === 0);
+
+    // Author identity AND date must still be preserved on EVERY commit, not just the tip — the strip now
+    // routes every commit (not only the tip) through a manual `git commit --author ... --date ...`.
+    const taintedShas = git(repo, `log --reverse --format=%H ${baseMainSha}..HEAD`).split("\n").slice(0, 2);
+    taintedShas.forEach((sha, i) => {
+      check(`(8) commit ${sha.slice(0, 7)} keeps the worker's own author identity (not the batch identity's)`,
+        git(repo, `log -1 --format=%an ${sha}`) === "bm" && git(repo, `log -1 --format=%ae ${sha}`) === "bm@loom");
+      // THE DISCRIMINATING ASSERTION for the --date round-trip specifically — a non-tip commit used to get
+      // its date implicitly from cherry-pick's auto-commit; it now goes through an explicit `--date`
+      // instead, which could silently drop or reset it if that flag were ever wrong/missing.
+      check(`(8) commit ${sha.slice(0, 7)} keeps the worker's own original author DATE (%at round-trips through --date)`,
+        git(repo, `log -1 --format=%at ${sha}`) === taintedSourceDates[i]);
+    });
+
+    // NEGATIVE CONTROL: a branch that never carried the trailer still lands normally — same shape section
+    // (1)'s GREEN case already proves for an untainted branch, just with the strip in the pipeline now.
+    const cleanBody = git(repo, `log -1 --format=%B ${cleanLanded.sha}`);
+    check("(8) the clean branch's landed body still carries its subject", cleanBody.includes("trailer-clean"));
+    check("(8) the clean branch's landed body still carries its Loom-Worker-Branch trailer", cleanBody.includes(`Loom-Worker-Branch: ${clean.branch}`));
+    check("(8) the clean branch's landed body carries no Claude-Session trailer (never had one)", !cleanBody.includes("Claude-Session"));
+  }
+
   // ── fastForwardCanonicalMain: a no-op batch (nothing landed on top) is a safe success, not a refusal ──
   {
     const repo = path.join(os.tmpdir(), `loom-bm-noop-${sfx}`);
