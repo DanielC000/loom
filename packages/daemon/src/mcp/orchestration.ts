@@ -52,6 +52,15 @@ import { INTENT_MAX_LEAD_MS } from "../orchestration/gate-intent.js";
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
+/** Project a row down to exactly the fields named in `keys` — same shape as entityRowFields.ts's own
+ *  local `pickFields` helper (not exported there, so this is a small standalone copy, not a shared
+ *  import) — generic so `out[k] = row[k]` type-checks against a homomorphic `Pick<T, K>`. */
+function pickKeys<T, K extends keyof T>(row: T, keys: readonly K[]): Pick<T, K> {
+  const out = {} as Pick<T, K>;
+  for (const k of keys) out[k] = row[k];
+  return out;
+}
+
 /**
  * Card 615967c5 — the cached-verdict-legibility fix: `AttachResult.freshMint` (set by PendingOpRegistry
  * ONLY for a genuine fresh mint, never a cache hit — see that class's own doc) is registry-shaped
@@ -2851,54 +2860,41 @@ export class OrchestrationMcpRouter {
     // straight from `db.getSession()` — into its tool response. That's an OPT-OUT projection: any column
     // added to the `sessions` table in future reaches the calling agent automatically, with no code
     // change and no review step (contrast `fleetView` just below, which already names every field it
-    // returns explicitly and never spreads a raw row — this closes the one place that didn't). This
-    // helper names every field `toSession` (db.ts) actually sets on a `Session` — i.e. exactly what
-    // `...w` was already emitting — so swapping it in is BEHAVIOUR-PRESERVING against today's row shape,
-    // not a trim; the fields below make the NEXT addition to `Session` a deliberate one-line choice here
-    // instead of an automatic one. `pendingMerge` is deliberately omitted: `toSession` never sets it (it's
-    // projected in from the in-memory PendingOpRegistry elsewhere), and the `worker_status` handler always
-    // overrides it with the live-computed value regardless of what `...w` would have carried.
-    const projectSessionRowFields = (w: Session): Omit<Session, "pendingMerge"> => ({
-      id: w.id,
-      projectId: w.projectId,
-      agentId: w.agentId,
-      engineSessionId: w.engineSessionId,
-      title: w.title,
-      cwd: w.cwd,
-      processState: w.processState,
-      resumability: w.resumability,
-      busy: w.busy,
-      createdAt: w.createdAt,
-      lastActivity: w.lastActivity,
-      lastError: w.lastError,
-      role: w.role,
-      parentSessionId: w.parentSessionId,
-      taskId: w.taskId,
-      worktreePath: w.worktreePath,
-      branch: w.branch,
-      reviewBaseSha: w.reviewBaseSha,
-      repoKey: w.repoKey,
-      gen: w.gen,
-      recycledFrom: w.recycledFrom,
-      ctxInputTokens: w.ctxInputTokens,
-      ctxTurns: w.ctxTurns,
-      turnSeq: w.turnSeq,
-      ctxUpdatedAt: w.ctxUpdatedAt,
-      model: w.model,
-      rateLimitedUntil: w.rateLimitedUntil,
-      rateLimitDeadline: w.rateLimitDeadline,
-      browserTesting: w.browserTesting,
-      documentConversion: w.documentConversion,
-      restrictedTools: w.restrictedTools,
-      noCommit: w.noCommit,
-      skills: w.skills,
-      connections: w.connections,
-      vaultWrite: w.vaultWrite,
-      companionLeadMode: w.companionLeadMode,
-      capabilities: w.capabilities,
-      archivedAt: w.archivedAt,
-      scheduledSpawn: w.scheduledSpawn,
-    });
+    // returns explicitly and never spreads a raw row — this closes the one place that didn't). `pendingMerge`
+    // is deliberately omitted: `toSession` never sets it (it's projected in from the in-memory
+    // PendingOpRegistry elsewhere), and the `worker_status` handler always overrides it with the
+    // live-computed value regardless of what `...w` would have carried.
+    //
+    // Card 2961dd3b: the field-by-field object literal this helper used to return was BEHAVIOUR-PRESERVING
+    // against today's row shape, but its claimed compile-time guarantee — "the next addition to `Session`
+    // is a deliberate one-line choice here, not an automatic one" — held only for `Session`'s REQUIRED
+    // fields. TypeScript does not force an object literal to name an OPTIONAL property, and `Session` has
+    // TWENTY-EIGHT of them (role?, parentSessionId?, taskId?, …), so a new `newThing?: X` on `Session`
+    // would have compiled fine here while silently dropping from every consumer (`worker_status`,
+    // `worker_list`, …) with no build error and no test failure. `SESSION_ROW_FIELDS` below closes that
+    // gap the same way entityRowFields.ts's `PROJECT_FIELDS`/`AGENT_FIELDS`/`PROFILE_FIELDS` do:
+    // `Record<keyof T, 1>` forces EVERY key, required and optional alike, so a field added to `Session` in
+    // `@loom/shared` now breaks the build at this sentinel until it's a deliberate, reviewed addition.
+    // ⚠️ THE SENTINEL VALUE IS THE NUMBER `1`, NOT THE BOOLEAN LITERAL — this file compiles into
+    // `dist/mcp/*.js`, the same directory `test/agent-runs-keys.mjs` (G3) textually scans for a literal
+    // `endpoint:\s*true` (see entityRowFields.ts's own doc comment for the full mechanism). `Session`
+    // carries no `endpoint` field today, but the numeric marker costs nothing and keeps this file immune
+    // to the same class of collision regardless.
+    const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge">, 1> = {
+      id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
+      resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
+      parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,
+      gen: 1, recycledFrom: 1, ctxInputTokens: 1, ctxTurns: 1, turnSeq: 1, ctxUpdatedAt: 1,
+      model: 1, rateLimitedUntil: 1, rateLimitDeadline: 1, browserTesting: 1, documentConversion: 1,
+      restrictedTools: 1, noCommit: 1, skills: 1, connections: 1, vaultWrite: 1, companionLeadMode: 1,
+      capabilities: 1, archivedAt: 1, scheduledSpawn: 1,
+    };
+    const SESSION_ROW_KEYS = Object.keys(SESSION_ROW_FIELDS) as (keyof Omit<Session, "pendingMerge">)[];
+
+    // ONE list, not two: the sentinel's own keys ARE the field list this projects, so there is nothing to
+    // keep in sync by hand. Behaviour-preserving against the prior object literal (same 39 keys).
+    const projectSessionRowFields = (w: Session): Omit<Session, "pendingMerge"> =>
+      pickKeys(w, SESSION_ROW_KEYS);
 
     const fleetView = async () => {
       const workers = db.listWorkers(managerSessionId).map((w) => {
