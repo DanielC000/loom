@@ -186,18 +186,20 @@ function commitSubjectsOnRepo(repoPath) {
  *  routes through the new abort-wired path under test; `kill:false` is today's only mechanism elsewhere
  *  in this codebase (bare `withTimeout`, no kill). `timeoutMs`/`killGraceMs` default to the fixture's
  *  own `TIMEOUT_MS`/`withTimeoutKillingChild`'s own default (`= ms`) — a caller overrides them only to
- *  manufacture the leg-2 positive control below (a race so tight the hook can't even start). Returns the
- *  settled elapsed ms (measured up to the wrapper's OWN settlement, NOT including the hookStarted poll
- *  below — see there for why those must stay separate), whether it rejected, the rejection's own message
- *  (so a caller can tell WHICH of withTimeoutKillingChild's two rejection paths actually fired — see the
- *  [green] path-1 check below for why this matters), and `hookStarted` (card e083c9b7 leg 2, refined by
- *  card 6799aa3b: whether the pre-commit hook's own start-marker was ever written — i.e. whether the
- *  hook, and thus the commit machinery, got a genuine chance to run — observed via a bounded, fail-fast
- *  POLL rather than a single synchronous check at the instant the wrapper settles, since a killed
- *  git.exe's own hook descendant can be orphaned and still catching up on its own process-spawn chain —
- *  see HOOK_STARTED_POLL_WINDOW_MS's own doc for why a single synchronous check can false-negative under
- *  host contention). */
-async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs }) {
+ *  manufacture the leg-2 controls below. `preAbort` (card 23cd388a): when true, the AbortController is
+ *  aborted SYNCHRONOUSLY before `git.raw()` is ever called, instead of relying on `timeoutMs` racing the
+ *  host's own git→sh→node spawn-chain speed — see the [setup] leg-2b control below for why this exists
+ *  and what it proves. Returns the settled elapsed ms (measured up to the wrapper's OWN settlement, NOT
+ *  including the hookStarted poll below — see there for why those must stay separate), whether it
+ *  rejected, the rejection's own message (so a caller can tell WHICH of withTimeoutKillingChild's
+ *  rejection paths actually fired — see the [green] path-1 check below, and the [setup] leg-2b control,
+ *  for why this matters), and `hookStarted` (card e083c9b7 leg 2, refined by card 6799aa3b: whether the
+ *  pre-commit hook's own start-marker was ever written — i.e. whether the hook, and thus the commit
+ *  machinery, got a genuine chance to run — observed via a bounded, fail-fast POLL rather than a single
+ *  synchronous check at the instant the wrapper settles, since a killed git.exe's own hook descendant can
+ *  be orphaned and still catching up on its own process-spawn chain — see HOOK_STARTED_POLL_WINDOW_MS's
+ *  own doc for why a single synchronous check can false-negative under host contention). */
+async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceMs, preAbort = false }) {
   const markerPath = hookStartMarkerPath(repo, message);
   try { fs.rmSync(markerPath, { force: true }); } catch { /* no prior marker for this message — fine */ }
   installSlowTalkingPreCommitHook(repo, markerPath);
@@ -206,6 +208,12 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
   if (kill) {
     const controller = new AbortController();
     const git = boundedSimpleGit(repo, timeoutMs, undefined, controller.signal);
+    // `preAbort`: abort BEFORE `git.raw()` is even called — not merely before awaiting it — so the
+    // signal is already aborted when simple-git's executor chain reaches its OWN `spawn.before` hook (see
+    // the [setup] leg-2b control below for the source citation this relies on). Aborting any later (e.g.
+    // right after calling `git.raw()` but before awaiting it) is NOT verified equivalent — this exact
+    // ordering is what was empirically confirmed 15/15 on both Linux and Windows.
+    if (preAbort) controller.abort();
     // GIT_ID_ARGV (not ambient identity — see its own doc): identity resolution runs BEFORE git invokes
     // the pre-commit hook at all, so on a host with no ambient git identity configured this commit would
     // otherwise fail near-instantly with "unable to auto-detect email address", never reaching the hook.
@@ -285,36 +293,71 @@ try {
       `NOT our confirmed path-1 kill by the new anchored assertion`, matchesNewAnchoredAssertion === false);
   }
 
-  // [setup] POSITIVE CONTROL for the [green] hookStarted assertion below (card e083c9b7 leg 2, the
+  // [setup] POSITIVE CONTROLS for the [green] hookStarted assertion below (card e083c9b7 leg 2, the
   // VACUOUS-PASS gap): "the commit never lands" can pass for the WRONG reason — the kill fired so early
   // that the pre-commit hook (and thus the commit machinery) never got a genuine chance to run, rather
-  // than because the kill stopped an in-flight commit. The `8e75ee20` worker reproduced this under
-  // 32-worker CPU saturation; the SAME underlying race — kill fires before the hook's own
-  // git→sh→node spawn chain completes — is reproducible WITHOUT artificial contention by making the
-  // kill-trigger timeout tight enough that no real host can win that spawn chain in time. MEASURED on
-  // the authoring host (a throwaway sweep of this exact attemptCommit path, n=8 trials/point, not part
-  // of the committed suite): hookStarted was 0/8 at timeoutMs<=20, 5/8 at 30, and 8/8 at timeoutMs>=50 —
-  // i.e. the spawn-chain floor sits somewhere in [20,50)ms here, so a 5ms trigger sits comfortably below
-  // it, not a close race. Re-run over 5/5 attempts at timeoutMs=5 (this exact positive control, repeated
-  // 5 times) also came back hookStarted:false every time. This is ONE host's measurement, not a
-  // cross-host guarantee — if it ever proves too tight elsewhere, widen this value, not the reasoning.
-  // [MEASURED against the OLD synchronous-check implementation, pre-card-6799aa3b — still the right
-  // reasoning for THIS control: a 5ms trigger fires before git even reaches the hook-invocation step, so
-  // the hook process tree is never spawned at all, and no amount of the NEW polling (below) can find a
-  // marker that nothing ever wrote. The floor numbers describe write-completion timing for an
-  // ALREADY-spawned hook, which is a different question from whether the hook was spawned in the first
-  // place — polling only helps the former.]
-  // `killGraceMs` is set generously here (unlike the real [green] run) because this control isn't
-  // testing WHICH rejection path fires, only that the run rejects at all and that the hook never
-  // started.
+  // than because the kill stopped an in-flight commit. Split into two legs (card 23cd388a), each proving
+  // a DIFFERENT thing — do not collapse them back into one:
+  //
+  // LEG 2a — exercises `withTimeoutKillingChild`'s OWN kill path (the mechanism the real [green] run
+  // below actually uses): a 5ms kill-trigger that races the host's git→sh→node spawn chain. This is the
+  // original `8e75ee20`/`e083c9b7` mechanism, UNCHANGED — MEASURED on the authoring host (a throwaway
+  // sweep of this exact attemptCommit path, n=8 trials/point, not part of the committed suite):
+  // hookStarted was 0/8 at timeoutMs<=20, 5/8 at 30, and 8/8 at timeoutMs>=50 — i.e. the spawn-chain
+  // floor sits somewhere in [20,50)ms on THAT (Windows) host, so a 5ms trigger sat comfortably below it.
+  // CARD 23cd388a: on Linux this floor is apparently well under 5ms (native fork/exec, no conpty/AV
+  // overhead) — reproduced deterministically (4/4) on a real Linux host (WSL2 Ubuntu 22.04) — so leg 2a
+  // no longer proves the vacuity claim reliably cross-host. It still reliably proves the narrower thing
+  // it's kept for: the wrapper rejects near-instantly rather than hanging when killed this early. The
+  // vacuity claim itself moved to leg 2b below, which does NOT depend on host spawn speed.
+  //
+  // LEG 2b — a STRUCTURAL guarantee instead of a race: `preAbort` (see attemptCommit's own doc) aborts
+  // the AbortController BEFORE `git.raw()` is ever called. Verified at source, `simple-git@3.36.0`,
+  // `node_modules/.pnpm/simple-git@3.36.0/node_modules/simple-git/dist/cjs/index.js` — this is a
+  // VENDORED INTERNAL, not a documented public contract, hence the regression-detecting check below:
+  //   - `:1174-1180` (`abortPlugin`'s `spawn.before` hook) checks `signal.aborted` and, if already true,
+  //     calls `context.kill(new GitPluginError(..., "abort", "Abort already signaled"))`.
+  //   - `:1897-1912` (`gitResponse`/`_beforeSpawn`) runs that `spawn.before` hook and, if it set a
+  //     rejection, returns via `if (rejection) return done(...)` BEFORE `child_process.spawn()` (the next
+  //     line) is ever reached — so the child process is structurally never created at all, not merely
+  //     killed quickly after.
+  // EMPIRICALLY CONFIRMED (card 23cd388a worker_report, a standalone probe against this exact
+  // attemptCommit/preAbort path): 15/15 trials on WSL2 Linux AND 15/15 on Windows — sub-millisecond
+  // rejection every time, hookStarted false every time, on BOTH hosts. This is NOT the forbidden "widen
+  // the 5ms threshold until it happens to pass" move: it removes the race entirely rather than re-tuning
+  // its size, and — worth stating explicitly — the OLD escape hatch above ("if it ever proves too tight
+  // elsewhere, widen this value") does not even apply to what broke here: on Linux the hook starts
+  // FASTER, so a same-shaped fix would need to SHRINK the trigger, not widen it, which would only narrow
+  // the margin on the host (Windows) where it already works — there is no single `timeoutMs` value that
+  // is comfortably below both hosts' floors, which is exactly why this leg no longer uses a `timeoutMs`
+  // race at all.
+  // `preAbort` makes the wrapper's OWN killTimer irrelevant (the signal is already aborted, so it never
+  // gets a chance to fire) — the rejection instead comes from simple-git's pre-spawn short-circuit above,
+  // with message "Abort already signaled" (NOT wrapped in withTimeoutKillingChild's "(git child killed)"
+  // prefix, since `timedOut` is never set true — see bounded.ts). REGRESSION DETECTION (card 23cd388a
+  // condition 2): a future simple-git version could remove or reorder that internal `spawn.before` check,
+  // which would silently turn `preAbort` back into an ineffective no-op — worse, since the signal's
+  // single 'abort' event fires before ANY listener is attached, the child would then run to completion
+  // UNKILLED (see attemptCommit's own doc). The check below asserts the SPECIFIC "Abort already signaled"
+  // message, not just `rejected` — so that regression fails this test LOUDLY (a changed/absent message,
+  // or eventually the giveUpTimer's "...giving up (hung git child?)" if the child truly runs unkilled),
+  // instead of silently reverting to a probabilistic race or a hung/landed commit.
   {
-    const vacuous = await attemptCommit({ kill: true, message: "vacuous-control-commit", timeoutMs: 5, killGraceMs: 5000 });
-    check(`[setup] positive control (leg 2): a 5ms kill-trigger still rejects, not hangs — actual message: ` +
-      `"${vacuous.rejectMessage}"`, vacuous.rejected);
-    check(`[setup] positive control (leg 2): hookStarted stays false, even after polling up to ` +
-      `${HOOK_STARTED_POLL_WINDOW_MS}ms, when the kill fires before the hook's own spawn chain can even ` +
-      `begin — proving the [green] hookStarted assertion below is NOT vacuous itself: it CAN observe this ` +
-      `exact failure mode`, vacuous.hookStarted === false);
+    const raced = await attemptCommit({ kill: true, message: "vacuous-control-commit-raced", timeoutMs: 5, killGraceMs: 5000 });
+    check(`[setup] positive control (leg 2a): a 5ms kill-trigger still rejects, not hangs — actual message: ` +
+      `"${raced.rejectMessage}"`, raced.rejected);
+
+    const preAborted = await attemptCommit({ kill: true, message: "vacuous-control-commit-preabort", timeoutMs: 5000, killGraceMs: 300, preAbort: true });
+    const rejectedViaPreSpawnShortCircuit = /Abort already signaled$/.test(preAborted.rejectMessage ?? "");
+    check(`[setup] positive control (leg 2b): pre-aborting BEFORE git.raw() is called rejects via simple-` +
+      `git's pre-spawn short-circuit ("Abort already signaled"), NOT withTimeoutKillingChild's own killTimer ` +
+      `path — actual message: "${preAborted.rejectMessage}" — if this ever goes false, the vendored ` +
+      `short-circuit this control relies on has changed and needs re-diagnosis, not a wider trigger`,
+      rejectedViaPreSpawnShortCircuit);
+    check(`[setup] positive control (leg 2b): hookStarted stays false, even after polling up to ` +
+      `${HOOK_STARTED_POLL_WINDOW_MS}ms, because pre-aborting structurally prevents the child from ever ` +
+      `spawning — proving the [green] hookStarted assertion below is NOT vacuous itself: it CAN observe ` +
+      `this exact failure mode`, preAborted.hookStarted === false);
   }
 
   const result = await assertNeverWithControl({
