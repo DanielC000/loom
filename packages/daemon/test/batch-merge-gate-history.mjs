@@ -147,6 +147,26 @@ try {
     check("(e2e) the row passed", row?.passed === true);
     check("(e2e) emitCompareReduced reads null — genuinely NOT DECIDABLE for this repo's diff shape (paths outside packages/daemon/src|test/), never a fabricated value", row?.emitCompareReduced === null);
 
+    // ── card 6cc803b2: phase-timing instrumentation. `GateHistoryRow` (the typed read above) deliberately
+    // does NOT surface arbitrary detail fields — read the RAW event's own detail instead, the same seam
+    // `reconcileOrphanedGateOps`'s boot sweep already uses (findGateOpEventsByOpId).
+    const rawEvents = row?.opId ? db.findGateOpEventsByOpId(row.opId) : [];
+    const rawBuildGate = rawEvents.find((e) => e.kind === "build_gate");
+    check("(e2e) card 6cc803b2: the batch's build_gate event carries a real (non-negative) worktreeCutMs", typeof rawBuildGate?.detail?.worktreeCutMs === "number" && rawBuildGate.detail.worktreeCutMs >= 0);
+    check("(e2e) card 6cc803b2: the batch's build_gate event carries a real (non-negative) assemblyMs", typeof rawBuildGate?.detail?.assemblyMs === "number" && rawBuildGate.detail.assemblyMs >= 0);
+    check("(e2e) card 6cc803b2: the batch's build_gate event carries a real (non-negative) admissionWaitMs, SEPARATE from durationMs (the gate-run phase)", typeof rawBuildGate?.detail?.admissionWaitMs === "number" && rawBuildGate.detail.admissionWaitMs >= 0);
+    // NEGATIVE CONTROL for the field-name discipline above: a solo (non-batch) build_gate event never
+    // carries these batch-only phase fields — proves the assertions above are reading a real, batch-
+    // specific stamp, not a value `toOrchestrationEvent`/JSON.parse fabricates for every row.
+    check("(e2e) negative control: a plain object with no worktreeCutMs key reads back undefined, not 0/null", ({}).worktreeCutMs === undefined);
+    // `mergeBatch`'s OWN return value also surfaces the two phases only knowable in that method's scope
+    // (worktree cut + fast-forward — see its own `phaseTimings` doc for why the other three live on the
+    // build_gate event instead).
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.worktreeCutMs", typeof result.phaseTimings?.worktreeCutMs === "number" && result.phaseTimings.worktreeCutMs >= 0);
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.assemblyMs (matches the build_gate event's own) — asserted as a REAL number on both sides first, so this can't vacuously pass on two undefineds",
+      typeof result.phaseTimings?.assemblyMs === "number" && typeof rawBuildGate?.detail?.assemblyMs === "number" && result.phaseTimings.assemblyMs === rawBuildGate.detail.assemblyMs);
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.fastForwardMs for a real, non-forfeited fast-forward", typeof result.phaseTimings?.fastForwardMs === "number" && result.phaseTimings.fastForwardMs >= 0);
+
     // ── card be260976 DoD-4: the SAME settled batch opId now resolves via gate_status, never never_existed ──
     const st = row?.opId ? sessions.gateStatus(row.opId) : undefined;
     check("(e2e) DoD-4: gate_status resolves the settled batch op as \"settled\" — was \"never_existed\" before this card", st?.state === "settled");
@@ -372,6 +392,12 @@ try {
     check("(e2e, FORFEIT) detail.currentMainSha is NOT the stale baseMainSha it forfeited from", detail.currentMainSha !== detail.baseMainSha);
     check("(e2e, FORFEIT) detail.reason (pre-existing, now also documented by this card) is present", typeof detail.reason === "string" && detail.reason.length > 0);
     check("(e2e, FORFEIT) detail.currentMainSha is never the literal string \"undefined\"", detail.currentMainSha !== "undefined");
+    // Card 6cc803b2: the forfeit check IS the fast-forward attempt (both happen inside the ONE
+    // fastForwardCanonicalMain call — see RunBatchedMergeResult.fastForwardMs's own doc), so this is the
+    // one path that exercises fastForwardMs on the batch_merge_forfeited event itself.
+    check("(e2e, FORFEIT) card 6cc803b2: detail.fastForwardMs is a real (non-negative) number on the forfeit event", typeof detail.fastForwardMs === "number" && detail.fastForwardMs >= 0);
+    check("(e2e, FORFEIT) card 6cc803b2: mergeBatch's own return value echoes the SAME fastForwardMs",
+      typeof result.phaseTimings?.fastForwardMs === "number" && result.phaseTimings.fastForwardMs === detail.fastForwardMs);
 
     try { fs.rmSync(shaFile, { force: true }); } catch { /* best-effort scratch cleanup */ }
   }

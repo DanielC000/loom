@@ -607,6 +607,20 @@ export interface RunBatchedMergeResult {
    *  `baseMainSha` (card 456f63a4: this was computed by `fastForwardCanonicalMain` but previously
    *  dropped here instead of reaching the caller). */
   currentMainSha?: string;
+  /** Card 6cc803b2 — phase instrumentation: wall time of the {@link assembleBatchBranches} call above
+   *  (cherry-picking every candidate's own commit range onto the batch tip), ALWAYS present once that
+   *  call returns — set regardless of outcome (including the `landed.length === 0` early return), since
+   *  assembly genuinely ran either way. This is the ONE phase this instrumentation card measures that
+   *  predates gate admission entirely — `mergeBatch`'s own `build_gate` event (sessions/service.ts) only
+   *  ever fires once a gate is actually invoked, which never happens on a nothing-landed batch. */
+  assemblyMs?: number;
+  /** Card 6cc803b2 — phase instrumentation: wall time of the {@link fastForwardCanonicalMain} call below,
+   *  present iff that call was actually attempted (a green gate on a non-empty landed set) — `undefined`
+   *  on every earlier return (nothing landed, or a rejected/errored gate), where fast-forward is never
+   *  reached at all. Covers the forfeit-check read+compare AND, when not forfeited, the `--ff-only`
+   *  merge itself — both happen inside the ONE `fastForwardCanonicalMain` call this times, so there is no
+   *  finer split between "checking" and "advancing" to report. */
+  fastForwardMs?: number;
 }
 
 /**
@@ -621,20 +635,25 @@ export interface RunBatchedMergeResult {
  *
  * `runGate`'s third argument is the ACTUAL landed-branch count for this gate run — `landed.length` AFTER
  * any conflict/assembly drop-outs, never the requested K — so a caller stamping this onto the gate child's
- * env (card dbc6f660's `LOOM_GATE_BATCH_SIZE`) reports what the gate genuinely covered.
+ * env (card dbc6f660's `LOOM_GATE_BATCH_SIZE`) reports what the gate genuinely covered. Its FOURTH argument
+ * (card 6cc803b2) is the wall time {@link assembleBatchBranches} just took, handed through so the caller's
+ * own gate-settle audit event (which fires before this function knows anything about fast-forward — see
+ * `RunBatchedMergeResult.fastForwardMs`'s own doc) can report the assembly phase on the SAME event.
  */
 export async function runBatchedMerge(
   repoPath: string, batchWorktreePath: string, baseMainSha: string, candidates: BatchCandidate[],
-  runGate: (worktreePath: string, baseMainSha: string, landedCount: number) => Promise<BatchGateResult>,
+  runGate: (worktreePath: string, baseMainSha: string, landedCount: number, assemblyMs: number) => Promise<BatchGateResult>,
   deps: BatchGitDeps = {},
 ): Promise<RunBatchedMergeResult> {
+  const assembleStartMs = Date.now();
   const { landed, dropped } = await assembleBatchBranches(batchWorktreePath, candidates, deps);
+  const assemblyMs = Date.now() - assembleStartMs;
   if (landed.length === 0) {
-    return { ok: false, landed, dropped, baseMainSha, reason: "nothing landed cleanly into the batch — every candidate was dropped" };
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, reason: "nothing landed cleanly into the batch — every candidate was dropped" };
   }
-  const gate = await runGate(batchWorktreePath, baseMainSha, landed.length);
+  const gate = await runGate(batchWorktreePath, baseMainSha, landed.length, assemblyMs);
   if (!gate.passed) {
-    return { ok: false, landed, dropped, baseMainSha, gatePassed: false, gateFailed: true, gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: false, gateFailed: true, gateDetail: gate, reason: gate.reason ?? "batch gate failed" };
   }
   const { git, timeoutMs } = boundedGit(batchWorktreePath, deps);
   let batchHeadSha: string;
@@ -643,14 +662,16 @@ export async function runBatchedMerge(
       git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch worktree, post-gate)",
     )).trim();
   } catch (e) {
-    return { ok: false, landed, dropped, baseMainSha, gatePassed: true, gateDetail: gate, reason: `failed to read batch worktree HEAD after a green gate: ${(e as Error).message}` };
+    return { ok: false, landed, dropped, baseMainSha, assemblyMs, gatePassed: true, gateDetail: gate, reason: `failed to read batch worktree HEAD after a green gate: ${(e as Error).message}` };
   }
+  const ffStartMs = Date.now();
   const ff = await fastForwardCanonicalMain(repoPath, baseMainSha, batchHeadSha, deps);
+  const fastForwardMs = Date.now() - ffStartMs;
   if (!ff.ok) {
     return {
-      ok: false, landed, dropped, baseMainSha, batchHeadSha, gatePassed: true, gateDetail: gate,
+      ok: false, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate,
       forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha,
     };
   }
-  return { ok: true, landed, dropped, baseMainSha, batchHeadSha, gatePassed: true, gateDetail: gate };
+  return { ok: true, landed, dropped, baseMainSha, batchHeadSha, assemblyMs, fastForwardMs, gatePassed: true, gateDetail: gate };
 }

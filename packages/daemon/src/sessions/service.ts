@@ -16217,6 +16217,18 @@ export class SessionService {
     landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string }[];
     fallback: { workerSessionId: string; reason: string }[];
     reason?: string;
+    /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
+     *  only ever known HERE, in this method's own scope, once {@link runBatchedMerge} has resolved — the
+     *  batch-worktree cut (before any gate is even considered) and the fast-forward (after the gate has
+     *  already settled and its own audit event already fired). Present only once a worktree was actually
+     *  cut for this batch (never on an early bail-out — under-2-candidates, no gateCommand, nothing
+     *  eligible). `fastForwardMs` is further gated on the gate having actually passed and something
+     *  having landed (see `RunBatchedMergeResult.fastForwardMs`'s own doc for exactly when it's absent).
+     *  The other three phases (per-branch assembly, gate admission wait, the gate run itself) are durably
+     *  recorded on this op's `build_gate` orchestration event instead (`worktreeCutMs`/`assemblyMs`/
+     *  `admissionWaitMs`/`durationMs` on its `detail`) — reachable via `gate_history`/`gate_status(opId)`
+     *  rather than repeated here, since that event already fires before this method's own return. */
+    phaseTimings?: { worktreeCutMs: number; assemblyMs?: number; fastForwardMs?: number };
   }> {
     if (workerSessionIds.length === 0) return { ok: false, landed: [], fallback: [], reason: "no worker session ids given" };
     interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; }
@@ -16308,10 +16320,17 @@ export class SessionService {
     let batchWorktreePath: string | undefined;
     const batchTaskId = `batch-${opId}`;
     try {
+      // Card 6cc803b2 — phase instrumentation: wall time of cutting the dedicated batch worktree, the
+      // FIRST of the five phases this card measures (batch-worktree cut · per-branch assembly · gate
+      // admission wait · gate run · fast-forward). Closed over by `runGate` below, which stamps it onto
+      // the batch's own `build_gate` audit event alongside the other phases known by the time that event
+      // fires (assembly + admission wait + the gate run itself).
+      const worktreeCutStartMs = Date.now();
       const wt = await createWorktree(finalRepoPath, finalProjectId, batchTaskId);
       batchWorktreePath = wt.worktreePath;
+      const worktreeCutMs = Date.now() - worktreeCutStartMs;
 
-      const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number): Promise<BatchGateResult> => {
+      const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number, assemblyMs: number): Promise<BatchGateResult> => {
         // Diagnostic-only reduction eligibility (see this method's own header doc) — never acted on.
         // NAMED `batchEmitCompare`, deliberately NOT the bare name confirmWorkerMerge's own classification
         // local uses: emit-compare-branch-capture-order-guard.mjs scans this file for exactly one line
@@ -16432,6 +16451,21 @@ export class SessionService {
           // not an oversight to reconcile away.
           durationMs: nowMs - gateStartedAt, gateCap: orchestration.maxConcurrentGates,
           concurrentGates: concurrentAtStart, concurrentGatesMax,
+          // Card 6cc803b2 — phase instrumentation (`46ebdf20`'s declined DoD-4): the other four of the
+          // five phases this card measures, alongside `durationMs` above (the gate-run phase) on this
+          // SAME event rather than a second, differently-shaped channel. `worktreeCutMs` and `assemblyMs`
+          // are handed in from outside this closure (the batch worktree cut happens before `runGate` is
+          // even defined; the per-branch assembly happens inside `runBatchedMerge`, before it calls this
+          // callback — see that function's own doc for why its fourth argument exists). `admissionWaitMs`
+          // is `gateStartedAt - opMintedAtMs` — the SAME two instants `insertPendingGateOp`/
+          // `deriveBatchGateVerdict` already capture for the tombstone above, just also stamped here as
+          // its own explicit field (per the card's own DoD-1: admission wait and gate run MUST be
+          // reported as separate numbers, never folded into one total) rather than left as something a
+          // reader has to re-derive from `gate_status(opId)`'s `admittedAt`/`durationMs` pair by hand.
+          // `fastForwardMs` (the fifth phase) is NOT here — it is only known once `runBatchedMerge`
+          // resolves, strictly after this event already fired; see `mergeBatch`'s own post-`runBatchedMerge`
+          // handling for where that phase is recorded instead.
+          worktreeCutMs, assemblyMs, admissionWaitMs: gateStartedAt - opMintedAtMs,
           ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
         });
         return { passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps } };
@@ -16449,7 +16483,9 @@ export class SessionService {
         // through as-is rather than defaulted to null: appendEvent's JSON.stringify (db.ts) drops an
         // undefined-valued key entirely, so an absent value is OMITTED from the stored detail, never the
         // literal string "undefined" — same shape `reason` already relies on here.
-        evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, currentMainSha: result.currentMainSha, reason: result.reason });
+        // fastForwardMs (card 6cc803b2): the forfeit check IS the fast-forward attempt (both happen
+        // inside the one fastForwardCanonicalMain call) — see RunBatchedMergeResult.fastForwardMs's doc.
+        evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, currentMainSha: result.currentMainSha, reason: result.reason, fastForwardMs: result.fastForwardMs });
       }
 
       if (!result.ok) {
@@ -16458,7 +16494,7 @@ export class SessionService {
           ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
           ...strandedFallback,
         ]);
-        return { ok: false, landed: [], fallback, reason: result.reason };
+        return { ok: false, landed: [], fallback, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
       }
 
       const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[] = [];
@@ -16482,7 +16518,7 @@ export class SessionService {
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
       ]);
-      return { ok: true, landed, fallback };
+      return { ok: true, landed, fallback, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
     } finally {
       if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
     }
