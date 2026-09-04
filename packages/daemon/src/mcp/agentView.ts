@@ -59,8 +59,20 @@ const AGENT_LIST_FIELDS: Record<keyof AgentListItem, 1> = {
 };
 const AGENT_LIST_KEYS = Object.keys(AGENT_LIST_FIELDS) as (keyof AgentListItem)[];
 
+/**
+ * The HONEST result type for the full:true path (card b6e3493f follow-up). The sentinel above is
+ * rightly total against `AgentListItem` (so a future enriched caller keeps `projectName`), but every
+ * CURRENT caller passes plain `Agent[]`, so `projectName` is genuinely `undefined` today — declaring
+ * the result as `AgentListItem` (where `projectName: string` is required) would be exactly the class of
+ * defect this card exists to close, one level up: a type that lies at compile time with no build error
+ * and no test failure, the same way the original opt-out `full:true` spread lied at the wire with
+ * neither. `Partial` on just the enrichment field says what's actually true: `projectName` MAY be
+ * present (when a future caller does pass `AgentListItem[]`) or absent (today, always).
+ */
+type FullAgentRow = Agent & Partial<Pick<AgentListItem, "projectName">>;
+
 /** Project ONE agent row to the full (non-summary) shape `full:true` returns. See AGENT_LIST_FIELDS. */
-const toFullAgentRow = (a: Agent): AgentListItem => pickFields(a as AgentListItem, AGENT_LIST_KEYS);
+const toFullAgentRow = (a: Agent): FullAgentRow => pickFields(a as AgentListItem, AGENT_LIST_KEYS);
 
 /**
  * Apply the shared MCP-layer list shape to an already-fetched agent list: optional offset/limit
@@ -69,7 +81,7 @@ const toFullAgentRow = (a: Agent): AgentListItem => pickFields(a as AgentListIte
 export function projectAgentList(
   rows: Agent[],
   opts: { full?: boolean; limit?: number; offset?: number } = {},
-): AgentListItem[] | AgentSummary[] {
+): FullAgentRow[] | AgentSummary[] {
   let page = rows;
   if (opts.offset !== undefined) page = page.slice(opts.offset);
   if (opts.limit !== undefined) page = page.slice(0, opts.limit);
