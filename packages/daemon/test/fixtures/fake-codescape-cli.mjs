@@ -248,6 +248,16 @@ if (args[0] === "ingest") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "not found" }));
     });
+    // Card 394649cf: WITHOUT this, a bind failure (e.g. EADDRINUSE — the requested port is already held)
+    // emits 'error' with no listener, which Node re-throws as an UNCAUGHT EXCEPTION — the fixture crashes
+    // instead of failing once, cleanly, with a diagnosable message. Registered BEFORE `.listen()` so there
+    // is no window where a synchronous bind failure could fire 'error' before this handler exists.
+    server.on("error", (err) => {
+      process.stderr.write(
+        `[fake-codescape] serve: failed to bind 127.0.0.1:${requestedPort} (code=${err.code ?? null}, errno=${err.errno ?? null}): ${err.message}\n`
+      );
+      process.exit(1);
+    });
     server.listen(requestedPort, "127.0.0.1", () => {
       // Card 4e0df6ce: the self-reported-bound-port contract — printed on stdout on EVERY successful
       // `serve` invocation (NOT gated to --port 0; both fields derive from the real bound address, never
