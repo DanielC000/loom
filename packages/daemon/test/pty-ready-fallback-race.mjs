@@ -167,6 +167,25 @@ try {
     // 700ms settle is [700ms − however long the control itself takes] — see LOOM_READY_FALLBACK_MS's own
     // comment above for the flake this margin caused before both were shrunk. windowMs is still comfortably
     // > READY_FALLBACK_MS(50, the OLD bug's exact firing point) and leaves ~500ms for the control to run in.
+    //
+    // Card 63c4e079 audit of this site (windowMs:150 above): PROVEN SAFE, empirically margined, not
+    // vacuous. Mechanism: `check()` reads countIn(fa, PASTE_START) — a monotonic marker count that, once
+    // flipped true by a real premature write, never resets — so a violation occurring at any point before
+    // OR during the window is caught (no false-negative risk from timing jitter). The only residual risk
+    // is a FALSE POSITIVE (a flaky fail on healthy code) if positiveControl's own wall-clock cost pushes
+    // the observation window's real-time END past the TRUE first-legitimate-delivery time (host.ts:10288's
+    // `setTimeout(() => awaitReadable(0), MODE_CYCLE_SETTLE_MS)`, MODE_CYCLE_SETTLE_MS=700, host.ts:1438,
+    // hardcoded/non-overridable) — this EXACT failure mode already happened once at a tighter 200ms/300ms
+    // pairing (~1/6 runs) and was fixed by shrinking to today's 50ms/150ms
+    // (docs/investigations/c469d54e-ready-fallback-race/findings.md:125-128, verified 0/20 post-fix there).
+    // Injection evidence (2026-09-05): measured baseline elapsed-to-end-of-observation-window ≈360ms vs.
+    // TRUE first legitimate delivery ≈821ms (≈460ms margin); uniform `globalThis.setTimeout` scaling
+    // (10x — every production timer INCLUDING the hardcoded MODE_CYCLE_SETTLE_MS and this file's own
+    // intervalMs poll cadence slowed together, simulating host contention) leaves the check still PASS
+    // with the margin only GROWING (window-end ≈1322ms vs. true delivery ≈7904ms at scale=10) — the fixed,
+    // real-time windowMs never itself scales, so uniform slowdown of the raced production timer only ever
+    // widens this site's margin. Reconfirmed the real, unmodified file 20/20 stable at default (unscaled)
+    // config, matching the investigation doc's own post-fix verification. No conversion made.
     const noPrematureDelivery = await assertNeverWithControl({
       label: "1: kickoff NOT delivered while the cycle is still mid-settle",
       check: () => countIn(fa, PASTE_START) >= 1,
@@ -214,7 +233,9 @@ try {
   // the new timer and clearing the old one" — a literal process crash can't be exercised in a unit test;
   // see the report's DoD-6 note on event-loop contention being out of reach here too). The ordering under
   // test (arm-before-clear) means this must degrade to AT WORST the pre-fix behavior — the old timer,
-  // left live, fires on its own original 200ms schedule — never to a stranded kickoff.
+  // left live, fires on its own original READY_FALLBACK_MS schedule (this file's LOOM_READY_FALLBACK_MS=50,
+  // see line ~63 — NOT the 200ms figure from before the scenario-1 flake fix; card 63c4e079 audit caught
+  // this comment had gone stale after that shrink) — never to a stranded kickoff.
   {
     const C = "race-C-crash-between-arm-and-clear";
     const KICKOFF = "orchestrate task — must survive a fault in the old-timer clear";
@@ -246,9 +267,10 @@ try {
     check("2: the simulated clear-timeout fault actually fired (the control is real)", clearThrew);
     check("2: deliverHook propagated the simulated throw (we are really testing the failure path, not a swallowed no-op)",
       caught !== null);
-    // Despite the throw, the OLD timer (never actually cleared) is still live on its original 200ms
-    // schedule — the session must still reach ready and deliver its kickoff, exactly the "degrades to
-    // today's pre-fix behavior, never to zero timers" guarantee the arm-before-clear ordering exists for.
+    // Despite the throw, the OLD timer (never actually cleared) is still live on its original
+    // READY_FALLBACK_MS(50) schedule — the session must still reach ready and deliver its kickoff, exactly
+    // the "degrades to today's pre-fix behavior, never to zero timers" guarantee the arm-before-clear
+    // ordering exists for.
     check("2: the session STILL reaches ready and delivers its kickoff despite the clear throwing (no permanent wedge)",
       await waitUntil(() => countIn(fc, PASTE_START) === 1, { timeoutMs: 2000, label: "2: kickoff delivered despite the clear throwing" }));
     // CODE REVIEW CORRECTION (2026-08-05): this used to claim "the NEW timer is also still live … give it
@@ -267,6 +289,21 @@ try {
     // out of a setTimeout callback in the current production code — judged out of scope here (DoD-3 is
     // correspondingly HALF discharged: the no-wedge liveness half above is real and fully exercised; this
     // half only shows the mundane single-timer-remaining case, not a genuine absorbed-double-fire case).
+    //
+    // Card 63c4e079 audit of this site (windowMs:300 above): PROVEN SAFE BY CONSTRUCTION, large margin.
+    // Mechanism: the only thing that could produce a second delivery here is the NEW re-armed timer
+    // (LOOM_MODE_CYCLE_FALLBACK_MS, this file line ~65, pinned to 5000ms) firing before its own clear —
+    // but that timer fires from SessionStart, and the observation window here starts only AFTER the OLD
+    // timer (READY_FALLBACK_MS=50, line ~63) has already fired and delivered (the waitUntil immediately
+    // above). Margin ≈ 5000 − 50 − 300 ≈ 4650ms, ~15x the 300ms window — no realistic host slowdown closes
+    // that gap (and per pty-ready-fallback-race.mjs's own scaling test above, a uniform slowdown would
+    // stretch the 5000ms timer right along with everything else, not shrink the margin). `check()` itself
+    // reads a monotonic countIn() marker, so no false-negative risk either. Injection evidence: the
+    // positiveControl immediately below (a fresh control session, forced UserPromptSubmit+Stop+
+    // enqueueStdin) proves the >=2 check catches a genuine repeat delivery via the SAME real production
+    // submit()/drainPending path (host.ts:10412 — synchronous once the composer is live), and this file's
+    // 20/20 stability run (2026-09-05, unmodified, default config) observed zero flakes for either scenario.
+    // No conversion made.
     const noSecondDelivery = await assertNeverWithControl({
       label: "2: the re-armed timer does not ALSO deliver a second time once the old timer's markReady has run",
       check: () => countIn(fc, PASTE_START) >= 2,

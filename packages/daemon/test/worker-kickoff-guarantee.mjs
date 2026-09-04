@@ -105,6 +105,25 @@ const lastFake = () => fakes[fakes.length - 1];
 // windowMs shared by every negative check below — derived from the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 // (5000ms) above: comfortably (25x) under it, so sendEnterAndVerify's give-up/reassert-paste retry can
 // never fire inside the window and be mistaken for a repeated/unexpected kickoff delivery.
+//
+// Card 63c4e079 audit of every NEGATIVE_WINDOW_MS site in this file: PROVEN SAFE, empirically confirmed,
+// not inherited from a structural guess. 8 real use-sites, not 5 — this comment previously undercounted
+// by omitting three (caught + corrected during manager review of this same card): EACH of the four
+// scenarios below (H1a/H1b/H1c/H1d) has TWO uses of this constant, not one — its own outer
+// assertNeverWithControl's windowMs, AND its own positiveControl's inner observeOnce's windowMs — so
+// 4 scenarios × 2 uses = 8. (Deliberately NOT citing line numbers here: the prior version's ~172/~184/etc.
+// refs went stale the moment this very comment block was edited, which is exactly how the undercount
+// went unnoticed — grep this file for `windowMs: NEGATIVE_WINDOW_MS` for the current, always-accurate
+// site list rather than trusting a number restated here.) This constant's derivation (200ms under a
+// pinned 5000ms SUBMIT_VERIFY_TIMEOUT_MS, 25x margin) is LINE-FOR-LINE the same construction as
+// kickoff-readiness-fallback.mjs's own NO_REPEAT_WINDOW_MS-family windows (compared directly, not
+// assumed) — that file's mechanism was already audited PROVEN SAFE by card f1c65f74. Every check() here
+// reads countIn(fake, marker) — a monotonic, cumulative write count that never resets — so H1b/H1c/H1d
+// (pure absence checks: no delivery ever happens on those code paths by construction, per this file's own
+// H1b/H1c/H1d comments) carry zero false-pass risk regardless of timing, and H1a's repeat-check has a
+// real positiveControl proving it can catch a genuine second delivery via the identical production
+// submit() path. Injection evidence (2026-09-05): full run — all 30 checks PASS; 20/20 stability run of
+// the real, unmodified file at default config, zero flakes. No conversion made.
 const NEGATIVE_WINDOW_MS = 200;
 
 // Spawn a throwaway control session (SessionStart delivered, like kick-A) and wait for its own real
