@@ -174,6 +174,21 @@ try {
   check("(3j-could-not-measure) THE BUG THIS CARD FIXES, RED-PROVEN: this does NOT render byte-identically to CLEAN (a manager can now tell 'checked, verified current' apart from 'the check failed')", couldNotMeasureComposed !== cleanComposed);
   check("(3j-could-not-measure) also does not render byte-identically to the NOT-APPLICABLE case (the two-class split is real, not a relabeling)", couldNotMeasureComposed !== unavailableComposed);
 
+  // ===================== (3k) card 548a0c7e: the "Orchestration config" block — a manager used to have
+  // no way to learn maxConcurrentWorkers/maxConcurrentGates/gateCommandTimeoutMs except provoking a
+  // worker_spawn cap-reject error, and the recorded incident was an agent reasoning from the DOCUMENTED
+  // DEFAULT (3) while a project OVERRIDE (4) was actually in force. `orchestration` is OPTIONAL — omitted
+  // (every call above this point) composes byte-identically, proving the field is purely additive. =====
+  const noOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  check("(3k) orchestration OMITTED ⇒ no 'Orchestration config' block at all", !noOrch.includes("Orchestration config"));
+  check("(3k) orchestration OMITTED ⇒ byte-identical to the pre-548a0c7e composition", noOrch === composed);
+  const withOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", orchestration: { maxConcurrentWorkers: 4, maxConcurrentGates: 2, gateCommandTimeoutMs: 900000 } });
+  check("(3k) orchestration PASSED ⇒ the 'Orchestration config' block renders", withOrch.includes("## Orchestration config"));
+  check("(3k) THE BUG THIS CARD FIXES, RED-PROVEN: names the OVERRIDE value (4), not the platform's documented default (3)", withOrch.includes("`4`") && /Max concurrent workers.*`4`/.test(withOrch));
+  check("(3k) also names maxConcurrentGates and the gate command timeout", withOrch.includes("`2`") && withOrch.includes("`900000`"));
+  check("(3k) points the reader at worker_spawn/worker_list's LIVE capacity instead of this snapshot", /worker_spawn.*success response|worker_list/i.test(withOrch) && /LIVE/.test(withOrch));
+  check("(3k) still carries the 'Where things live' header + the agent's own doctrine", withOrch.includes("## Where things live") && withOrch.includes("DOCTRINE_BODY"));
+
   // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
   const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
   const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] });
@@ -302,13 +317,22 @@ try {
   fs.mkdirSync(vaultCustom, { recursive: true });
   db.insertProject({
     id: "pCustom", name: "CustomProj", repoPath: repo, vaultPath: vaultCustom,
-    config: { orchestration: { resumeDocFilename: customName } }, createdAt: now, archivedAt: null,
+    // card 548a0c7e: ALSO overrides maxConcurrentWorkers to 4 — deliberately different from the
+    // platform's documented default of 3 — mirroring the exact incident the card records (an agent
+    // reasoned from the documented default while this exact kind of override was in force).
+    config: { orchestration: { resumeDocFilename: customName, maxConcurrentWorkers: 4 } }, createdAt: now, archivedAt: null,
   });
   db.insertAgent({ id: "agentMgrCustom", projectId: "pCustom", name: "Orchestrator", startupPrompt: "AGENT_MGR_CUSTOM_DOCTRINE", position: 0, profileId: null });
   const sMCustom = svc.startManager("agentMgrCustom");
   const oMCustom = optsFor(sMCustom.id);
   check("(1e) manager spawn with a project resumeDocFilename override carries the CUSTOM resume-doc path", oMCustom?.startupPrompt?.includes(path.join(vaultCustom, customName)));
   check("(1e) manager spawn with a project resumeDocFilename override does NOT carry the default filename", !oMCustom?.startupPrompt?.includes(path.join(vaultCustom, "Orchestrator Log.md")));
+  // ===================== (1e-cap) card 548a0c7e END-TO-END: a REAL manager spawn against a project with
+  // maxConcurrentWorkers OVERRIDDEN to 4 names the RESOLVED override (4) in its startup prompt, never the
+  // platform's documented default (3) — the exact bug this card fixes, proven through the real spawn path
+  // (startManager), not just the pure composer. =====
+  check("(1e-cap) RED-PROVEN: real manager spawn's startupPrompt names the RESOLVED override (4)", /Max concurrent workers.*`4`/.test(oMCustom?.startupPrompt ?? ""));
+  check("(1e-cap) does NOT name the platform's documented default (3) for this field", !/Max concurrent workers.*`3`/.test(oMCustom?.startupPrompt ?? ""));
   try { fs.rmSync(vaultCustom, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (1) MANAGER spawn → composed startupPrompt CONTAINS both absolute roots =====================
@@ -321,6 +345,10 @@ try {
   check("(1) manager spawn preserves the agent's OWN doctrine after the block", oM?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1) manager session is live + role manager", db.getSession(sM.id).processState === "live" && oM?.role === "manager");
   check("(1) project pM has no referenceRepos ⇒ manager spawn carries NO 'Also referenced' block (byte-identical guarantee)", !oM?.startupPrompt?.includes("Also referenced"));
+  // card 548a0c7e control: pM sets NO orchestration override, so its manager spawn names the platform's
+  // OWN default (3) — the control that makes (1e-cap)'s override assertion meaningful (proves the block
+  // reads the RESOLVED value, which happens to equal the default here, not a hardcoded "4" everywhere).
+  check("(1) control: project pM (no override) names the platform default (3) for maxConcurrentWorkers", /Max concurrent workers.*`3`/.test(oM?.startupPrompt ?? ""));
 
   // ===================== (1b) MANAGER RECYCLE (successor spawn) also gets the block — the fix: a =====
   // recycle-successor manager is a fresh boot exactly like startManager's first spawn, and used to

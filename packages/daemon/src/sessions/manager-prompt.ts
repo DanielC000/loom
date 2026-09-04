@@ -38,7 +38,16 @@ import { computeDeployStaleness, type DeployStalenessResult } from "../deploy-st
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
-  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[]; resumeDocFilename?: string },
+  loc: {
+    repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[]; resumeDocFilename?: string;
+    /** Card 548a0c7e: the project's RESOLVED (default-or-override) orchestration knobs — a manager used
+     *  to have no way to learn these except hand-transcribing a `worker_spawn` cap-reject error message
+     *  ("concurrency cap reached (N)") into its own resume doc, which then went stale the moment the
+     *  project's config changed. Optional so every existing caller/test that omits it composes
+     *  byte-identically to before (see multi-repo-prompt.mjs's own byte-identity pins on this same
+     *  param). */
+    orchestration?: { maxConcurrentWorkers: number; maxConcurrentGates: number; gateCommandTimeoutMs: number };
+  },
   // Test seam ONLY (card 5e30c4bd) — a real spawn always omits this and gets the live
   // `computeDeployStaleness()` read; a hermetic test injects a fixed result so it can assert BOTH the
   // STALE and CLEAN renderings deterministically, without needing a real git checkout + a rebuilt dist.
@@ -168,7 +177,23 @@ export function composeManagerStartupPrompt(
       "registered repo with no gate command does NOT inherit this project's gate: work merged there is " +
       "reported unverified, so decide before you dispatch whether that is acceptable for the card."
     : "";
-  const full = blockWithNote + refBlock + repoBlock;
+  // Card 548a0c7e: a SNAPSHOT of this project's resolved orchestration knobs, taken at spawn/recycle
+  // time — omitted entirely when the caller doesn't pass `orchestration` (every existing test/caller
+  // that predates this card), so this is purely additive. It's a snapshot, not a live read: free worker
+  // slots move on every spawn/retirement within a single manager turn, so this block deliberately points
+  // the reader at `worker_spawn`'s success response / `worker_list` for the LIVE capacity figure instead
+  // of implying this snapshot is good for that.
+  const orchBlock = loc.orchestration
+    ? "\n\n## Orchestration config (this project's RESOLVED values — may differ from Loom's documented defaults)\n" +
+      `- **Max concurrent workers (per manager):** \`${loc.orchestration.maxConcurrentWorkers}\`\n` +
+      `- **Max concurrent gates (daemon-global):** \`${loc.orchestration.maxConcurrentGates}\`\n` +
+      `- **Gate command timeout:** \`${loc.orchestration.gateCommandTimeoutMs}\` ms\n\n` +
+      "These are a snapshot taken at spawn — don't hand-transcribe them into a resume doc, and don't " +
+      "reason from Loom's documented defaults instead of this. For LIVE free-slot capacity (which moves " +
+      "on every spawn/retirement), read the `{cap, live, inFlight, free}` capacity `worker_spawn`'s " +
+      "success response and `worker_list` both carry, not this snapshot."
+    : "";
+  const full = blockWithNote + refBlock + repoBlock + orchBlock;
   const own = startupPrompt?.trim();
   return own ? `${full}\n\n${own}` : full;
 }

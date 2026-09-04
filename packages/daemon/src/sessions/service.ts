@@ -1838,6 +1838,15 @@ export interface ShippedCardMatch {
   mainBranch: string;
 }
 
+/** Card 548a0c7e — a manager's live worker-concurrency snapshot. See {@link SessionService.getWorkerCapacity}
+ *  for how each field is derived. */
+export interface WorkerCapacity {
+  cap: number;
+  live: number;
+  inFlight: number;
+  free: number;
+}
+
 /** One escalation's manager-facing status (orchestration `escalation_status`) — a compact, honest read of
  *  a `platform_escalate` task's CURRENT state; never the Platform task's full body. */
 export interface EscalationStatusItem {
@@ -2920,7 +2929,7 @@ export class SessionService {
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
       ? appendMemoryRecallToStartupPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
           codescapeStatus!.text,
         )
       : startupPrompt;
@@ -3061,7 +3070,7 @@ export class SessionService {
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
           appendMemoryRecallToStartupPrompt(
-            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
             codescapeStatus.text,
           ),
           prompt,
@@ -7016,7 +7025,7 @@ export class SessionService {
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -7472,7 +7481,13 @@ export class SessionService {
       if (taskId) this.capQueue.clearForTask(taskId);
       else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
       const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
-      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf };
+      // Card 548a0c7e: live capacity on the SUCCESS response — this is the exact moment a manager
+      // decides whether to dispatch again, and a boot-time snapshot (see composeManagerStartupPrompt's
+      // orchestration block) goes stale the instant a slot frees or fills. `excludeOwnClaim:true` because
+      // THIS call's own in-flight claim (added below the cap-admit check above) has already resolved into
+      // the live `worker` row `live` below counts — leaving it in `inFlight` too would double-count it.
+      const capacity = this.getWorkerCapacity(managerSessionId, true);
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf, capacity };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -7482,6 +7497,32 @@ export class SessionService {
       if (remaining > 0) this.inFlightSpawnCountByManager.set(managerSessionId, remaining);
       else this.inFlightSpawnCountByManager.delete(managerSessionId);
     }
+  }
+
+  /**
+   * Card 548a0c7e — live worker-concurrency snapshot for THIS manager: `{cap, live, inFlight, free}`.
+   * `cap` is the RESOLVED (default-or-override) `maxConcurrentWorkers` for this manager's project — the
+   * SAME value `spawnWorker`'s own cap-admit check above enforces, never a restated default. `live`
+   * counts this manager's own currently-live worker rows (mirrors the cap-admit check's own
+   * `liveWorkers`). `inFlight` counts spawn calls for this manager that have claimed a slot but not yet
+   * landed a live row (`inFlightSpawnCountByManager`) — pass `excludeOwnClaim:true` when the CALLER
+   * itself currently holds one of those claims (the spawn-success call site below: that claim has
+   * already resolved into the `live` row being counted here, so leaving it in `inFlight` too would
+   * double-count it); a bare read with no claim of its own (worker_list) omits it. `free` is
+   * `max(0, cap - live - inFlight)` — how many MORE workers this manager can spawn right now. Returns
+   * all-zero for a manager/project this daemon can no longer resolve (defensive; not expected in
+   * practice — every caller already holds a live manager session).
+   */
+  getWorkerCapacity(managerSessionId: string, excludeOwnClaim = false): WorkerCapacity {
+    const manager = this.db.getSession(managerSessionId);
+    const project = manager ? this.db.getProject(manager.projectId) : undefined;
+    if (!manager || !project) return { cap: 0, live: 0, inFlight: 0, free: 0 };
+    const cap = resolveConfig(project.config).orchestration.maxConcurrentWorkers;
+    const live = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
+    const rawInFlight = this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0;
+    const inFlight = excludeOwnClaim ? Math.max(0, rawInFlight - 1) : rawInFlight;
+    const free = Math.max(0, cap - live - inFlight);
+    return { cap, live, inFlight, free };
   }
 
   /**
@@ -7507,10 +7548,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
     );
@@ -12402,7 +12443,7 @@ export class SessionService {
           `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
           `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
           `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename },
+        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
       ),
       codescapeStatus.text,
     );
