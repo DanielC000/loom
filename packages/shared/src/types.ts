@@ -1493,7 +1493,37 @@ export type OrchestrationEventKind =
   // that consumes an ACCUMULATION of these). Any count derived from this kind starts at ZERO on the
   // deploy that ships it and can never be back-filled — do not difference it against a pre-this-change
   // figure (a different instrument, a retention-bounded floor, not a measurement).
-  | "engine_session_rotated";
+  | "engine_session_rotated"
+  // Card badba5a8: OBSERVABILITY ONLY — records whether `sessions/service.ts`'s
+  // `resolveCodescapeInjectionStatus` appended the codescape discovery block to a spawn/recycle's
+  // startupPrompt, filed at all FIVE injection call sites (startNew's manager-role branch, startManager
+  // — covers both a plain and a scheduler-fired spawn, spawnWorker, recycleWorker, recycleManager) right
+  // after the composed prompt is built. Filed under the OWNING manager for a worker site
+  // (managerSessionId = the parent, workerSessionId = the new/recycled worker, taskId when available) or
+  // under the session's OWN id for a manager site (managerSessionId = the new/recycled manager's own id
+  // — mirrors `context_escalated`'s convention for manager-self events; no workerSessionId/taskId).
+  // `detail` carries THREE DELIBERATELY SEPARATE facts (never collapsed into one boolean — that
+  // collapse is the exact defect this card exists to fix):
+  //   - `injected: boolean` — block-presence (every gate below passed).
+  //   - `reason: string | null` — set ONLY when `injected:false`, one of "no-supervisor" (no
+  //     CodescapeSupervisor injected into this SessionService — every non-dev/non-self-host host) /
+  //     "not-enabled" (the daemon-wide supervisor gate or the project's own opt-in is off, folds in
+  //     LOOM_DEV) / "no-port" (the supervisor exists but `codescape serve` isn't currently up) /
+  //     "no-project-id" (serve is up but this repo has no resolvable codescape project id) /
+  //     "asset-unreadable" (every gate passed but the dev-only prompt-block asset — omitted from a
+  //     shipped `loomctl` release — could not be read: a packaging/deploy fault) / "asset-empty" (the
+  //     asset WAS read but was empty after trim: a content fault, deliberately kept DISTINCT from
+  //     "asset-unreadable" per the card's own DoD-2 principle that two operationally different states
+  //     must never share one bucket).
+  //   - `stamped: boolean | null` — set ONLY when `injected:true`: whether the freshness-stamp manifest
+  //     read also succeeded (`true`) or the block rendered UNSTAMPED (`false` — serving but this repo's
+  //     manifest entry/read failed, a real signal that previously had no surface at all — the card's
+  //     §NEW sixth state its original DoD-2 enumeration missed).
+  // NEVER carries the block's own PROSE (would reintroduce the exact leak the codescape privacy guard —
+  // card f3ce53f1 — exists to prevent, by a different route). Deliberately excluded from
+  // `EVENT_TRIGGER_EVENT_KINDS` and `GATE_HISTORY_KINDS` below (a per-spawn observability fact, not a
+  // live decision trigger or a gate-history row).
+  | "codescape_injection";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1529,6 +1559,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
+  codescape_injection: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

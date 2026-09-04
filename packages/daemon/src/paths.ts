@@ -231,6 +231,27 @@ export const OBSIDIAN_PREFLIGHT_FRAGMENT = path.join(__dirname, "..", "assets", 
  */
 export const CODESCAPE_PROMPT_BLOCK_ASSET = path.join(__dirname, "..", "assets", "skills", "codescape", "prompt-block.md");
 
+/**
+ * Card badba5a8 — the asset-read half of `sessions/service.ts`'s `resolveCodescapeInjectionStatus`,
+ * pulled out as its own pure function of an EXPLICIT path (not the module constant above) so it can be
+ * unit-tested against a controlled fixture path without ever touching the real, shared, tracked
+ * `CODESCAPE_PROMPT_BLOCK_ASSET` file — reading/mutating that file for a test would race every other
+ * codescape test in this repo. Behavior is byte-identical to the inline read it replaces: trim, treat an
+ * unreadable file (missing/permission-denied/etc — anything `readFileSync` throws on) and a
+ * present-but-empty-after-trim file as two DISTINCT outcomes (never collapsed — see the card's DoD-2 on
+ * why a bare boolean/collapsed reason loses operationally distinct information), never throws.
+ */
+export function readCodescapePromptBlockAsset(assetPath: string): { text: string } | { error: "unreadable" | "empty" } {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(assetPath, "utf-8");
+  } catch {
+    return { error: "unreadable" };
+  }
+  const text = raw.trim();
+  return text ? { text } : { error: "empty" };
+}
+
 export const PORT = Number(process.env.LOOM_PORT || 4317);
 
 /**

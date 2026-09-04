@@ -23,7 +23,7 @@ import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
-import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, isLogMessageContentEnabled } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
@@ -2088,6 +2088,61 @@ export function frameFromManager(text: string, tagSuffix?: string): string {
   return `[${FROM_MANAGER_TAG}${tagSuffix ? `:${tagSuffix}` : ""}]\n${text}`;
 }
 
+/** Card badba5a8: the four {@link SessionService.resolveCodescapeGraphContext} gate-failure reasons. */
+type CodescapeGraphGateReason = "no-supervisor" | "not-enabled" | "no-port" | "no-project-id";
+
+/**
+ * Card badba5a8: every reason `resolveCodescapeInjectionStatus`/{@link composeCodescapeInjectionStatus}
+ * can record — the four graph gates above plus the two asset outcomes. Kept as SIX distinct values
+ * (never collapsed) per the card's own DoD-2 principle: a bare boolean/collapsed reason can't
+ * distinguish operationally different states, and folding `asset-unreadable` (a packaging/deploy fault —
+ * the shipped-package case) together with `asset-empty` (a content fault) would reproduce that exact
+ * defect one level down, just because both happen to fail at the same call site.
+ */
+export type CodescapeInjectionReason = CodescapeGraphGateReason | "asset-unreadable" | "asset-empty";
+
+/**
+ * Card badba5a8: the THREE deliberately-separate facts recorded about one spawn/recycle's codescape
+ * injection attempt (never collapsed into one boolean) — see {@link composeCodescapeInjectionStatus}'s
+ * own doc for exactly which field is meaningful in which branch.
+ */
+export interface CodescapeInjectionStatus {
+  injected: boolean;
+  /** Set ONLY when `injected:false` — WHICH condition failed. */
+  reason: CodescapeInjectionReason | null;
+  /** Set ONLY when `injected:true` — whether the freshness-stamp manifest read also succeeded. */
+  stamped: boolean | null;
+  /** The rendered block text (byte-identical to the pre-refactor inline computation), or `null`. */
+  text: string | null;
+}
+
+/**
+ * Card badba5a8: PURE composition of a {@link SessionService.resolveCodescapeGraphContext} result plus
+ * an asset-read result (see {@link readCodescapePromptBlockAsset} in `paths.ts`) into one
+ * {@link CodescapeInjectionStatus}. Exported and kept free of `this`/`fs`/any I/O specifically so it is
+ * directly unit-testable with literal `info`/`asset` fixtures covering all SEVEN outcomes (2 injected ×
+ * stamped/unstamped, plus the 6 reasons) — WITHOUT ever needing to make the real, shared, tracked
+ * `CODESCAPE_PROMPT_BLOCK_ASSET` file unreadable or empty, which would race every other codescape test
+ * in this repo's gate if attempted via the real file. `resolveCodescapeInjectionStatus` (the class
+ * method) is thin wiring over this: it resolves the graph context, conditionally reads the real asset
+ * (only when the graph context succeeded — `asset` is `undefined` on a graph-gate failure, since nothing
+ * ever needs to read the asset in that branch), and hands both straight here. The TEXT composition
+ * (`${base} Graph last indexed: ${lastIngestedAt}.` when stamped, else `base`, else `null`) is BYTE-
+ * IDENTICAL to the pre-refactor inline computation this function replaces — see the card's Ruling 2 on
+ * why that equivalence had to be proven, not merely asserted.
+ */
+export function composeCodescapeInjectionStatus(
+  info: { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason },
+  asset: ReturnType<typeof readCodescapePromptBlockAsset> | undefined,
+): CodescapeInjectionStatus {
+  if (!info.ok) return { injected: false, reason: info.reason, stamped: null, text: null };
+  if (!asset || "error" in asset) {
+    return { injected: false, reason: asset?.error === "empty" ? "asset-empty" : "asset-unreadable", stamped: null, text: null };
+  }
+  const text = info.lastIngestedAt ? `${asset.text} Graph last indexed: ${info.lastIngestedAt}.` : asset.text;
+  return { injected: true, reason: null, stamped: info.lastIngestedAt != null, text };
+}
+
 /** Derived from {@link FROM_MANAGER_TAG} — see that constant's doc for why this must never be a second
  *  hand-typed literal. `workerReport`'s done-refusal strips this off before previewing a still-queued
  *  instruction's text: left in, the preview reads as a SECOND, impersonating `[loom:from-manager]` frame
@@ -2576,22 +2631,44 @@ export class SessionService {
    * mount. The freshness stamp is a SEPARATE, uncached manifest read (cheap — see
    * `resolveCodescapeLastIngested`) that only runs once an id has already resolved, so a transient
    * stamp-read hiccup degrades to an unstamped block rather than hiding the whole thing.
+   *
+   * Card badba5a8: now a DISCRIMINATED result (`ok:true|false`) instead of `{...}|undefined` — same four
+   * conditions, same order, GATE BEHAVIOR UNCHANGED — so {@link resolveCodescapeInjectionStatus} (and, via
+   * it, {@link resolveCodescapeBlockText}) can record WHICH condition failed rather than a bare miss.
    */
-  private resolveCodescapeGraphContext(project: Project): { lastIngestedAt: string | null } | undefined {
-    if (!this.codescape) return undefined;
+  private resolveCodescapeGraphContext(project: Project): { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason } {
+    if (!this.codescape) return { ok: false, reason: "no-supervisor" };
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled;
     const dbPath = resolveCodescapeIntegrationPath(this.db.getPlatformConfig());
-    if (!isCodescapeEnabled(codescapeEnabled, dbPath)) return undefined;
-    if (this.codescape.getPort() == null) return undefined;
+    if (!isCodescapeEnabled(codescapeEnabled, dbPath)) return { ok: false, reason: "not-enabled" };
+    if (this.codescape.getPort() == null) return { ok: false, reason: "no-port" };
     const id = this.codescape.resolveProjectId(project.repoPath);
-    if (!id) return undefined;
-    return { lastIngestedAt: resolveCodescapeLastIngested(project.repoPath, this.codescape.getHomeDir()) };
+    if (!id) return { ok: false, reason: "no-project-id" };
+    return { ok: true, lastIngestedAt: resolveCodescapeLastIngested(project.repoPath, this.codescape.getHomeDir()) };
+  }
+
+  /**
+   * Card badba5a8 (observability-only — see the card for why): the SINGLE source of truth for both the
+   * rendered block text AND the three facts worth recording about how it was (or wasn't) produced. Thin
+   * wiring over the EXPORTED, pure {@link composeCodescapeInjectionStatus} (see its own doc for the
+   * actual reason/stamped/text logic) — kept pure and exported specifically so it can be unit-tested with
+   * literal `info`/`asset` fixtures, without ever touching the real, shared, tracked
+   * `CODESCAPE_PROMPT_BLOCK_ASSET` file (mutating that file mid-test would race every other codescape
+   * test in this repo's gate). `resolveCodescapeBlockText` is a THIN DELEGATOR over THIS method (see its
+   * own doc) so there is exactly one place that computes the text — never a second, parallel gate mirror
+   * that could drift from this one (the class doc above already warns about that risk for the FIRST
+   * mirror, `codescapeHttpMcpServer`; this method deliberately avoids creating a third).
+   */
+  private resolveCodescapeInjectionStatus(project: Project): CodescapeInjectionStatus {
+    const info = this.resolveCodescapeGraphContext(project);
+    const asset = info.ok ? readCodescapePromptBlockAsset(CODESCAPE_PROMPT_BLOCK_ASSET) : undefined;
+    return composeCodescapeInjectionStatus(info, asset);
   }
 
   /**
    * Card 0e4a859a — the FULLY-RENDERED codescape discovery block, ready to append verbatim via the
    * generic {@link appendMemoryRecallToStartupPrompt} (the SAME primitive companion/project-memory blocks
-   * already reuse), or `undefined` to append nothing.
+   * already reuse), or `null` to append nothing.
    *
    * PRIVACY GUARD (card f3ce53f1) — WHY THIS READS A FILE INSTEAD OF A STRING LITERAL: the block's PROSE
    * ("Codescape is available for this project…") is NOT a source string anywhere in this codebase — it
@@ -2605,20 +2682,14 @@ export class SessionService {
    * they just append an opaque pre-rendered block, so the concept never has to compile into those files.
    *
    * Never throws: a missing/unreadable asset (the expected shape on every non-dev/non-self-host host,
-   * where {@link resolveCodescapeGraphContext} already returned `undefined` anyway since the daemon-wide
-   * gate is off there too) degrades to no block, same as any other clean-skip in this feature.
+   * where {@link resolveCodescapeGraphContext} already returned a `ok:false` result anyway since the
+   * daemon-wide gate is off there too) degrades to no block, same as any other clean-skip in this
+   * feature. Card badba5a8: a THIN delegator over {@link resolveCodescapeInjectionStatus} — the text
+   * output is UNCHANGED (same trim/empty-check/stamp-append, just computed once, in one place) — see that
+   * method's own doc for why this is one source of truth rather than a second, drift-prone gate mirror.
    */
   private resolveCodescapeBlockText(project: Project): string | null {
-    const info = this.resolveCodescapeGraphContext(project);
-    if (!info) return null;
-    let base: string;
-    try {
-      base = fs.readFileSync(CODESCAPE_PROMPT_BLOCK_ASSET, "utf-8").trim();
-    } catch {
-      return null;
-    }
-    if (!base) return null;
-    return info.lastIngestedAt ? `${base} Graph last indexed: ${info.lastIngestedAt}.` : base;
+    return this.resolveCodescapeInjectionStatus(project).text;
   }
 
   /**
@@ -2834,12 +2905,16 @@ export class SessionService {
       ? buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name))
       : null;
     if (role === "assistant") this.stampCompanionMemoryDigest(session.id, companionRecallFramed);
+    // Card badba5a8: computed ONCE (not re-derived) so both the composition below and the observability
+    // event after spawn read the SAME result — only relevant for the role==="manager" branch, which is
+    // the only one that ever appends the codescape block here.
+    const codescapeStatus = role === "manager" ? this.resolveCodescapeInjectionStatus(project) : null;
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
       ? appendMemoryRecallToStartupPrompt(
           composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
-          this.resolveCodescapeBlockText(project),
+          codescapeStatus!.text,
         )
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
@@ -2888,6 +2963,15 @@ export class SessionService {
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName, // card f9b47cd1: `-n <name>` resume-picker label (version-gated at createPty)
     });
+    // Card badba5a8: observability only — record whether the codescape block was injected. Only fires for
+    // the role==="manager" branch (the only one that ever computes codescapeStatus above).
+    if (codescapeStatus) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: session.id, kind: "codescape_injection",
+        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
+      });
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2945,6 +3029,9 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
+    // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
+    // observability event after it read the SAME result.
+    const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -2968,7 +3055,7 @@ export class SessionService {
         const scheduled = appendScheduledPrompt(
           appendMemoryRecallToStartupPrompt(
             composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
-            this.resolveCodescapeBlockText(project),
+            codescapeStatus.text,
           ),
           prompt,
         );
@@ -2986,6 +3073,12 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: `loom-<project>-mgr`
+    });
+    // Card badba5a8: observability only — record whether the codescape block was injected.
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: session.id, kind: "codescape_injection",
+      detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
     });
     return { ...session, processState: "live" };
   }
@@ -7256,6 +7349,10 @@ export class SessionService {
       // worker's FIRST resume compares against what this fresh spawn just showed it.
       const workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
       this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
+      // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
+      // observability event after it (only fired on a SUCCESSFUL spawn — see the catch below) read the
+      // SAME result.
+      const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
       try {
         this.pty.spawn({
           sessionId: worker.id,
@@ -7280,7 +7377,7 @@ export class SessionService {
               // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
               // session row above — the same resolution, so the prompt can never disagree with the worktree.
               composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined, discardedOnRecut),
-              this.resolveCodescapeBlockText(project),
+              codescapeStatus.text,
             ),
             workerProjectMemoryFramed,
           ),
@@ -7326,6 +7423,12 @@ export class SessionService {
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId, workerSessionId: worker.id, taskId, kind: "spawn_worker",
+      });
+      // Card badba5a8: observability only — record whether the codescape block was injected.
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId, workerSessionId: worker.id, taskId, kind: "codescape_injection",
+        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
       });
       // Wasted-dispatch advisory (card 7b5944fc): runs AFTER pty.spawn so it never delays the worker's
       // actual start — only the point at which this call's result resolves. Tasked spawns only; taskless
@@ -12129,6 +12232,9 @@ export class SessionService {
       // worktree, so its codescape registration is exactly as stale/lost across a serve restart as a plain
       // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
       this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch ?? "");
+      // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
+      // observability event alongside recycle_complete below read the SAME result.
+      const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
       this.pty.spawn({
         sessionId: fresh.id,
         cwd: worktreePath,
@@ -12146,7 +12252,7 @@ export class SessionService {
         startupPrompt: appendMemoryRecallToStartupPrompt(
           appendMemoryRecallToStartupPrompt(
             composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
-            this.resolveCodescapeBlockText(project),
+            codescapeStatus.text,
           ),
           recycleProjectMemoryFramed,
         ),
@@ -12176,6 +12282,12 @@ export class SessionService {
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
         detail: { recycledFrom: old.id, gen: newGen },
+      });
+      // Card badba5a8: observability only — record whether the codescape block was injected.
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId, workerSessionId: fresh.id, taskId, kind: "codescape_injection",
+        detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
       });
       return { ...fresh, processState: "live" };
     } finally {
@@ -12226,6 +12338,9 @@ export class SessionService {
     });
 
     const warmup = agent?.startupPrompt?.trim();
+    // Card badba5a8: computed ONCE, so both the composition below and the observability event after the
+    // spawn (near this method's own recycle_complete) read the SAME result.
+    const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
     // PL Auditor finding #8 parity: a recycle-successor manager is a "fresh boot" exactly like
     // startManager's first spawn — it needs the SAME "Where things live" pre-block (absolute repo+vault
     // roots + the resolved resume-doc path), or it cold-boots into the same Glob-timeout trap a fresh
@@ -12239,7 +12354,7 @@ export class SessionService {
           `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
         { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename },
       ),
-      this.resolveCodescapeBlockText(project),
+      codescapeStatus.text,
     );
 
     const now = new Date().toISOString();
@@ -12354,6 +12469,12 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: fresh.id, kind: "recycle_complete",
       detail: { recycledFrom: old.id, gen: newGen, reparentedWorkers: reparented },
+    });
+    // Card badba5a8: observability only — record whether the codescape block was injected.
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: fresh.id, kind: "codescape_injection",
+      detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
     });
 
     // Close the predecessor AFTER a short delay so the recycle_me tool response (it's the old manager's
