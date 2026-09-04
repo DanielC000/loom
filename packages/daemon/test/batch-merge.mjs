@@ -803,12 +803,16 @@ try {
   //     noop check (untouched by this card, per its own DoD-4) only catches a WHOLE branch already landed.
   //     It does NOT catch ONE redundant commit inside an otherwise-new multi-commit branch: `mixed` below
   //     has a genuinely NEW first commit and a SECOND commit whose content `shared` already landed
-  //     independently (both branches created the same file with the same content). Pre-fix, the manual
-  //     `git commit` for that second (empty-stage) commit can itself fail on git's own "nothing to commit,
-  //     working tree clean", landing in the GENERIC cherry-pick/commit catch with an opaque
-  //     "commit failed while landing commit <sha7>: …" — technically correct (the branch still drops) but
-  //     misleading, exactly the diagnosability defect this card fixes. THE DISCRIMINATING ASSERTION is the
-  //     reason string: it must name the redundancy, never the bare "commit failed" text. ─────────────────
+  //     independently (both branches created the same file with the same content). THIS IS AN END-TO-END
+  //     OUTCOME GUARD, NOT A POSITIVE CONTROL FOR THE PROBE: in THIS environment (this repo's installed
+  //     simple-git/git-for-windows combo) the manual `git commit` for that second (empty-stage) commit
+  //     RESOLVES rather than rejects, so the pre-existing `newHead === currentHead` fail-closed check
+  //     (card 43a9182d) already classifies it with a redundancy-naming reason on its own, regardless of
+  //     this card's fix — this block is green both pre- and post-fix HERE and never actually exercises
+  //     the old generic catch. It still earns its place: it proves the branch drops wholesale with a
+  //     redundancy-naming reason, end to end. THE DISCRIMINATING CASE — the one that actually goes RED
+  //     without this card's empty-stage probe — is (11b) below, which force-rejects the manual commit via
+  //     a mock to reproduce the pre-fix text that this environment does not naturally produce. ──────────
   {
     const repo = path.join(os.tmpdir(), `loom-bm-mixedredundant-${sfx}`);
     makeRepo(repo);
@@ -841,8 +845,8 @@ try {
     check("(11) mixed is DROPPED WHOLESALE (DoD-2 decision (b) — not a partial landing of its first commit)",
       assembled.dropped.length === 1 && assembled.dropped[0]?.branch === mixed.branch);
     const mixedReason = assembled.dropped[0]?.reason ?? "";
-    // THE POSITIVE-CONTROLLED ASSERTIONS — these FAIL against pre-fix code, which lets the manual `git
-    // commit` for the redundant commit run unguarded and can surface the opaque generic reason instead.
+    // END-TO-END OUTCOME ASSERTIONS (see this block's header comment above) — green both pre- and
+    // post-fix in THIS environment; (11b) below carries the actual discriminating case.
     check("(11) the drop reason does NOT read as a bare/generic commit failure", !mixedReason.includes("commit failed while landing commit"));
     check("(11) the drop reason names redundancy (an empty commit already present in the batch tree)",
       mixedReason.includes("empty commit") && mixedReason.includes("already present in the batch tree"));
