@@ -141,6 +141,32 @@ function BatchIdentity({ landed, branches, style }: { landed: number | null; bra
 const BATCH_NOTE =
   "lands several worker branches under one gate, so it has no single branch to name. Expand the count to see which branches went in.";
 
+// ── wholesale batch forfeit (card b480dda9) ──────────────────────────────────────
+// A batched merge's own gate can genuinely PASS while the whole batch still lands ZERO branches: main
+// advanced mid-gate, so the assembled tree went stale before the post-gate fast-forward, and every
+// candidate fell back to its own individual gate instead. `outcome`/`passed` on this row stay a real
+// "pass" — the gate itself wasn't wrong — so without a distinct marker this reads as an ordinary green
+// K=N batch for a run that actually landed nothing. This tag is that annotation, on the SAME row (never
+// a second one): amber, not red/phosphor, since it isn't a gate failure, and shown ONLY when
+// `batchForfeited` is true — an ordinary batch that landed all N renders with no tag at all, unchanged.
+const FORFEIT_LABEL = "forfeited";
+const FORFEIT_NOTE =
+  "This batch's own gate passed, but main advanced while it ran — the assembled tree went stale before it could land, so nothing from this run actually merged. Every candidate branch fell back to its own individual gate (look for it among the surrounding rows).";
+
+function ForfeitTag() {
+  return (
+    <span
+      style={{
+        fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase",
+        padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.amber}`, color: color.amber, flex: "none",
+      }}
+      title={FORFEIT_NOTE}
+    >
+      {FORFEIT_LABEL}
+    </span>
+  );
+}
+
 // A long-running lane cue mirroring the mockup: warn (amber) once a running gate passes this, since the
 // default gateCommandTimeoutMs is minutes and a lane held this long is worth the eye.
 const LONG_RUN_WARN_SECONDS = 420;
@@ -559,6 +585,11 @@ function HistoryTable({
           <BatchTag />{" "}{BATCH_NOTE}
         </div>
       )}
+      {rows.some((r) => r.batchForfeited) && (
+        <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.border}`, fontSize: 11, lineHeight: 1.55, color: color.textDim, maxWidth: "78ch", whiteSpace: "normal" }}>
+          <ForfeitTag />{" "}{FORFEIT_NOTE}
+        </div>
+      )}
       {rows.some((r) => !r.gateRan) && (
         <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.border}`, fontSize: 11, lineHeight: 1.55, color: color.textDim, maxWidth: "78ch", whiteSpace: "normal" }}>
           <span style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: color.cyan }}>{NON_RUN_LABEL}</span>
@@ -576,9 +607,12 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
   return (
     <tr className="loom-gate-row">
       <td style={tdStyle}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: outC }}>
-          <span style={{ width: 7, height: 7, borderRadius: 7, background: outC, ...(OUTCOME_GLOW[row.outcome] ? { boxShadow: `0 0 5px ${outC}` } : null) }} />
-          {row.outcome}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: outC }}>
+            <span style={{ width: 7, height: 7, borderRadius: 7, background: outC, ...(OUTCOME_GLOW[row.outcome] ? { boxShadow: `0 0 5px ${outC}` } : null) }} />
+            {row.outcome}
+          </span>
+          {row.batchForfeited && <ForfeitTag />}
         </span>
       </td>
       <td style={tdStyle}><span style={{ fontSize: 10, letterSpacing: "0.07em", textTransform: "uppercase", color: kindC }}>{KIND_LABEL[row.gateType]}</span></td>

@@ -54,6 +54,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           (`identicalCount` informative, `testFiles:[]`), an explicit `false` (a real gate proven NOT
 //           reduced — the positive control, never conflated with "nothing to report"), and a row with no
 //           matching `pending_gate_ops` tombstone at all (reads back `null`, never a fabricated `false`).
+//   (card b480dda9) a batched merge's OWN gate can genuinely pass while the whole batch still lands ZERO
+//           branches — main advanced mid-gate, so the assembled tree went stale before its post-gate
+//           fast-forward, and every candidate fell back to its own individual gate. That forfeit is
+//           recorded as a SEPARATE `batch_merge_forfeited` event `GATE_HISTORY_KINDS` (still, deliberately)
+//           excludes — so before this card an operator reading history saw an ordinary green K=N batch row
+//           for a run that landed nothing. Fixed as an ANNOTATION on the SAME row (never a second row):
+//           `batchForfeited` reads `true` when a sibling `batch_merge_forfeited` event shares this row's
+//           own `opId`, sourced via a correlated subquery (db.ts's `listGateEvents`), while `outcome`/
+//           `passed`/`branchCount` all stay exactly what the genuine pass looked like. The "(unit, card
+//           b480dda9)" checks below prove fixture (6) — a passing batch with a sibling forfeit event —
+//           reads `batchForfeited:true` with its verdict fields untouched, AND that every OTHER batch
+//           shape from card 10fd660b's own fixtures (passing, rejected, dropped-branch, legacy, solo) reads
+//           `batchForfeited:false` — the DoD's own positive control that an ordinary batch's rendering
+//           never changes.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-history.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -835,28 +849,54 @@ function seed(db) {
       taskId: t, kind: "build_gate",
       detail: { opId: randomUUID(), passed: true, durationMs: 555000, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 1 },
     });
+    // (6, card b480dda9) A WHOLESALE FORFEIT — the batch's OWN gate genuinely passed (batched:true,
+    // branchCount:2, exactly like fixture (1)), but a SIBLING `batch_merge_forfeited` event shares its
+    // opId, mirroring mergeBatch's real `evtBatch("batch_merge_forfeited", {repoPath, baseMainSha, reason})`
+    // call (sessions/service.ts) — which, via the SAME `evtBatch` closure fixture (1)-(5) already model,
+    // also carries `opId`/`branches` on every event, not just `build_gate`. This is the ONE fixture this
+    // card's own annotation must flip to `batchForfeited:true` while `outcome`/`passed`/`branchCount` all
+    // stay exactly what a genuine pass looks like — the whole point of an ANNOTATION, not a second row.
+    const forfeitOpId = randomUUID();
+    seedBatch(1400, 566000, { passed: true, batched: true, branchCount: 2, branches: [10, 11].map(branchIdentity), opId: forfeitOpId });
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 1300).toISOString(), managerSessionId: mgr,
+      taskId: null, kind: "batch_merge_forfeited",
+      detail: { opId: forfeitOpId, repoPath: `/tmp/${P}`, baseMainSha: "deadbeef", reason: "main advanced mid-gate", branches: [10, 11].map(branchIdentity) },
+    });
 
     const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
-    check("(unit, card 10fd660b) all 5 fixture rows returned", page.items.length === 5);
+    // The `batch_merge_forfeited` event itself must NEVER surface as its own row — `GATE_HISTORY_KINDS`
+    // deliberately excludes that kind (unchanged by this card); it exists here ONLY to annotate fixture
+    // (6)'s `build_gate` row. So the page still holds exactly 6 rows: the 5 original fixtures + fixture (6).
+    check("(unit, card 10fd660b / b480dda9) all 6 fixture rows returned — the sibling batch_merge_forfeited event is NOT a 7th row", page.items.length === 6);
     const byDuration = (ms) => page.items.find((r) => r.durationMs === ms);
     const passBatch = byDuration(511000), rejectBatch = byDuration(522000);
     const droppedBatch = byDuration(533000), legacyBatch = byDuration(544000), solo = byDuration(555000);
-    check("(unit, card 10fd660b) precondition: all 5 fixtures resolved to 5 distinct rows", new Set([passBatch, rejectBatch, droppedBatch, legacyBatch, solo]).size === 5 && [passBatch, rejectBatch, droppedBatch, legacyBatch, solo].every(Boolean));
+    const forfeitedBatch = byDuration(566000);
+    check("(unit, card 10fd660b / b480dda9) precondition: all 6 fixtures resolved to 6 distinct rows", new Set([passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch]).size === 6 && [passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch].every(Boolean));
 
     check("(unit, card 10fd660b) (1) a passing batch reads batched:true", passBatch?.batched === true);
     check("(unit, card 10fd660b) (1) a passing batch carries branchCount:3 (the LANDED count)", passBatch?.branchCount === 3);
     check("(unit, card 10fd660b) (1) a passing batch carries batchBranches, the REQUESTED branch names in order", Array.isArray(passBatch?.batchBranches) && passBatch.batchBranches.join(",") === "loom/batch-1,loom/batch-2,loom/batch-3");
     check("(unit, card 10fd660b — NEVER SYNTHESIZE A BRANCH) (1) a batch row's own `branch`/`taskId` stay null; the null pair IS the batch signature other readers key on", passBatch?.branch === null && passBatch?.taskId === null);
+    check("(unit, card b480dda9 — THE NEGATIVE CONTROL) (1) an ordinary passing batch with NO sibling forfeit event reads batchForfeited:false", passBatch?.batchForfeited === false);
 
     check("(unit, card 10fd660b) (2) a REJECTED batch keeps batched/branchCount/batchBranches intact (same discipline as durationMs)", rejectBatch?.batched === true && rejectBatch?.branchCount === 2 && rejectBatch?.batchBranches?.length === 2);
     check("(unit, card 10fd660b) (2) that rejected batch is still outcome:\"reject\"/passed:false — the new fields change no existing derivation", rejectBatch?.outcome === "reject" && rejectBatch?.passed === false);
+    check("(unit, card b480dda9) (2) a rejected batch with no sibling forfeit event also reads batchForfeited:false", rejectBatch?.batchForfeited === false);
 
     check("(unit, card 10fd660b — THE DENOMINATOR CONTROL) (3) a batch that dropped a branch reads branchCount:3 (LANDED), NOT 4 — batchBranches.length is the REQUESTED set and must never stand in for it", droppedBatch?.branchCount === 3 && droppedBatch?.batchBranches?.length === 4);
+    check("(unit, card b480dda9) (3) that dropped-branch batch is not itself forfeited", droppedBatch?.batchForfeited === false);
 
     check("(unit, card 10fd660b — NEVER FABRICATE) (4) a legacy batch row with neither stamp reads branchCount:null and batchBranches:null, while still reading batched:true", legacyBatch?.batched === true && legacyBatch?.branchCount === null && legacyBatch?.batchBranches === null);
+    check("(unit, card b480dda9) (4) a legacy batch row with no sibling forfeit event reads batchForfeited:false, never fabricated true", legacyBatch?.batchForfeited === false);
 
     check("(unit, card 10fd660b — THE POSITIVE CONTROL) (5) an ordinary SOLO row reads batched:false with both new fields null", solo?.batched === false && solo?.branchCount === null && solo?.batchBranches === null);
     check("(unit, card 10fd660b — THE POSITIVE CONTROL) (5) that solo row's real branch still resolves through the JOIN, unchanged", solo?.branch === "loom/solo-control-branch");
+    check("(unit, card b480dda9) (5) a solo (non-batched) row reads batchForfeited:false", solo?.batchForfeited === false);
+
+    check("(unit, card b480dda9) (6) a FORFEITED batch still reads outcome:\"pass\"/passed:true/branchCount:2 UNCHANGED — the gate itself genuinely passed, this card never touches that verdict", forfeitedBatch?.outcome === "pass" && forfeitedBatch?.passed === true && forfeitedBatch?.branchCount === 2);
+    check("(unit, card b480dda9 — THE WHOLE POINT) (6) that same row ALSO reads batchForfeited:true, from the sibling batch_merge_forfeited event sharing its opId", forfeitedBatch?.batchForfeited === true);
 
     // A PRE-EXISTING (seed()) row from before this card shipped must also read the un-batched shape — the
     // legacy case is not special-cased differently from the synthetic solo control just proven above.
@@ -872,5 +912,6 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — gate_history() reuses db.listGateEvents verbatim (no duplicate query logic), returns a REJECTED run with durationMs/gateCap/concurrentGates/passed:false intact (the exact case gate_queue/gate_status/the nudge all drop, and the whole point of card 753d9911), is scoped to the CALLER's own project with no projectId argument to widen it (a foreign project's rows are never returned at all, never merely redacted), paginates correctly via limit/offset/nextOffset, is registered on the manager surface ONLY (the worker's pinned depth-1 tool set is unchanged), and — since card 3a6f04cc — reports a CANCELLED gate op as outcome:\"cancelled\" (never \"reject\") with a gateRan bit distinguishing a real spawn from a reused/never-admitted one, proven against both synthetic fixtures and a REAL gate_cancel + REAL rejection through production code. Since card 6ca4b1a0, a row also carries emitCompareReduced/emitCompareIdenticalCount/emitCompareTestFiles sourced from pending_gate_ops (never the raw event alone), correctly distinguishing both reduction arms, an explicit proven-not-reduced false, and a never-fabricated null."
   + " Since card eb9348b0, a merge row's own failingTest is recovered from that SAME joined verdict payload (gateDetail.failingTest) as a fallback whenever the raw event has none, proven against both a synthetic fixture and a REAL confirmWorkerMergeTracked write — with negative controls proving a pass verdict, a no-tombstone row, and a pre-existing legacy row all still read null, never a fabricated value."
   + " Since card 10fd660b, a BATCHED merge row also carries batched/branchCount/batchBranches, so a batch is no longer indistinguishable from missing data — with branchCount held to the POST-ASSEMBLY LANDED count and batchBranches to the REQUESTED set (a fixture where the two deliberately disagree proves neither is derived from the other), a legacy batch row reading null rather than a fabricated count, and a SOLO positive control proving an ordinary row is unchanged: batched:false, both fields null, its real branch still resolved."
+  + " Since card b480dda9, a batch row ALSO carries batchForfeited — an ANNOTATION, not a second row: a batch whose gate genuinely passed (outcome/passed/branchCount all unchanged) but whose sibling batch_merge_forfeited event shares its opId now reads batchForfeited:true, while every OTHER batch shape proven above (passing, rejected, dropped-branch, legacy, solo) reads batchForfeited:false — proving the annotation is additive and never disturbs an ordinary batch's existing rendering."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

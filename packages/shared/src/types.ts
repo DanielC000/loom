@@ -1633,9 +1633,12 @@ export interface GateRun {
    *  branch at assembly (a conflict), so it can be SMALLER than `batchBranches.length`. ⛔ Never use
    *  `batchBranches.length` as the landed count (the trap recorded on card cf0e2e3b): that array is the
    *  REQUESTED set, captured before assembly. `null` only on a row/run recorded before the count was
-   *  stamped. Note neither field can express a WHOLESALE FORFEIT (main advanced mid-gate): the gate
-   *  itself still passed and is recorded as such, and the forfeit is a separate `batch_merge_forfeited`
-   *  event this feed does not read. */
+   *  stamped. ⚠️ Card b480dda9: neither field can express a WHOLESALE FORFEIT (main advanced mid-gate) —
+   *  the gate itself still genuinely passed HERE, in the ACTIVE snapshot, at the instant it settled; the
+   *  forfeit is a LATER fact (a separate `batch_merge_forfeited` event, decided only once the whole batch
+   *  either fast-forwards or falls back) that cannot exist yet while this run is still live. This is not
+   *  a gap in this type — it is inherent to what "active" means. Once the run settles, {@link
+   *  GateHistoryRow.batchForfeited} is where that later fact is surfaced. */
   batched: boolean;
   branchCount: number | null;
   batchBranches: string[] | null;
@@ -1892,12 +1895,24 @@ export interface GateHistoryRow {
    *  branch at assembly (a conflict), so it can be SMALLER than `batchBranches.length`. ⛔ Never use
    *  `batchBranches.length` as the landed count (the trap recorded on card cf0e2e3b): that array is the
    *  REQUESTED set, captured before assembly. `null` only on a row/run recorded before the count was
-   *  stamped. Note neither field can express a WHOLESALE FORFEIT (main advanced mid-gate): the gate
-   *  itself still passed and is recorded as such, and the forfeit is a separate `batch_merge_forfeited`
-   *  event this feed does not read. */
+   *  stamped. */
   batched: boolean;
   branchCount: number | null;
   batchBranches: string[] | null;
+  /** Card b480dda9 — the WHOLESALE-FORFEIT annotation `batched`/`branchCount`/`batchBranches` above
+   *  couldn't express: main advanced between the batch worktree being cut and its post-gate
+   *  fast-forward, so the batch's own gate genuinely passed and is recorded as such (`outcome`/`passed`
+   *  above are UNCHANGED by this field — do not derive a different verdict from it), but nothing actually
+   *  landed — every candidate branch fell back to its own individual gate instead. An operator reading
+   *  `outcome`/`passed`/`branchCount` alone on a forfeited row would see an ordinary green K=N batch for a
+   *  run that landed ZERO branches; this field is what makes that distinguishable at a glance. `true` only
+   *  when a sibling `batch_merge_forfeited` event shares this row's own `opId` (see `mergeBatch`'s own
+   *  header doc, sessions/service.ts); `false` on every other row, batched or not — including an ordinary
+   *  batch that landed all N, which this field must never make render any differently (the positive
+   *  control this card's own DoD names). Do NOT "fix" a forfeited row by zeroing `branchCount` instead —
+   *  that count is the real, correct post-assembly figure at the moment the gate settled; the forfeit is
+   *  a separate, later fact and belongs in its own field, not a falsified count. */
+  batchForfeited: boolean;
 }
 
 /** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so

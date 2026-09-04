@@ -5606,6 +5606,14 @@ export class Db {
    * `detail_json`) to project `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` — see
    * `GateEventJoinRow.verdictPayloadJson`'s own doc for why that table, not `detail_json` directly, is the
    * one place the real true/false tri-state survives.
+   *
+   * Card b480dda9: a correlated subquery (not a JOIN — a `batch_merge_forfeited` event has no dedicated
+   * table to join, and a subquery sidesteps any fan-out risk from a hypothetical duplicate) checks whether
+   * a sibling `batch_merge_forfeited` event shares this row's own `opId`, projected as `GateHistoryRow
+   * .batchForfeited`. Cheap in practice: `orchestration_events.kind` is indexed (`idx_orch_events_kind`),
+   * so the subquery filters to the (normally zero, always small — see that field's own doc) set of
+   * forfeit events before ever comparing `opId`, and it only evaluates for the page actually returned
+   * (after `LIMIT`/`OFFSET`), never the full matching set.
    */
   listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
     const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
@@ -5628,7 +5636,11 @@ export class Db {
       `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
               COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
               s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
-              s.branch AS branch, t.title AS taskTitle, pgo.verdict_payload_json AS verdictPayloadJson
+              s.branch AS branch, t.title AS taskTitle, pgo.verdict_payload_json AS verdictPayloadJson,
+              (SELECT 1 FROM orchestration_events bmf
+                WHERE bmf.kind = 'batch_merge_forfeited'
+                  AND json_extract(bmf.detail_json, '$.opId') = json_extract(oe.detail_json, '$.opId')
+                LIMIT 1) AS forfeited
        ${from}
        ORDER BY oe.seq DESC
        LIMIT ? OFFSET ?`,
@@ -7730,6 +7742,17 @@ interface GateEventJoinRow {
    *  `toGateHistoryRow`'s own doc for why the raw event's `detailJson` alone cannot supply this. `null`
    *  when no `pending_gate_ops` row matches (no opId on this event, or the op was never tombstoned). */
   verdictPayloadJson: string | null;
+  /** Card b480dda9: `1` iff a sibling `batch_merge_forfeited` event shares this row's own `opId` — the
+   *  WHOLESALE-FORFEIT annotation for a batched merge (see `toGateHistoryRow`'s own doc for why this is
+   *  an annotation on the SAME passed row, never a second row). `0`/`null` (SQLite's `NULL` for "no
+   *  match") for every other row, including a non-batched one — a `batch_merge_forfeited` event's `opId`
+   *  is only ever minted by `mergeBatch`, so it can never coincide with a solo gate's opId in practice,
+   *  but the mapper still gates on `batched` defensively rather than trusting that invariant alone. Like
+   *  `verdictPayloadJson` above, this column is selected ONLY by {@link Db.listGateEvents}'s own query —
+   *  {@link Db.listOrchestrationEventsBounded} shares this row SHAPE but not this SELECT list, so a row
+   *  from that method reads this key as `undefined` at runtime (never read there — `toEventForensicsRow`
+   *  has no use for it). */
+  forfeited: number | null;
 }
 
 /** Map a gate-run event kind to the page's three gate types (`build_gate`/`build_gate_retry` → merge). */
@@ -7920,6 +7943,14 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
         return typeof name === "string" && name.length > 0 ? [name] : [];
       })
     : null;
+  // Card b480dda9: an ANNOTATION on this SAME row, not a second row — the gate genuinely passed (or
+  // failed) and `outcome`/`passed` above stay exactly what they were; this only adds the LATER fact that
+  // main advanced mid-gate and the whole batch was abandoned (every candidate fell back to its own
+  // individual gate). Sourced from `r.forfeited` (the correlated-subquery match on this row's own opId —
+  // see `listGateEvents`'s own doc), gated on `batched` for the same defensive reason `branchCount`/
+  // `batchBranches` are: a forfeit event's opId is only ever minted by `mergeBatch`, so it cannot
+  // genuinely coincide with a non-batch row, but nothing here relies on that alone.
+  const batchForfeited = batched && r.forfeited === 1;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
@@ -7948,6 +7979,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     batched,
     branchCount,
     batchBranches,
+    batchForfeited,
   };
 }
 
