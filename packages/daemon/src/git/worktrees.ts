@@ -207,6 +207,38 @@ function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<Si
   return { git, timeoutMs };
 }
 
+/** One line of git's own KNOWN, benign `worktree add` progress output — printed on every successful add,
+ *  split across stdout (`HEAD is now at …`) and stderr (`Preparing worktree (…)`). See the doc on this
+ *  constant's one caller ({@link createWorktree}'s `worktree add` catch, card af436c99) for why this
+ *  narrow allowlist exists and what it deliberately does NOT match. */
+const BENIGN_WORKTREE_ADD_LINE = /^(Preparing worktree \(.*\)|HEAD is now at [0-9a-f]+.*)$/;
+
+/** True only when `message` consists ENTIRELY of lines matching {@link BENIGN_WORKTREE_ADD_LINE} (and is
+ *  non-empty) — i.e. it carries no `fatal:`/`error:` line and none of `withTimeoutKillingChild`'s own
+ *  wrapper suffixes ("git child killed" / "giving up … hung git child?"), both of which fail this check
+ *  by construction (they never match the allowlisted patterns). */
+function isBenignWorktreeAddNoise(message: string): boolean {
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((l) => BENIGN_WORKTREE_ADD_LINE.test(l));
+}
+
+/** Independently confirms a `worktree add` actually landed: the directory + its `.git` link exist, and
+ *  the checked-out branch is really `branch`. Used ONLY alongside {@link isBenignWorktreeAddNoise} — belt
+ *  and suspenders, never trusted alone — so a benign-looking message can't paper over an add that, for
+ *  some other reason, didn't actually leave a valid worktree behind. */
+async function worktreeAddLanded(worktreePath: string, branch: string, gitDeps: BoundedGitDeps): Promise<boolean> {
+  if (!fs.existsSync(worktreePath) || !fs.existsSync(path.join(worktreePath, ".git"))) return false;
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, gitDeps);
+    const head = (await withTimeout(
+      git.raw(["rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "git rev-parse --abbrev-ref HEAD (post-add benign-noise verify)",
+    )).trim();
+    return head === branch;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Injectable seam for {@link diffBranch}, mirroring {@link BoundedGitDeps} — same
  * block-timeout + {@link withTimeout} race, same `timeoutMs` default of {@link GIT_OP_TIMEOUT_MS} — but
@@ -1031,6 +1063,29 @@ export async function createWorktree(
           : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
         "git worktree add");
     } catch (addErr) {
+      // Card af436c99: `git worktree add`'s own SUCCESS output is entirely informational progress text —
+      // `Preparing worktree (new branch '…')` / `Preparing worktree (checking out '…')` / `HEAD is now at
+      // <sha> <subject>` — split across stdout and stderr. simple-git's default error detection flags a
+      // task as failed whenever the reported exitCode is truthy AND stderr carries ANY content at all
+      // (`error-detection.plugin.ts`'s `isTaskError`), with NO regard for what that content actually says
+      // — so an `add` that finishes genuinely fine, but whose completion-detection plugin reports a
+      // stale/misread non-zero exitCode (`completion-detection.plugin.ts` seeds `exitCode = -1`, itself
+      // truthy, until the child's `close`/`exit` events land — a known race under host contention), still
+      // throws a `GitError` whose entire message is that benign progress text. A real batch gate hit
+      // exactly this: `merge-deny-glob.mjs`'s own assertions all passed, then the process died on a
+      // `GitError` reading only `HEAD is now at 366e155 init\nPreparing worktree (new branch '…')`.
+      //
+      // Recognize ONLY that narrow shape — EVERY line of the error matches git's own known worktree-add
+      // progress format — and treat it as success once the resulting worktree is independently confirmed
+      // present and on the right branch. This deliberately does NOT swallow a genuine failure: a real
+      // `fatal:`/`error:` line, or either of `withTimeoutKillingChild`'s own wrapper suffixes ("git child
+      // killed" / "giving up … hung git child?"), never matches the benign pattern, so a killed/timed-out
+      // child and an "already used by worktree" failure fall straight through to the existing recovery +
+      // rethrow below, unchanged (see worktree-locked-residue-cleanup.mjs, which pins exactly that).
+      if (isBenignWorktreeAddNoise((addErr as Error).message ?? "")
+        && (await worktreeAddLanded(worktreePath, branch, gitDeps))) {
+        return exists;
+      }
       // Card 1a858805: a killed `worktree add` (withTimeoutKillingChild above, card 8e75ee20) can leave
       // `.git/worktrees/<name>/locked` (content `initializing`) behind — git's own in-progress marker,
       // normally cleared on success, now orphaned because the child died mid-checkout. `git worktree
