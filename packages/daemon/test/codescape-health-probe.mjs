@@ -302,7 +302,6 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 // ===================== (3) a sub-threshold wedge window (recovers in time) never restarts =====================
 {
   const homeDir = path.join(tmpHome, "blip-wedge-home");
-  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
   const wedgeFile = path.join(tmpHome, "blip-wedge-flag"); // does NOT exist yet — starts healthy
   process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
 
@@ -331,7 +330,11 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     healthProbeFailureThreshold: 3, // needs 3 CONSECUTIVE failures — this window can produce at most 1
   });
   await sup.start(["/fake/repo/blip-wedge"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 060dad34: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   // Wedge for a window well under one probe interval (140ms < 300ms), so realistically at most 1 probe
