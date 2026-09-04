@@ -1862,6 +1862,12 @@ if (isMain) {
     // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
     // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
     // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
+    // Card 63664129: THIS echo — front-anchored by orchestration/gate-runner.ts's `outputTail` capture,
+    // not this file's own bytes — is the ONLY surface that survives for a test whose decisive failure
+    // detail is multi-line (a stack, a timeline, a stdout/stderr dump): `failingTest` keeps just one line
+    // per tier, or `undefined` entirely for a thrown message matching no recognized marker. See
+    // GateStepResult.failingTest's own doc (gate-runner.ts) for the full constraint and its known gaps —
+    // don't restate it here, it drifts.
     for (const f of failed) {
       // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
       // child's real exit status was discarded, so "completed successfully, 'close' was just late"

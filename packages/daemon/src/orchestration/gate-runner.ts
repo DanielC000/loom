@@ -50,9 +50,14 @@ const OUTPUT_TAIL_BYTES = 4096;
  *
  *  Card 0e5b2045: the `UNCAUGHT` tier sits FIRST (highest priority), ABOVE `FAIL`/`not ok` — a deliberate
  *  priority decision, not an append. `result()` (below) returns the highest-priority tier with any match,
- *  so insertion position decides which line wins when a run prints both. 9 of this daemon's own test files
- *  report a genuine (non-`AssertionError`) thrown failure via `console.error("... UNCAUGHT ...")`, and this
- *  daemon's own `test-daemon.mjs` `runLane` ALSO prints a `FAIL  <name>  (exit N)` wrapper line for every
+ *  so insertion position decides which line wins when a run prints both. A subset of this daemon's own
+ *  test files report a genuine (non-`AssertionError`) thrown failure via `console.error("... UNCAUGHT ...")`
+ *  — re-answer the live count yourself with `grep -rl UNCAUGHT packages/daemon/test/*.mjs` (an upper bound:
+ *  a couple of hits are files that only mention the idiom in a comment or fixture, not files that use it for
+ *  their own real failures) rather than trusting any number written here — card 63664129 measured ~12-14
+ *  against this file's own stale "9", on 2026-09-04, and a hardcoded count is exactly the kind of thing that
+ *  drifts silently on the next file added or removed. This daemon's own
+ *  `test-daemon.mjs` `runLane` ALSO prints a `FAIL  <name>  (exit N)` wrapper line for every
  *  failing file, regardless of why it failed — a content-free summary (name + exit code only) that matched
  *  tier 0 and WON, in the incident that motivated this card, while the actual stack (only reachable via the
  *  `UNCAUGHT` line, printed later in the same stream, in `test-daemon.mjs`'s own end-of-run `FAILURES:`
@@ -62,7 +67,7 @@ const OUTPUT_TAIL_BYTES = 4096;
  *  the more useful line for a human diagnosing a rejection, and wins.
  *  ⚠️ DECOUPLED FROM RETRY ON PURPOSE (manager review, card 0e5b2045): {@link identifyRetriableTestFile}
  *  only recognizes a string shaped like `FAIL <name>` (its own bare-identifier regex) to drive the
- *  single-file merge retry — and `kickoff-real-spawn` (one of the 9 `UNCAUGHT`-idiom files) is this
+ *  single-file merge retry — and `kickoff-real-spawn` (one of the `UNCAUGHT`-idiom files above) is this
  *  daemon's OWN measured source of both weaker-passes ever recorded, at roughly a 1-in-11 rate. Letting
  *  `result()`'s new UNCAUGHT-wins priority also decide retry eligibility would have turned every one of
  *  those self-healing retries into a hard merge rejection (~15 extra minutes each) as a SIDE EFFECT of a
@@ -504,7 +509,32 @@ export interface GateStepResult {
   /** Best-effort failing-test/assertion line, scanned LIVE across the full stream (see
    *  {@link createFailingTestTracker}) — unlike `outputTail`, never truncated to the last
    *  {@link OUTPUT_TAIL_BYTES}. `undefined` when nothing recognizable was found (an honest miss, never a
-   *  guess — see {@link extractFailingTest}'s own doc). */
+   *  guess — see {@link extractFailingTest}'s own doc).
+   *
+   *  ⚠️ **STRUCTURALLY ONE LINE — this is a constraint on every test's failure OUTPUT, not just on this
+   *  field.** `createFailingTestTracker` deliberately keeps only the single winning line per tier (its own
+   *  doc: "never the whole output"), so a test whose decisive diagnostic genuinely spans multiple lines (a
+   *  timeline, a stack, a stdout/stderr dump) has that content EITHER cut down to its first matching line,
+   *  OR — for a failure shape that matches none of {@link FAILING_TEST_PATTERNS} at all (e.g. a plain
+   *  `throw new Error(multiLineMessage)` with no `AssertionError`/`UNCAUGHT`/`FAIL`/`error TS` marker
+   *  text) — this field is `undefined` ENTIRELY, not a truncated fragment. Card 63664129 confirmed both
+   *  shapes exist in this suite today: the `commitAll` test helper (`test/_git-commit.mjs`) throws a
+   *  3-line message on failure that matches no tier here (`failingTest` is always `undefined` for it), and
+   *  the `console.error(`... UNCAUGHT — ${err.stack}`)` idiom used by several test files has a multi-line
+   *  `.stack` of which only line 1 is ever kept.
+   *
+   *  ➡️ **The recovery path for either shape is `outputTail`, NOT this field** — specifically its
+   *  front-anchored `FAILURES:`-block capture (see {@link createFailureBlockTracker}), which echoes a
+   *  failing `test:daemon` file's FULL captured stdout/stderr (test-daemon.mjs's own epilogue never
+   *  truncates per file) up to a 16KB budget. A test author whose assertion failure isn't legible from
+   *  `failingTest` alone should read `outputTail` before assuming the diagnostic was lost — it usually
+   *  wasn't. Two known, unproven-either-way gaps in that recovery path, tracked as card `87cdb15f` (gap 1
+   *  = its DoD-1, gap 2 = its DoD-2 — don't re-derive by hand): (1) several failing files in the SAME
+   *  run share that one 16KB budget, so an earlier file's echo can starve a later file's own diagnostic;
+   *  (2) if the run never reaches its own `FAILURES:` epilogue at all (e.g. the step times out first —
+   *  card `9966c52d` records exactly this shape for `kickoff-real-spawn`), there is no fallback recovery
+   *  for a multi-line diagnostic — only whatever single line (or nothing, for the `commitAll` shape)
+   *  `failingTest` itself already holds. */
   failingTest?: string;
   /** How many lines matched the SAME tier `failingTest` was drawn from (see
    *  {@link createFailingTestTracker.matchCount}) — `undefined` iff `failingTest` is `undefined` (nothing
