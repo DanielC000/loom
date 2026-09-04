@@ -23,6 +23,16 @@
 //     append to `fake-codescape-calls.jsonl` (that log is for SUBPROCESS invocations; a registration is an
 //     HTTP call against the already-recorded `serve` process, and mixing it in would shift the
 //     position-indexed assertions elsewhere in codescape-supervisor.mjs that read that file).
+//     Card 44d45f81: env `FAKE_CODESCAPE_PORT_REPORT_DELAY_MS=<n>` delays ONLY the self-reported-bound-port
+//     stdout line by that many ms after the HTTP listener is already bound and answering — models a real
+//     installed binary that is merely SLOW to report under host contention (never an old-binary rejection,
+//     which stays synchronous), so a test can exercise `spawnServeSelfReporting`'s timeout/abandon branch
+//     and the "slow but within budget" success path without a real subprocess actually taking that long.
+//     Companion env `FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS=<n>` (default: every invocation) bounds the
+//     delay to only the first N `serve` invocations, counted PER CWD via a counter file — same shape as
+//     FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS below, and for the same reason: a "slow once, then recovers"
+//     scenario needs attempt #1 slow and attempt #2 instant, and a later parent-process env mutation can
+//     never reach a child that already spawned with the old env baked in.
 //     Card 5a7491d3: ALSO answers `POST /mcp/<anything>` with a minimal `tools/list` JSON-RPC stand-in —
 //     the caller passes the tool names to advertise via `params.advertise` and gets them echoed back as
 //     `result.tools`; used by codescape-mcp-spawn.mjs's list-completeness check, not a real MCP handshake.
@@ -143,6 +153,22 @@ if (args[0] === "ingest") {
   // ALL, even on an ordinary explicit-port invocation (that reporting was added in the SAME commit as
   // --port 0 support), unlike the capable default behavior below.
   const portZeroUnsupported = process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED === "1";
+  // Card 44d45f81: FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS bounds the delay to the first N `serve`
+  // invocations (counted PER CWD, via a counter file — same shape as FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS
+  // above, and for the same reason: a delayed-then-recovers scenario needs attempt #1 slow and attempt #2
+  // instant WITHOUT racing a parent-process env mutation against an already-spawned child, which cannot
+  // observe an env change made after it started). Omitted (or 0) means "every invocation", matching the
+  // simpler unconditional-delay case a single-attempt test needs.
+  const delayAttempts = Number(process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS || "0");
+  let delayAppliesThisInvocation = true;
+  if (delayAttempts > 0) {
+    const delayCounterFile = path.join(cwd, "fake-codescape-port-delay.count");
+    let priorDelayCount = 0;
+    try { priorDelayCount = Number(fs.readFileSync(delayCounterFile, "utf8")) || 0; } catch { /* first invocation — starts at 0 */ }
+    const thisInvocationNumber = priorDelayCount + 1;
+    fs.writeFileSync(delayCounterFile, String(thisInvocationNumber));
+    delayAppliesThisInvocation = thisInvocationNumber <= delayAttempts;
+  }
   if (portZeroUnsupported && portArg === "0") {
     record({ cmd: "serve", port: portArg, rejected: "port-zero-unsupported" });
     process.stderr.write(`invalid --port "0"\n`);
@@ -229,7 +255,13 @@ if (args[0] === "ingest") {
       // (portZeroUnsupported), which never had this capability at all.
       if (!portZeroUnsupported) {
         const bound = server.address().port;
-        console.log(JSON.stringify({ url: `http://127.0.0.1:${bound}`, port: bound }));
+        // Card 44d45f81: FAKE_CODESCAPE_PORT_REPORT_DELAY_MS delays only THIS line — the server is already
+        // listening (and answering /graph/health etc.) before it fires, mirroring a real installed binary
+        // that is slow to REPORT, never slow to actually bind.
+        const delayMs = delayAppliesThisInvocation ? Number(process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS || "0") : 0;
+        const emit = () => console.log(JSON.stringify({ url: `http://127.0.0.1:${bound}`, port: bound }));
+        if (delayMs > 0) setTimeout(emit, delayMs);
+        else emit();
       }
     });
   }

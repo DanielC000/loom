@@ -639,6 +639,81 @@ await new Promise((resolve) => hungServer.close(resolve));
   delete process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED;
 }
 
+// ===================== (g) card 44d45f81: the port-report TIMEOUT bound itself — previously zero =========
+// ===================== coverage of this branch at all (the fixture always reported instantly) ============
+{
+  // (g0) the ACTUAL production regression, against the REAL (unoverridden) default constant: a report at
+  // 8000ms is slower than the OLD 5_000ms default (would have been wrongly abandoned — this is exactly the
+  // shape measured live in production, card 44d45f81) but comfortably inside the NEW 20_000ms default.
+  // Deliberately does NOT override portReportTimeoutMs — this is the one check that would go RED again if
+  // DEFAULT_PORT_REPORT_TIMEOUT_MS were ever reverted or accidentally shrunk back down; every other check
+  // in this section uses the opts test seam and would stay green regardless of the shipped default.
+  const defaultTimeoutHomeDir = path.join(tmpHome, "default-timeout-home");
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "8000";
+  const defaultTimeoutSup = new CodescapeSupervisor({ homeDir: defaultTimeoutHomeDir, ingestTimeoutMs: 15_000 });
+  await defaultTimeoutSup.start(["/fake/repo/default-timeout"]);
+  // TIMING-GUARD-SAFE: poll-observes-a-later-step — up to 15s of polling (well past the 8s delay, well
+  // short of the 20s default bound) for getPort() to leave null via the delayed report actually arriving.
+  for (let i = 0; i < 300 && defaultTimeoutSup.getPort() === null; i++) await sleep(50);
+  check("(g0) against the REAL shipped default timeout, an 8s report (slower than the OLD 5s default) still succeeds on the first attempt",
+    defaultTimeoutSup.getPortReportCapable() === true && defaultTimeoutSup.getPort() !== null);
+  defaultTimeoutSup.stop();
+  delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
+
+  // (g1) a report that arrives WITHIN the bound must succeed on the FIRST attempt — never abandoned, never
+  // a wasted restart. This is the exact regression: `4e0df6ce`'s original 5_000ms was measured (card
+  // 44d45f81) to be shorter than the REAL installed binary's report time under real host contention, so a
+  // live, functioning `serve` got killed and retried needlessly. Here the fixture is deliberately SLOWER
+  // than instant (delayMs) but still comfortably inside portReportTimeoutMs.
+  const slowOkHomeDir = path.join(tmpHome, "slow-ok-home");
+  const slowOkCallsFile = path.join(slowOkHomeDir, "fake-codescape-calls.jsonl");
+  const readSlowOkServeCalls = () => (fs.existsSync(slowOkCallsFile)
+    ? fs.readFileSync(slowOkCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : []).filter((c) => c.cmd === "serve");
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "500";
+  const slowOkSup = new CodescapeSupervisor({ homeDir: slowOkHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 3_000 });
+  await slowOkSup.start(["/fake/repo/slow-ok"]);
+  // TIMING-GUARD-SAFE: poll-observes-a-later-step — waits for getPort() to leave null, which (given
+  // portReportTimeoutMs=3000 >> delayMs=500) can only happen via the delayed report actually arriving, not
+  // via a timeout+restart (that would take at least 3000ms of its own before even scheduling a retry).
+  for (let i = 0; i < 100 && slowOkSup.getPort() === null; i++) await sleep(50);
+  check("(g1) a report slower than instant but well within the bound still succeeds",
+    slowOkSup.getPort() !== null && slowOkSup.getPortReportCapable() === true);
+  check("(g1) it succeeded on the FIRST attempt — no timeout-triggered restart was ever needed",
+    readSlowOkServeCalls().length === 1);
+  slowOkSup.stop();
+  delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
+
+  // (g2) a report that NEVER beats the bound must still be abandoned and retried — the timeout/abandon
+  // branch itself (previously untested end-to-end: nothing in this file exercised the `setTimeout` path in
+  // `spawnServeSelfReporting` before this card). DELAY_ATTEMPTS=1 confines the slow report to attempt #1
+  // ONLY — attempt #2 reports instantly — because a later parent-process env mutation could never reach a
+  // child that already spawned with the old env baked in (spawn() copies env at call time); this is the
+  // fixture's own established idiom (see FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS above), not a new one.
+  const slowTimeoutHomeDir = path.join(tmpHome, "slow-timeout-home");
+  const slowTimeoutCallsFile = path.join(slowTimeoutHomeDir, "fake-codescape-calls.jsonl");
+  const readSlowTimeoutServeCalls = () => (fs.existsSync(slowTimeoutCallsFile)
+    ? fs.readFileSync(slowTimeoutCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : []).filter((c) => c.cmd === "serve");
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "5000"; // far past portReportTimeoutMs below
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS = "1"; // ONLY attempt #1 is slow
+  const slowTimeoutSup = new CodescapeSupervisor({
+    homeDir: slowTimeoutHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 200, restartBackoffMs: [100, 200],
+  });
+  await slowTimeoutSup.start(["/fake/repo/slow-timeout"]);
+  // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN condition (getPort() non-null) is the
+  // fact the checks below re-observe; it can only become true via attempt #2's un-delayed report (attempt
+  // #1's 5000ms delay vastly exceeds its own 200ms bound, so attempt #1 alone could never resolve this).
+  for (let i = 0; i < 100 && slowTimeoutSup.getPort() === null; i++) await sleep(50);
+  check("(g2) a report slower than the bound is abandoned — a second serve attempt was scheduled",
+    readSlowTimeoutServeCalls().length >= 2);
+  check("(g2) it recovers once a later attempt's report arrives inside the bound — never left permanently stuck",
+    slowTimeoutSup.getPort() !== null && slowTimeoutSup.getPortReportCapable() === true);
+  slowTimeoutSup.stop();
+  delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
+  delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;

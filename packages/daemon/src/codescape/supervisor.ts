@@ -95,12 +95,29 @@ const DEFAULT_HEALTHY_RUN_MS = 30_000;
  * attempt of this instance's life (and any later attempt after {@link CodescapeSupervisor.port} goes back
  * to `null` — a `stop()`/restart-give-up). How long we wait for EITHER the reported-bound-port stdout line
  * (see {@link parsePortReportLine}) OR the child's own exit before concluding the attempt is ambiguous and
- * falling back to a scheduled restart (never left permanently unresolved). Short, mirroring the other
- * subprocess-probe bounds in this file ({@link DEFAULT_VERSION_PROBE_TIMEOUT_MS} et al.) — a capable
- * `serve` reports essentially at bind time; an incapable one (predating `f7a5684`) rejects `--port 0`
- * synchronously, before doing anything else.
+ * falling back to a scheduled restart (never left permanently unresolved).
+ *
+ * Card 44d45f81 RAISED this from the original 5_000: `4e0df6ce`'s reasoning ("a capable `serve` reports
+ * essentially at bind time") was measured FALSE under real host contention and caused a live production
+ * regression — two live, functioning `serve` attempts abandoned on the FIRST boot after deploying that
+ * constant. Measured directly against the REAL installed binary (never the fixture, which reports
+ * instantly and so cannot exercise this bound at all — same family as this project's standing real-spawn
+ * rule): quiet host, n=8, 765-836ms; under synthetic CPU load oversubscribing 16 logical cores 18x, n=6,
+ * 2442-3557ms; oversubscribing ~2.5x (40 workers), n=9 across two batches, 975-7942ms — several runs
+ * already past the OLD 5_000ms bound. A byte-level trace under that same load showed essentially ALL of
+ * the elapsed time lands BEFORE the child writes its first byte (module load + graph-store open); the gap
+ * from first byte to the report line itself was consistently under 100ms. That rules out an idle-reset
+ * bound as an improvement here — there is no trickle of progress output partway through to reset against,
+ * the delay is one unbroken block up front — so a larger absolute wall-clock bound is the correct
+ * SHAPE, not just the easy one. 20_000ms is real headroom (>2.5x the worst synthetically-measured value)
+ * over host contention well beyond what produced the production incident, while still bounding a
+ * genuinely-stuck spawn to a human-noticeable wait rather than removing the bound (`spawnServeSelfReporting`'s
+ * own doc commits to "never a permanently-stuck attempt"). Deliberately NOT mirroring the short
+ * already-alive-server probe bounds elsewhere in this file ({@link DEFAULT_VERSION_PROBE_TIMEOUT_MS} et
+ * al.) — those probe a server that's already up and answering fast; this one waits out a COLD START, a
+ * fundamentally different cost that scales with host contention far more steeply.
  */
-const DEFAULT_PORT_REPORT_TIMEOUT_MS = 5_000;
+const DEFAULT_PORT_REPORT_TIMEOUT_MS = 20_000;
 /**
  * Card 4c7a337d: the sliding window (ms) {@link DEFAULT_MAX_RESTARTS_PER_WINDOW} is measured over — see
  * that constant's own doc for what this pair exists to fix.
@@ -1195,6 +1212,23 @@ export class CodescapeSupervisor {
   }
 
   /**
+   * Card 44d45f81 DoD-3: repeated `spawnServeSelfReporting` timeouts DO feed this same give-up arithmetic
+   * (each abandoned attempt calls `scheduleRestart(false)`, never "healthy") — a slow-but-genuinely-broken
+   * host CAN still reach the give-up arm below, this raised timeout does not make that structurally
+   * impossible, only much harder to reach. With {@link DEFAULT_PORT_REPORT_TIMEOUT_MS} at 20_000ms and the
+   * default {@link DEFAULT_RESTART_BACKOFF_MS} (6 entries), give-up via backoff exhaustion now needs 7
+   * consecutive attempts that EACH individually exceed 20s — worst case ~7*20s + the backoff sum
+   * (1+2+5+10+30+60=108s) ≈ 248s (~4.1 min) of sustained badness, versus ~143s (~2.4 min) at the old 5s
+   * bound. That is the DELIBERATE tradeoff: a transient slow start (measured up to ~7.9s under synthetic
+   * heavy load, see that constant's doc) now succeeds on the FIRST attempt instead of ever entering this
+   * path at all, which is what closes the production regression; a process that is genuinely, permanently
+   * unable to report still reaches the same loud "needs a human" diagnostic, just after a longer, bounded
+   * wait — never silently stuck (this only ever changes HOW LONG until give-up, never WHETHER it fires).
+   * Unmeasured against a real production host under real sustained badness (only synthetic CPU-contention
+   * data exists here, see `DEFAULT_PORT_REPORT_TIMEOUT_MS`'s own doc) — do not assume this arithmetic
+   * transfers 1:1 to a real crash loop; it is the reachable-in-principle analysis the card asked for, not a
+   * guarantee about wall-clock time on any specific host.
+   *
    * Schedule a bounded-backoff restart; `ranHealthy` (computed by the caller, which alone knows whether
    * THIS attempt ever came up) resets the backoff schedule — legitimate policy so a long-lived healthy
    * process that dies once isn't permanently penalised by ancient restart history. Gives up (stays down,
