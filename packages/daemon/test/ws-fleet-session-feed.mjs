@@ -102,6 +102,23 @@ try {
   });
   db.setBusy("S1", true);
   db.setBusy("S1", false);
+  // Card 64af0023 audit of this file's ONE windowMs site (used here and by its own positiveControl below):
+  // injection-tested by delaying every production `setTimeout(fn, DIRTY_FLUSH_MS)` call (fleet-hub.ts's
+  // own dirty-flush debounce timer — the ONE production timer this windowMs is anchored to) and bisecting
+  // the factor. The `check` itself (pointReadCounts.get("S1")) is proven safe by construction — S1's
+  // branch never connects a socket, so markSessionDirty's early-out means NO debounce timer is ever
+  // started for S1 at all, at any delay factor; confirmed no false-pass risk.
+  // BUT the positiveControl (below) genuinely races the SAME production timer, and its own margin is
+  // tight: PASSES with the production timer delayed up to 1.4x (280ms observed within this 300ms window),
+  // FAILS (assertNeverWithControl throws "positive control did NOT observe check() go true") at 1.5x
+  // (300ms) and every factor tested above it, up to 9x — confirmed the injection is real by wall-clock
+  // (injectedCount>0 logged on every failing run) and that the harness fails LOUD, not silently. ⇒
+  // AT-RISK, not proven-safe: real host contention that slows fleet-hub's debounce timer by >=~50% would
+  // make this test hard-crash (not silently false-pass) rather than pass or fail gracefully. NOT widened
+  // here (card 64af0023 DoD-3: "never buy margin by widening a budget" — bumping this window's +100 is
+  // exactly that temptation) and NOT converted (there is nothing to convert — this site already uses the
+  // sanctioned observer pattern correctly; the risk is margin, not idiom). Reported up for a manager/owner
+  // call on whether a deliberate margin increase is warranted.
   const noPointReadsWithoutSocket = await assertNeverWithControl({
     label: "(1) no socket connected: session mutations trigger zero point-reads",
     check: () => (pointReadCounts.get("S1") ?? 0) > 0,

@@ -275,6 +275,15 @@ try {
     let worker2Settled = false;
     const p2 = sessions.confirmWorkerMerge(G.mgrId, worker2Id).then((r) => { worker2Settled = true; return r; });
 
+    // Card 64af0023 audit of this file's ONE windowMs site (used here and by its own positiveControl
+    // below): PROVEN SAFE BY CONSTRUCTION, not injection-dependent at all — `runGate` is fully faked
+    // (`fakeGate` above) and `worker2Settled` can only flip once `p2` resolves, which is gated behind the
+    // per-repo runExclusive admission held by worker1's retry; that admission is released ONLY by this
+    // test's own explicit `releaseRetry("go")` call (below), issued SEQUENTIALLY AFTER this
+    // assertNeverWithControl already completes. No production setTimeout of any kind sits on this check's
+    // path, so no delay factor could ever flip `worker2Settled` early — the same "verdict decided by
+    // already-fixed state is invariant to callback timing" mechanism the card's own model commits use (no
+    // injection experiment run; there is nothing in this path for one to delay).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(G) worker2 does NOT settle while worker1's single-file retry is still running",
