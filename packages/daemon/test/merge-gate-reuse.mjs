@@ -167,12 +167,15 @@ try {
     // by reuse-check time `branch`'s own ref already has the moved main as an ancestor and
     // `freshBehindMain` reads 0 — condition 7 ("behind-main") genuinely CANNOT independently fire here.
     // The union-merge's own new commit is what actually surfaces: it changes the worktree's HEAD sha away
-    // from what the self-check's stamp recorded, so the REAL discriminator is condition 6
-    // ("stamp-changed") — exactly what the card's own body already names ("Condition 6 via the
-    // union-merge... it can change the worktree stamp"). (T) below exercises the preLanded path, where
-    // the union-merge is skipped and "behind-main" genuinely fires on its own.
+    // from what the self-check's stamp recorded, so the REAL discriminator is condition 6, and
+    // SPECIFICALLY the union-merge-caused half of it ("stamp-changed-by-union-merge", not the
+    // worktree-caused "stamp-changed-worktree") — exactly what the card's own body already names
+    // ("Condition 6 via the union-merge... it can change the worktree stamp"). (T) below exercises the
+    // preLanded path, where the union-merge is skipped, "behind-main" genuinely fires on its own, and a
+    // stamp change (from a real worktree edit, not a union-merge) is attributed to the OTHER half.
     const buildGateB = eventsOfKind(db, B.mgrId, "build_gate")[0];
-    check("(B) build_gate reuseRefusalReasons is exactly ['stamp-changed'] — the union-merge absorbs the main advance before condition 7 is ever checked", JSON.stringify(buildGateB?.detail?.reuseRefusalReasons) === JSON.stringify(["stamp-changed"]));
+    check("(B) build_gate reuseRefusalReasons is exactly ['stamp-changed-by-union-merge'] — the union-merge absorbs the main advance before condition 7 is ever checked, and is correctly attributed as the CAUSE of the stamp change (not the worktree)",
+      JSON.stringify(buildGateB?.detail?.reuseRefusalReasons) === JSON.stringify(["stamp-changed-by-union-merge"]));
   }
 
   // ── (C) STALE BASE (before the self-check even ran) — must re-gate ─────────────────────────────────
@@ -330,6 +333,15 @@ try {
     check("(G) confirmWorkerMerge re-ran the gate for real (validatedHead A can never match commit B)", calls === 2);
     check("(G) gateRan:true", confirm.gateRan === true);
     check("(G) reusedOpId is absent", confirm.reusedOpId === undefined);
+    // Card 2e52bf99 — the DISCRIMINATOR'S OTHER HALF: main is untouched here (only the branch itself
+    // gained a new commit), so the ordinary path's union-merge short-circuits to its cheap no-write
+    // merge-base check (main is already an ancestor, nothing to fold in) — `unionMergeMovedHead` never
+    // gets set. The resulting stamp change must be attributed to the worktree/branch, not the union-merge,
+    // proving the discriminator doesn't just default to "worktree" — it correctly distinguishes THIS real
+    // cause (a worker's own new commit) from (B)'s real cause (main moving) using the same code path.
+    const buildGateG = eventsOfKind(db, G.mgrId, "build_gate")[0];
+    check("(G) build_gate reuseRefusalReasons is exactly ['stamp-changed-worktree'] — a new commit on the branch itself, correctly NOT attributed to the union-merge",
+      JSON.stringify(buildGateG?.detail?.reuseRefusalReasons) === JSON.stringify(["stamp-changed-worktree"]));
   }
 
   // ── (H) SIMULATED DAEMON RESTART — the in-memory self-check record is process-local; a fresh
@@ -1151,10 +1163,14 @@ try {
   //        DELIBERATELY on the preLanded path, not the ordinary one (B) uses: as (B)'s own comment above
   //        now documents (found while writing THIS test), the ordinary path's union-merge folds any main
   //        advance into the worktree BEFORE the reuse block ever runs, so `freshBehindMain` always reads 0
-  //        there and condition 7 can never independently fire — only condition 6 (stamp-changed) shows a
-  //        main advance on that path. The preLanded path (mirrors (M)/(N)) skips the union-merge entirely,
-  //        so main can genuinely sit ahead of what `branch`'s own ref contains at reuse-check time — the
-  //        one shape where "behind-main" is independently, simultaneously true alongside a dirty worktree.
+  //        there and condition 7 can never independently fire — only condition 6 (as
+  //        "stamp-changed-by-union-merge") shows a main advance on that path. The preLanded path (mirrors
+  //        (M)/(N)) skips the union-merge entirely, so main can genuinely sit ahead of what `branch`'s own
+  //        ref contains at reuse-check time — the one shape where "behind-main" is independently,
+  //        simultaneously true alongside a dirty worktree. It's ALSO the shape that proves the
+  //        union-merge/worktree discriminator attributes correctly even when BOTH could plausibly apply:
+  //        main genuinely advances here too, but since no union-merge ever ran, the stamp change must be
+  //        (and is asserted to be) attributed to the worktree, not mislabeled "by-union-merge".
   {
     const T = mk("t", "feature-t.txt");
     makeRepo(T);
@@ -1200,7 +1216,11 @@ try {
     const reasonsT = buildGateT?.detail?.reuseRefusalReasons;
     check("(T) reuseRefusalReasons is an array", Array.isArray(reasonsT));
     check("(T) reuseRefusalReasons includes worktree-dirty", Array.isArray(reasonsT) && reasonsT.includes("worktree-dirty"));
-    check("(T) reuseRefusalReasons includes stamp-changed", Array.isArray(reasonsT) && reasonsT.includes("stamp-changed"));
+    // "stamp-changed-worktree", NOT "stamp-changed-by-union-merge" — the discriminator's own correctness
+    // check: no union-merge ran on this (preLanded) path, so even though main ALSO genuinely advanced in
+    // this same scenario, the stamp change must be attributed to the worktree, never mislabeled.
+    check("(T) reuseRefusalReasons includes stamp-changed-worktree (correctly attributed — no union-merge ran on this path)", Array.isArray(reasonsT) && reasonsT.includes("stamp-changed-worktree"));
+    check("(T) reuseRefusalReasons does NOT include stamp-changed-by-union-merge", Array.isArray(reasonsT) && !reasonsT.includes("stamp-changed-by-union-merge"));
     check("(T) reuseRefusalReasons includes behind-main", Array.isArray(reasonsT) && reasonsT.includes("behind-main"));
     // THE DISCRIMINATING ASSERTION: a first-fail-only implementation would report exactly ONE of the three
     // above (whichever the check order visits first) and never the other two — this proves ALL THREE
@@ -1209,7 +1229,7 @@ try {
     // And nothing from the UNAFFECTED conditions (1-4, and the resolve-failure variants of 7) leaks in —
     // lastCheck genuinely existed/matched/passed/was current, and main's HEAD resolved cleanly.
     check("(T) no conditions 1-4 or unrelated tokens present (only the 3 genuinely-failing ones)",
-      Array.isArray(reasonsT) && !reasonsT.some((r) => ["no-last-check", "branch-mismatch", "last-check-failed", "head-not-current", "main-head-unresolved", "behind-main-unknown", "worktree-dirty-unknown", "stamp-unknown"].includes(r)));
+      Array.isArray(reasonsT) && !reasonsT.some((r) => ["no-last-check", "branch-mismatch", "last-check-failed", "head-not-current", "main-head-unresolved", "behind-main-unknown", "worktree-dirty-unknown", "stamp-unknown", "stamp-changed-by-union-merge"].includes(r)));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

@@ -13932,6 +13932,20 @@ export class SessionService {
     // reuse-decision block below for why "first failing condition only" would bias any distribution built
     // from this field toward whichever condition happens to sit earliest in the check order.
     let reuseRefusalReasons: string[] | undefined;
+    // Card 2e52bf99 (manager follow-up): whether the union-merge below (the non-preLanded branch) actually
+    // MOVED the worktree's HEAD — i.e. `mergeMainIntoWorktree`'s own `merged:true`, meaning `git merge
+    // --no-edit mainSha` genuinely ran (fast-forward OR a real merge commit; VERIFIED by reading that
+    // function — its ONLY early-return short-circuit, on a pre-existing merge-base check, returns
+    // `merged:false` and never invokes `git merge` at all when main was already an ancestor, i.e. nothing
+    // to fold in). Declared at this outer scope, defaulting `false`, so the preLanded branch (which never
+    // runs a union-merge at all) and the "nothing to fold in" short-circuit both correctly leave it unset —
+    // in both cases any later stamp change can ONLY be attributable to the worktree/branch itself, never
+    // to this step. Exists so the reuse-refusal reasons below can tell apart two causes that would
+    // otherwise collapse into one bucket: the union-merge's OWN commit moving HEAD (structural — fires
+    // whenever main advanced, independent of anything the worker did) vs. the worktree genuinely changing
+    // on its own (the worker committed or edited something after its self-check — a real, different
+    // signal). Read-only, additive: never influences `reuseResult`.
+    let unionMergeMovedHead = false;
     // Card db9b0130: whether this merge's gate was skipped because its ENTIRE changed-path set is proven
     // inert (see `isInertMergeDiff`) — declared at THIS outer scope for the same reason `gateRan` is (the
     // plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block where this is
@@ -14225,6 +14239,9 @@ export class SessionService {
         // (a distinct, independently-proven invariant) when reuse is decided instead; left as this union
         // sha whenever the gate ends up actually running for real.
         gateBaseMainHead = union.mainSha;
+        // Card 2e52bf99: capture whether THIS step is what moved HEAD — see `unionMergeMovedHead`'s own
+        // doc (declared above, outer scope) for why.
+        unionMergeMovedHead = union.merged;
       } else {
         // GATE-BASE CAPTURE, preLanded path (card b0ab78d6): the union-merge above is skipped on THIS
         // branch — deliberately, to protect ALREADY_MERGED classification (see the doc above) — so there
@@ -14407,7 +14424,15 @@ export class SessionService {
           reasons.push("worktree-dirty-unknown", "stamp-unknown");
         } else {
           if (freshStamp.dirty) reasons.push("worktree-dirty");
-          if (hasLastCheck && stampDiffers === true) reasons.push("stamp-changed");
+          // SPLIT (manager follow-up, card 2e52bf99): a stamp change has two structurally different
+          // causes that must not collapse into one bucket — see `unionMergeMovedHead`'s own doc. When the
+          // union-merge above genuinely moved HEAD (main was folded in — structural, unrelated to
+          // anything the worker did), attribute it there; otherwise the change can only be the
+          // worktree/branch itself (a new commit or a dirty edit landing after the self-check — a real,
+          // different, worker-caused signal).
+          if (hasLastCheck && stampDiffers === true) {
+            reasons.push(unionMergeMovedHead ? "stamp-changed-by-union-merge" : "stamp-changed-worktree");
+          }
         }
         // Same ambiguous-absence discipline for condition 7, split into its two distinct failure modes:
         // "couldn't resolve main's HEAD at all" (a git-op failure) is a different root cause from "resolved
