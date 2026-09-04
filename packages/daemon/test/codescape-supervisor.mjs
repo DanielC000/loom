@@ -622,13 +622,18 @@ await new Promise((resolve) => hungServer.close(resolve));
   const oldBinPortBefore = oldBinSup.getPort();
   const oldBinPidBefore = oldBinSup.getPid();
   process.kill(oldBinPidBefore);
+  // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN condition is the conjunction of the two
+  // facts the checks below re-observe (pid changed, and a 3rd serve call is on record); the THIRD check
+  // additionally re-asserts `.length === 3` explicitly rather than indexing `[2]` alone, so a timeout exit
+  // (an under-length array) fails loudly instead of `[2]?.port !== "0"` vacuously reading `undefined`.
   for (let i = 0; i < 100 && (oldBinSup.getPid() === oldBinPidBefore || readOldBinServeCalls().length < 3); i++) await sleep(50);
   check("(f) restart-on-death on the fallback path reuses the SAME explicit port",
     oldBinSup.getPort() === oldBinPortBefore);
   check("(f) restart-on-death produced a genuinely new pid",
     oldBinSup.getPid() !== oldBinPidBefore && oldBinSup.getPid() !== null);
+  const oldBinServeCallsAfterRestart = readOldBinServeCalls();
   check("(f) the restart did NOT re-attempt --port 0 (capability stays confirmed-false, sticky, never re-probed)",
-    readOldBinServeCalls()[2]?.port !== "0");
+    oldBinServeCallsAfterRestart.length === 3 && oldBinServeCallsAfterRestart[2]?.port !== "0");
 
   oldBinSup.stop();
   delete process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED;
