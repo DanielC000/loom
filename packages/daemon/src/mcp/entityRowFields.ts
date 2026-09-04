@@ -52,8 +52,13 @@ import type { Agent, Profile, Project } from "@loom/shared";
  * would silently read undefined fields off the error object instead of surfacing the error.
  */
 
-/** Project a row down to exactly the fields named in `keys` — the shared machinery every xFields helper below calls. */
-function pickFields<T>(row: T, keys: readonly (keyof T)[]): T {
+/**
+ * Project a row down to exactly the fields named in `keys` — the shared machinery every xFields helper
+ * below calls. Exported (card b6e3493f) so agentView.ts/sessionView.ts's `full:true` projections reuse
+ * it too, instead of adding two more standalone copies of the same five lines — this file's own §WHY
+ * is precisely about that class of divergence.
+ */
+export function pickFields<T>(row: T, keys: readonly (keyof T)[]): T {
   const out = {} as T;
   for (const k of keys) out[k] = row[k];
   return out;

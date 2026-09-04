@@ -1,4 +1,5 @@
 import type { SessionListItem } from "@loom/shared";
+import { pickFields } from "./entityRowFields.js";
 
 // Shared MCP-layer projection for the cross-project session list tools (audit list_sessions +
 // platform list_all_sessions). This is a PRESENTATION projection only — it never touches the db
@@ -76,6 +77,36 @@ export function filterSessionsByState(
 export const DEFAULT_SESSION_SUMMARY_CAP = 50;
 
 /**
+ * COMPILE-TIME TOTALITY for the full:true path (card b6e3493f). `projectSessionList` below used to
+ * return `full:true` rows unprojected — an OPT-OUT shape that ships every column on a `Session` row
+ * straight to the wire, with no build error and no test failure when a new one is added. Every caller
+ * of this function (list_all_sessions on both platform.ts + setup.ts, and the auditor's list_sessions
+ * in transcript-read.ts) genuinely feeds it `SessionListItem[]` (enriched with `projectName`/
+ * `agentName`, not bare `Session`), so the sentinel is against `SessionListItem` — a bare `keyof
+ * Session` sentinel would have silently dropped those two fields on every real caller today, not just
+ * a hypothetical future one (contrast agentView.ts's AGENT_LIST_FIELDS, where the enrichment is only a
+ * future-proofing concern). `pendingMerge` (optional on `Session`, `PendingMerge | null`) is included
+ * here rather than excluded like orchestration.ts's SESSION_ROW_FIELDS does for `worker_status` —
+ * nothing on this path computes or overrides `pendingMerge`, and a DB-sourced row never sets it, so
+ * keeping the sentinel genuinely total over `keyof SessionListItem` costs nothing (the resulting
+ * `undefined` is dropped entirely by this router's `ok()` envelope's `JSON.stringify`).
+ */
+const SESSION_LIST_FIELDS: Record<keyof SessionListItem, 1> = {
+  id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
+  resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
+  parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,
+  gen: 1, recycledFrom: 1, ctxInputTokens: 1, ctxTurns: 1, turnSeq: 1, ctxUpdatedAt: 1,
+  model: 1, rateLimitedUntil: 1, rateLimitDeadline: 1, browserTesting: 1, documentConversion: 1,
+  restrictedTools: 1, noCommit: 1, skills: 1, connections: 1, vaultWrite: 1, companionLeadMode: 1,
+  capabilities: 1, archivedAt: 1, pendingMerge: 1, scheduledSpawn: 1,
+  projectName: 1, agentName: 1,
+};
+const SESSION_LIST_KEYS = Object.keys(SESSION_LIST_FIELDS) as (keyof SessionListItem)[];
+
+/** Project ONE session row to the full (non-summary) shape `full:true` returns. See SESSION_LIST_FIELDS. */
+const toFullSessionRow = (s: SessionListItem): SessionListItem => pickFields(s, SESSION_LIST_KEYS);
+
+/**
  * Apply the shared MCP-layer list shape to an already-fetched, already-filtered session list:
  * optional offset/limit pagination, then summary projection unless full:true. Pure — no db access.
  */
@@ -86,5 +117,5 @@ export function projectSessionList(
   let page = rows;
   if (opts.offset !== undefined) page = page.slice(opts.offset);
   if (opts.limit !== undefined) page = page.slice(0, opts.limit);
-  return opts.full ? page : page.map(toSessionSummary);
+  return opts.full ? page.map(toFullSessionRow) : page.map(toSessionSummary);
 }

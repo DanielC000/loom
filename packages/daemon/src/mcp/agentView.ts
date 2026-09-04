@@ -1,4 +1,5 @@
-import type { Agent } from "@loom/shared";
+import type { Agent, AgentListItem } from "@loom/shared";
+import { pickFields } from "./entityRowFields.js";
 
 // Shared MCP-layer projection for the cross-project agent list tools (platform + setup
 // `list_all_agents`). The exact sibling of sessionView.ts: a PRESENTATION projection only — it never
@@ -40,15 +41,37 @@ export const toAgentSummary = (a: Agent): AgentSummary => ({
 export const DEFAULT_AGENT_SUMMARY_CAP = 100;
 
 /**
+ * COMPILE-TIME TOTALITY for the full:true path (card b6e3493f). `projectAgentList` below used to
+ * return `full:true` rows unprojected — an OPT-OUT shape that ships every column on an `Agent` row (and
+ * anything a future caller enriches it with) straight to the wire. Sentinelled against `AgentListItem`
+ * (id + every `Agent` field + `projectName`), NOT bare `Agent`: `projectAgentList`'s own `rows: Agent[]`
+ * parameter structurally accepts an `AgentListItem[]` too (it's a subtype), and `db.listAllAgents():
+ * AgentListItem[]` already exists — so a `keyof Agent`-only sentinel would silently drop `projectName`
+ * the moment any future caller passes it through, with no build error and no test failure to catch it.
+ * Every CURRENT caller (platform.ts / setup.ts `list_all_agents`) passes plain `Agent[]` (from
+ * `db.listAgents`), so `projectName` comes back `undefined` today — and every caller's response goes
+ * through this router's `ok()` envelope (`JSON.stringify`), which drops an undefined-valued key
+ * entirely, so the wire payload for today's callers is byte-identical to the prior raw-row shape.
+ */
+const AGENT_LIST_FIELDS: Record<keyof AgentListItem, 1> = {
+  id: 1, projectId: 1, name: 1, startupPrompt: 1, position: 1, profileId: 1,
+  endpoint: 1, ioSchema: 1, projectName: 1,
+};
+const AGENT_LIST_KEYS = Object.keys(AGENT_LIST_FIELDS) as (keyof AgentListItem)[];
+
+/** Project ONE agent row to the full (non-summary) shape `full:true` returns. See AGENT_LIST_FIELDS. */
+const toFullAgentRow = (a: Agent): AgentListItem => pickFields(a as AgentListItem, AGENT_LIST_KEYS);
+
+/**
  * Apply the shared MCP-layer list shape to an already-fetched agent list: optional offset/limit
  * pagination, then summary projection unless full:true. Pure — no db access. Sibling of projectSessionList.
  */
 export function projectAgentList(
   rows: Agent[],
   opts: { full?: boolean; limit?: number; offset?: number } = {},
-): Agent[] | AgentSummary[] {
+): AgentListItem[] | AgentSummary[] {
   let page = rows;
   if (opts.offset !== undefined) page = page.slice(opts.offset);
   if (opts.limit !== undefined) page = page.slice(0, opts.limit);
-  return opts.full ? page : page.map(toAgentSummary);
+  return opts.full ? page.map(toFullAgentRow) : page.map(toAgentSummary);
 }
