@@ -167,9 +167,50 @@ function ForfeitTag() {
   );
 }
 
-// A long-running lane cue mirroring the mockup: warn (amber) once a running gate passes this, since the
-// default gateCommandTimeoutMs is minutes and a lane held this long is worth the eye.
-const LONG_RUN_WARN_SECONDS = 420;
+// A long-running lane cue mirroring the mockup: the running lane's elapsed clock is amber while healthy
+// and flips to RED once a gate has consumed this FRACTION of its OWN project's resolved
+// `gateCommandTimeoutMs` (surfaced per row as `GateRun.gateTimeoutMs`).
+//
+// WHY A FRACTION AND NOT A FIXED NUMBER OF SECONDS (card fd9edb87, owner-reported): the gate timeout is
+// PER-PROJECT and this page is a deliberate cross-project view, so two rows on screen can legitimately
+// have different bounds — ⛔ no single page-level constant can be correct for both. The constant this
+// replaced was a hardcoded 420s, which on this repo's own 1,800,000ms bound fired at ~23% and left a
+// completely healthy 16–20 minute merge gate red for most of its life. A warning that is on almost always
+// carries no information: it trains the reader to ignore the one time it matters.
+//
+// WHY 0.80: Loom's own healthy merge gates measure ~16–20 min against a 30 min bound (~53–67%), so 0.80
+// clears the top of that measured band by a comfortable margin while still leaving ~6 minutes of runway
+// before the bound — late enough to be quiet on routine runs, early enough for the cue to be actionable.
+// It sits deliberately just UNDER the daemon's own post-settle GATE_PROXIMITY_THRESHOLD (0.85, see
+// `orchestration/gate-runner.ts`): this is the LIVE cue, so it should draw the eye slightly before the
+// settled record would call a run near-budget, while there is still time to act on it.
+// ⚠️ The two fractions are NOT the same measurement and must not be read as one: the daemon's is a single
+// STEP's duration; this one is the WHOLE RUN's elapsed time since admission (worktree prep + every step).
+// Whole-run elapsed is always ≥ the worst step, so on a project with a heavy build step this fires EARLIER
+// relative to the daemon's signal. That is the safe direction for a warning, not an equivalence.
+const LONG_RUN_WARN_FRACTION = 0.80;
+
+/** The per-ROW long-run verdict for a running gate: `warn` flips its elapsed clock from amber to red once
+ *  the run has consumed {@link LONG_RUN_WARN_FRACTION} of THAT row's own project bound.
+ *  A row whose `gateTimeoutMs` is `null` (the project row was unreadable — see `GateRun.gateTimeoutMs`)
+ *  NEVER warns: there is ⛔ deliberately no fallback constant, because an unknown bound cannot say whether
+ *  a run is long, and inventing one is exactly the information-free warning this replaced. `title` always
+ *  states which case it is, so the colour is never mute about why. */
+function longRunCue(elapsedSec: number, gateTimeoutMs: number | null): { warn: boolean; title: string } {
+  if (gateTimeoutMs == null || gateTimeoutMs <= 0) {
+    return {
+      warn: false,
+      title: "This project's gate timeout is unknown, so there is no bound to measure this run against — the clock stays amber however long it runs.",
+    };
+  }
+  const fraction = (elapsedSec * 1000) / gateTimeoutMs;
+  const warn = fraction >= LONG_RUN_WARN_FRACTION;
+  return {
+    warn,
+    title: `${Math.round(fraction * 100)}% of this project's ${fmtSeconds(gateTimeoutMs / 1000)} gate timeout`
+      + (warn ? " — this lane is close to its bound." : "."),
+  };
+}
 
 export default function Gates() {
   const now = useNow();
@@ -458,7 +499,8 @@ function LaneSlot({
     );
   }
   const elapsedSec = (now - Date.parse(gate.since)) / 1000;
-  const warn = elapsedSec > LONG_RUN_WARN_SECONDS;
+  // Derived PER ROW from this gate's own project bound — never a page-level constant (card fd9edb87).
+  const { warn, title: longRunTitle } = longRunCue(elapsedSec, gate.gateTimeoutMs);
   return (
     <div>
       <div style={slotLblStyle}>{slotLabel}</div>
@@ -469,7 +511,10 @@ function LaneSlot({
             Running
           </span>
           <KindTag gate={gate} />
-          <span style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontSize: 18, color: warn ? color.red : color.amber }}>
+          <span
+            title={longRunTitle}
+            style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontSize: 18, color: warn ? color.red : color.amber }}
+          >
             {fmtSeconds(elapsedSec)}
           </span>
         </div>

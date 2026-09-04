@@ -235,6 +235,10 @@ test.describe("Gates page (card a1c86452)", () => {
     const base = {
       gateType: "merge" as const, projectId: "p-active-fixture", projectName: "Active Lane Fixture",
       sessionId: "s-active-fixture", taskId: null, priority: null,
+      // Card fd9edb87: every real GateRun now carries its project's own resolved bound. These lanes are
+      // seconds old, so the long-run cue is quiet either way — it is here to keep the fixture faithful to
+      // the contract, not to exercise the threshold (that is the dedicated test below).
+      gateTimeoutMs: 1_800_000,
     };
     await page.route("**/api/gates/active", (route) => route.fulfill({
       json: {
@@ -278,5 +282,90 @@ test.describe("Gates page (card a1c86452)", () => {
     // The SAME workerLabel locator shape DOES hit the branchless solo card, proving that zero is a real
     // absence and that the pre-existing workerLabel fallback is untouched for a non-batched run.
     await expect(activeSection.getByText("Fallback Worker Label", { exact: true })).toBeVisible();
+  });
+
+  // Card fd9edb87 (owner-reported) — the running lane's elapsed clock used to flip RED at a hardcoded 420s,
+  // ~23% of this repo's own 1,800,000ms bound, so a completely healthy 16-20 minute merge gate was red for
+  // most of its life. The threshold is now a FRACTION of each row's OWN project bound (`gateTimeoutMs`).
+  //
+  // THE ACCEPTANCE EVIDENCE IS THE PER-ROW CONTRAST, not any single row: two lanes with the SAME 8-minute
+  // elapsed render OPPOSITE colours purely because their projects' timeouts differ. A fix that swapped one
+  // hardcoded number for one config-read number would render them identically and fail here.
+  //
+  // Every bound is a DISTINCT string ("30m 00s" / "20m 00s" / "9m 00s"), so each row is addressed by a
+  // tooltip fragment that cannot drift as the 1s clock ticks during the assertions — a percentage-based
+  // locator would go stale mid-test.
+  test("the long-run cue scales to each row's own gate timeout, and never warns on an unknown bound", async ({ page, loomDaemon }) => {
+    const AMBER = "rgb(255, 178, 62)"; // --loom-amber #ffb23e — running, healthy
+    const RED = "rgb(255, 92, 92)";    // --loom-red   #ff5c5c — close to this row's own bound
+    const since = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
+    const base = {
+      gateType: "merge" as const, phase: "running" as const, taskId: null, priority: null,
+      queuePosition: null, batched: false, branchCount: null, batchBranches: null,
+    };
+    await page.route("**/api/gates/active", (route) => route.fulfill({
+      json: {
+        cap: 4, activeCount: 4, queuedCount: 0,
+        gates: [
+          // (A) 8 minutes into a 30-minute bound = 27%. HEALTHY. Under the old 420s constant this exact
+          // row was RED — it is the owner's reported complaint, stated as a fixture.
+          { ...base, id: "g-wide-healthy", projectId: "p-wide", projectName: "Wide Bound Fixture",
+            sessionId: "s-wide-healthy", branch: "loom/lane-wide-healthy", workerLabel: "Dev",
+            since: since(8 * 60), gateTimeoutMs: 1_800_000 },
+          // (B) 18 minutes into a 20-minute bound = 90%. GENUINELY near its bound — the one case the cue
+          // exists for, and the positive control that proves the red locator below can actually hit.
+          { ...base, id: "g-mid-near", projectId: "p-mid", projectName: "Mid Bound Fixture",
+            sessionId: "s-mid-near", branch: "loom/lane-mid-near", workerLabel: "Dev",
+            since: since(18 * 60), gateTimeoutMs: 1_200_000 },
+          // (C) THE PER-ROW PROOF: the SAME 8-minute elapsed as (A), but against a 9-minute bound = 89%.
+          // Same clock, opposite colour, decided only by this row's own project timeout.
+          { ...base, id: "g-tight-near", projectId: "p-tight", projectName: "Tight Bound Fixture",
+            sessionId: "s-tight-near", branch: "loom/lane-tight-near", workerLabel: "Dev",
+            since: since(8 * 60), gateTimeoutMs: 540_000 },
+          // (D) THE MISSING CASE: no resolvable bound. 25 minutes in — far past the old 420s constant —
+          // and it must still NOT warn. `null` is an unknown, never a measured zero, and never a licence
+          // to fall back to an invented threshold.
+          { ...base, id: "g-unknown", projectId: "p-unknown", projectName: "Unknown Bound Fixture",
+            sessionId: "s-unknown", branch: "loom/lane-unknown-bound", workerLabel: "Dev",
+            since: since(25 * 60), gateTimeoutMs: null },
+        ],
+      },
+    }));
+
+    await page.goto(`${loomDaemon.baseURL}/gates`);
+    const activeSection = page.locator("section").filter({ hasText: "Lane occupancy" }).first();
+    // FIXTURE IDENTITY: this payload is on screen, not the real (empty) registry or a sibling spec's rows.
+    await expect(activeSection.getByText("loom/lane-wide-healthy", { exact: true })).toBeVisible();
+    await expect(activeSection.getByText("loom/lane-tight-near", { exact: true })).toBeVisible();
+    await expect(activeSection.locator("[title*='gate timeout']")).toHaveCount(4);
+
+    const clock = (titleFragment: string) => activeSection.locator(`[title*="${titleFragment}"]`);
+
+    // (B) + (C) THE POSITIVE CONTROL FOR RED: two rows genuinely near their own bounds do turn red, so
+    // every "not red" assertion below is a real absence rather than a locator that matches nothing.
+    await expect(clock("this project's 20m 00s gate timeout")).toHaveCSS("color", RED);
+    await expect(clock("this project's 9m 00s gate timeout")).toHaveCSS("color", RED);
+    // …and they say WHY, so the colour is never mute.
+    await expect(clock("this project's 20m 00s gate timeout")).toHaveAttribute("title", /close to its bound/);
+
+    // (A) THE FIX: 8 minutes is no longer red — it is 27% of this project's real bound. Asserted with the
+    // SAME toHaveCSS locator shape that just returned RED above.
+    await expect(clock("this project's 30m 00s gate timeout")).toHaveCSS("color", AMBER);
+    // A real measured fraction of the REAL bound, not pinned to the exact integer: the 1s clock keeps
+    // ticking through these assertions, and 8m/30m (~27%) only reaches 30% a full minute later.
+    await expect(clock("this project's 30m 00s gate timeout")).toHaveAttribute("title", /^2\d% of/);
+    await expect(clock("this project's 30m 00s gate timeout")).not.toHaveAttribute("title", /close to its bound/);
+
+    // (A) vs (C) SPELLED OUT: identical elapsed clocks, different colours. Both read "8m 0Xs" (the 1s tick
+    // may have advanced the seconds), so the minute is the stable part to compare.
+    await expect(clock("this project's 30m 00s gate timeout")).toHaveText(/^8m \d{2}s$/);
+    await expect(clock("this project's 9m 00s gate timeout")).toHaveText(/^8m \d{2}s$/);
+
+    // (D) THE MISSING CASE: 25 minutes with no bound stays amber and says so, rather than warning on an
+    // invented default. Under the constant this replaced, this row would have been red since 7 minutes.
+    await expect(clock("gate timeout is unknown")).toHaveCSS("color", AMBER);
+    await expect(clock("gate timeout is unknown")).toHaveText(/^25m \d{2}s$/);
+    // No percentage is fabricated for it — a null bound yields no measured fraction at all.
+    await expect(clock("gate timeout is unknown")).not.toHaveAttribute("title", /%/);
   });
 });
