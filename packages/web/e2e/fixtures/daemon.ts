@@ -330,6 +330,13 @@ export interface LoomDaemon {
     wake?: { note?: string };
     ptyGeometry?: { cols: number; rows: number };
     ptyBytes?: string;
+    /** The model string ContextUsage resolves a context window against — set alongside `ctxInputTokens`
+     *  so a spec's expected `%` is derivable rather than a magic number. */
+    model?: string;
+    /** Measured context occupancy (card b449be97). `0` is a legitimate MEASURED value (a real 0% meter),
+     *  distinct from omitting this field entirely (renders as the archive's "never measured" dash) — the
+     *  seed endpoint distinguishes the two via `??`, never `||`, so pass `0` explicitly to seed that case. */
+    ctxInputTokens?: number;
   }) => Promise<SeededLiveSession>;
   /**
    * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
@@ -670,6 +677,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           id: sessionId, projectId: project.id, agentId, role, busy: opts.busy ?? false,
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
           ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
+          model: opts.model, ctxInputTokens: opts.ctxInputTokens,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

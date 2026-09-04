@@ -2940,6 +2940,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           role?: SessionRole | "plain" | null;
           parentSessionId?: string; taskId?: string; title?: string;
           busy?: boolean; branch?: string; model?: string; processState?: ProcessState;
+          // Measured context occupancy (card b449be97) — the ONLY way an e2e spec can seed a session with
+          // a real ctxInputTokens reading; nothing else writes ctx_input_tokens outside the pty's own
+          // onContextStats. `0` is a legitimate MEASURED value (a real 0% meter), distinct from the
+          // omitted/null "never measured" case ContextUsage renders as a dash — use `??`, never `||`, at
+          // every hop that touches this field, or the measured-zero case collapses into "never measured".
+          ctxInputTokens?: number | null;
           // (card a53e6bc9) Pinned terminal geometry + canned bytes to REPLAY on `/ws/term` attach — the
           // faithful-render gap the plain row above can't close (its WS attach is a genuine no-op). Either
           // key alone is enough to register a `deps.pty.seedCanned` entry keyed to this session's id;
@@ -3205,6 +3211,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           taskId: s.taskId ?? null,
           branch: s.branch ?? null,
           model: s.model ?? null,
+          ctxInputTokens: s.ctxInputTokens ?? null,
         };
         deps.db.insertSession(row);
         liveSessionIds.push(id);
