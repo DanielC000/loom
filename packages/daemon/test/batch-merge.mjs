@@ -184,7 +184,14 @@ try {
       git(repo, "rev-parse HEAD") === baseMainSha);
 
     // The batch proceeds with the 2 that landed — a single conflicting branch never fails the whole batch.
-    const result = await runBatchedMerge(repo, batchWt, baseMainSha, [a, b, c], passGate);
+    // A SEPARATE fresh batch worktree, cut from the same baseMainSha — production never re-assembles onto
+    // an already-mutated worktree (a batch worktree is cut once, assembled once, gated once); reusing the
+    // dirty `batchWt` from the standalone assembleBatchBranches call above would re-submit a's and b's own
+    // ALREADY-LANDED (this-run) branches a second time, tripping the card 43a9182d empty-commit fail-closed
+    // check this file's fix added — a real defect that check correctly catches, not a regression to work
+    // around by reusing worktree state no real caller ever reuses.
+    const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-conflict-run-${sfx}`);
+    const result = await runBatchedMerge(repo, batchWt2, baseMainSha, [a, b, c], passGate);
     check("(3) batch still succeeds with the 2 survivors", result.ok === true && result.landed.length === 2);
     check("(3) conflict-a.txt and shared.txt(b) land; c's own edit does not",
       fs.existsSync(path.join(repo, "conflict-a.txt")) &&
@@ -725,6 +732,67 @@ try {
       landed[0].sha === landedSha);
     check("(9b) a noop landing OMITS pathSetStamped entirely (key absent) — distinct from an explicit false",
       !("pathSetStamped" in landed[0]));
+  }
+
+  // ── (10) EMPTY-COMMIT FAIL-CLOSED (card 43a9182d) — a MULTI-CANDIDATE batch where a stale/already-landed
+  //     branch is RESUBMITTED (its own original, pre-land ref never reset/deleted) AFTER another candidate
+  //     has already contributed a genuinely-new commit THIS run. Pre-fix, the stale branch's cherry-pick
+  //     lands on a clean index (its content is already present, having been landed under different SHAs by
+  //     an earlier batch) — `git commit` resolves "nothing to commit" rather than rejecting, so no new
+  //     commit is created, and control fell through to the tip-only Loom-Worker-Base/PathSet amend, which
+  //     unconditionally amended WHATEVER HEAD currently was — silently rewriting the OTHER candidate's own
+  //     real, brand-new commit with the stale branch's message/trailers. Fixed: the manual commit step now
+  //     asserts HEAD actually moved and fails closed (drop + rollback) when it didn't. ─────────────────────
+  {
+    const repo = path.join(os.tmpdir(), `loom-bm-emptycommit-${sfx}`);
+    makeRepo(repo);
+
+    // B lands ALONE first, in its own batch — this is the "already-batch-landed branch" whose ref is left
+    // intact afterward (mirrors the real scenario: resubmitted before the ref is deleted).
+    const b = await cutBranch(repo, "ec-stale-b", "ec-stale-b.txt", "stale content\n");
+    const baseMainSha1 = git(repo, "rev-parse HEAD");
+    const { worktreePath: batchWt1 } = await createWorktree(repo, projId, `bm-batch-ec1-${sfx}`);
+    const first = await runBatchedMerge(repo, batchWt1, baseMainSha1, [b], passGate);
+    check("(10) precondition: B's first (solo) landing succeeds", first.ok === true && first.landed.length === 1);
+    const baseMainSha2 = git(repo, "rev-parse HEAD");
+
+    // A is a genuinely NEW branch, cut from main's CURRENT tip — i.e. AFTER B already landed, so A's own
+    // tree already contains B's content too (exactly as a real worker branch cut post-landing would).
+    const a = await cutBranch(repo, "ec-new-a", "ec-new-a.txt", "new content\n");
+
+    // Second batch: [A, B_stale] IN THAT ORDER — A lands first (a real new commit), then B is resubmitted
+    // via its ORIGINAL (pre-land) branch ref. B's content is already present in the tree A was cut from,
+    // so B's cherry-pick applies cleanly with an EMPTY diff — the exact precondition for the defect.
+    const { worktreePath: batchWt2 } = await createWorktree(repo, projId, `bm-batch-ec2-${sfx}`);
+    const assembled = await assembleBatchBranches(batchWt2, [a, b]);
+
+    // THE DISCRIMINATING ASSERTIONS — these FAIL against pre-fix code, which reports B as landed (ok:true,
+    // noop:undefined, a fabricated sha/subject) and silently corrupts A's commit in the process.
+    check("(10) A lands normally", assembled.landed.length === 1 && assembled.landed[0]?.branch === a.branch);
+    check("(10) B is DROPPED (fails closed), not silently reported as landed", assembled.dropped.length === 1 && assembled.dropped[0]?.branch === b.branch);
+    check("(10) B's drop reason names the empty commit", !!assembled.dropped[0]?.reason.includes("empty commit"));
+
+    // A's own commit must be COMPLETELY untouched: same sha, same trailer, reachable, and batch worktree
+    // HEAD sitting exactly there (rollback reset the failed B attempt back to it, not left in some other state).
+    const headAfter = git(batchWt2, "rev-parse HEAD");
+    check("(10) batch worktree HEAD is exactly A's landed sha (rollback restored it, nothing left dangling)",
+      headAfter === assembled.landed[0].sha);
+    const headBody = git(batchWt2, "log -1 --format=%B");
+    check("(10) HEAD still carries A's OWN Loom-Worker-Branch trailer", headBody.includes(`Loom-Worker-Branch: ${a.branch}`));
+    check("(10) HEAD does NOT carry B's trailer (no corruption)", !headBody.includes(`Loom-Worker-Branch: ${b.branch}`));
+    check("(10) batch worktree is clean post-rollback (no lingering cherry-pick/index state)",
+      git(batchWt2, "status --porcelain") === "");
+
+    // The fast-forward must land ONLY A's genuine commit — exactly 1 new commit on canonical main, correctly
+    // attributed, never a rewritten sibling carrying B's identity.
+    const ff = await fastForwardCanonicalMain(repo, baseMainSha2, headAfter);
+    check("(10) fast-forward to A's real commit succeeds", ff.ok === true);
+    check("(10) canonical main gained exactly 1 new commit (A's — B was dropped, not landed)",
+      git(repo, `rev-list --count ${baseMainSha2}..HEAD`) === "1");
+    check("(10) canonical main's new tip carries A's trailer, not B's",
+      git(repo, "log -1 --format=%B").includes(`Loom-Worker-Branch: ${a.branch}`) &&
+      !git(repo, "log -1 --format=%B").includes(`Loom-Worker-Branch: ${b.branch}`));
+    check("(10) ec-new-a.txt landed on canonical main", fs.existsSync(path.join(repo, "ec-new-a.txt")));
   }
 
   // ── fastForwardCanonicalMain: a no-op batch (nothing landed on top) is a safe success, not a refusal ──

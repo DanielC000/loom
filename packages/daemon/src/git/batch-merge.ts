@@ -335,6 +335,10 @@ async function landBranchCommitsIndividually(
 
   let strippedTrailerCount = 0;
   let pathSetStamped = true;
+  // Tracks HEAD across iterations so each commit's own `git commit` can be verified to have actually
+  // moved HEAD — see the empty-commit check right after the commit call below for why this can't just
+  // be inferred from the commit call resolving.
+  let currentHead = batchHeadBefore;
   for (let i = 0; i < commitShas.length; i++) {
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
@@ -384,6 +388,30 @@ async function landBranchCommitsIndividually(
       await rollback();
       return { ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
     }
+    // FAIL CLOSED on an empty commit (card 43a9182d): a cherry-pick with `--no-commit` never errors when
+    // its patch is already fully applied (e.g. this branch was already landed elsewhere in the same
+    // ancestry under different SHAs, then resubmitted before its ref was deleted) — it just leaves the
+    // index clean. The manual `git commit` above then runs against that clean index, and simple-git's
+    // `.raw()` RESOLVES rather than REJECTS on git's own "nothing to commit, working tree clean" — no
+    // commit is created, HEAD does not move. Left unchecked, control would fall through to the tip-only
+    // Loom-Worker-Base/PathSet amend below, which unconditionally amends WHATEVER HEAD currently is —
+    // silently rewriting a PRIOR, unrelated commit (e.g. an earlier candidate's own genuinely-new commit
+    // this same run) with this branch's message and trailers. Assert the OBSERVABLE (HEAD actually moved)
+    // rather than pattern-matching the resolved output text, which is locale- and git-version-fragile.
+    let newHead: string;
+    try {
+      newHead = (await withTimeout(
+        git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit verify)",
+      )).trim();
+    } catch (e) {
+      await rollback();
+      return { ok: false, reason: `${branch}: failed to verify commit landed for ${sha.slice(0, 7)}: ${(e as Error).message}` };
+    }
+    if (newHead === currentHead) {
+      await rollback();
+      return { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` };
+    }
+    currentHead = newHead;
     if (!isLast) continue;
     // Stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` via a follow-up amend (card d62dad73 phase 2),
     // computed from the LANDED range (batchHeadBefore..the commit just created) — NOT from this branch's
@@ -398,10 +426,8 @@ async function landBranchCommitsIndividually(
     // trailers (the commit above already landed and stays valid without them, degrading to the existing
     // `trailer-only` tier) rather than failing an otherwise-successful branch.
     try {
-      const landedSha = (await withTimeout(
-        git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, pathset)",
-      )).trim();
-      const digest = await changedPathSetDigest(git, batchHeadBefore, landedSha, timeoutMs);
+      // `currentHead` was just verified (above) to be this commit's own real sha — no need to re-query.
+      const digest = await changedPathSetDigest(git, batchHeadBefore, currentHead, timeoutMs);
       const amendedMessage = `${finalMessage.replace(/\s+$/, "")}\nLoom-Worker-Base: ${batchHeadBefore}\nLoom-Worker-PathSet: ${digest}\n`;
       await withTimeout(
         git.raw([...identityArgs, "commit", "--amend", "-m", amendedMessage]),
