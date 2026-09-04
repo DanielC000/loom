@@ -924,7 +924,12 @@ export class CodescapeSupervisor {
    * Spawn `serve` and wire up restart-on-death. Never throws. Card 4e0df6ce dispatch:
    *  - {@link port} already known (an ordinary restart-on-death: the previously-live child released it on
    *    exit, and NOTHING in between — us or anyone else — separately bound and closed it) — respawn with
-   *    that SAME explicit port, exactly as before this card. No TOCTOU here; there never was one.
+   *    that SAME explicit port, exactly as before this card. This path does not reproduce the bind-close-
+   *    rebind pattern above, and is unchanged by this card. It is NOT window-free, though: the port sits
+   *    unbound between the dying child's exit and the new child's bind (at least {@link restartBackoffMs}'s
+   *    own delay, so longer than {@link pickLoopbackPort}'s own window) — a pre-existing gap, out of scope
+   *    here (card 4e0df6ce is scoped to the FIRST-spawn/give-up site below; a follow-up card covers letting
+   *    a restart re-derive its port via `--port 0` too).
    *  - {@link port} is `null` (the FIRST spawn of this instance's life, or a fresh attempt after a
    *    `stop()`/give-up nulled it — the ONE site the original TOCTOU actually lived at, see
    *    {@link pickLoopbackPort}'s own doc): use the self-reporting path when the installed binary is
