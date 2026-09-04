@@ -561,6 +561,11 @@ await new Promise((resolve) => hungServer.close(resolve));
   const reqHomeDir = path.join(tmpHome, "request-targets-reported-home");
   const reqSup = new CodescapeSupervisor({ homeDir: reqHomeDir, ingestTimeoutMs: 15_000 });
   await reqSup.start(["/fake/repo/request-target"]);
+  // TIMING-GUARD-SAFE: fully-awaited-completion — this loop's OWN exit condition (`getPort() === null`)
+  // IS the exact fact the very next check re-observes (`reportedPort = reqSup.getPort()`), read from the
+  // SAME live getter, not a separate incidental check the window scan happened to pull in. A timeout exit
+  // (never resolved) leaves `reportedPort` `null`, and the check below fails loudly (`typeof null !==
+  // "number"`) rather than silently passing — it cannot mistake "hasn't happened yet" for "happened".
   for (let i = 0; i < 100 && reqSup.getPort() === null; i++) await sleep(50);
   const reportedPort = reqSup.getPort();
   check("(e) getPort() resolved to a real, non-zero port (never the literal '0' requested)",
@@ -584,6 +589,14 @@ await new Promise((resolve) => hungServer.close(resolve));
   process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED = "1"; // fixture stands in for a pre-f7a5684 install
   const oldBinSup = new CodescapeSupervisor({ homeDir: oldBinHomeDir, ingestTimeoutMs: 15_000 });
   await oldBinSup.start(["/fake/repo/old-bin"]);
+  // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop waits for `getPort()` to leave `null`, which
+  // only happens once the LEGACY fallback spawn (spawnServeLegacy) succeeds. Source-verified ordering in
+  // supervisor.ts's spawnServeSelfReporting: `onDeathBeforeReport` sets `this.portReportCapable = false`
+  // SYNCHRONOUSLY, strictly BEFORE it calls `scheduleRestart(false)` — and only THAT call, after its own
+  // backoff delay, ever reaches spawnServeLegacy (via spawnServe()'s dispatch, which reads
+  // `portReportCapable` fresh each time). So `portReportCapable` is unconditionally `false` by the time
+  // any later spawn attempt — legacy or not — can possibly set `getPort()` non-null; the negative check
+  // below reads a fact the wait's own precondition already guarantees, not a race against it.
   for (let i = 0; i < 100 && oldBinSup.getPort() === null; i++) await sleep(50);
 
   check("(f) capability detection confirms the installed binary does NOT support --port 0",
