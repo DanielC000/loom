@@ -172,6 +172,16 @@ export interface BatchLandedBranch extends BatchCandidate {
    *  put harness attribution on its own commit, against this project's CLAUDE.md, and this landing path
    *  is what caught it. Omitted (not present) on a `noop` landing, which reuses an already-landed sha. */
   strippedTrailerCount?: number;
+  /** Whether the tip commit's follow-up `Loom-Worker-Base`/`Loom-Worker-PathSet` amend (card d62dad73
+   *  phase 2) actually landed. `true` for the ordinary case; `false` when that best-effort amend failed
+   *  (rare — logged at the stamp site, {@link landBranchCommitsIndividually}) and the branch landed WITHOUT
+   *  either trailer, degrading its later verification to the weaker `trailer-only` tier with no other trace
+   *  (card 1d3f500e / Code Review `c00a136c` — previously this was a `console.warn` only, invisible to the
+   *  batch report). Omitted (not present) on a `noop` landing, which reuses an already-landed commit and so
+   *  never attempts a stamp — that omission is what tells a `false` (a REAL, this-run stamp failure) apart
+   *  from a commit that predates this trailer entirely or was never stamped for any other reason. Does NOT
+   *  fail the merge itself: the commit above already landed and stays valid without the trailers. */
+  pathSetStamped?: boolean;
 }
 
 export interface BatchDroppedBranch extends BatchCandidate {
@@ -207,6 +217,7 @@ interface LandResult {
   reason?: string;
   emptyKind?: MergeEmptyKind;
   strippedTrailerCount?: number;
+  pathSetStamped?: boolean;
 }
 
 /**
@@ -323,6 +334,7 @@ async function landBranchCommitsIndividually(
   };
 
   let strippedTrailerCount = 0;
+  let pathSetStamped = true;
   for (let i = 0; i < commitShas.length; i++) {
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
@@ -396,6 +408,7 @@ async function landBranchCommitsIndividually(
         timeoutMs, "git commit --amend (batch land, pathset)",
       );
     } catch (e) {
+      pathSetStamped = false;
       // eslint-disable-next-line no-console
       console.warn(`[git] landBranchCommitsIndividually: Loom-Worker-Base/PathSet capture failed for ${branch} — ` +
         `commit lands without either trailer: ${(e as Error).message}`);
@@ -411,7 +424,7 @@ async function landBranchCommitsIndividually(
   try {
     const landedSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (batch land, post-commit)")).trim();
     const landedSubject = (await withTimeout(git.raw(["log", "-1", "--format=%s"]), timeoutMs, "git log -1 subject (batch land)")).trim();
-    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount };
+    return { ok: true, sha: landedSha, subject: landedSubject, strippedTrailerCount, pathSetStamped };
   } catch (e) {
     return { ok: false, reason: `${branch}: landed but failed to read the result: ${(e as Error).message}` };
   }
@@ -456,7 +469,7 @@ export async function assembleBatchBranches(
       dropped.push({ ...c, reason: "batch land reported ok with no sha/subject" });
       continue;
     }
-    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount });
+    landed.push({ ...c, sha: r.sha, subject: r.subject, strippedTrailerCount: r.strippedTrailerCount, pathSetStamped: r.pathSetStamped });
   }
   return { landed, dropped };
 }

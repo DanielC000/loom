@@ -2771,6 +2771,28 @@ const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 const LOOM_WORKER_BASE_TRAILER = /^Loom-Worker-Base:\s*(\S+)/m;
 
 /**
+ * Returns the LAST match of a trailer regex in `body`, never the first (Code Review `c00a136c`, card
+ * 1d3f500e). The real trailer block a stamp lands sits at the END of a commit message, appended after any
+ * worker-authored text — on the BATCH path ({@link landBranchCommitsIndividually}, `git/batch-merge.ts`)
+ * that worker-authored body passes through **verbatim** before `Loom-Worker-Branch`/`-PathSet`/`-Base` are
+ * appended. A first-match `/^X:\s*(\S+)/m` regex would let a worker-authored line that merely starts with
+ * the same shape at column 0 pre-empt the real, machine-stamped trailer — the reviewer's own specimen: a
+ * future commit TO `batch-merge.ts` itself, whose body quotes an example `Loom-Worker-Base: <sha>` line at
+ * column 0, would shadow its own real trailer under the old code. Taking the last match instead makes the
+ * position in the message (not the first textual occurrence) the thing that resolves it, matching how a
+ * real trailer block is actually located.
+ *
+ * `re` must carry the `m` flag and exactly one capture group (every `LOOM_WORKER_*_TRAILER` constant does);
+ * this builds a `g`-flagged variant to scan every match in `body` and keeps only the last one found.
+ */
+function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
+  const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  let last: RegExpMatchArray | null = null;
+  for (const m of body.matchAll(globalRe)) last = m;
+  return last;
+}
+
+/**
  * The raw changed-path list between `base` and `ref` — the single git-diff invocation {@link
  * changedPathSetDigest} and {@link isInertMergeDiff} BOTH build on (Code Review, card db9b0130: extracted
  * after the two calls were found to have drifted into byte-identical copies of the same `git diff` args —
@@ -4312,13 +4334,13 @@ export async function findLandedSquashCommit(
       if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
     } else {
       // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has one.
-      const pathSetMatch = body.match(LOOM_WORKER_PATHSET_TRAILER);
+      const pathSetMatch = lastTrailerMatch(body, LOOM_WORKER_PATHSET_TRAILER);
       if (pathSetMatch) {
         // Phase 2 (card d62dad73) + card 756a2cd8: prefer the commit's own Loom-Worker-Base trailer as the
         // verification base when present (every solo squash and batched landing now stamps one); undefined
         // here falls back to sha^ for a commit that predates either fix, or whose best-effort trailer
         // capture failed — see verifyPersistedPathSet's doc.
-        const baseMatch = body.match(LOOM_WORKER_BASE_TRAILER);
+        const baseMatch = lastTrailerMatch(body, LOOM_WORKER_BASE_TRAILER);
         if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!, baseMatch?.[1]))) return null;
       } else if (onPreFixTrailerNotice) {
         onPreFixTrailerNotice(branch, sha);
@@ -4816,11 +4838,11 @@ async function scanMergedCommitMap(
       const sha = record.slice(0, sep1).trim();
       const date = record.slice(sep1 + 1, sep2).trim();
       const body = record.slice(sep2 + 1);
-      const trailer = body.match(LOOM_WORKER_BRANCH_TRAILER);
+      const trailer = lastTrailerMatch(body, LOOM_WORKER_BRANCH_TRAILER);
       if (!sha || !trailer) continue;
       const branch = trailer[1]!;
-      const pathSetTrailer = body.match(LOOM_WORKER_PATHSET_TRAILER);
-      const baseTrailer = body.match(LOOM_WORKER_BASE_TRAILER);
+      const pathSetTrailer = lastTrailerMatch(body, LOOM_WORKER_PATHSET_TRAILER);
+      const baseTrailer = lastTrailerMatch(body, LOOM_WORKER_BASE_TRAILER);
       if (!map.has(branch)) {
         map.set(branch, { // first hit = most recent (reverse-chron)
           sha, date,
