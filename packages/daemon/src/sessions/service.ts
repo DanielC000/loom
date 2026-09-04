@@ -4625,7 +4625,10 @@ export class SessionService {
           // `null`/`undefined` retriedFile has no warning to render).
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
-          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile) } : {}),
+          // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
+          // is passed through so the formatter can tell a genuine timeout kill apart from an assertion
+          // failure — see `formatWeakerPassWarning`'s own doc.
+          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile, payload?.outputTail) } : {}),
           // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
           // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,
           // not silence) and the same "derive the warning text, gated on truthy, via the ONE shared
@@ -16738,8 +16741,11 @@ export class SessionService {
         // never just from the durable gate_history row. No cause is asserted here (see the card's own
         // "measured n=30" finding) — this states only that a retry happened and passed, nothing about why
         // the first attempt failed.
+        // Card 9966c52d: `outcome.value.outputTail` (attempt 1's own tail — see `ConfirmMergeResult
+        // .outputTail`'s own doc) is passed through so a genuine timeout kill isn't mislabelled as an
+        // order-dependent/cross-test-pollution bug — see `formatWeakerPassWarning`'s own doc.
         const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
-          ? ` ${formatWeakerPassWarning(outcome.value.retriedFile)}`
+          ? ` ${formatWeakerPassWarning(outcome.value.retriedFile, outcome.value.outputTail)}`
           : "";
         // Card 39da2570: the sibling of `retryNote` immediately above, for the OTHER retry that can produce
         // a `merged:true` verdict — the TRANSIENT-KILL AUTO-RETRY (card bcba83a1). Before this card, a

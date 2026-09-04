@@ -1324,6 +1324,27 @@ export function identifyRetriableTestFile(failTierTest: string | undefined, cwd:
 }
 
 /**
+ * Card 9966c52d: `retriedFile`'s attempt-1 `outputTail` sometimes shows the file was KILLED ON A TIMEOUT
+ * (`test-daemon.mjs`'s own `(exit timeout (...))` classification for that file's `FAILURES:` entry), not
+ * failed by an assertion — measured directly on two specimens (`kickoff-real-spawn`, `batch-merge`), both
+ * with every visible assertion `PASS` and the process killed on a clock. The generic wording below is
+ * WRONG for that case: nothing about a timeout kill indicates order-dependence/cross-test-pollution.
+ *
+ * Anchored on the RETRIED FILE'S OWN line — `- <retriedFile> (exit timeout` — never a bare "exit timeout"
+ * mention anywhere in the tail (e.g. inside a DIFFERENT file's own echoed stdout/stderr), so a match can
+ * only mean test-daemon.mjs itself classified THIS file's exit as a timeout, not merely that the word
+ * appears somewhere in a ~4-16KB tail. Fail-safe by construction, per this card's own §NON-NEGOTIABLE:
+ * `outputTail` missing, or present but not containing this exact shape for this file, both return `false`
+ * — never inferred from an absent match, only asserted from a positive one.
+ */
+function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined): boolean {
+  if (!outputTail) return false;
+  const escaped = retriedFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?:^|\\n)\\s*-\\s+${escaped}\\s+\\(exit timeout\\b`);
+  return re.test(outputTail);
+}
+
+/**
  * Card 6dcb9cd3: the ONE place the "⚠ WEAKER PASS" wording is authored — reused by BOTH the live
  * `[loom:merge-done]` nudge (`confirmWorkerMergeTracked`'s onSettle, sessions/service.ts) and the pull-based
  * `gate_status(opId)` settled-record read (`retryWarning`, same file). Before this card the nudge had its
@@ -1337,8 +1358,16 @@ export function identifyRetriableTestFile(failTierTest: string | undefined, cwd:
  * truthy `retriedFile` first, so this never has to branch on "was there a retry"). Returns the warning text
  * WITHOUT a leading space or the `⚠` glyph's own leading space — callers that inline this into a larger
  * nudge string prepend their own separator, mirroring {@link formatGateStepsDiagnostic}'s own convention.
+ *
+ * Card 9966c52d: `outputTail` is OPTIONAL and additive — both call sites already hold attempt 1's own
+ * `outputTail` (the failed run's, per {@link isTimeoutKillEntry}'s own doc) alongside `retriedFile`, so
+ * passing it through costs nothing new to plumb. Omitted (or not matching), this returns the ORIGINAL
+ * cross-test-pollution wording, byte-identical to before this card — the fail-safe default.
  */
-export function formatWeakerPassWarning(retriedFile: string): string {
+export function formatWeakerPassWarning(retriedFile: string, outputTail?: string): string {
+  if (isTimeoutKillEntry(retriedFile, outputTail)) {
+    return `⚠ WEAKER PASS: the first gate attempt killed '${retriedFile}' on a timeout, not an assertion failure — passed only after retrying it in isolation once. This is NOT evidence of an order-dependent/cross-test-pollution bug; treat it as a timeout (possibly host-load-related), not a correctness signal.`;
+  }
   return `⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`;
 }
 
