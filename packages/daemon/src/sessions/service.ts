@@ -4223,7 +4223,8 @@ export class SessionService {
    * row's OWN terminal state: `"settled"`, `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the
    * schema doc for what each means). `"pending"` covers the narrow, genuinely-real window where a row was
    * minted but is not yet visible in the live GateSemaphore (either about to register, or — after a real
-   * daemon restart — awaiting the next boot's `reconcileOrphanedGateOps` sweep): the op demonstrably
+   * daemon restart — awaiting the next boot's `reconcileOrphanedGateOps`/`reconcileUnsurfacedPendingGateOps`
+   * sweep, card 7239c712): the op demonstrably
    * EXISTS, so this must never collapse to `never_existed`. An AMBIGUOUS prefix at EITHER layer is a
    * DISTINCT outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must never
    * collapse into `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a
@@ -7704,6 +7705,67 @@ export class SessionService {
       this.db.markPendingGateOpOrphaned(row.opId);
       cleared++;
       console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was orphaned by a daemon restart — resurfaced ${tag} to session ${target.slice(0, 8)}${target !== row.ownerSessionId ? ` (lineage-resolved from ${row.ownerSessionId.slice(0, 8)})` : ""}`);
+    }
+    return cleared;
+  }
+
+  /**
+   * Card 7239c712 — the STATE-ONLY complement to {@link reconcileOrphanedGateOps} above, closing a gap that
+   * card left deliberately out of scope: `reconcileOrphanedGateOps` reads {@link Db.listSurfacedPendingGateOps},
+   * whose WHERE clause requires `surfaced_pending = 1` — so it can NEVER see a row minted by a
+   * single-synchronous-span call site that never flips that flag at all. Two such sites exist today:
+   * `mergeBatch`'s own `insertPendingGateOp` call (kind:"merge", key `merge-batch:<managerSessionId>`) and
+   * `deployOwnProject`'s (kind:"deploy") — both mint immediately before their one `runExclusive` call and
+   * settle back-to-back right after it resolves, by design (see each one's own insertPendingGateOp comment
+   * for why `surfacedPending:false` there is deliberate, not an oversight). If the daemon dies anywhere
+   * inside that `runExclusive` span, the row is stranded `state:'pending'` forever: `gate_status(opId)`
+   * reports `pending` with no verdict, indistinguishable from "still running" when nothing is, and no
+   * existing sweep ever reconciles it.
+   *
+   * DELIBERATELY PUSHES NO NUDGE, unlike `reconcileOrphanedGateOps` — this is the load-bearing difference,
+   * not an oversight. Every row this method touches has `surfaced_pending = 0`, meaning NO caller was ever
+   * actually told "pending" for it (a caller only learns that via `onSurfacedPending`, which these mint
+   * sites never invoke — see `Db.listUnsurfacedPendingGateOps`'s own doc). Surfacing one now would
+   * fabricate a notification for a state nobody ever observed in the first place, and — since a
+   * `mergeBatch` row is `kind:"merge"` — would route through `reconcileOrphanedGateOps`'s own `isMerge`
+   * branch, whose "re-run `worker_merge_confirm`" advice is wrong for a batch (no single worker/branch to
+   * re-confirm; see that method's own doc). The only goal here is that `gate_status` stops claiming
+   * `pending` forever for a row nothing will ever settle — nobody needs to be told that happened.
+   *
+   * NO DURABLE-HISTORY RECOVERY ATTEMPT (unlike `reconcileOrphanedGateOps`'s own recovery branch): that
+   * recovery exists to make a PUSHED NUDGE tell the truth (a real verdict instead of a false "orphaned").
+   * Since this method never pushes a nudge at all, recovering the real verdict here would only change what
+   * a LATER `gate_status(opId)` read reports — a real improvement, but not needed to close the gap this
+   * method exists for, and `recoverGateOpVerdict` doesn't accept `kind:"deploy"` today besides. Left as a
+   * documented, deliberate simplification rather than a half-built recovery path.
+   *
+   * SCOPE (card 7239c712 DoD-3): covers ALL THREE kinds, including "deploy" — deliberately WIDER than
+   * `reconcileOrphanedGateOps`'s own `if (row.kind === "deploy") continue`. That exclusion exists there only
+   * because a "deploy" row can never be `surfaced_pending=1` in the first place (so it's a defensive no-op,
+   * not a real filter) — it says nothing about whether deploy's OWN unsurfaced-tombstone exposure should be
+   * swept. `deployOwnProject` mints the identical single-synchronous-span shape as `mergeBatch` (see its own
+   * insertPendingGateOp comment) and carries the identical exposure — a daemon death mid-deploy strands its
+   * tombstone `pending` forever with nothing to reconcile it, same as a mid-batch death. Since this method
+   * pushes no nudge regardless of kind, none of `reconcileOrphanedGateOps`'s "wrong re-run advice" reasoning
+   * for excluding deploy applies here — there is no advice being given at all. Chosen deliberately, not by
+   * omission: narrowing this to "gate"/"merge" only would leave deploy's identical exposure unclosed for no
+   * reason tied to this method's own design.
+   *
+   * Best-effort per row (one write failure must never abort the rest) + never throws, mirroring
+   * `reconcileOrphanedGateOps`. Returns the count reconciled for the same boot-log line. Runs alongside that
+   * method at boot (see index.ts) — order between the two does not matter, since they operate on disjoint
+   * row sets (`surfaced_pending=1` vs `=0`).
+   */
+  reconcileUnsurfacedPendingGateOps(): number {
+    let cleared = 0;
+    for (const row of this.db.listUnsurfacedPendingGateOps()) {
+      try {
+        this.db.markPendingGateOpOrphaned(row.opId);
+        cleared++;
+        console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was never surfaced pending and is stranded state:'pending' after a daemon restart — marked 'orphaned-by-restart' (no nudge pushed: no caller was ever told "pending" for it)`);
+      } catch {
+        /* best-effort — a write failure on one row must never abort the rest of the sweep */
+      }
     }
     return cleared;
   }

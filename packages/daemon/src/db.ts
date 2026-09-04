@@ -565,11 +565,17 @@ CREATE TABLE IF NOT EXISTS wakes (
 -- "pending" and moves to exactly one
 -- TERMINAL value — "settled" (a normal settle, fast or surfaced), "evicted-dead-owner" (force-removed by
 -- evictDeadOwner because its owning manager died — the run() may still be executing, unreachable; this is
--- NOT a verdict), or "orphaned-by-restart" (reconcileOrphanedGateOps found it still surfaced_pending AND
--- still "pending" at boot after a real process death) — NEVER DELETED on any of these transitions (see
--- gate_status's tombstone read). reconcileOrphanedGateOps' boot sweep only ever selects rows that are BOTH
+-- NOT a verdict), or "orphaned-by-restart" (found still "pending" at boot after a real process death, by
+-- EITHER of two boot sweeps — see below) — NEVER DELETED on any of these transitions (see gate_status's
+-- tombstone read). reconcileOrphanedGateOps' boot sweep only ever selects rows that are BOTH
 -- surfaced_pending=1 AND still state='pending' — a fast op that settled cleanly before a crash must never
--- resurface a false [loom:gate-failed]. project_id is the scope anchor gate_status's tombstone read
+-- resurface a false [loom:gate-failed] — and pushes a synthetic terminal nudge to the owning session (a
+-- caller WAS told "pending" for these, so it is owed a real answer). reconcileUnsurfacedPendingGateOps
+-- (card 7239c712) is the COMPLEMENT: rows still "pending" at boot with surfaced_pending=0 — nobody was ever
+-- told "pending" for these (mergeBatch/deployOwnProject's own single-synchronous-span mints, which never
+-- flip surfaced_pending at all — see their own insertPendingGateOp comments), so it marks them
+-- "orphaned-by-restart" too but pushes NO nudge; see that method's own doc for why. project_id is the scope
+-- anchor gate_status's tombstone read
 -- filters on (mirroring GateSemaphore.findByOpId's session/project candidate-set filter — a stranger
 -- session/project must get the SAME "not found" family of answer a live op gives them, never "settled").
 -- Rows are cascade-deleted alongside their project/agent (see deleteProject/deleteAgent) — permanent rows
@@ -6551,6 +6557,19 @@ export class Db {
    *  failure nudge (that would invert the signal this table exists to give). */
   listSurfacedPendingGateOps(): PendingGateOp[] {
     return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 1 AND state = 'pending'").all() as PendingGateOpRow[]).map(toPendingGateOp);
+  }
+  /** Boot-time read of the COMPLEMENT set (card 7239c712): rows still `state:'pending'` at boot that were
+   *  NEVER told "pending" to any caller (`surfaced_pending = 0`) — either a "merge"/"deploy" op minted by a
+   *  single-synchronous-span call site that never flips `surfaced_pending` at all (mergeBatch's own
+   *  `insertPendingGateOp` call, and `deployOwnProject`'s — see their own comments for why that's deliberate
+   *  in the no-crash case), or the much narrower window of a "gate"/"merge" op that crashed between its own
+   *  mint and either its `onSurfacedPending` flip or its `onSettle` callback. `SessionService.
+   *  reconcileUnsurfacedPendingGateOps` is this table's sole reader — see its own doc for why these rows get
+   *  no synthetic nudge (nobody was ever told "pending" in the first place). Excludes legacy pre-e3e40167
+   *  rows by construction: `migratePendingGateOps` backfills those to `surfaced_pending = 1` specifically so
+   *  they are NOT mistaken for this "never surfaced" set (see the schema doc). */
+  listUnsurfacedPendingGateOps(): PendingGateOp[] {
+    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 0 AND state = 'pending'").all() as PendingGateOpRow[]).map(toPendingGateOp);
   }
   /**
    * Scoped id-or-prefix lookup for `gate_status`'s tombstone fallback (once a live GateSemaphore lookup

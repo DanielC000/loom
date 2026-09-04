@@ -38,6 +38,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       settled (state='settled') before the simulated crash is correctly EXCLUDED from the sweep and gets
 //       NO synthetic failure nudge — the exact inversion of card edc1ec12's signal that mint-on-create would
 //       cause if the sweep selected every surviving row instead of only the surfaced+pending ones.
+//   (3c) card 7239c712 — reconcileUnsurfacedPendingGateOps: the COMPLEMENT sweep, for rows a caller was
+//        NEVER told "pending" about (surfaced_pending=0) — mergeBatch/deployOwnProject's own single-
+//        synchronous-span mints, plus the narrower "gate" early-crash window. Marks 'orphaned-by-restart'
+//        like (3), but pushes NO nudge at all (nobody was ever told, so nobody needs telling); covers
+//        "deploy" too (a deliberate DoD-3 scope call, unlike (3)'s own no-op deploy exclusion); and leaves
+//        every surfaced_pending=1 row completely untouched, proving the two sweeps partition the table.
 //   (4) END-TO-END via the REAL runWorkerGate (not just the generic PendingOpRegistry hook in
 //       pending-ops-registry.mjs — this proves the actual service.ts wiring): a durable row EXISTS (state
 //       'pending', surfaced_pending true) while the op is genuinely pending, and moves to state='settled'
@@ -540,6 +546,75 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.close();
 }
 
+// ===== (3c) card 7239c712 — reconcileUnsurfacedPendingGateOps: the COMPLEMENT sweep for rows a caller was
+// NEVER told "pending" about (surfaced_pending=0) — a mergeBatch/deployOwnProject-shaped tombstone stranded
+// state:'pending' by a crash inside their one synchronous mint-to-settle span. Marks 'orphaned-by-restart'
+// like section (3) above, but pushes NO nudge at all (nobody was ever told "pending" in the first place) —
+// and must leave every surfaced_pending=1 row (section (3)'s own domain) completely untouched, proving the
+// two sweeps partition the table rather than double-handling or racing each other. =====
+{
+  const P = "pgo-unsurfaced";
+  const db = new Db(path.join(tmpHome, "unsurfaced.db"));
+  const host = new SpyHost({
+    onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+    onBusy(id, busy) { db.setBusy(id, busy); },
+    onContextStats() {}, onRateLimited() {},
+    onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+  });
+  const sessions = new SessionService(db, host, new OrchestrationControl());
+
+  db.insertProject({ id: P, name: "PGO-UNSURFACED", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P}-mgr`, projectId: P, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
+  db.insertAgent({ id: `${P}-dev`, projectId: P, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
+  const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
+  db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: null });
+
+  // A mergeBatch-shaped tombstone stranded mid-run — kind:"merge", surfacedPending:false, exactly how
+  // mergeBatch's own insertPendingGateOp call mints it (service.ts, the "DURABLE TOMBSTONE card be260976"
+  // comment above that call site).
+  db.insertPendingGateOp({ opId: "batch-stranded-1", kind: "merge", key: `merge-batch:${mgrId}`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  // A deployOwnProject-shaped tombstone stranded mid-run — kind:"deploy", surfacedPending:false.
+  db.insertPendingGateOp({ opId: "deploy-stranded-1", kind: "deploy", key: `deploy:${mgrId}`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  // The much narrower window: a "gate" op that crashed between its own mint and its onSurfacedPending flip
+  // (never reached onSettle either) — same unsurfaced shape, different origin.
+  db.insertPendingGateOp({ opId: "gate-early-crash-1", kind: "gate", key: `gate:${workerId}-early`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+
+  // CONTROL: a genuinely surfaced+pending row (section (3)'s own domain) — must be left COMPLETELY
+  // untouched by this sweep: still surfaced_pending=1, still state='pending', and no nudge pushed for it by
+  // THIS call (reconcileOrphanedGateOps is never invoked in this block at all).
+  db.insertPendingGateOp({ opId: "surfaced-untouched-1", kind: "gate", key: `gate:${workerId}-surfaced`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  // CONTROL: an unsurfaced row that already settled cleanly (the batch/deploy fast, no-crash case) — must
+  // be excluded (state != 'pending') exactly like section (3)'s own already-settled control.
+  db.insertPendingGateOp({ opId: "batch-settled-1", kind: "merge", key: `merge-batch:${mgrId}-2`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("batch-settled-1");
+
+  const cleared = sessions.reconcileUnsurfacedPendingGateOps();
+  check("(3c) reconcileUnsurfacedPendingGateOps reports exactly 3 reconciled (not 5)", cleared === 3);
+
+  const rowsAfter = db.listPendingGateOps();
+  check("(3c) all 5 rows STILL EXIST afterward — nothing is ever deleted from this table", rowsAfter.length === 5);
+  check("(3c) the batch-shaped stranded row is marked 'orphaned-by-restart'", rowsAfter.find((r) => r.opId === "batch-stranded-1").state === "orphaned-by-restart");
+  check("(3c) the deploy-shaped stranded row is ALSO marked 'orphaned-by-restart' (DoD-3: deploy IS in scope for this sweep)", rowsAfter.find((r) => r.opId === "deploy-stranded-1").state === "orphaned-by-restart");
+  check("(3c) the early-crash 'gate' row is marked 'orphaned-by-restart'", rowsAfter.find((r) => r.opId === "gate-early-crash-1").state === "orphaned-by-restart");
+  check("(3c) the surfaced+pending control row is left COMPLETELY untouched (still surfaced_pending=1, state='pending') — the two sweeps partition the table, never double-handle", rowsAfter.find((r) => r.opId === "surfaced-untouched-1").state === "pending" && rowsAfter.find((r) => r.opId === "surfaced-untouched-1").surfacedPending === true);
+  check("(3c) the already-settled unsurfaced control row is UNTOUCHED at state='settled'", rowsAfter.find((r) => r.opId === "batch-settled-1").state === "settled");
+
+  // The load-bearing negative: NO nudge of any kind was pushed to ANYONE for the three reconciled rows —
+  // this is the entire point of this sweep (DoD-1/DoD-2: state-only, nobody is ever told).
+  const anyNudgeForReconciled = host.enqueueCalls.some((c) => /batch-stranded-1|deploy-stranded-1|gate-early-crash-1/.test(c.text));
+  check("(3c) NO nudge of any kind is pushed for any of the three reconciled rows — state-only, nobody is told", !anyNudgeForReconciled);
+  check("(3c) no enqueueStdin call happened AT ALL during this sweep (not just a filtered subset)", host.enqueueCalls.length === 0);
+
+  // Re-running with nothing left in 'pending'+unsurfaced state is a harmless no-op, same discipline as
+  // section (3)'s own re-run check — boot calls this unconditionally on every start.
+  const clearedAgain = sessions.reconcileUnsurfacedPendingGateOps();
+  check("(3c) re-running the sweep with nothing left to reconcile is a harmless no-op", clearedAgain === 0);
+  check("(3c) the still-surfaced-pending control row is STILL untouched after the re-run too", db.listPendingGateOps().find((r) => r.opId === "surfaced-untouched-1").state === "pending");
+
+  db.close();
+}
+
 // ===== (4) END-TO-END via the REAL runWorkerGate: the row exists (state 'pending') while pending, and
 // moves to state='settled' (never deleted) on normal settle =====
 const worktrees = [];
@@ -588,5 +663,8 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — pending_gate_ops is created on a table-less pre-existing DB AND correctly ALTERs an existing 7-column pre-e3e40167 table (backfilling state='pending', surfacedPending=true, projectId=null) — not just a fresh install; the full CRUD surface (insert/markSurfaced/settle/evictDeadOwner/markOrphaned/list/listSurfaced/findByOpIdOrPrefix, with session/project scoping) round-trips correctly and NEVER deletes a row on any terminal transition; reconcileOrphanedGateOps selects ONLY surfaced_pending+state='pending' rows (never a row that already settled, fast-path or otherwise) and marks them 'orphaned-by-restart' rather than deleting them; and the REAL runWorkerGate wiring writes a durable 'pending' row exactly while pending and moves it to 'settled' (never deletes it) on a normal settle, so the opId stays positively queryable long after PendingOpRegistry itself has forgotten it."
+  + " reconcileUnsurfacedPendingGateOps (card 7239c712) marks a mergeBatch/deployOwnProject/early-crash-'gate'"
+  + " row's surfaced_pending=0+state='pending' tombstone 'orphaned-by-restart' too, but pushes NO nudge at all"
+  + " and leaves every surfaced_pending=1 row completely untouched — the two sweeps partition the table."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

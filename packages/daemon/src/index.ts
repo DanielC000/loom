@@ -1463,6 +1463,20 @@ async function main(): Promise<void> {
     console.warn(`[boot] orphaned gate/merge-op sweep failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Unsurfaced gate-op sweep (card 7239c712): the STATE-ONLY complement to the sweep just above. That sweep
+  // only ever sees rows a caller was actually told "pending" about (`surfaced_pending=1`) — a `mergeBatch`
+  // or `deployOwnProject` tombstone is minted+settled in one synchronous span and never flips that flag, so
+  // a crash mid-run strands it `state:'pending'` forever, invisible to the sweep above. This one closes just
+  // that: no caller was ever told "pending" for these rows, so — deliberately, see
+  // reconcileUnsurfacedPendingGateOps's own doc — it pushes NO nudge to anyone; it only stops `gate_status`
+  // from claiming `pending` forever for a row nothing will ever settle. Never gates boot.
+  try {
+    const cleared = sessions.reconcileUnsurfacedPendingGateOps();
+    if (cleared > 0) console.log(`[boot] unsurfaced gate-op sweep: marked ${cleared} restart-stranded op(s) 'orphaned-by-restart' (no nudge — none was ever told "pending")`);
+  } catch (err) {
+    console.warn(`[boot] unsurfaced gate-op sweep failed (continuing boot): ${(err as Error).message}`);
+  }
+
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker
   // is stamped at launch so it never re-fires — not after a daemon_restart, not after the user later
