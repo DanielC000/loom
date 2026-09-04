@@ -8382,6 +8382,45 @@ export class PtyHost {
       // lose the tail's flag, exactly like the same-sender branch before 66b78175. Equalized unconditionally
       // (not gated on the toggle) — cheapest, safe-by-construction, and harmless on the untoggled default
       // path where no `warning`-kind producer sets `proactive` today.
+      //
+      // ⛔ DELIBERATELY UNBOUNDED by count/bytes, UNLIKE the agent-kind run above (card 8f1d7912, decided
+      // 2026-09-04 — filed from worker efbd63a9's DECLINED item on card a9e4240f/MINOR-3 after that worker
+      // correctly refused to fold this into a "safe-by-construction" batch). The in-code rationale for
+      // AGENT_COALESCE_MAX_COUNT/_MAX_BYTES ("coalescing makes writes bigger on a path with a live,
+      // unresolved confirmation-loss defect") applies here too, but a byte/count bound is NOT the same safe
+      // remedy on THIS branch — enumerated against every real `warning`-kind producer before deciding:
+      //   - Memory-recall digests (sessions/service.ts's resume-time companion + project recall, both
+      //     enqueued back-to-back via enqueueStdin with NO route between them, kind defaulting to
+      //     "warning") are the dominant payload and are DELIBERATELY meant to land as one coherent block.
+      //     Companion recall is hard-capped at MEMORY_RECALL_MAX_BYTES (companion/memory-recall.ts) =
+      //     8,000 body bytes (~8,350 framed); project recall is hard-capped via MEMORY_CONFIG_MAX.budgetTokens
+      //     (shared/src/config.ts) = 8,000 tokens × the project's own ~4-bytes/token estimator
+      //     (estimateTokens, sessions/project-memory-recall.ts) = 32,000 body bytes (~32,430 framed). The two
+      //     ALREADY routinely coalesce here today (same empty route, same "warning" kind) for a combined
+      //     worst case of ~40,780 bytes — over 2x AGENT_COALESCE_MAX_BYTES. A cap small enough to bite would
+      //     SPLIT this intentional pairing across turns, which is a WORSE outcome than the unbounded write
+      //     it would replace (exactly the hazard this card was filed to avoid); a cap large enough to never
+      //     split it protects against nothing that has ever been observed or is structurally possible today.
+      //   - Restart/boot continuation notes (crash-recovery-watcher.ts, resume-doc-watcher.ts) are fixed
+      //     single-sentence templates, ~200-500 bytes each — no unbounded list inside them.
+      //   - Idle/context/busy-stuck watchdog nudges (idle-watcher.ts, context-watcher.ts,
+      //     busy-worker-watcher.ts) are fixed templates plus, for the idle nudge only, a board-delta digest
+      //     capped at DELTA_LIST_CAP=10 entries per category (board-read.ts) — bounded to roughly 1-2 KB even
+      //     at max. Each watcher is independently cooldown/dedup-gated to at most ONE pending nudge per
+      //     session at a time (idle escalates-once, context re-nudges on a cadence, busy-worker is
+      //     once-per-episode, resume-doc has a 30-min cooldown) — no unbounded same-producer accumulation.
+      //   - "Rate-limit/usage nudges" (named as an example in QueuedMessageKind's own doc above) turned out
+      //     NOT to be a real producer on this branch: resumeAfterRateLimit replays live.lastPrompt via a
+      //     DIRECT this.submit() call, bypassing enqueueStdin/live.pending entirely — it never reaches
+      //     drainPending at all. Left as-is (out of this card's scope) rather than corrected here.
+      //   - Fan-in risk (many small per-worker watchdog nudges landing on one manager's queue at once) is
+      //     structurally bounded by orchestration.maxConcurrentWorkers (shared/src/config.ts) — a hard cap
+      //     on live workers per manager, default 3 — so even a fleet-wide recovery burst keeps this branch's
+      //     total bytes in the low KB range for any project running the default.
+      // No enumerated producer today can drive an unbounded byte or count run on this branch — a cap would
+      // either break the one legitimate large/atomic case above or guard against a scenario nothing here can
+      // produce. See card 8f1d7912 for the full enumeration; do not reintroduce a bound without re-deriving
+      // these numbers fresh (they can drift as producers change).
       const key = routeKeyOf(head.route);
       const proactiveKey = head.proactive ?? false;
       let n = 1;
