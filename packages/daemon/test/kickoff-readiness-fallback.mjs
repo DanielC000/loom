@@ -106,6 +106,22 @@ try {
     check("(1) the kickoff was delivered exactly once via the fallback path", countIn(fa, PASTE_START) === 1);
     check("(1) the delivered text is the ORIGINAL kickoff", writtenOf(fa).includes(KICKOFF));
     check("(1) busy was (re)armed true by the delivery", busyById[A]?.[busyById[A].length - 1] === true);
+    // Card a7732d7d audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent. `check()`
+    // watches countIn(fa, PASTE_START), and the SECOND write it would see is produced by the positiveControl's
+    // own `host.enqueueStdin(id, ...)` call below — which, once `Stop` has cleared `busy` (confirmed live:
+    // `[busy] ... -> false (stop-hook) afterMs=0` immediately followed by `[submit-write] ... reason=immediate`
+    // in the SAME log tick), takes enqueueStdin's IMMEDIATE branch (host.ts:7436) and calls `submit()`
+    // (host.ts:8570) SYNCHRONOUSLY — which in turn calls `writeNewTurn()` (host.ts:8703) SYNCHRONOUSLY, whose
+    // very first statement is `this.ptyWrite(sessionId, l, BRACKET_PASTE_START, ...)` (host.ts:8714). No
+    // setTimeout sits anywhere on this path: the write lands in the SAME synchronous call stack as
+    // `host.enqueueStdin(...)` returning, so `observeOnce`'s first poll (before any `await wait(intervalMs)`)
+    // already observes it — NEGATIVE_WINDOW_MS has nothing to race here. Injection-verified: uniform
+    // global.setTimeout scaling to 50x (69 production timers intercepted) left the outcome unchanged; scaling
+    // to 500x only broke the UNRELATED line-105 waitUntil(timeoutMs:5000) for the FIRST delivery — not a
+    // windowMs site — confirming this site's margin is untouched even as unrelated timers strain. A targeted
+    // adversarial probe against the shared _timing-guard.mjs mechanism itself (delaying a positiveControl's own
+    // flip past its windowMs) DID throw once the delay passed ~200-250ms, proving the injection method is
+    // non-vacuous — it would have caught this site had it actually depended on a delayable timer.
     const noRepeat1 = await assertNeverWithControl({
       label: "(1) still exactly ONE delivery (no repeat firing)",
       check: () => countIn(fa, PASTE_START) >= 2,
@@ -139,6 +155,14 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
     const fb = fakes[fakes.length - 1];
+    // Card a7732d7d audit of this site: PROVEN SAFE BY CONSTRUCTION, same reasoning as (1) above, and even
+    // more directly so. The positiveControl's `spawnControlDelivery` already `await`s a `waitUntil(...)` that
+    // only resolves once `countIn(fake, PASTE_START) === 1` (line ~87) — BEFORE the `observeOnce({ ...,
+    // windowMs: NEGATIVE_WINDOW_MS })` below even starts. So by the time that observeOnce runs, the condition
+    // it polls (`>= 1`) is ALREADY true; its first synchronous check succeeds before any `await wait(...)`.
+    // NEGATIVE_WINDOW_MS is not raced by any timer on this path at all. Same injection evidence as (1): uniform
+    // setTimeout scaling to 50x unchanged; the shared _timing-guard.mjs mechanism itself was independently
+    // shown capable of throwing under a targeted delay past ~200-250ms, proving the technique is non-vacuous.
     const neverDelivered2 = await assertNeverWithControl({
       label: "(2) resume path via the fallback: NEVER delivers (no kickoff was ever passed)",
       check: () => countIn(fb, PASTE_START) >= 1,
