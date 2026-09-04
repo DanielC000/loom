@@ -360,6 +360,38 @@ async function landBranchCommitsIndividually(
         ? { ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` }
         : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
     }
+    // Detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before the manual commit
+    // below (card 2eb78eb2) — `cherry-pick --no-commit` never errors when its patch is already fully
+    // applied (see the FAIL-CLOSED comment further down); it just leaves the index unchanged. The
+    // `mergeBase === branchTip` check above only catches a WHOLE branch already landed — it says nothing
+    // about ONE redundant commit inside an otherwise-new multi-commit branch (e.g. two branches that
+    // cherry-picked the same fix independently). Left undetected here, the manual `git commit` a few
+    // lines down runs against a clean index and can itself fail on git's own "nothing to commit, working
+    // tree clean" — a REAL git failure, not a Loom bug — landing in this function's generic commit-failure
+    // branch below with an opaque "commit failed while landing commit <sha7>: …". The outcome (this branch
+    // still drops, same fallback as always) doesn't change; only the diagnosability does — a manager reading
+    // that opaque reason has no way to tell "redundant content" apart from an actual Loom defect. `git diff
+    // --cached --name-only` (not `--quiet`) is used deliberately: `--quiet` signals "nothing staged" via its
+    // EXIT CODE, which is indistinguishable at this call site from any other command failure once it reaches
+    // simple-git's `.raw()` rejection path; `--name-only` always exits 0 and reports emptiness through its
+    // OUTPUT instead, so detecting "nothing staged" here needs no exit-code guessing.
+    let stagedPaths: string;
+    try {
+      stagedPaths = await withTimeout(
+        git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached --name-only (batch land, empty-stage probe)",
+      );
+    } catch (e) {
+      await rollback();
+      return { ok: false, reason: `${branch}: failed to probe staged changes after cherry-picking ${sha.slice(0, 7)}: ${(e as Error).message}` };
+    }
+    if (stagedPaths.trim() === "") {
+      // DoD-2's deliberate choice (b): the CONSERVATIVE default. This does NOT skip just the redundant
+      // commit and continue landing the rest of the branch — a commit silently skipped is a commit nobody
+      // reviewed the absence of. The whole branch drops, exactly like every other failure in this loop,
+      // with an honest reason instead of a misleading one.
+      await rollback();
+      return { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} produced an empty commit — its content was already present in the batch tree; dropping this branch rather than risk amending an unrelated commit` };
+    }
     // Read the ORIGINAL message + author identity (name/email/date), then commit manually — preserving
     // authorship explicitly, since a bare `git commit` here would otherwise stamp the CURRENT committer
     // identity as author too, losing the worker's own authorship (true for every commit, not just the tip).
@@ -388,16 +420,15 @@ async function landBranchCommitsIndividually(
       await rollback();
       return { ok: false, reason: `${branch}: commit failed while landing commit ${sha.slice(0, 7)}: ${(e as Error).message}` };
     }
-    // FAIL CLOSED on an empty commit (card 43a9182d): a cherry-pick with `--no-commit` never errors when
-    // its patch is already fully applied (e.g. this branch was already landed elsewhere in the same
-    // ancestry under different SHAs, then resubmitted before its ref was deleted) — it just leaves the
-    // index clean. The manual `git commit` above then runs against that clean index, and simple-git's
-    // `.raw()` RESOLVES rather than REJECTS on git's own "nothing to commit, working tree clean" — no
-    // commit is created, HEAD does not move. Left unchecked, control would fall through to the tip-only
-    // Loom-Worker-Base/PathSet amend below, which unconditionally amends WHATEVER HEAD currently is —
-    // silently rewriting a PRIOR, unrelated commit (e.g. an earlier candidate's own genuinely-new commit
-    // this same run) with this branch's message and trailers. Assert the OBSERVABLE (HEAD actually moved)
-    // rather than pattern-matching the resolved output text, which is locale- and git-version-fragile.
+    // FAIL CLOSED on an empty commit (card 43a9182d) — a BACKSTOP behind the explicit empty-stage probe
+    // above (card 2eb78eb2), which already catches the ordinary "nothing staged" case before the manual
+    // commit is even attempted. This assertion stays as defense-in-depth for the residual case where the
+    // stage was non-empty (so the probe above passed) yet the commit still produces no net change and HEAD
+    // doesn't move. Left unchecked, control would fall through to the tip-only Loom-Worker-Base/PathSet
+    // amend below, which unconditionally amends WHATEVER HEAD currently is — silently rewriting a PRIOR,
+    // unrelated commit (e.g. an earlier candidate's own genuinely-new commit this same run) with this
+    // branch's message and trailers. Assert the OBSERVABLE (HEAD actually moved) rather than pattern-
+    // matching the resolved output text, which is locale- and git-version-fragile.
     let newHead: string;
     try {
       newHead = (await withTimeout(
