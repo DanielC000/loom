@@ -841,6 +841,19 @@ export const PROMPT_MISMATCH_NOTICE_TAG = "[loom:prompt-mismatch]";
 export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unresolved]";
 
 /**
+ * Card 38d68b8d — the literal, stable prefix of the THIRD notice family this mechanism can mint:
+ * `SessionService.handlePromptMismatchUnmatched`'s own sender/parent message (sessions/service.ts), fired
+ * from the `onPromptMismatchUnmatched` event above whenever an UNMATCHABLE mismatch (`isUnmatchableMismatch`
+ * at this file's own `UserPromptSubmit` detector) is genuinely reported, not suppressed as an exact repeat.
+ * Same reachability question as `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG` above, same answer: this notice is
+ * itself a pty submission to a real session (the sender/parent), so ITS OWN delivery can mismatch too, and
+ * without recognizing it here that mismatch would (if unmatchable in turn) mint ANOTHER push, forever.
+ * Exported so `SessionService` mints its sender message FROM this constant rather than a second hardcoded
+ * literal that could silently drift from what `intendedIsOwnMismatchNotice` actually recognizes.
+ */
+export const PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG = "[loom:prompt-mismatch-unmatched]";
+
+/**
  * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
  * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
  * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
@@ -3863,6 +3876,24 @@ export interface PtyHostEvents {
    */
   onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string }): void;
   /**
+   * Card 38d68b8d — DoD-2 of `59757189`'s UNMATCHABLE-mismatch population (the structural TWIN of
+   * `onPromptMismatchUnresolved` above, fired on the OPPOSITE `isUnmatchableMismatch` branch — see that
+   * local's own doc at its call site: none of the recognized/confirmed shapes claimed this mismatch). A
+   * pull surface (`getLastMismatchUnmatched`) already lets a session that KNOWS to ask retrieve this text
+   * (card `59757189` DoD-1/3, shipped); this event is the PUSH half that was deliberately left for a
+   * later card once the content-in-durable-records ruling (`0eb43216`) landed — a recipient can never
+   * self-diagnose (card `68459420`), and a pull surface only ever helps someone who already suspects a
+   * mismatch. Fires once per genuinely-sent notice (gated behind the SAME `isExactRepeatNotice` check the
+   * recipient's own `[loom:prompt-mismatch]` notice already goes through — no separate dedup invented
+   * here). `intendedText` is the FULL captured text (`Live.lastMismatchUnmatched.intendedText`), passed
+   * RAW and UNCONDITIONALLY — same posture as `onPromptMismatchUnresolved`'s `messageExcerpt` above:
+   * PtyHost stays DB-agnostic (no DB, no manager/sender lookup), and the implementer
+   * (SessionService.handlePromptMismatchUnmatched, via index.ts) decides who the sender is and applies
+   * the `LOOM_LOG_MESSAGE_CONTENT` gate at the one place this content can become durable/queryable — not
+   * here. OPTIONAL, same rationale as every sibling above.
+   */
+  onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void;
+  /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
    * death (the process died without a stop() — a crash / clean self-exit). It is the load-bearing
@@ -6155,15 +6186,17 @@ export class PtyHost {
               const reported = hook.prompt;
               const intended = live.lastPrompt ?? "";
               // Card 87d2dc95 DoD-1 — LOOP-BREAKER: is THIS generation's own intended text itself one of
-              // Loom's own prompt-mismatch-family notices — EITHER this file's own `[loom:prompt-mismatch]`
-              // notice OR SessionService's `[loom:prompt-mismatch-unresolved]` one (see both tag constants'
-              // own docs for why BOTH are checked, not just the first — a manager review found the original
-              // single-tag check left the second family's own mismatch able to mint a fresh plain notice and
-              // re-arm a follow-up timer that could still fire another `-unresolved` notice later). If so,
-              // this generation must never be allowed to mint ANOTHER notice about its own mismatch, no
-              // matter what the engine reports back for it — see the guard this feeds, just before
-              // `mismatchText` is actually composed/delivered, for the termination argument it establishes.
-              const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG);
+              // Loom's own prompt-mismatch-family notices — this file's own `[loom:prompt-mismatch]`
+              // notice, SessionService's `[loom:prompt-mismatch-unresolved]` one, OR (card 38d68b8d)
+              // SessionService's `[loom:prompt-mismatch-unmatched]` sender/parent push (see all three tag
+              // constants' own docs for why each is checked, not just the first — a manager review found
+              // the original single-tag check left the second family's own mismatch able to mint a fresh
+              // plain notice and re-arm a follow-up timer that could still fire another `-unresolved`
+              // notice later; the third family is the SAME class of gap for the same reason). If so, this
+              // generation must never be allowed to mint ANOTHER notice about its own mismatch, no matter
+              // what the engine reports back for it — see the guard this feeds, just before `mismatchText`
+              // is actually composed/delivered, for the termination argument it establishes.
+              const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
               let i = 0;
               const max = Math.min(reported.length, intended.length);
               while (i < max && reported[i] === intended[i]) i++;
@@ -6471,8 +6504,9 @@ export class PtyHost {
                 (intended.length - reported.length) <= OFFSET_OMISSION_MAX_TAIL_CHARS && intended.startsWith(reported);
               if (intendedIsOwnMismatchNotice) {
                 // Card 87d2dc95 DoD-1 — THE ACTUAL LOOP-BREAKER: this generation's own intended text IS one
-                // of Loom's own prompt-mismatch-family notices (either tag — see `PROMPT_MISMATCH_NOTICE_TAG`/
-                // `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG`'s own docs), so skip mismatch classification/
+                // of Loom's own prompt-mismatch-family notices (any of the three tags — see
+                // `PROMPT_MISMATCH_NOTICE_TAG`/`PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG`/
+                // `PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG`'s own docs), so skip mismatch classification/
                 // re-notification/follow-up-timer-arming for it ENTIRELY, regardless of what the engine
                 // reported. TERMINATION ARGUMENT: the block this `if` gates is the ONLY code that can ever
                 // mint a plain `[loom:prompt-mismatch]` notice OR arm the `checkPromptMismatchUnresolved`
@@ -6969,6 +7003,15 @@ export class PtyHost {
                 } else {
                   live.lastMismatchNoticeSignature = noticeSignature;
                   setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
+                  // Card 38d68b8d DoD-1/2: push this UNMATCHABLE mismatch to the SENDER/parent too, not
+                  // just the recipient above — `mismatchText`'s own final fallback arm already says why:
+                  // "only the sender can tell whether their content actually arrived." Gated on the SAME
+                  // `isExactRepeatNotice` suppression the recipient notice just went through (this `else`
+                  // branch only runs for a genuinely new signature) rather than a second, independently
+                  // driftable dedup check.
+                  if (isUnmatchableMismatch) {
+                    this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now() });
+                  }
                 }
               }
             }

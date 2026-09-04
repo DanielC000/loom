@@ -366,6 +366,11 @@ async function main(): Promise<void> {
     // how to fail loud to the recipient AND the sender. See PtyHostEvents.onPromptMismatchUnresolved's own
     // doc / SessionService.handlePromptMismatchUnresolved's own doc.
     onPromptMismatchUnresolved: (sessionId, info) => sessions.handlePromptMismatchUnresolved(sessionId, info),
+    // Card 38d68b8d: the UNMATCHABLE-mismatch twin of `onPromptMismatchUnresolved` just above — `sessions`
+    // (forward reference, same pattern) decides who the sender/parent is and applies the opt-in content
+    // gate. See PtyHostEvents.onPromptMismatchUnmatched's own doc / SessionService.
+    // handlePromptMismatchUnmatched's own doc.
+    onPromptMismatchUnmatched: (sessionId, info) => sessions.handlePromptMismatchUnmatched(sessionId, info),
     // Card 2d8d2e42: a repeated-identical-call streak just reached the Nth repeat (or a subsequent
     // multiple) — `sessions` (forward reference, same pattern as onPasteLengthLoss above) decides how to
     // record the durable event + fail loud to the recipient AND the sender. See

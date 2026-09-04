@@ -13,7 +13,7 @@ import {
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -9427,6 +9427,53 @@ export class SessionService {
       const senderMsg = `${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} replay detected (gen=${info.gen}, ${info.intendedLen} chars) that never resolved — no later generation's own submission was ever recognized as containing it within the wait window, and Loom has no copy of it to resend automatically. If you (or the owner, relayed through you) sent that content and it does not appear to have been acted on since, consider resending it — but check first, since a resend on top of content that actually did arrive creates a duplicate.`;
       this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
     }
+  }
+
+  /**
+   * Card 38d68b8d — consumes `PtyHostEvents.onPromptMismatchUnmatched`: `59757189` DoD-1/3 shipped
+   * CAPTURE (`Live.lastMismatchUnmatched`) and a PULL surface (`getLastMismatchUnmatched`) for an
+   * UNMATCHABLE mismatch, but deliberately withheld the PUSH half pending the `0eb43216` content-in-
+   * durable-records ruling — `25f31381` re-examined whether the pull surface made the push unnecessary
+   * and ruled NO (a pull surface only ever helps someone who already suspects a mismatch and knows to
+   * call it; the push exists to tell a sender who does not know to ask — card `68459420`). `0eb43216` has
+   * since been answered ("opt-in verbosity, content only under an explicit env flag, default OFF"), which
+   * is exactly the shape this method implements.
+   *
+   * ONLY recipient this method has: the SENDER/PARENT (`s.parentSessionId`) — mirroring
+   * `handlePromptMismatchUnresolved`/`handlePasteTripwireGiveUp` above exactly (same "if a parent exists,
+   * push to it" shape; a session with no parent — e.g. a top-level manager/lead — has no sender to push
+   * to, so this is a silent no-op for it, same as those siblings). Deliberately does NOT also resolve
+   * `info.gen`'s own `QueuedMessage.senderId` as an alternate target: `parentSessionId` is the SAME
+   * established addressee this notification family already uses for every sibling shape, and inventing a
+   * second, untested resolution path here would diverge from that convention for no proven benefit.
+   *
+   * ⛔ NO separate durable audit event (unlike `handlePromptMismatchUnresolved`'s own `db.appendEvent`):
+   * `59757189`'s own reasoning for the unmatched population is that an in-memory capture + a pull surface
+   * "never creates durable content at rest" — a NEW durable row here would contradict that deliberate
+   * design choice for no requirement this card's own DoD states. `enqueueSystemNudge` below already
+   * durably queues the delivery itself (the existing message-delivery machinery), which is sufficient for
+   * the PUSH obligation this card actually asks for.
+   *
+   * ⭐ THE NOTIFICATION ITSELF FIRES UNCONDITIONALLY — only the CONTENT inside it is gated. Card `38d68b8d`'s
+   * own explicit design constraint: gating the whole notification behind the opt-in flag would silently
+   * re-create the exact defect this card exists to close (a sender who does not know to ask, and now also
+   * never told). Gated with `isLogMessageContentEnabled()` directly (paths.ts), the SAME flag every other
+   * content-bearing diagnostic in this file uses — mirroring `handlePromptMismatchUnresolved`'s own
+   * `messageExcerpt` gating just above (an inline `? :`, not `redactedExcerpt`/pty/host.ts's chokepoint:
+   * that helper's own job is producing a len+hash SUBSTITUTE string for an otherwise-unconditional call
+   * site; here the signature (`intendedLen`, `writtenHash`) is already stated plainly and unconditionally
+   * in the shared lead-in sentence below, so gating only needs to add-or-withhold the raw text itself, not
+   * synthesize a replacement for it). `intendedLen` is stated explicitly per this card's own DoD-1
+   * ("alongside `intendedLen`"), regardless of which branch the content clause takes.
+   */
+  handlePromptMismatchUnmatched(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void {
+    const s = this.db.getSession(sessionId);
+    if (!s?.parentSessionId) return; // no sender/parent to push to — the pull surface still stands
+    const contentClause = isLogMessageContentEnabled()
+      ? ` Intended text: ${JSON.stringify(info.intendedText)}.`
+      : ` Content is not included by default (set LOOM_LOG_MESSAGE_CONTENT=1 to include it) — the length and hash above already let you confirm a match against what you actually sent.`;
+    const senderMsg = `${PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} at gen=${info.gen} that could not be matched to anything recognized (not a replay, not a confirmed fusion) — a possible LOSS of ${info.intendedLen} char(s) Loom intended to write there (writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}). Only you — the sender — can tell whether that content actually arrived and was acted on; the recipient only ever sees what arrived, never what was intended.${contentClause} If it does not appear to have been acted on, consider resending it — but check first, since a resend on top of content that actually did arrive creates a duplicate.`;
+    this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
   }
 
   /**
