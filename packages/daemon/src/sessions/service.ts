@@ -16148,6 +16148,17 @@ export class SessionService {
    * cleanup below. `notified` on the return is unconditionally `true` regardless — this path OWNS the
    * announcement for an ALREADY_MERGED outcome, whether THIS call fired it or a prior one already did, so
    * confirmWorkerMergeTracked's generic echo must stay suppressed either way.
+   *
+   * BATCH CALLER SUPPRESSION (card c35b60c4): `mergeBatchTracked` calls this once per LANDED branch, and
+   * on that path every one of these branches legitimately resolves ALREADY_MERGED (the batch's own single
+   * fast-forward already put every branch's work on main — see that method's own header doc) — none of
+   * them is a stale retry, so `alreadyFinalized` above is `false` for every one and this method's push
+   * would otherwise fire K times for one batch (measured live: card c35b60c4's specimen). `suppressNotify`
+   * (set ONLY by that caller) skips this method's own per-branch push entirely; `mergeBatchTracked` sends
+   * ONE aggregate notice for the whole batch instead, once, naming every landed branch — see its own
+   * settle callback. This is a NEW, EXPLICIT opt-out, not a widening of the `alreadyFinalized` guard above
+   * (which stays reserved for the stale-retry case it was built for) — every non-batch caller omits this
+   * flag and keeps today's push behavior byte-identical.
    */
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
@@ -16155,28 +16166,32 @@ export class SessionService {
     forceRemoveWorktree?: boolean; opStartedAt?: string;
     /** Ship-state to persist (card 1eebc46a) — forwarded verbatim into {@link finalizeMerge}; see its own doc. */
     mergedSha?: string | null; repoKey?: string | null;
+    /** Card c35b60c4 — see this method's own "BATCH CALLER SUPPRESSION" doc above. */
+    suppressNotify?: boolean;
   }): Promise<ConfirmMergeResult> {
-    const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
-    if (!alreadyFinalized) {
-      // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this success announcement OWNS notified:true (see
-      // this method's doc), suppressing confirmWorkerMergeTracked's generic echo — so it must itself reach
-      // the current lineage owner, not the (possibly recycled) manager captured when the confirm started.
-      const target = this.resolveSettleNudgeTarget(args.managerSessionId);
-      const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
-      try {
-        // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
-        // other settle nudge.
-        const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: args.taskId, kind: "agent" });
-        // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — a failed/undelivered
-        // push leaves every pending wake untouched, since the fallback wake is then the session's own
-        // real recovery path (see autoCancelSettleWakes's doc). `args.opStartedAt` is CAPTURED (not
-        // peeked from the registry here) — threaded all the way from confirmWorkerMergeTracked's own
-        // pre-attach() capture, the only place this op's start instant is known unconditionally; a
-        // settle-time `peek()` raced the registry's retain-then-notify ordering under concurrent test
-        // load (op 473b8596) even though both happen in one synchronous callback — closure capture
-        // removes that race entirely instead of chasing it.
-        if (r.delivered) this.autoCancelSettleWakes(target, args.opStartedAt, args.opId);
-      } catch { /* manager not live; wakes deliberately left untouched */ }
+    if (!args.suppressNotify) {
+      const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+      if (!alreadyFinalized) {
+        // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this success announcement OWNS notified:true (see
+        // this method's doc), suppressing confirmWorkerMergeTracked's generic echo — so it must itself reach
+        // the current lineage owner, not the (possibly recycled) manager captured when the confirm started.
+        const target = this.resolveSettleNudgeTarget(args.managerSessionId);
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
+        try {
+          // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
+          // other settle nudge.
+          const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: args.taskId, kind: "agent" });
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — a failed/undelivered
+          // push leaves every pending wake untouched, since the fallback wake is then the session's own
+          // real recovery path (see autoCancelSettleWakes's doc). `args.opStartedAt` is CAPTURED (not
+          // peeked from the registry here) — threaded all the way from confirmWorkerMergeTracked's own
+          // pre-attach() capture, the only place this op's start instant is known unconditionally; a
+          // settle-time `peek()` raced the registry's retain-then-notify ordering under concurrent test
+          // load (op 473b8596) even though both happen in one synchronous callback — closure capture
+          // removes that race entirely instead of chasing it.
+          if (r.delivered) this.autoCancelSettleWakes(target, args.opStartedAt, args.opId);
+        } catch { /* manager not live; wakes deliberately left untouched */ }
+      }
     }
     this.pty.stop(args.workerSessionId, "hard");
     for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
@@ -16192,9 +16207,13 @@ export class SessionService {
     // against this same worker, so the same signal is just as relevant here.
     const composerWarning = composerIntegrityWarning(this.pty, args.workerSessionId);
     const warning = [nestedWarning, worktreeWarning, composerWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // `notified` reflects whether THIS call actually pushed the `[loom:already-merged]` announcement —
+    // `!args.suppressNotify` on the batch path (card c35b60c4), since that caller sends its own aggregate
+    // notice instead; unconditionally `true` for every other caller, unchanged (see this method's own doc).
+    const notified = !args.suppressNotify;
     return warning
-      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true, warning }
-      : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };
+      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified, warning }
+      : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified };
   }
 
   /**
@@ -16554,10 +16573,15 @@ export class SessionService {
             const worker = this.db.getSession(lb.workerSessionId);
             if (!worker) continue;
             const c = chosen.find((x) => x.workerSessionId === lb.workerSessionId);
+            // suppressNotify (card c35b60c4): every landed branch here resolves ALREADY_MERGED by
+            // construction (the batch's own single fast-forward already put it on main) — none of them is
+            // a stale retry, so finishAlreadyMerged's own push would fire once per branch. This method
+            // sends ONE aggregate notice for the whole batch instead (see the settle callback below).
             await this.finishAlreadyMerged({
               managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
               worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
+              suppressNotify: true,
             });
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
@@ -16577,19 +16601,32 @@ export class SessionService {
       },
       // ASYNC SETTLE NUDGE (card f944d4e4 DoD-2) — fires ONLY for a caller that actually observed
       // `{settled:false}` (see PendingOpRegistry.attach's `onSettledAfterPending` doc); a caller whose
-      // batch settled inside the sync wait never needs this, it already has the value inline. Deliberately
-      // MUCH thinner than confirmWorkerMergeTracked's own per-branch echo just below (no per-step
-      // diagnostics, no skill/proximity/retry notes) — every LANDED branch already got its own rich
-      // `[loom:already-merged]` push (finishAlreadyMerged, inside the `run` closure above via
-      // runBatchedMerge's `result.landed` loop) and every FALLBACK candidate already got its own via
-      // `runFallback`'s `confirmWorkerMergeTracked` call; this is only the ONE aggregate "the batch call
-      // you got a pending response for has now concluded" signal a caller has no other way to learn.
+      // batch settled inside the sync wait never needs this, it already has the value inline (that sync
+      // caller gets ZERO notices — the fast-path return already IS the answer, mirroring
+      // confirmWorkerMergeTracked's own sync-vs-async split; no per-op push is needed on top of it).
+      // Deliberately MUCH thinner than confirmWorkerMergeTracked's own per-branch echo just below (no
+      // per-step diagnostics, no skill/proximity/retry notes) — but per card c35b60c4 (measured: a K=4
+      // batch queued/delivered FOUR separate `[loom:already-merged]` pushes to the manager, wasting that
+      // many turns, and the wording read like the fallback/rejection path even though the batch had
+      // actually succeeded) every LANDED branch's own `finishAlreadyMerged` push is now SUPPRESSED
+      // (`suppressNotify:true` on that call above) — this is the ONE place a batch's landed branches are
+      // ever announced to the manager, so it names every one of them (task + branch + commit) rather than
+      // just a bare count. Every FALLBACK candidate still gets its own notice via `runFallback`'s
+      // `confirmWorkerMergeTracked` call — those are genuinely per-worker outcomes (a real gate rejection,
+      // a stranded-work refusal, an over-cap deferral), not a batch success duplicated K times, so they are
+      // deliberately left alone.
       (outcome, opId) => {
         const target = this.resolveSettleNudgeTarget(managerSessionId);
+        // Card c35b60c4 DoD-3: never call a batched branch "ALREADY_MERGED" — it landed BECAUSE of this
+        // batch's own fast-forward, not because it was redundant, and that wording read like the red-gate
+        // fallback path to the manager who hit this live (see the card's own "CORRECTION" section).
+        const landedList = (list: MergeBatchResult["landed"]) =>
+          list.map((l) => `task ${l.taskId ?? "none"} (branch ${l.branch}, commit ${l.sha.slice(0, 8)})`).join("; ");
         const msg = !outcome.ok
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
-          ? `[loom:merge-batch-done] merge_batch [op ${opId}] settled — landed ${outcome.value.landed.length} branch(es), ${outcome.value.fallback.length} fell back to an individual confirm (each already notified separately).`
+          ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${outcome.value.landed.length} branch(es) on main: ${landedList(outcome.value.landed)}.` +
+            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).` : "")
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).`;
         try {
           this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId: null, kind: "warning" });
