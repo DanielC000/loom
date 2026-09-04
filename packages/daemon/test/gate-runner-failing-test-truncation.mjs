@@ -201,6 +201,113 @@ const dir = mkdtempManaged("loom-gr-trunc-");
       !cappedResult.includes("arrives after the cap"));
   }
 
+  // ── (A4) Card 87cdb15f DoD-1 — MULTI-FILE BUDGET STARVATION, PROVEN: several failing files sharing the
+  //        capture's ONE 16KB budget in test-daemon.mjs's own FAILURES: echo ORDER can let an earlier
+  //        file's full echo consume the budget before a later file's own diagnostic is ever reached.
+  //        Hermetic (direct tracker feed, mirrors (A3)'s convention) — createFailureBlockTracker.feed() is
+  //        a pure function of the bytes test-daemon.mjs's real epilogue would emit in the same order, so
+  //        this is the actual shared-budget mechanism, not a stand-in for it. ─────────────────────────────
+  {
+    const SECOND_FILE_MARKER = "vault-push-status (exit 1): assertion for the SECOND failing file";
+
+    // (A4-control) POSITIVE CONTROL, REQUIRED FIRST (card 87cdb15f's own polarity warning: this is testing
+    // for a LOSS, so a clean-looking "second file not found" result is exactly what a broken check also
+    // produces). Two SMALL files, well inside the 16KB budget together — the tracker must recover BOTH,
+    // proving the check below can actually see the second file's marker when it is genuinely present.
+    {
+      const tracker = createFailureBlockTracker();
+      tracker.feed(Buffer.from([
+        "FAILURES:",
+        "  - first-file (exit 1): first file's own small body",
+        `  - ${SECOND_FILE_MARKER}`,
+      ].join("\n") + "\n", "utf-8"));
+      const result = tracker.result();
+      check("(A4-control) POSITIVE CONTROL: with both files' bodies well inside the 16KB budget, the SECOND file's own marker IS recovered",
+        result !== undefined && result.includes(SECOND_FILE_MARKER));
+    }
+
+    // (A4) THE STARVATION, REPRODUCED: the FIRST failing file's own echoed body alone exceeds the 16KB cap
+    // (test-daemon.mjs echoes a failing file's FULL captured stdout/stderr, uncapped per file), so the
+    // capture caps mid-way through file 1 and NEVER reaches file 2's header or body — a genuine, provable
+    // loss of a second file's diagnostic, not a hypothetical.
+    {
+      const tracker = createFailureBlockTracker();
+      tracker.feed(Buffer.from("FAILURES:\n", "utf-8"));
+      tracker.feed(Buffer.from("  - first-file (exit 1): " + "x".repeat(20_000) + "\n", "utf-8"));
+      tracker.feed(Buffer.from(`  - ${SECOND_FILE_MARKER}\n`, "utf-8"));
+      const result = tracker.result();
+      check("(A4) the capture is genuinely capped (proves the starvation scenario's own precondition — file 1 alone exceeds the budget)",
+        result !== undefined && result.length <= 16_384);
+      check("(A4) THE LOSS, PROVEN: the second failing file's own marker never appears anywhere in the recovered capture — its diagnostic is TOTALLY lost, not merely degraded",
+        result !== undefined && !result.includes(SECOND_FILE_MARKER));
+      check("(A4) the first file's own content DID survive — the loss is specifically about budget-SHARING across files, not a capture that lost everything",
+        result !== undefined && result.includes("first-file (exit 1)"));
+    }
+  }
+
+  // ── (A5) Card 87cdb15f DoD-2 — NO FALLBACK WHEN THE FAILURES: EPILOGUE IS NEVER REACHED, PROVEN: a real
+  //        spawn whose step TIMES OUT before test-daemon.mjs's own end-of-suite FAILURES: echo ever prints
+  //        (the general form of the live specimen card 9966c52d records for kickoff-real-spawn/batch-merge)
+  //        never triggers createFailureBlockTracker at all — result() stays undefined forever, since the
+  //        marker is never seen — so the richer per-file diagnostic recovery path this whole file otherwise
+  //        tests is completely unavailable, and the reader is left with only whatever SINGLE line
+  //        createFailingTestTracker already scanned live (or nothing, for a shape matching no tier — see
+  //        the commitAll shape's own doc above `failingTest`). allowExtend:false on the timing-out arm so
+  //        the test doesn't wait out the one-time auto-extend window (GATE_EXTEND_IDLE_MS). ───────────────
+  {
+    const STACK_DETAIL = "    at a deeper stack frame that only the FAILURES: echo ever carries";
+    // A PASS-line flood ahead of the failure in both arms, sized well past OUTPUT_TAIL_BYTES (4096) — this
+    // is what makes resolveOutputTail() actually take the content-selected branch in EITHER arm (a short
+    // run's raw tail is never lossy in the first place, so it would recover everything regardless of
+    // whether the epilogue was reached — that would prove nothing about this gap specifically).
+    const PASS_LINES = Array.from({ length: 2000 }, (_, i) => `console.log('PASS  fixture-test-${i}');`).join("\n");
+    const passOutputBytes = Buffer.byteLength(
+      Array.from({ length: 2000 }, (_, i) => `PASS  fixture-test-${i}`).join("\n"), "utf-8",
+    );
+
+    // (A5-control) POSITIVE CONTROL: the identical wrapper-line + multi-line stack-detail diagnostic, but
+    // the run reaches its own FAILURES: epilogue before exiting (a fast, non-timing-out failure) — the
+    // front-anchored capture recovers the FULL multi-line body. This is the real baseline the timeout arm
+    // below is judged against, not an assumption about what "reaching the epilogue" buys.
+    {
+      fs.writeFileSync(path.join(dir, "reaches-epilogue.mjs"), [
+        PASS_LINES,
+        "console.log('FAIL  vault-push-status  (exit 1)');",
+        "console.log('FAILURES:');",
+        "console.log('  - vault-push-status (exit 1):');",
+        "console.log(\"      AssertionError: expected vault push status 'clean' but got 'dirty'\");",
+        `console.log(${JSON.stringify(STACK_DETAIL)});`,
+        "process.exitCode = 1;",
+      ].join("\n"));
+      const res = await runGateStep("node reaches-epilogue.mjs", dir, 15_000);
+      check("(A5-control) the PASS-line flood alone genuinely exceeds the 4096-byte positional tail budget (proves this exercises the content-selected branch, matching the timeout arm's own shape)",
+        passOutputBytes > 4096 && res.status === 1);
+      check("(A5-control) a run that DOES reach its own FAILURES: epilogue recovers the full multi-line stack-detail line",
+        typeof res.outputTail === "string" && res.outputTail.includes(STACK_DETAIL));
+    }
+
+    // (A5) THE GAP, REPRODUCED: the SAME shape of diagnostic (a wrapper line + a stack-detail line), but the
+    // process HANGS after printing them — never prints its own FAILURES: epilogue and never exits — and the
+    // gate step's own timeout kills it first.
+    {
+      fs.writeFileSync(path.join(dir, "hangs-before-epilogue.mjs"), [
+        PASS_LINES,
+        "console.log('FAIL  vault-push-status  (exit 1)');",
+        "console.log(\"      AssertionError: expected vault push status 'clean' but got 'dirty'\");",
+        `console.log(${JSON.stringify(STACK_DETAIL)});`,
+        // Never prints its own FAILURES: epilogue and never exits — mirrors a real run killed mid-suite.
+        "setInterval(() => {}, 1_000_000);",
+      ].join("\n"));
+      const res = await runGateStep("node hangs-before-epilogue.mjs", dir, 3000, undefined, false);
+      check("(A5) the step genuinely timed out (proves this exercises the never-reaches-the-epilogue path, not a fast exit)",
+        res.timedOut === true && res.status === null);
+      check("(A5) THE GAP, PROVEN: the stack-detail line is NOT recovered anywhere in outputTail — the exact content the (A5-control) baseline shows IS recoverable when the epilogue is reached",
+        typeof res.outputTail === "string" && !res.outputTail.includes(STACK_DETAIL));
+      check("(A5) the only surviving diagnostic is the single wrapper line createFailingTestTracker already scanned live — the multi-line stack detail is gone, not degraded",
+        res.outputTail === "FAIL  vault-push-status  (exit 1)" && res.failingTest === "FAIL  vault-push-status  (exit 1)");
+    }
+  }
+
   // ── (E) Code Review follow-up (card 55cba5c5): `carry` — the not-yet-terminated remainder
   //        createFailingTestTracker holds between feed() calls — must be BOUNDED. A bare-`\r` progress/
   //        download-meter renderer (pnpm/npm/turbo all use one) writes with NO real `\n` at all, so the
