@@ -96,10 +96,41 @@ const writtenOf = (fake) => fake.writes.join("");
 const countIn = (fake, marker) => writtenOf(fake).split(marker).length - 1;
 const lastFake = () => fakes[fakes.length - 1];
 
-// windowMs shared by every negative check below — comfortably (well over 10x) above the pinned poll/settle
-// chain (MODE_LOG_MAX_ATTEMPTS=8 * LOOM_MODE_LOG_POLL_MS=15ms ≈ 120ms worst case, plus the deferred
-// setTimeout(0) tick) and comfortably under the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS (5000ms) so a give-up
-// retry can never fire inside the window and be mistaken for a repeated delivery.
+// windowMs shared by every negative check below — comfortably above the pinned poll/settle chain
+// (MODE_LOG_MAX_ATTEMPTS=8 * LOOM_MODE_LOG_POLL_MS=15ms ≈ 120ms worst case, plus the deferred setTimeout(0)
+// tick) and comfortably under the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS (5000ms) so a give-up retry can
+// never fire inside the window and be mistaken for a repeated delivery. CORRECTED (card 79c1522a): this
+// comment previously claimed "well over 10x" above that ~120ms chain — 500/120 ≈ 4.2x, not 10x+, and the
+// injection evidence below measured the REAL pre-fix violation firing at t+159.8ms (≈3.1x margin under
+// the 500ms window), not the theoretical ~120ms figure — a stale overstatement, corrected here rather than
+// left to mislead a future reader about the true safety margin.
+//
+// Card 79c1522a audit of this file's 4 real windowMs use-sites (grep-counted, not comment-counted, per
+// this card's own DoD-0 correction of a 5-times-drifted lineage count): lines 148/156 (scenario A: outer
+// assertNeverWithControl + its positiveControl's inner observeOnce) and 179/182 (scenario B: same pair),
+// 1 constant (NEGATIVE_WINDOW_MS). MECHANISM (structural, not timing-margin — no production setTimeout is
+// even armed on a resume's path): host.ts's `live.startupPrompt` field is written in exactly one place for
+// a real `kind:"claude"` session — `spawn()` at host.ts:5205-5206, `opts.startupPrompt ?? null` — grep of
+// every `.startupPrompt` write-site in host.ts confirms the only other two Live-record constructions that
+// touch the field (spawnShell:5422, seedCanned:5509) hardcode null for the unrelated shell/canned kinds and
+// are unreachable via the resume/kickoff path at all. `markReady` (host.ts:10411) computes
+// `kickoff = live.startupPrompt != null && !live.firstTurnStarted ? live.startupPrompt : null` and only
+// calls `scheduleKickoffGuarantee` (host.ts:10428) when `kickoff != null`. Production's real resume call
+// site (sessions/service.ts:3599, the `this.pty.spawn({...resumeId: session.engineSessionId...})` block)
+// never sets `startupPrompt` — confirmed by reading that call site directly, not inferred from a comment —
+// so `live.startupPrompt` is always null for a resume ⇒ `scheduleKickoffGuarantee` is NEVER invoked on any
+// resume path ⇒ scenarios A and B's checks (`countIn(...) >= 2` / `>= 1`) cannot be triggered by that
+// mechanism at any delay, however slow the host. INJECTION EVIDENCE (the strongest form available — the
+// actual historical regression, not a synthetic proxy): built the pre-fix parent commit 493dce1c (parent
+// of 062cf855, which both fixed the bug and added this file) in an isolated detached scratch worktree
+// outside this repo, copied this test file in unmodified, built, and ran it against the UNFIXED source.
+// Result: scenario (A) correctly FAILS — the real regression fires and is observed at t+159.8ms, well
+// inside the 500ms window — while scenario (B) PASSES unchanged on BOTH fixed and unfixed code, confirming
+// (B) is a pure discriminating control (an empty queue produces nothing on any version of the code) and
+// never itself raced the fix. This proves the check is sensitive to the exact defect it exists to catch,
+// not merely structurally argued. Zero observed flakes for this file (census logs, gate-admission history,
+// `git log --grep=flake` all return nothing for it). CONCLUSION: PROVEN SAFE. Zero conversions — nothing
+// here should change.
 const NEGATIVE_WINDOW_MS = 500;
 
 // Spawn a throwaway control session (SessionStart delivered, like a normal fresh kickoff) and wait for its

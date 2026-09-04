@@ -166,6 +166,28 @@ try {
   check("(b) tracked pid is gone after stop()", trackedGone);
   const mtimeOf = (f) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0);
   const heartbeatMtimeAfterKill = mtimeOf(heartbeatOut);
+  // Card 79c1522a audit of this file's 4 real windowMs use-sites (grep-counted: lines 172/179 here, and
+  // the identical pair at 1010/1015 for scenario (n) below — same constant, same mechanism, see that
+  // site's own note). MECHANISM: PROVEN SAFE BY CONSTRUCTION, not a real-time deadline race — by the time
+  // `heartbeatMtimeAfterKill` is captured (this line), `stop()` (line 161, which synchronously calls
+  // `killTracked` — assets/skills/orchestrate/scripts/dev-server.mjs:316-323) has ALREADY returned, and
+  // `trackedGone`'s own `waitUntil(() => !isAlive(trackedPid))` (line 165) has ALREADY confirmed death —
+  // so the sampling window below isn't racing a timer at all, it's re-confirming an already-fixed state.
+  // On win32 (this host), `killTracked` uses `spawnSync("taskkill", ["/pid", pid, "/T", "/F"])`, which is
+  // ALSO independently confirmed synchronous-until-dead: measured directly against a real throwaway child
+  // process on this exact environment — `isAlive(pid)` reads false immediately after `spawnSync` returns,
+  // with zero additional wait. A dead process cannot resume writing at any later delay, however slow the
+  // host — so windowMs (5 write intervals) isn't a margin being raced, it's simply "sample a while to be
+  // sure," the same shape as merge-gate-single-file-retry.mjs's already-proven-safe site (card a8f6d5d9:
+  // "gated behind a test-controlled Promise ... no injection experiment applicable"). The mandatory
+  // positiveControl below (the never-stopped sibling control heartbeat) proves the identical
+  // content-agnostic `mtimeOf` sampling mechanism CAN observe genuine advancement — since `mtimeOf` reads
+  // no state but the file's own mtime, that same proof generalizes to `heartbeatOut`: had `killTracked`
+  // failed to kill the right process (the exact historical bug class card 075bc1cf/(n) below exists to
+  // catch), the still-alive real heartbeat would advance every 100ms and this check would catch it well
+  // inside the window, exactly as the control does. Zero observed flakes for this file (census logs,
+  // gate-admission history, `git log --grep=flake` all return nothing for it). CONCLUSION: PROVEN SAFE.
+  // Zero conversions.
   const heartbeatStillFrozen = await assertNeverWithControl({
     label: "(b) fixture's heartbeat file stops advancing after stop()",
     check: () => mtimeOf(heartbeatOut) !== heartbeatMtimeAfterKill,
@@ -1002,6 +1024,16 @@ try {
   // THE ASSERTION: even though the crash-fixture never called `stop()` itself, its own exit hook — the
   // SAME register+sweep-on-exit mechanism this file's own sections now use — must have killed the REAL
   // command too, not merely the tracked supervisor pid (which the old buggy fallback also always killed).
+  //
+  // Card 79c1522a audit — same windowMs constant/mechanism as scenario (b)'s own note above (lines 172/179
+  // there; this pair is 1010/1015). PROVEN SAFE BY CONSTRUCTION here too, via one extra synchronous hop:
+  // the crash-fixture's own `process.on('exit', ...)` handler (crashFixtureSrc, this file, `spawnSync(...,
+  // [helper, 'stop', d], ...)`) is a BLOCKING spawnSync — it runs the helper's `stop` (which itself
+  // synchronously calls `killTracked`) to completion before the crash-fixture process can finish exiting.
+  // Since `killTracked`'s own win32 `taskkill /T /F` is independently confirmed synchronous-until-dead (see
+  // (b)'s note), the real command is ALREADY dead by the time the crash-fixture's OS-level exit is even
+  // observable to this parent process (`crashChild.on("exit", ...)`, below) — so `heartbeatMtimeAfterCrash`
+  // is captured strictly after guaranteed death, same as (b). Zero conversions.
   const mtimeOf = (f) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0);
   const heartbeatMtimeAfterCrash = mtimeOf(crashHeartbeatOut);
   const heartbeatStillFrozen = await assertNeverWithControl({
