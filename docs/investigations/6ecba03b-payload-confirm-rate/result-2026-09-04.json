@@ -1,0 +1,51 @@
+{
+  "files": [
+    "C:/Users/danie/.loom/logs/daemon-output.log.5",
+    "C:/Users/danie/.loom/logs/daemon-output.log.4",
+    "C:/Users/danie/.loom/logs/daemon-output.log.3",
+    "C:/Users/danie/.loom/logs/daemon-output.log.2",
+    "C:/Users/danie/.loom/logs/daemon-output.log.1",
+    "C:/Users/danie/.loom/logs/daemon-output.log"
+  ],
+  "totalLines": 390022,
+  "timeRange": [
+    "2026-08-24T11:49:54.403Z",
+    "2026-09-04T21:47:28.787Z"
+  ],
+  "rawCounts": {
+    "submitWrites": 6304,
+    "enter1s": 6311,
+    "giveupsTrue": 302,
+    "giveupsFalseSuppressed": 4
+  },
+  "join1": {
+    "lookbackMs": 30000,
+    "resolved": 6304,
+    "unresolved": 7
+  },
+  "join2": {
+    "joinMs": 15000,
+    "linked": 301,
+    "unlinked": 1,
+    "doubleClaims": 0
+  },
+  "buckets": [
+    { "bucket": "<5KB", "n": 3825, "g": 114 },
+    { "bucket": "5-20KB", "n": 1075, "g": 94 },
+    { "bucket": "20-60KB", "n": 1233, "g": 73 },
+    { "bucket": "60-120KB", "n": 171, "g": 16 },
+    { "bucket": "120KB+", "n": 0, "g": 0 }
+  ],
+  "smallVsLarge": {
+    "smallN": 4900,
+    "smallG": 208,
+    "largeN": 1404,
+    "largeG": 89,
+    "chiSquare": 10.660412007365148
+  },
+  "byReason": [
+    { "reason": "drain", "smallN": 2416, "smallG": 170, "largeN": 221, "largeG": 22, "chiSquare": 2.554390168662709 },
+    { "reason": "kickoff-guarantee", "smallN": 24, "smallG": 0, "largeN": 1183, "largeG": 67, "chiSquare": 1.4391422342839346 },
+    { "reason": "immediate", "smallN": 2460, "smallG": 38, "largeN": 0, "largeG": 0, "chiSquare": null }
+  ]
+}
