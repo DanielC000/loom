@@ -30,6 +30,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gcr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -57,7 +58,8 @@ const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { retur
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gcr\n");
-  execSync(`git init -q && git config user.email gcr@loom && git config user.name gcr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gcr@loom && git config user.name gcr`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const worktrees = [];

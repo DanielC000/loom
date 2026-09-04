@@ -33,6 +33,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wld-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -54,12 +55,13 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function commitToBranch(worktreePath, file) {
   fs.writeFileSync(path.join(worktreePath, file), "committed to branch, not merged\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${file}`, GIT_ID);
 }
 
 // mk(tag) allocates a fresh, isolated project + repo + id set for one scenario.

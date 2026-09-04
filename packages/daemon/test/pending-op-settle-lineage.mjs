@@ -58,6 +58,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/pending-op-settle-lineage.mjs
 import fs from "node:fs";
 import os from "node:os";
+import { commitAll } from "./_git-commit.mjs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
@@ -149,7 +150,8 @@ function makeRepo() {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo); // the finally block's removeWorktree(repo, wt) only removes the WORKTREE, never this bare repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# posl\n");
-  execSync(`git init -q && git config user.email posl@loom && git config user.name posl && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email posl@loom && git config user.name posl`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   return repo;
 }
 function seedProject(projId, repo) {
@@ -192,7 +194,7 @@ try {
     const P = "posl-merge-ok", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "ta");
     fs.writeFileSync(path.join(worktreePath, "feata.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feata`, { cwd: worktreePath });
+    commitAll(worktreePath, "feata", GIT_ID);
     seedProject(P, repo);
     const mgrAId = `${P}-mgr1`, workerId = `${P}-wkr`;
     db.insertTask({ id: "ta", projectId: P, title: "ta", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -225,7 +227,7 @@ try {
     const P = "posl-merge-reject", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "tb");
     fs.writeFileSync(path.join(worktreePath, "featb.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m featb`, { cwd: worktreePath });
+    commitAll(worktreePath, "featb", GIT_ID);
     seedProject(P, repo);
     FAIL_WORKTREES.add(worktreePath); // this scenario's gate fails
     const mgrAId = `${P}-mgr1`, workerId = `${P}-wkr`;

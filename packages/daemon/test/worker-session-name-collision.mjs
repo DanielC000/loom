@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -50,7 +51,8 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const repo = path.join(os.tmpdir(), `loom-wsnc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-session-name-collision test\n");
-execSync(`git init -q && git add . && git -c user.email=wsnc@loom -c user.name=wsnc commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=wsnc@loom -c user.name=wsnc");
 
 const now = new Date().toISOString();
 const db = new Db();

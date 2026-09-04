@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-br-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -53,10 +54,11 @@ function seed(p) {
 async function setupMerged(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# br merged\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   // The SQUASH merge LANDED (this is what confirmWorkerMerge does first: `git merge --squash` + a plain
   // commit carrying the deterministic Loom-Worker-Branch trailer)... but the daemon died before the
   // bookkeeping ran: branch + worktree still present, task still in_progress. Under squash the branch is
@@ -74,10 +76,11 @@ async function setupMerged(p) {
 async function setupOrphan(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# br orphan\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "completed work, committed to the branch but NOT merged\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath }); // committed, NOT merged → branch ahead
+  commitAll(worktreePath, `${p.file}`, GIT_ID); // committed, NOT merged → branch ahead
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -90,7 +93,8 @@ async function setupOrphan(p) {
 async function setupDeadLeftover(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# br dead leftover\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   // Simulate the live failure: the prior removeWorktree dropped git's admin entry + the `.git` linkage
   // file, but the directory survived on disk. `.git` in a worktree is a FILE (gitdir pointer); rm it.

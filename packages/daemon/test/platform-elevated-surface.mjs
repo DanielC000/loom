@@ -36,6 +36,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -56,7 +57,7 @@ fs.mkdirSync(repo, { recursive: true });
 execSync("git init -q", { cwd: repo });
 execSync("git config user.email p3@loom && git config user.name p3", { cwd: repo });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform P3 test repo\n");
-execSync("git add . && git commit -q -m init", { cwd: repo });
+commitAll(repo, "init");
 execSync(`git init --bare -q "${bare}"`, { cwd: os.tmpdir() });
 execSync(`git remote add origin "${bare}"`, { cwd: repo }); // local bare remote — push target
 
@@ -68,7 +69,7 @@ fs.mkdirSync(repo2, { recursive: true });
 execSync("git init -q", { cwd: repo2 });
 execSync("git config user.email p3@loom && git config user.name p3", { cwd: repo2 });
 fs.writeFileSync(path.join(repo2, "README.md"), "# platform P3 secondary (api) repo\n");
-execSync("git add . && git commit -q -m init", { cwd: repo2 });
+commitAll(repo2, "init");
 execSync(`git init --bare -q "${bare2}"`, { cwd: os.tmpdir() });
 execSync(`git remote add origin "${bare2}"`, { cwd: repo2 });
 const branchExists = (dir, branch) => { try { execSync(`git rev-parse --verify refs/heads/${branch}`, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; } };

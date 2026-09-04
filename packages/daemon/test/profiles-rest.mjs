@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -40,7 +41,8 @@ console.log(`profiles-rest: ownDaemon=${ownDaemon} PORT=${PORT} LOOM_HOME=${LOOM
 const REPO_DIR = path.join(os.tmpdir(), `loom-prest-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(REPO_DIR, { recursive: true });
 fs.writeFileSync(path.join(REPO_DIR, "README.md"), "# profiles-rest test\n");
-execSync(`git init -q && git add . && git -c user.email=prest@loom -c user.name=prest commit -q -m init`, { cwd: REPO_DIR });
+execSync(`git init -q`, { cwd: REPO_DIR });
+commitAll(REPO_DIR, "init", "-c user.email=prest@loom -c user.name=prest");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

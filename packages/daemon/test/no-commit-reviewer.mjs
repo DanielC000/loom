@@ -38,6 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ncr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -115,7 +116,8 @@ function seed(p, noCommit) {
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# ncr\n");
-  execSync(`git init -q && git config user.email ncr@loom && git config user.name ncr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email ncr@loom && git config user.name ncr`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Fixture transcript writer (mirrors context-stats.mjs's pattern): one assistant line carrying
@@ -150,7 +152,7 @@ async function build(p, { noCommit, commit }) {
   p.worktreePath = worktreePath; p.branch = branch;
   if (commit) {
     fs.writeFileSync(path.join(worktreePath, "change.txt"), `work for ${p.projId}\n`);
-    execSync(`git add . && git ${GIT_ID} commit -q -m "change"`, { cwd: worktreePath });
+    commitAll(worktreePath, "change", GIT_ID);
   }
   seed(p, noCommit);
 }

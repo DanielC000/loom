@@ -22,6 +22,7 @@ import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -59,7 +60,8 @@ const K = { proj: `ar-kill-proj-${sfx}`, agent: `ar-kill-agent-${sfx}`, task: `a
 // KILL needs a real git repo (it reaches createWorktree); PAUSE/CAP only need the project row.
 fs.mkdirSync(K.repo, { recursive: true });
 fs.writeFileSync(path.join(K.repo, "README.md"), "# autonomy-rails kill\n");
-execSync(`git init -q && git add . && git -c user.email=ar@loom -c user.name=ar commit -q -m init`, { cwd: K.repo });
+execSync(`git init -q`, { cwd: K.repo });
+commitAll(K.repo, "init", "-c user.email=ar@loom -c user.name=ar");
 
 // --- seed the daemon's (isolated) DB directly ---
 {

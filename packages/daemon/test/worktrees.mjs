@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync, spawn } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -25,7 +26,7 @@ const TIMER_SLACK_MS = 50;
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
-  execSync(`git add . && git -c user.email=wt@loom -c user.name=wt commit -qm "${msg}"`, { cwd: dir });
+  commitAll(dir, `${msg}`, "-c user.email=wt@loom -c user.name=wt");
 };
 
 const repo = path.join(os.tmpdir(), `loom-wt-repo-${Date.now()}-${process.pid}`);
@@ -36,7 +37,8 @@ try {
   //     `git commit` (the squash commit — no `-c` overrides by design) has an author, mirroring a real repo.
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# worktree test\n");
-  execSync(`git init -q && git config user.email wt@loom && git config user.name wt && git add . && git commit -q -m "init"`, { cwd: repo });
+  execSync(`git init -q && git config user.email wt@loom && git config user.name wt`, { cwd: repo });
+  commitAll(repo, "init");
 
   // (b) createWorktree → dir exists, HEAD on the loom/<key> branch (key is hashed, not a raw slice).
   const { worktreePath, branch } = await createWorktree(repo, "projWT", taskId);

@@ -20,6 +20,7 @@ import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -41,7 +42,8 @@ const sfx = Date.now();
 const repo = path.join(os.tmpdir(), `loom-mgr-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# manager-live test\n");
-execSync(`git init -q && git add . && git -c user.email=mgr@loom -c user.name=mgr commit -q -m "init"`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=mgr@loom -c user.name=mgr");
 
 const P = await post("/api/projects", { name: `MgrLive-${sfx}`, repoPath: repo, vaultPath: repo });
 const task = await post(`/api/projects/${P.id}/tasks`, { title: "MGR-TASK", columnKey: "todo" });

@@ -42,6 +42,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -55,7 +56,8 @@ const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const repo = path.join(os.tmpdir(), `loom-lead-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead multi test repo\n");
-execSync(`git init -q && git add . && git -c user.email=ls@loom -c user.name=ls commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=ls@loom -c user.name=ls");
 
 // Write a stub engine transcript so a given engine id is genuinely RESUMABLE (engineTranscriptExists
 // resolves <home>/.claude/projects/<encodeProjectDir(cwd)>/<eng>.jsonl).

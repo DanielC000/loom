@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -61,7 +62,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git config user.email rtg@loom && git config user.name rtg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email rtg@loom && git config user.name rtg`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 class SeamHost extends createSeamHost(PtyHost) {
@@ -131,7 +133,7 @@ try {
   const wGuard = await sessions.spawnWorker(mgr.id, { taskId: taskGuard, agentId: "wkrAgent", kickoffPrompt: "GO" });
   worktreesToClean.push(wGuard.worktreePath);
   fs.writeFileSync(path.join(wGuard.worktreePath, "change.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: wGuard.worktreePath });
+  commitAll(wGuard.worktreePath, "change.txt", GIT_ID);
 
   const rejected = await sessions.confirmWorkerMerge(mgr.id, wGuard.id);
   check("(setup) merge REJECTED (the failing gate did its job)", rejected.merged === false);
@@ -188,7 +190,7 @@ try {
   const wRest = await sessions.spawnWorker(mgr.id, { taskId: taskRest, agentId: "wkrAgent", kickoffPrompt: "GO" });
   worktreesToClean.push(wRest.worktreePath);
   fs.writeFileSync(path.join(wRest.worktreePath, "change.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: wRest.worktreePath });
+  commitAll(wRest.worktreePath, "change.txt", GIT_ID);
   await sessions.confirmWorkerMerge(mgr.id, wRest.id); // rejected (failGate) — worktree/branch retained
   db.setProcessState(wRest.id, "exited");
 
@@ -218,7 +220,7 @@ try {
   worktreesToClean.push(wInvariant.worktreePath);
   check("(6) setup: worker's session is stamped repoKey='svc-b' (the repo its worktree is ACTUALLY in)", db.getSession(wInvariant.id)?.repoKey === "svc-b");
   fs.writeFileSync(path.join(wInvariant.worktreePath, "invariant-change.txt"), "invariant work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "invariant-change.txt"`, { cwd: wInvariant.worktreePath });
+  commitAll(wInvariant.worktreePath, "invariant-change.txt", GIT_ID);
 
   // DIRECTLY at the DB layer — bypassing checkTaskRepoKeyRebind entirely — retarget the TASK to svc-a
   // while the worker's worktree is still live in svc-b. This is the divergence: task says svc-a, the

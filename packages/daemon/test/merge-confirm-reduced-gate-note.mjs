@@ -32,6 +32,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { cleanupPathSync, registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcrgn-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -103,7 +104,8 @@ try {
     initRepo(N);
     fs.writeFileSync(path.join(N.repo, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v1\");\n");
     fs.writeFileSync(path.join(N.repo, "packages", "daemon", "test", `${NOT_HERMETIC_NAME}.mjs`), "// needs a live daemon\nconsole.log(\"v1\");\n");
-    execSync(`git init -q && git config user.email mcrgn@loom && git config user.name mcrgn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: N.repo });
+    execSync(`git init -q && git config user.email mcrgn@loom && git config user.name mcrgn`, { cwd: N.repo });
+    commitAll(N.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const pty = makeSpyPty();
     const fakeGate = async (gate) => { await sleep(SLOW_GATE_MS); return { passed: true }; };
@@ -112,7 +114,7 @@ try {
     N.worktreePath = worktreePath; N.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v2\");\n");
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", `${NOT_HERMETIC_NAME}.mjs`), "// needs a live daemon\nconsole.log(\"v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update kickoff-real + ${NOT_HERMETIC_NAME}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `test: update kickoff-real + ${NOT_HERMETIC_NAME}`, GIT_ID);
     seed(db, N);
 
     const first = await sessions.confirmWorkerMergeTracked(N.mgrId, N.workerId);
@@ -142,7 +144,8 @@ try {
     const O = mk("o");
     initRepo(O);
     fs.writeFileSync(path.join(O.repo, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v1\");\n");
-    execSync(`git init -q && git config user.email mcrgn@loom && git config user.name mcrgn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: O.repo });
+    execSync(`git init -q && git config user.email mcrgn@loom && git config user.name mcrgn`, { cwd: O.repo });
+    commitAll(O.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const pty = makeSpyPty();
     const fakeGate = async (gate) => { await sleep(SLOW_GATE_MS); return { passed: true }; };
@@ -150,7 +153,7 @@ try {
     const { worktreePath, branch } = await createWorktree(O.repo, O.projId, O.taskId);
     O.worktreePath = worktreePath; O.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update kickoff-real"`, { cwd: worktreePath });
+    commitAll(worktreePath, "test: update kickoff-real", GIT_ID);
     seed(db, O);
 
     const first = await sessions.confirmWorkerMergeTracked(O.mgrId, O.workerId);

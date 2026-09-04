@@ -41,6 +41,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrp-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -169,12 +170,13 @@ function seed(p, { withTask, denyGlobs } = {}) {
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mrp\n");
-  execSync(`git init -q && git config user.email mrp@loom && git config user.name mrp && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mrp@loom && git config user.name mrp`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function commitChange(worktreePath, file, content, msg) {
   fs.writeFileSync(path.join(worktreePath, file), content);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${msg}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${msg}`, GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -255,7 +257,7 @@ try {
     D.worktreePath = worktreePath; D.branch = branch;
     fs.mkdirSync(path.join(worktreePath, "mockups"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "mockups", "direction-1.html"), "<html></html>\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "add mockup + keep regression test"`, { cwd: worktreePath });
+    commitAll(worktreePath, "add mockup + keep regression test", GIT_ID);
     seed(D, { withTask: true }); // default denyGlobs (mockups/**)
 
     const review = await sessions.reviewWorkerMerge(D.mgrId, D.workerId);

@@ -29,6 +29,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -56,7 +57,8 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const repo = path.join(os.tmpdir(), `loom-wssm-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-spawn-shipped-match test\n");
-execSync(`git init -q && git config user.email wssm@loom && git config user.name wssm && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+execSync(`git init -q && git config user.email wssm@loom && git config user.name wssm`, { cwd: repo });
+commitAll(repo, "init", GIT_ID);
 
 // A card title that is BARE PROSE (unconventional) — the merge path would coerce it to `chore: <title>`
 // (toConventionalSubject's bare-prose fallback). Land a commit with EXACTLY that coerced subject, so a
@@ -65,7 +67,7 @@ const shippedTitle = "Tidy up the frobnicator";
 const shippedSubject = toConventionalSubject(shippedTitle);
 check("(setup) sanity: bare-prose title coerces to a chore: subject", shippedSubject === `chore: ${shippedTitle}`);
 fs.writeFileSync(path.join(repo, "frobnicator.txt"), "tidied\n");
-execSync(`git add . && git ${GIT_ID} commit -q -m "${shippedSubject}"`, { cwd: repo });
+commitAll(repo, `${shippedSubject}`, GIT_ID);
 const shippedSha = git(repo, "rev-parse HEAD");
 const mainBranch = git(repo, "rev-parse --abbrev-ref HEAD");
 

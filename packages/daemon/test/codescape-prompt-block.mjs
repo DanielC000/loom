@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -140,7 +141,8 @@ process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 const repo = path.join(os.tmpdir(), `loom-csprompt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# codescape-prompt-block test\n");
-execSync(`git init -q && git add . && git -c user.email=cp@loom -c user.name=cp commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=cp@loom -c user.name=cp");
 
 const now = new Date().toISOString();
 const db = new Db();

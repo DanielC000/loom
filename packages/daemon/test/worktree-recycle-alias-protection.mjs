@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wrap-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -55,7 +56,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# wrap\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   git(repo, "branch -M main");
   // A resolvable LOCAL origin/HEAD symbolic ref — no real remote needed (same recipe as
   // worktree-branch-gc.mjs's R1) — required for Pass C's branch-ref sweep to even consider this repo;

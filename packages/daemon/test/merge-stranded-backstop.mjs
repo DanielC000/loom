@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-msb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -57,7 +58,8 @@ function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# msb\n");
   // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
-  execSync(`git init -q && git config user.email msb@loom && git config user.name msb && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email msb@loom && git config user.name msb`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // STRANDED worker: create the worktree (on assigned `loom/<key>`), then have the worker cut its OWN
@@ -67,7 +69,7 @@ async function setupStranded(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   execSync(`git ${GIT_ID} checkout -q -b ${p.selfBranch}`, { cwd: worktreePath });
   fs.writeFileSync(path.join(worktreePath, p.file), "stranded worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -77,7 +79,7 @@ async function setupNormal(p) {
   initRepo(p.repo);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "normal worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }

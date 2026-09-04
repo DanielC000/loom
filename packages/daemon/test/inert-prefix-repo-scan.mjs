@@ -48,6 +48,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const { repoTreeReferencesInertPrefix } = await import("../dist/git/worktrees.js");
 
@@ -74,7 +75,8 @@ function makeRepo(label, testFileContent) {
   registerForCleanup(repo);
   fs.mkdirSync(path.join(repo, "test"), { recursive: true });
   fs.writeFileSync(path.join(repo, "test", "some.mjs"), testFileContent);
-  execSync(`git init -q && git config user.email iprs@loom && git config user.name iprs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email iprs@loom && git config user.name iprs`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   const head = execSync(`git rev-parse HEAD`, { cwd: repo }).toString().trim();
   return { repo, head };
 }
@@ -126,7 +128,8 @@ try {
     path.join(pyRepo, "test", "test_schema.py"),
     "import os\n\ndef test_schema():\n    root = os.path.dirname(__file__)\n    with open(os.path.join(root, \"docs\", \"schema.md\")) as f:\n        assert \"user_id\" in f.read()\n",
   );
-  execSync(`git init -q && git config user.email iprs@loom && git config user.name iprs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: pyRepo });
+  execSync(`git init -q && git config user.email iprs@loom && git config user.name iprs`, { cwd: pyRepo });
+  commitAll(pyRepo, "init", GIT_ID);
   const pyHead = execSync(`git rev-parse HEAD`, { cwd: pyRepo }).toString().trim();
   const pyResult = await repoTreeReferencesInertPrefix(pyRepo, pyHead, "docs", TIMEOUT_MS);
   check("(6) a repo with ZERO JS/TS files fails CLOSED even though its (Python) corpus genuinely reads docs/ — the scan cannot confirm anything about a language it has no vocabulary for", pyResult === true);

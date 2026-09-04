@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -91,7 +92,8 @@ function makeRepo(p, script = RUN_TESTS_SCRIPT) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgd\n");
   fs.writeFileSync(path.join(p.repo, "run-tests.mjs"), script);
-  execSync(`git init -q && git config user.email mgd@loom && git config user.name mgd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mgd@loom && git config user.name mgd`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -112,7 +114,7 @@ try {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch;
     fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     seed(A, "node run-tests.mjs");
 
     const confirmA = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -171,7 +173,7 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch;
     fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     seed(B, 'node -e "process.exit(0)"');
 
     const confirmB = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -192,7 +194,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch;
     fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${C.file}`, GIT_ID);
     seed(C, 'node -e "console.error(\'kaboom, no idea why\'); process.exit(1)"');
 
     const confirmC = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -214,7 +216,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch;
     fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file}`, GIT_ID);
     seed(D, "node run-tests.mjs");
 
     const confirmD = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);

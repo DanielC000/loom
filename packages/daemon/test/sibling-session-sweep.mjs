@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 // --- Hermetic LOOM_HOME (set BEFORE importing dist — paths.ts reads LOOM_HOME at import). ---
 const tmpHome = path.join(os.tmpdir(), `loom-sss-${Date.now()}-${process.pid}`);
@@ -66,7 +67,8 @@ try {
     repos.push(repo);
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# sibling-sweep merge test\n");
-    execSync(`git init -q && git config user.email sss@loom && git config user.name sss && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email sss@loom && git config user.name sss`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const projId = `sss-m-proj`, agentId = `sss-m-agent`, taskId = randomUUID();
     const mgrId = `sss-m-mgr`, workerId = `sss-m-wkr`, siblingId = `sss-m-sib`;
@@ -79,7 +81,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "the work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat work"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat work", GIT_ID);
 
     // TWO live sessions bound to the SAME task/worktree/branch — the pre-fix 2-workers-on-one-branch state.
     const seedWorker = (id) => db.insertSession({ id, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });

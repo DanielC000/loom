@@ -58,6 +58,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-canonical-untracked-overlap-backstop.mjs
 import fs from "node:fs";
+import { commitAll } from "./_git-commit.mjs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
@@ -99,7 +100,8 @@ function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   tmpDirs.push(repo);
   fs.writeFileSync(path.join(repo, "unrelated.txt"), "orig-unrelated\n");
-  execSync(`git init -q && git config user.email cuo@loom && git config user.name cuo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email cuo@loom && git config user.name cuo`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -136,7 +138,7 @@ async function setup(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   tmpDirs.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "new.txt"), "worker-version\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "new.txt work"`, { cwd: worktreePath });
+  commitAll(worktreePath, "new.txt work", GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -224,7 +226,8 @@ try {
     tmpDirs.push(repo);
     fs.writeFileSync(path.join(repo, "unrelated.txt"), "orig-unrelated\n");
     fs.writeFileSync(path.join(repo, "existing.txt"), "tracked-content\n");
-    execSync(`git init -q && git config user.email cuo@loom && git config user.name cuo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email cuo@loom && git config user.name cuo`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const wt = await createWorktree(repo, `cuo-i-proj-${sfx}`, `cuo-i-task-${sfx}`);
     tmpDirs.push(wt.worktreePath);
@@ -260,7 +263,7 @@ try {
   const wtC = await createWorktree(C.repo, `cuo-c-proj-${sfx}`, `cuo-c-task-${sfx}`);
   tmpDirs.push(wtC.worktreePath);
   fs.writeFileSync(path.join(wtC.worktreePath, "new.txt"), "worker-version-c\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "new.txt work c"`, { cwd: wtC.worktreePath });
+  commitAll(wtC.worktreePath, "new.txt work c", GIT_ID);
   fs.writeFileSync(path.join(C.repo, "new.txt"), "LIVE UNCOMMITTED UNTRACKED CONTENT C\n");
   const headCBefore = git(C.repo, "rev-parse HEAD");
 

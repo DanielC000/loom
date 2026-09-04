@@ -27,6 +27,7 @@ import path from "node:path";
 import http from "node:http";
 import { execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4321;
 const tmpHome = path.join(os.tmpdir(), `loom-classifier-probe-home-${Date.now()}-${process.pid}`);
@@ -113,7 +114,8 @@ function makeRepo(label) {
   // collision axis a clock-derived name doesn't discriminate on — see clock-path-regression-guard.mjs).
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `loom-classifier-probe-repo-${label}-`));
   fs.writeFileSync(path.join(repo, "README.md"), "# probe\n");
-  execSync(`git init -q && git add . && git -c user.email=p@p -c user.name=p commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", "-c user.email=p@p -c user.name=p");
   return repo;
 }
 

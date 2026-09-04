@@ -47,6 +47,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -94,7 +95,8 @@ const GIT_ID = "-c user.email=rlcqd@loom -c user.name=rlcqd";
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# rlcqd\n");
-  execSync(`git init -q && git config user.email rlcqd@loom && git config user.name rlcqd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email rlcqd@loom && git config user.name rlcqd`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const now = new Date().toISOString();

@@ -13,6 +13,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const TMP = mkdtempManaged("loom-gwhard-");
 process.env.LOOM_HOME = TMP;
@@ -40,7 +41,8 @@ const mkRepo = (tag) => {
   const r = path.join(TMP, `repo-${tag}`);
   fs.mkdirSync(r, { recursive: true });
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
-  execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
+  execSync(`git init -q`, { cwd: r });
+  commitAll(r, "init", "-c user.email=r@loom -c user.name=r");
   return r;
 };
 const repoA = mkRepo("A");

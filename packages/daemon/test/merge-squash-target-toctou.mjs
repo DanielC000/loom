@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mstt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -38,12 +39,13 @@ registerForCleanup(repo);
 
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# mstt\n");
-execSync(`git init -q && git config user.email mstt@loom && git config user.name mstt && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+execSync(`git init -q && git config user.email mstt@loom && git config user.name mstt`, { cwd: repo });
+commitAll(repo, "init", GIT_ID);
 
 const { worktreePath, branch } = await createWorktree(repo, "mstt-proj", "mstt-task");
 registerForCleanup(worktreePath);
 fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work for the branch\n");
-execSync(`git add . && git ${GIT_ID} commit -q -m "feature work"`, { cwd: worktreePath });
+commitAll(worktreePath, "feature work", GIT_ID);
 
 const mainSha = execSync("git rev-parse HEAD", { cwd: repo }).toString().trim();
 const branchShaBeforeMutation = execSync(`git rev-parse ${branch}`, { cwd: repo }).toString().trim();
@@ -65,7 +67,7 @@ function toctouGitFactory(repoPath, blockTimeoutMs) {
         mutated = true;
         // Simulate a still-alive worker committing more work in the exact TOCTOU window.
         fs.writeFileSync(path.join(worktreePath, NEW_FILE), "landed after the stability check resolved\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "late commit during the TOCTOU window"`, { cwd: worktreePath });
+        commitAll(worktreePath, "late commit during the TOCTOU window", GIT_ID);
       }
       return result;
     },

@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wrb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -51,14 +52,15 @@ function seed(p, { lastActivity, protect }) {
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 async function setupUnmergedCommit(p, ageDaysBack) {
   initRepo(p.repo, "# wrb unmerged-commit\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "committed to branch, not merged\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p, { lastActivity: daysAgo(ageDaysBack) });
 }
@@ -76,7 +78,7 @@ async function setupMerged(p) {
   initRepo(p.repo, "# wrb merged\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "real merged work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "WRB-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p, { lastActivity: daysAgo(1) });
@@ -86,7 +88,7 @@ async function setupProtectedLive(p) {
   initRepo(p.repo, "# wrb protected-live\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "real in-flight commit on a live worker\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p, { lastActivity: now, protect: true });
 }

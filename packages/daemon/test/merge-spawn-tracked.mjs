@@ -34,6 +34,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -86,7 +87,8 @@ function makeRepo() {
   // squash-merge commit runs a PLAIN `git commit` with no `-c` overrides (see the repo's git-commit-identity
   // convention), and our sandboxed HOME above hides any real global config, so without this the daemon's
   // internal commit fails with "unable to auto-detect email address".
-  execSync(`git init -q && git config user.email mst@loom && git config user.name mst && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mst@loom && git config user.name mst`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   return repo;
 }
 // Card 5783dffc: the SPAWN scenarios below spawn a REAL live PtyHost session (via SeamHost) with a real
@@ -191,7 +193,7 @@ try {
     const P = "mst-merge-fast", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t4");
     fs.writeFileSync(path.join(worktreePath, "feat4.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat4`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat4", GIT_ID);
     seedProject(P, repo);
     const workerId = `${P}-wkr`;
     db.insertTask({ id: "t4", projectId: P, title: "t4", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -213,7 +215,7 @@ try {
     const P = "mst-merge-race", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t5");
     fs.writeFileSync(path.join(worktreePath, "feat5.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat5`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat5", GIT_ID);
     const marker = path.join(os.tmpdir(), `loom-mst-marker-${Date.now()}-${process.pid}.log`);
     process.env.LOOM_MST_MARKER = marker;
     seedProject(P, repo, `node -e "require('fs').appendFileSync(process.env.LOOM_MST_MARKER, 'x')"`);
@@ -284,7 +286,7 @@ try {
     const P = "mst-merge-stale", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t6");
     fs.writeFileSync(path.join(worktreePath, "feat6.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat6`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat6", GIT_ID);
     // Land the branch into main directly, WITHOUT deleting it or touching the worker/worktree — simulating
     // work that's already merged by the time confirmWorkerMergeTracked is (first) called.
     const landed = await mergeBranch(repo, branch, "MST already-merged");
@@ -313,7 +315,7 @@ try {
     const P = "mst-merge-retain", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t7");
     fs.writeFileSync(path.join(worktreePath, "feat7.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat7`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat7", GIT_ID);
     const marker = path.join(os.tmpdir(), `loom-mst-marker7-${Date.now()}-${process.pid}.log`);
     process.env.LOOM_MST_MARKER = marker;
     seedProject(P, repo, `node -e "require('fs').appendFileSync(process.env.LOOM_MST_MARKER, 'x')"`);
@@ -349,12 +351,13 @@ try {
     const P = "mst-merge-force-retain", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t8");
     fs.writeFileSync(path.join(worktreePath, "feat8.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat8`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat8", GIT_ID);
     // A real nested clone inside the worktree — mirrors worktree-nested-repo-guard.mjs's addNestedRepo.
     const nestedDir = path.join(worktreePath, "_external", "cloned-repo");
     fs.mkdirSync(nestedDir, { recursive: true });
     fs.writeFileSync(path.join(nestedDir, "unpushed.txt"), "unpushed work\n");
-    execSync(`git init -q && git config user.email ext@loom && git config user.name ext && git add . && git ${GIT_ID} commit -q -m "unpushed external work"`, { cwd: nestedDir });
+    execSync(`git init -q && git config user.email ext@loom && git config user.name ext`, { cwd: nestedDir });
+    commitAll(nestedDir, "unpushed external work", GIT_ID);
     seedProject(P, repo);
     const workerId = `${P}-wkr`;
     db.insertTask({ id: "t8", projectId: P, title: "t8", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -386,7 +389,7 @@ try {
     const P = "mst-merge-new-commit", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t9");
     fs.writeFileSync(path.join(worktreePath, "feat9.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat9`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat9", GIT_ID);
     // A gate that fails until a marker file (created below, between the two confirms) exists — simulates a
     // real gate rejecting a genuine defect, then passing once it's fixed.
     // Path threaded via env var (mirrors test 7's LOOM_MST_MARKER pattern) rather than inlined into the
@@ -408,7 +411,7 @@ try {
     // The worker fixes the code — a REAL new commit moves the branch's HEAD — and the fix also flips the
     // gate to passing (the marker file), mirroring a genuine "the defect is now fixed" state.
     fs.writeFileSync(path.join(worktreePath, "feat9-fix.txt"), "the fix\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat9-fix`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat9-fix", GIT_ID);
     fs.writeFileSync(passMarker, "go\n");
 
     // The manager re-calls PLAINLY — no forceRemoveWorktree — exactly as an unsuspecting manager would.

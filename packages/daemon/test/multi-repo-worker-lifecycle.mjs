@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -59,7 +60,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git config user.email mrwl@loom && git config user.name mrwl && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mrwl@loom && git config user.name mrwl`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 class SeamHost extends createSeamHost(PtyHost) {
@@ -132,7 +134,7 @@ try {
   check("(1) secondary worker's Session row is stamped repoKey='secondary'", db.getSession(wSecondary.id)?.repoKey === "secondary");
 
   fs.writeFileSync(path.join(wSecondary.worktreePath, "secondary-change.txt"), "secondary work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "secondary-change.txt"`, { cwd: wSecondary.worktreePath });
+  commitAll(wSecondary.worktreePath, "secondary-change.txt", GIT_ID);
   const confirmSecondary = await sessions.confirmWorkerMerge(mgr.id, wSecondary.id);
   check("(1) secondary-repo merge lands", confirmSecondary.merged === true);
   check("(1) secondary-repo merge carries NO warning (its own gateCommand ran green)", confirmSecondary.warning === undefined);
@@ -169,7 +171,7 @@ try {
   check("(2) gateless worker's Session row is stamped repoKey='gateless'", db.getSession(wGateless.id)?.repoKey === "gateless");
 
   fs.writeFileSync(path.join(wGateless.worktreePath, "gateless-change.txt"), "gateless work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "gateless-change.txt"`, { cwd: wGateless.worktreePath });
+  commitAll(wGateless.worktreePath, "gateless-change.txt", GIT_ID);
   const primaryMarkerBefore = fs.existsSync(primaryGateMarker);
   const confirmGateless = await sessions.confirmWorkerMerge(mgr.id, wGateless.id);
   check("(2) gateless-repo merge lands (unconditionally, no gate configured for it)", confirmGateless.merged === true);
@@ -191,7 +193,7 @@ try {
   check("(3) primary sibling's Session row has repoKey null (unaffected by the other two cards' repos)", db.getSession(wPrimary.id)?.repoKey === null);
 
   fs.writeFileSync(path.join(wPrimary.worktreePath, "primary-change.txt"), "primary work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "primary-change.txt"`, { cwd: wPrimary.worktreePath });
+  commitAll(wPrimary.worktreePath, "primary-change.txt", GIT_ID);
   const confirmPrimary = await sessions.confirmWorkerMerge(mgr.id, wPrimary.id);
   check("(3) primary sibling merge lands", confirmPrimary.merged === true);
   check("(3) primary sibling's own gate (project-level) ran green, no warning", confirmPrimary.warning === undefined);
@@ -221,7 +223,7 @@ try {
   db.insertTask({ id: taskOrphan, projectId: projId, title: "Orphaned secondary merge", body: "", columnKey: "backlog", position: 4, priority: "p2", repoKey: "secondary", createdAt: now, updatedAt: now });
   const wOrphan = await sessions.spawnWorker(mgr.id, { taskId: taskOrphan, agentId: "wkrAgent", kickoffPrompt: "GO" });
   fs.writeFileSync(path.join(wOrphan.worktreePath, "orphan-change.txt"), "orphaned work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "orphan-change.txt"`, { cwd: wOrphan.worktreePath });
+  commitAll(wOrphan.worktreePath, "orphan-change.txt", GIT_ID);
   // Simulate the crash window: land the squash-merge commit directly on SECONDARY (mirrors what
   // confirmWorkerMerge's mergeBranch step does), but never run finalizeMerge — the worktree/branch/task
   // are left exactly as a daemon crash between the squash and its bookkeeping would leave them.

@@ -43,6 +43,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -63,7 +64,8 @@ const { listProjectTasks, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP } = await 
 const repo = path.join(os.tmpdir(), `loom-xtask-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# cross-project task test repo\n");
-execSync(`git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=x@loom -c user.name=x");
 
 const now = new Date().toISOString();
 const db = new Db();

@@ -25,6 +25,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -994,7 +995,8 @@ const worktrees = [];
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gs\n");
-  execSync(`git init -q && git config user.email gs@loom && git config user.name gs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gs@loom && git config user.name gs`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Seeds ONE manager + TWO workers, each in its OWN project/repo (confirmWorkerMerge derives the repo
@@ -1027,7 +1029,7 @@ async function seedTwoWorkers(sfx, reposDir) {
     worktrees.push(worktreePath);
     const file = `feature-${label}.txt`;
     fs.writeFileSync(path.join(worktreePath, file), `work for ${label}\n`);
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${file}`, GIT_ID);
     db.insertSession({ id: workerId, projectId: projId, agentId: `${agentId}-${label}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
     workers.push(workerId);
   }

@@ -58,6 +58,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
 import fs from "node:fs";
 import os from "node:os";
+import { commitAll } from "./_git-commit.mjs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
@@ -100,7 +101,7 @@ try {
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: fix comment typo", GIT_ID);
     seed(db, A);
 
     const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -136,7 +137,7 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold"`, { cwd: worktreePath });
+    commitAll(worktreePath, "fix: correct isReady threshold", GIT_ID);
     seed(db, B);
 
     const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -169,7 +170,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), `\n\n${BASE_SRC}`);
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: reformat leading blank lines"`, { cwd: worktreePath });
+    commitAll(worktreePath, "chore: reformat leading blank lines", GIT_ID);
     seed(db, C);
 
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -197,7 +198,8 @@ try {
     // same reasoning writeRealTestDaemonScript's own doc gives.
     writeRealTestDaemonScript(D.repo);
     fs.writeFileSync(path.join(D.repo, "packages", "daemon", "test", "placeholder.mjs"), BASE_TEST);
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: D.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: D.repo });
+    commitAll(D.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -207,7 +209,7 @@ try {
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "placeholder.mjs"),
       BASE_TEST.replace("no clock usage of its own", "reads state fresh against wall-clock Date.now() elsewhere"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: explain placeholder via wall-clock Date.now()"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: explain placeholder via wall-clock Date.now()", GIT_ID);
     seed(db, D);
 
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
@@ -256,7 +258,7 @@ try {
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "second.ts"), "export const y = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add second.ts"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add second.ts", GIT_ID);
     seed(db, E);
 
     const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
@@ -281,7 +283,7 @@ try {
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
     mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "helper.mjs"), "console.log(1);\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + new script helper"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: comment fix + new script helper", GIT_ID);
 
     // Card 2db8a3dd: THIS is the shape a genuinely non-Loom-layout repo hits on its FIRST changed path,
     // always — the predicate could never have been eligible here, independent of the OTHER (reducible)
@@ -320,7 +322,7 @@ try {
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: fix comment typo", GIT_ID);
     seed(db, G);
 
     const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
@@ -336,7 +338,7 @@ try {
     makeRepoWithBaseSrcFile(N, BASE_SRC);
     mkdirp(path.join(N.repo, "docs", "investigations"));
     fs.writeFileSync(path.join(N.repo, "docs", "investigations", "findings.md"), "# findings\n\nline one\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: seed findings"`, { cwd: N.repo });
+    commitAll(N.repo, "docs: seed findings", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -347,7 +349,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
     fs.appendFileSync(path.join(worktreePath, "docs", "investigations", "findings.md"), "line two\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + one findings.md line"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: comment fix + one findings.md line", GIT_ID);
     seed(db, N);
 
     const confirm = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
@@ -376,7 +378,7 @@ try {
     makeRepoWithBaseSrcFile(N2, BASE_SRC);
     mkdirp(path.join(N2.repo, "docs"));
     fs.writeFileSync(path.join(N2.repo, "docs", "notes.md"), "# notes\n\nline one\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: seed notes"`, { cwd: N2.repo });
+    commitAll(N2.repo, "docs: seed notes", GIT_ID);
     const baseSha = execSync("git rev-parse HEAD", { cwd: N2.repo }).toString().trim();
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -387,7 +389,7 @@ try {
     N2.worktreePath = worktreePath; N2.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
     fs.appendFileSync(path.join(worktreePath, "docs", "notes.md"), "line two\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold + a docs note"`, { cwd: worktreePath });
+    commitAll(worktreePath, "fix: correct isReady threshold + a docs note", GIT_ID);
 
     // Code Review, card b97f643d: `capturedGate === FULL_GATE` alone is BLIND to whether the skip is even
     // present — a `.ts` edit that isn't transpile-identical fails closed to the full gate for that reason
@@ -430,7 +432,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
     fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment fix + repo-root CLAUDE.md"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: comment fix + repo-root CLAUDE.md", GIT_ID);
 
     const direct = await computeEmitCompareGate(O.repo, worktreePath, baseSha, branch);
     check("(O) direct call: not eligible — CLAUDE.md is outside emit-compare scope", direct.eligible === false);

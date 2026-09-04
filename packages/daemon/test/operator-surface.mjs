@@ -55,6 +55,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -77,7 +78,8 @@ fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# operator test repo\n");
 // PERSISTED (not just -c per-invocation) repo-local identity — git_commit reuses GitWriter.commit()
 // VERBATIM (no -c overrides, per the project convention), so it needs the repo's OWN configured identity.
-execSync(`git init -q && git config user.email o@loom && git config user.name o && git add . && git commit -q -m init`, { cwd: repo });
+execSync(`git init -q && git config user.email o@loom && git config user.name o`, { cwd: repo });
+commitAll(repo, "init");
 const bareRemote = path.join(os.tmpdir(), `loom-operator-remote-${Date.now()}-${process.pid}.git`);
 execSync(`git init -q --bare "${bareRemote}"`);
 execSync(`git remote add origin "${bareRemote}"`, { cwd: repo });
@@ -87,7 +89,8 @@ execSync(`git push -q -u origin HEAD:refs/heads/main`, { cwd: repo });
 const otherRepo = path.join(os.tmpdir(), `loom-operator-otherrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(otherRepo, { recursive: true });
 fs.writeFileSync(path.join(otherRepo, "README.md"), "# other repo\n");
-execSync(`git init -q && git add . && git -c user.email=o@loom -c user.name=o commit -q -m init`, { cwd: otherRepo });
+execSync(`git init -q`, { cwd: otherRepo });
+commitAll(otherRepo, "init", "-c user.email=o@loom -c user.name=o");
 
 const now = new Date().toISOString();
 const db = new Db();

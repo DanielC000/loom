@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcvc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -43,7 +44,8 @@ const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { retur
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mcvc\n");
-  execSync(`git init -q && git config user.email mcvc@loom && git config user.name mcvc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mcvc@loom && git config user.name mcvc`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function headSha(cwd) {
@@ -64,7 +66,7 @@ async function setupWorkerProject(sfx, reposDir) {
   db.insertTask({ id: taskId, projectId: projId, title: "MCVC-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   const workerSha = headSha(worktreePath);
   db.insertSession({ id: workerId, projectId: projId, agentId: `agent-mcvc-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
   return { db, mgrId, projId, taskId, workerId, repo, worktreePath, branch, workerSha };
@@ -129,7 +131,7 @@ async function setupWorkerProject(sfx, reposDir) {
 
   // Advance MAIN (in the canonical repo, not the worktree) — the worker's branch is now genuinely behind.
   fs.writeFileSync(path.join(repo, "main-advance.txt"), "advanced\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "main advanced"`, { cwd: repo });
+  commitAll(repo, "main advanced", GIT_ID);
   const mainShaAfterAdvance = headSha(repo);
   check("(identity-mismatch/main-advanced setup) main genuinely moved past the worker's branch point", mainShaAfterAdvance !== workerSha);
 
@@ -185,7 +187,7 @@ async function setupWorkerProject(sfx, reposDir) {
   // The WORKER pushes a genuinely new commit onto its own branch — main is untouched, no union-merge ever
   // runs, so this is the OTHER cause colliding into the same observed label.
   fs.writeFileSync(path.join(worktreePath, "worker-followup.txt"), "more work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "worker followup commit"`, { cwd: worktreePath });
+  commitAll(worktreePath, "worker followup commit", GIT_ID);
   const shaAfterWorkerCommit = headSha(worktreePath);
   check("(identity-mismatch/own-commit setup) the worker's own new commit moved the branch tip", shaAfterWorkerCommit !== workerSha);
 

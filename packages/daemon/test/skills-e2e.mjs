@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4319;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -30,7 +31,8 @@ fs.mkdirSync(path.join(home, "skills", "loom-e2e-marker"), { recursive: true });
 fs.writeFileSync(path.join(home, "skills", "loom-e2e-marker", "SKILL.md"), "---\nname: loom-e2e-marker\ndescription: e2e marker\n---\nmarker");
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# e2e\n");
-execSync(`git init -q && git add . && git -c user.email=e2e@loom -c user.name=e2e commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=e2e@loom -c user.name=e2e");
 
 const realClaudeJson = path.join(os.homedir(), ".claude.json");
 const trustKey = path.resolve(repo).replace(/\\/g, "/");

@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ngbd-mw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -53,7 +54,8 @@ function seed(p, { gateCommand, noGateByDesign } = {}) {
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# ngbd-mw\n");
-  execSync(`git init -q && git config user.email ngbdmw@loom && git config user.name ngbdmw && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email ngbdmw@loom && git config user.name ngbdmw`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -70,7 +72,7 @@ const G1 = mk("g1", "feat-g1.txt"); // (3b) gateCommand configured, flag true â†
 async function commitAndConfirm(p, opts) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p, opts);
   return sessions.confirmWorkerMerge(p.mgrId, p.workerId);

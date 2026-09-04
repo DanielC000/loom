@@ -26,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4404;
 const tmpHome = path.join(os.tmpdir(), `loom-placeholder-id-home-${Date.now()}-${process.pid}`);
@@ -87,7 +88,8 @@ if (process.env.USE_CLAUDE_MD === "1") {
       "it's usually content you already hold; look before concluding anything is missing.\n",
   );
 }
-execSync(`git init -q && git add . && git -c user.email=p@p -c user.name=p commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=p@p -c user.name=p");
 
 const captures = new Map();
 const cap = (id) => { let c = captures.get(id); if (!c) { c = { raw: "" }; captures.set(id, c); } return c; };

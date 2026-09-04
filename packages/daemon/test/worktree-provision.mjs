@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync, spawnSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 const stamp = Date.now();
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wtp-home-${stamp}`);
@@ -61,7 +62,8 @@ try {
   check("(setup) main checkout got a pnpm-lock.yaml", fs.existsSync(path.join(repo, "pnpm-lock.yaml")));
   check("(setup) main checkout got node_modules", fs.existsSync(path.join(repo, "node_modules")));
 
-  execSync(`git init -q && git add . && git -c user.email=wtp@loom -c user.name=wtp commit -qm "init"`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", "-c user.email=wtp@loom -c user.name=wtp");
 
   // (i) BUILD-READY: createWorktree provisions the worktree's own node_modules (no worker install needed).
   const { worktreePath } = await createWorktree(repo, "projWTP", "build-ready-aaaa-1111");

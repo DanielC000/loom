@@ -33,6 +33,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -48,7 +49,8 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const repo = path.join(os.tmpdir(), `loom-pth-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# project-task-held test\n");
-execSync(`git init -q && git add . && git -c user.email=pth@loom -c user.name=pth commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=pth@loom -c user.name=pth");
 
 const now = new Date().toISOString();
 const db = new Db();

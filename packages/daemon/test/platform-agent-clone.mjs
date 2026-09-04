@@ -35,6 +35,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -49,7 +50,8 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const repo = path.join(os.tmpdir(), `loom-clone-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-clone test repo\n");
-execSync(`git init -q && git add . && git -c user.email=clone@loom -c user.name=clone commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=clone@loom -c user.name=clone");
 
 const now = new Date().toISOString();
 const db = new Db();

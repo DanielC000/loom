@@ -38,6 +38,7 @@ import { encodeProjectDir } from "../dist/sessions/transcript.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { registerForCleanup, unregister } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
@@ -53,7 +54,8 @@ const dir = path.join(os.tmpdir(), `loom-e2e-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# E2E Project\nIntegrated phase-1 pass.\n");
 fs.writeFileSync(path.join(dir, "docs", "note.md"), "# Note\nhello vault\n");
-execSync(`git init -q && git add . && git -c user.email=e2e@loom -c user.name=e2e commit -q -m "init e2e"`, { cwd: dir });
+execSync(`git init -q`, { cwd: dir });
+commitAll(dir, "init e2e", "-c user.email=e2e@loom -c user.name=e2e");
 
 // The exact real-homedir dir this run's spawn will create — computed with the SAME encoder
 // production uses (claude-transcript.js), not a hand-rolled copy, so this can never target the

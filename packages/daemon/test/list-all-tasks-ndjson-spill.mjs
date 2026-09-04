@@ -36,6 +36,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -69,7 +70,8 @@ const repo = path.join(os.tmpdir(), `loom-lats-repo-${Date.now()}-${process.pid}
 fs.mkdirSync(repo, { recursive: true });
 registerForCleanup(repo); // this file has NO finally/cleanup block at all — nothing else removes this
 fs.writeFileSync(path.join(repo, "README.md"), "# list_all_tasks spill test repo\n");
-execSync("git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init", { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=x@loom -c user.name=x");
 
 const now = new Date().toISOString();
 const db = new Db();

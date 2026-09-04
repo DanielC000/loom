@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bgcf-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -38,7 +39,8 @@ const branch = "loom/whatever";
 const realRepo = path.join(os.tmpdir(), `loom-bgcf-real-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(realRepo, { recursive: true });
 fs.writeFileSync(path.join(realRepo, "README.md"), "# bgcf\n");
-execSync(`git init -q && git config user.email bgcf@loom && git config user.name bgcf && git add . && git commit -q -m init`, { cwd: realRepo });
+execSync(`git init -q && git config user.email bgcf@loom && git config user.name bgcf`, { cwd: realRepo });
+commitAll(realRepo, "init");
 
 try {
   // ── CONSTRUCT CONTROLS — prove the fixture is genuinely provocative, not vacuously safe ───────────
@@ -141,7 +143,7 @@ try {
   //     itself is still physically intact" — the exact TRIGGER the card names.
   const { worktreePath: pWt, branch: pBranch } = await createWorktree(realRepo, "bgcfProj", "bgcf-task-precheck");
   fs.writeFileSync(path.join(pWt, "work.txt"), "real committed work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "precheck work"`, { cwd: pWt });
+  commitAll(pWt, "precheck work", GIT_ID);
   threw = false; let r3;
   try { r3 = await precheckWorkerDone(noRepo, pWt, pBranch); } catch { threw = true; }
   check("(3) precheckWorkerDone(nonexistent repoPath, REAL clean+ahead worktree) fails safe (uncommitted:false, zeroAhead:false), never throws",

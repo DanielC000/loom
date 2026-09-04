@@ -18,6 +18,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -133,5 +134,6 @@ export function makeRepoWithBaseSrcFile(p, srcContent, packageTsconfigOpts = { o
   mkdirp(path.join(p.repo, "packages", "daemon", "src"));
   fs.writeFileSync(path.join(p.repo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json", compilerOptions: packageTsconfigOpts }));
   fs.writeFileSync(path.join(p.repo, "packages", "daemon", "src", "example.ts"), srcContent);
-  execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }

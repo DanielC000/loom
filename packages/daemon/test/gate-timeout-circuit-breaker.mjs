@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -36,7 +37,8 @@ const now = new Date().toISOString();
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gtb\n");
-  execSync(`git init -q && git config user.email gtb@loom && git config user.name gtb && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gtb@loom && git config user.name gtb`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 const timeoutGate = async () => ({ passed: false, failedTimedOut: true, failedSignal: "SIGKILL" });
 const ptyStub = () => ({ stop() {}, isAlive() { return false; }, enqueueStdin() {}, getPid: () => undefined });
@@ -103,7 +105,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feature.txt", GIT_ID);
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     let calls = 0;
@@ -140,7 +142,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work v1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt v1"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feature.txt v1", GIT_ID);
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     let calls = 0;
@@ -154,7 +156,7 @@ try {
 
     // Push a NEW commit onto the SAME branch/worktree — the plausible fix.
     fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work v2 (fixed the hang)\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt v2"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feature.txt v2", GIT_ID);
 
     const afterFix = await sessions.confirmWorkerMerge(mgrId, workerId);
     check("(C) a NEW commit re-enables gating — the gate runner is invoked again (not short-circuited)", calls === GATE_TIMEOUT_BREAKER_THRESHOLD + 1);
@@ -226,7 +228,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feature.txt", GIT_ID);
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     let calls = 0;
@@ -238,7 +240,7 @@ try {
       // union-merge, run inside confirmWorkerMerge right before the breaker check, folds into the
       // worktree's raw HEAD on every single call.
       fs.writeFileSync(path.join(repo, `main-progress-${i}.txt`), `progress ${i}\n`);
-      execSync(`git add . && git ${GIT_ID} commit -q -m "main progress ${i}"`, { cwd: repo });
+      commitAll(repo, `main progress ${i}`, GIT_ID);
       const r = await sessions.confirmWorkerMerge(mgrId, workerId);
       check(`(E) confirm ${i + 1}/${GATE_TIMEOUT_BREAKER_THRESHOLD} timed out, not yet circuitBroken (main kept advancing)`,
         r.merged === false && r.gateDetail?.timedOut === true && !r.gateDetail?.circuitBroken);
@@ -247,7 +249,7 @@ try {
 
     // One more main advance, then confirm again — the worker STILL made no real fix, so this must trip.
     fs.writeFileSync(path.join(repo, "main-progress-final.txt"), "progress final\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main progress final"`, { cwd: repo });
+    commitAll(repo, "main progress final", GIT_ID);
     const tripped = await sessions.confirmWorkerMerge(mgrId, workerId);
     check("(E) the breaker STILL TRIPS after N consecutive timeouts even though main advanced before every attempt (Finding 1 fix)",
       tripped.merged === false && tripped.gateDetail?.circuitBroken === true);
@@ -255,7 +257,7 @@ try {
 
     // (F) …but a REAL worker fix commit on the same branch DOES clear it, even post-trip.
     fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work v2 (fixed the hang)\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt v2 - actual fix"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feature.txt v2 - actual fix", GIT_ID);
     const afterFix = await sessions.confirmWorkerMerge(mgrId, workerId);
     check("(F) a real worker commit re-enables gating — the gate runner is invoked again (not short-circuited)",
       calls === GATE_TIMEOUT_BREAKER_THRESHOLD + 1);
@@ -306,7 +308,7 @@ try {
     // healed (on the OLD code, entry.sha stays null forever since the short-circuited path never calls
     // recordGateTimeoutOutcome, so this comparison could never succeed).
     fs.writeFileSync(path.join(gateWorktreePath, "fix.txt"), "a fix\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "a fix"`, { cwd: gateWorktreePath });
+    commitAll(gateWorktreePath, "a fix", GIT_ID);
     const afterFix = await sessions.runWorkerGate(workerId);
     check("(G) a real new commit on the now-readable worktree clears the self-healed streak (self-heal proven)",
       calls === GATE_TIMEOUT_BREAKER_THRESHOLD + 1 && !afterFix.value.gateDetail?.circuitBroken);

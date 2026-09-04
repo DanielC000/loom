@@ -58,6 +58,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 import { deferred, waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mciw-home-${Date.now()}-${process.pid}`);
@@ -94,7 +95,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mciw\n");
-  execSync(`git init -q && git config user.email mciw@loom && git config user.name mciw && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mciw@loom && git config user.name mciw`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -128,7 +130,7 @@ try {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-a.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-a"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-a", GIT_ID);
     seed(db, A);
 
     const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -147,7 +149,7 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-b.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-b"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-b", GIT_ID);
     seed(db, B);
     signals.fusion[B.workerId] = { gen: 9, spanGens: [7, 8, 9], reportedLen: 100, intendedLen: 40, detectedAt: 1_000_000 };
 
@@ -171,7 +173,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-c.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-c"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-c", GIT_ID);
     seed(db, C);
     signals.replay[C.workerId] = { gen: 3, replayedGen: 2, reportedLen: 10, intendedLen: 10, detectedAt: 1_000_000 };
     signals.fusion[C.workerId] = { gen: 5, spanGens: [4, 5], reportedLen: 20, intendedLen: 10, detectedAt: 2_000_000 };
@@ -199,7 +201,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C2.repo, C2.projId, C2.taskId);
     C2.worktreePath = worktreePath; C2.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-c2.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-c2"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-c2", GIT_ID);
     seed(db, C2);
     // OLDER, SEVERE: a possible LOSS at gen=4.
     signals.unmatched[C2.workerId] = { gen: 4, intendedLen: 12, intendedText: "y", detectedAt: 1_000_000 };
@@ -225,7 +227,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-d.txt"), "already merged work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-d"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-d", GIT_ID);
     seed(db, D);
     signals.fusion[D.workerId] = { gen: 4, spanGens: [3, 4], reportedLen: 50, intendedLen: 20, detectedAt: 1_000_000 };
     // Land the branch OUT-OF-BAND (simulating a merge that already happened) — confirmWorkerMerge should
@@ -251,7 +253,7 @@ try {
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-e.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-e"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-e", GIT_ID);
     seed(db, E);
 
     let threw = false;
@@ -273,7 +275,7 @@ try {
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-f.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-f"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-f", GIT_ID);
     seed(db, F);
     signals.fusion[F.workerId] = { gen: 1, spanGens: [0, 1], reportedLen: 30, intendedLen: 10, detectedAt: 1_000_000 };
 
@@ -307,7 +309,7 @@ try {
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-g.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-g"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-g", GIT_ID);
     seed(db, G, { mgrProcessState: "live" }); // see seed()'s own doc — avoids dead-owner eviction across polls
     // Set the signal BEFORE the call — proving placement-at-run-time (not issuance-time) still reads it
     // correctly once the op actually gets to run, not merely that a LATER mutation is excluded (that's (F)).

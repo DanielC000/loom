@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -127,7 +128,8 @@ for (const skill of ["platform-lead", "platform-audit"]) {
 const repo = path.join(os.tmpdir(), `loom-ph-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform-home test\n");
-execSync(`git init -q && git add . && git -c user.email=ph@loom -c user.name=ph commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=ph@loom -c user.name=ph");
 
 // An ORDINARY project + a manager + a worker agent (the orchestration side), plus reuse the seeded
 // platform Lead agent (the platform side) to prove spawnWorker rejects a platform-profile agent.

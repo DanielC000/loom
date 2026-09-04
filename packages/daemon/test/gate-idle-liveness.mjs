@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // gate_status/gate_queue IDLE TIME (the gap this file closes): `gate_status` returned {state, gateType,
 // elapsedMs} and `gate_queue`'s entries carried {since, elapsedMs, ...} — NEITHER exposed how long a gate
@@ -95,7 +96,8 @@ function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# gil\n");
-  execSync(`git init -q && git config user.email gil@loom && git config user.name gil && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gil@loom && git config user.name gil`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function writeScript(scratchDir, name, body) {

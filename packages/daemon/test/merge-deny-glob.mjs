@@ -35,6 +35,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -68,7 +69,8 @@ function initRepo(repo, seedFiles = {}) {
     fs.mkdirSync(path.join(repo, path.dirname(rel)), { recursive: true });
     fs.writeFileSync(path.join(repo, rel), content);
   }
-  execSync(`git init -q && git config user.email mdg@loom && git config user.name mdg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mdg@loom && git config user.name mdg`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -86,7 +88,7 @@ try {
     A.worktreePath = worktreePath; A.branch = branch;
     fs.mkdirSync(path.join(worktreePath, "mockups", "schedules-history"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "mockups", "schedules-history", "direction-1.html"), "<html></html>\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "add mockup"`, { cwd: worktreePath });
+    commitAll(worktreePath, "add mockup", GIT_ID);
     seed(A);
 
     const review = await sessions.reviewWorkerMerge(A.mgrId, A.workerId);
@@ -105,7 +107,7 @@ try {
     B.worktreePath = worktreePath; B.branch = branch;
     fs.mkdirSync(path.join(worktreePath, "src"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "src", "feature.ts"), "export const x = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "add feature"`, { cwd: worktreePath });
+    commitAll(worktreePath, "add feature", GIT_ID);
     seed(B);
 
     const review = await sessions.reviewWorkerMerge(B.mgrId, B.workerId);
@@ -122,7 +124,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch;
     fs.writeFileSync(path.join(worktreePath, "mockups", "existing", "direction-1.html"), "<html>v2</html>\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "tweak existing mockup"`, { cwd: worktreePath });
+    commitAll(worktreePath, "tweak existing mockup", GIT_ID);
     seed(C);
 
     const review = await sessions.reviewWorkerMerge(C.mgrId, C.workerId);
@@ -162,7 +164,7 @@ try {
     E.worktreePath = worktreePath; E.branch = branch;
     fs.mkdirSync(path.join(worktreePath, "my-mockups"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "my-mockups", "z.png"), "not-a-real-png\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "add my-mockups file"`, { cwd: worktreePath });
+    commitAll(worktreePath, "add my-mockups file", GIT_ID);
     seed(E);
 
     const review = await sessions.reviewWorkerMerge(E.mgrId, E.workerId);

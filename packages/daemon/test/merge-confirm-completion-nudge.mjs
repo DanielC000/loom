@@ -55,6 +55,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 // Both read LIVE (per-call, via resolveConfig) — not module-load-time constants — so setting them here
 // affects every scenario in this file uniformly; harmless for (1)-(5), which never reach a timeout-kill
@@ -168,7 +169,8 @@ function makeRepo() {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo); // the finally block's removeWorktree(repo, wt) only removes the WORKTREE, never this bare repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# mcn\n");
-  execSync(`git init -q && git config user.email mcn@loom && git config user.name mcn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mcn@loom && git config user.name mcn`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   return repo;
 }
 function seedProject(projId, repo, gateCommand, orchestrationExtra) {
@@ -186,7 +188,7 @@ try {
     const P = "mcn-merged", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t1");
     fs.writeFileSync(path.join(worktreePath, "feat1.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat1`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat1", GIT_ID);
     // A gate that outlives the injected syncAttachBudgetMs (TEST_SYNC_BUDGET_MS) then exits 0.
     seedProject(P, repo, `node -e "setTimeout(()=>process.exit(0), ${SLOW_GATE_MS})"`);
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
@@ -228,7 +230,7 @@ try {
     const P = "mcn-gate-failed", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t2");
     fs.writeFileSync(path.join(worktreePath, "feat2.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat2`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat2", GIT_ID);
     // A gate that outlives the injected syncAttachBudgetMs then exits non-zero.
     seedProject(P, repo, `node -e "setTimeout(()=>process.exit(1), ${SLOW_GATE_MS})"`);
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
@@ -264,7 +266,7 @@ try {
     const P = "mcn-fast", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t3");
     fs.writeFileSync(path.join(worktreePath, "feat3.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat3`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat3", GIT_ID);
     seedProject(P, repo); // no gateCommand — resolves synchronously
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
     db.insertTask({ id: "t3", projectId: P, title: "t3", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -296,7 +298,7 @@ try {
     const P = "mcn-suppressed", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t4");
     fs.writeFileSync(path.join(worktreePath, "feat4.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat4`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat4", GIT_ID);
     seedProject(P, repo, `node -e "setTimeout(()=>{console.log('FAIL mcn-scenario4-marker'); process.exit(1)}, ${SLOW_GATE_MS})"`);
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
     // "done" is the project's default terminal column key (no custom kanbanColumns configured) — same
@@ -349,7 +351,7 @@ try {
     const P = "mcn-already-merged", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t5");
     fs.writeFileSync(path.join(worktreePath, "feat5.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat5`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat5", GIT_ID);
     // A gate that outlives the injected syncAttachBudgetMs then exits 0.
     seedProject(P, repo, `node -e "setTimeout(()=>process.exit(0), ${SLOW_GATE_MS})"`);
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
@@ -395,7 +397,7 @@ try {
     const P = "mcn-timeout", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t6");
     fs.writeFileSync(path.join(worktreePath, "feat6.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat6`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat6", GIT_ID);
     // A gate that NEVER exits and produces NO output — killed by our own gateCommandTimeoutMs
     // (TIMEOUT_KILL_MS), deliberately > the injected syncAttachBudgetMs so this degrades to pending
     // FIRST, then the timeout-kill happens a moment later — the ASYNC settle path (gate-timeout-tree-

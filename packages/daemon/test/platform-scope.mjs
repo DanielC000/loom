@@ -20,6 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -88,7 +89,8 @@ const nonGit = path.join(os.tmpdir(), `loom-plat-nongit-${Date.now()}-${process.
 const missing = path.join(os.tmpdir(), `loom-plat-missing-${Date.now()}-${process.pid}`); // never created
 fs.mkdirSync(gitRepo, { recursive: true });
 fs.writeFileSync(path.join(gitRepo, "README.md"), "# platform test repo\n");
-execSync(`git init -q && git add . && git -c user.email=p@loom -c user.name=p commit -q -m "init"`, { cwd: gitRepo });
+execSync(`git init -q`, { cwd: gitRepo });
+commitAll(gitRepo, "init", "-c user.email=p@loom -c user.name=p");
 fs.mkdirSync(nonGit, { recursive: true });
 
 try {

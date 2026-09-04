@@ -32,6 +32,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rgc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -68,7 +69,8 @@ try {
     registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
-    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const db = new Db();
     dbs.push(db);
@@ -102,7 +104,8 @@ try {
     registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
-    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const db = new Db();
     dbs.push(db);
@@ -223,7 +226,8 @@ try {
     registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
-    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const db = new Db();
     dbs.push(db);

@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -43,7 +44,8 @@ const repo = path.join(os.tmpdir(), `loom-runs-repo-${Date.now()}-${process.pid}
 fs.mkdirSync(path.join(repo, "src"), { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-runs test\n");
 fs.writeFileSync(path.join(repo, "src", "code.js"), "export const TRACKED = 1;\n");
-execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=r@loom -c user.name=r");
 
 const now = new Date().toISOString();
 const PROJECT_ID = "pRun";

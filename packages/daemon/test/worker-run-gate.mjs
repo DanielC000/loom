@@ -18,6 +18,7 @@ import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -76,7 +77,8 @@ const worktrees = [];
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# wg\n");
-  execSync(`git init -q && git config user.email wg@loom && git config user.name wg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wg@loom && git config user.name wg`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Seeds a manager + ONE merge-capable worker (real git worktree, for confirmWorkerMerge) + ONE
@@ -107,7 +109,7 @@ async function seedWorkers(sfx, reposDir) {
   const { worktreePath: mergeWorktreePath, branch: mergeBranch } = await createWorktree(mergeRepo, mergeProjId, mergeTaskId);
   worktrees.push(mergeWorktreePath);
   fs.writeFileSync(path.join(mergeWorktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: mergeWorktreePath });
+  commitAll(mergeWorktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: mergeWorkerId, projectId: mergeProjId, agentId: `${agentId}-merge`, engineSessionId: null, title: null, cwd: mergeWorktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: mergeTaskId, worktreePath: mergeWorktreePath, branch: mergeBranch });
 
   // Gate-only worker (no git needed, gateCommand configured).

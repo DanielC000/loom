@@ -32,6 +32,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-opid-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -53,7 +54,8 @@ function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# opid\n");
-  execSync(`git init -q && git config user.email opid@loom && git config user.name opid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email opid@loom && git config user.name opid`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function seed(db, p, gateCommand) {
@@ -97,13 +99,13 @@ try {
     const wtA = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = wtA.worktreePath; A.branch = wtA.branch; worktrees.push(wtA.worktreePath);
     fs.writeFileSync(path.join(wtA.worktreePath, "a.txt"), "a\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m a`, { cwd: wtA.worktreePath });
+    commitAll(wtA.worktreePath, "a", GIT_ID);
     seed(db, A, "pnpm gate");
 
     const wtB = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = wtB.worktreePath; B.branch = wtB.branch; worktrees.push(wtB.worktreePath);
     fs.writeFileSync(path.join(wtB.worktreePath, "b.txt"), "b\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m b`, { cwd: wtB.worktreePath });
+    commitAll(wtB.worktreePath, "b", GIT_ID);
     seed(db, B, "pnpm gate");
 
     holds.set(A.worktreePath, mkHold());
@@ -147,7 +149,7 @@ try {
     const wt = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = wt.worktreePath; C.branch = wt.branch; worktrees.push(wt.worktreePath);
     fs.writeFileSync(path.join(wt.worktreePath, "c.txt"), "c\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m c`, { cwd: wt.worktreePath });
+    commitAll(wt.worktreePath, "c", GIT_ID);
     seed(db, C, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -184,7 +186,7 @@ try {
     fs.mkdirSync(path.join(wt.worktreePath, "packages", "daemon", "test"), { recursive: true });
     fs.writeFileSync(path.join(wt.worktreePath, "packages", "daemon", "test", "flaky-one.mjs"), "// stub\n");
     fs.writeFileSync(path.join(wt.worktreePath, "d.txt"), "d\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m d`, { cwd: wt.worktreePath });
+    commitAll(wt.worktreePath, "d", GIT_ID);
     seed(db, D, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);

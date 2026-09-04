@@ -32,6 +32,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-concstamp-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -50,7 +51,8 @@ function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# concstamp\n");
-  execSync(`git init -q && git config user.email concstamp@loom && git config user.name concstamp && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email concstamp@loom && git config user.name concstamp`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function seed(db, p, gateCommand) {
@@ -98,7 +100,7 @@ try {
     const wtP = await createWorktree(P.repo, P.projId, P.taskId);
     P.worktreePath = wtP.worktreePath; P.branch = wtP.branch; worktrees.push(wtP.worktreePath);
     fs.writeFileSync(path.join(wtP.worktreePath, "p.txt"), "p\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m p`, { cwd: wtP.worktreePath });
+    commitAll(wtP.worktreePath, "p", GIT_ID);
     seed(db, P, "pnpm gate");
     // confirmWorkerMergeTracked (not the bare confirmWorkerMerge) — ONLY the tracked wrapper's onSettle
     // actually calls deriveMergeGateVerdict/settlePendingGateOp to write the durable verdict_payload_json
@@ -119,7 +121,7 @@ try {
     const wtF = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = wtF.worktreePath; F.branch = wtF.branch; worktrees.push(wtF.worktreePath);
     fs.writeFileSync(path.join(wtF.worktreePath, "f.txt"), "f\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m f`, { cwd: wtF.worktreePath });
+    commitAll(wtF.worktreePath, "f", GIT_ID);
     seed(db, F, "pnpm gate");
     const sessionsF = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGateFail });
     // Card 6a9f4178 — same reasoning as the P call above.
@@ -173,13 +175,13 @@ try {
     const wtP = await createWorktree(P.repo, P.projId, P.taskId);
     P.worktreePath = wtP.worktreePath; P.branch = wtP.branch; worktrees.push(wtP.worktreePath);
     fs.writeFileSync(path.join(wtP.worktreePath, "p.txt"), "p\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m p`, { cwd: wtP.worktreePath });
+    commitAll(wtP.worktreePath, "p", GIT_ID);
     seed(db, P, "pnpm gate");
 
     const wtF = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = wtF.worktreePath; F.branch = wtF.branch; worktrees.push(wtF.worktreePath);
     fs.writeFileSync(path.join(wtF.worktreePath, "f.txt"), "f\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m f`, { cwd: wtF.worktreePath });
+    commitAll(wtF.worktreePath, "f", GIT_ID);
     seed(db, F, "pnpm gate");
 
     holds.set(P.worktreePath, mkHold());
@@ -236,7 +238,7 @@ try {
     const wtG = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = wtG.worktreePath; G.branch = wtG.branch; worktrees.push(wtG.worktreePath);
     fs.writeFileSync(path.join(wtG.worktreePath, "g.txt"), "g\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m g`, { cwd: wtG.worktreePath });
+    commitAll(wtG.worktreePath, "g", GIT_ID);
     seed(dbG, G, null); // no gateCommand configured
     const confirmG = await sessionsG.confirmWorkerMerge(G.mgrId, G.workerId);
     check("(negative control — precondition) gateless merge still succeeds", confirmG.merged === true);

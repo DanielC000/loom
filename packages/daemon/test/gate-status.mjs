@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // gate_status(opId) (card edc1ec12, Platform-Audit finding 7afa6ea9; GENERALIZED by card e3e40167) — a
 // status lookup: a caller holding an opId from a `run_gate`/`worker_merge_confirm` {status:"pending"}
@@ -217,7 +218,8 @@ function makeRepo(repo) {
   // scan.
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
   fs.writeFileSync(path.join(repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
-  execSync(`git init -q && git config user.email gst@loom && git config user.name gst && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gst@loom && git config user.name gst`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Card e082bf4d (p2, on this project's board): confirmWorkerMergeTracked can LEGITIMATELY exceed
@@ -421,7 +423,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     // Same blocking-gate pattern as the worker "(e2e gate)" block above, applied to confirmWorkerMergeTracked
@@ -644,7 +646,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -757,7 +759,7 @@ try {
     fs.mkdirSync(path.join(worktreePath, "packages", "daemon", "test"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "flaky-gst.mjs"), "// stub\n");
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -821,7 +823,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -872,7 +874,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -920,7 +922,7 @@ try {
     // merge-gate-inert-diff.mjs's own scenario (A).
     fs.mkdirSync(path.join(worktreePath, "docs"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "findings\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add finding", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -993,7 +995,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -1069,7 +1071,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };

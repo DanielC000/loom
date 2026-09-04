@@ -15,6 +15,7 @@ import { removeWorktree } from "../dist/git/worktrees.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -34,7 +35,8 @@ const projId = `sd-proj-${sfx}`, agentId = `sd-agent-${sfx}`, taskId = `sd-task-
 const repo = path.join(os.tmpdir(), `loom-sd-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# scheduler-drain test\n");
-execSync(`git init -q && git add . && git -c user.email=sd@loom -c user.name=sd commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=sd@loom -c user.name=sd");
 
 const managerKickoff =
   "You are an autonomous manager. Do exactly this, then stop: call the tasks_list tool to read the board; " +

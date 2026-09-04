@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rf-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -293,7 +294,8 @@ try {
     repoRoots.push(p.repo);
     fs.mkdirSync(p.repo, { recursive: true });
     fs.writeFileSync(path.join(p.repo, "README.md"), `# ${p.key}\n`);
-    execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+    execSync(`git init -q`, { cwd: p.repo });
+    commitAll(p.repo, "init", GIT_ID);
     const wt = await createWorktree(p.repo, p.proj, p.task); // fresh branch at main — clean, 0-ahead
     p.worktreePath = wt.worktreePath; p.branch = wt.branch;
     mkProject(p.proj, p.repo); mkAgent(p.agent, p.proj); mkTask(p.task, p.proj);
@@ -511,7 +513,8 @@ try {
     repoRoots.push(repo);
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), `# ${label}\n`);
-    execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
     const projId = `rf-wtrisk-${label}-proj-${sfx}`;
     const agentId = `rf-wtrisk-${label}-ag-${sfx}`;
     mkProject(projId, repo);

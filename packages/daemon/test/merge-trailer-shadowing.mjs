@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 const { getTaskMergedInfo, findLandedSquashCommit, taskKey, __resetMergedCommitMapCacheForTest } =
   await import("../dist/git/worktrees.js");
@@ -61,7 +62,8 @@ function buildFixture(label, withDecoy) {
   const repo = path.join(os.tmpdir(), `loom-shadow-${label}-${sfx}`);
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# shadow\n");
-  execSync(`git init -q && git config user.email shadow@loom && git config user.name shadow && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email shadow@loom && git config user.name shadow`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   const baseSha = git(repo, "rev-parse HEAD");
 
   const taskId = `shadow-task-${label}-${sfx}`;

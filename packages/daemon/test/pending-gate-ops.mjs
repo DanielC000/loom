@@ -58,6 +58,7 @@ import { execSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -687,7 +688,8 @@ try {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo); // this file's finally block only rmSync's tmpHome, never this separate repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# pgo\n");
-  execSync(`git init -q && git config user.email pgo@loom && git config user.name pgo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email pgo@loom && git config user.name pgo`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(repo, P, "t1");
   worktrees.push([repo, worktreePath]);
 

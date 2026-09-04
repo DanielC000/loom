@@ -42,6 +42,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -55,7 +56,8 @@ const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 const repo = path.join(os.tmpdir(), `loom-setup-singleton-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# setup singleton test repo\n");
-execSync(`git init -q && git add . && git -c user.email=ss@loom -c user.name=ss commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=ss@loom -c user.name=ss");
 
 // Write a stub engine transcript so a given engine id is genuinely RESUMABLE (engineTranscriptExists
 // resolves <home>/.claude/projects/<encodeProjectDir(cwd)>/<eng>.jsonl).

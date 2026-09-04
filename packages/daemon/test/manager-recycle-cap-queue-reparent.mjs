@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -50,7 +51,8 @@ const GIT_ID = "-c user.email=mrcq@loom -c user.name=mrcq";
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mrcq\n");
-  execSync(`git init -q && git config user.email mrcq@loom && git config user.name mrcq && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mrcq@loom && git config user.name mrcq`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 class SeamHost extends PtyHost {

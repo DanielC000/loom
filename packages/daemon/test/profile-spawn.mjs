@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -42,7 +43,8 @@ const { resolveConfig } = await import("@loom/shared");
 const repo = path.join(os.tmpdir(), `loom-pspawn-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# profile-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=ps@loom -c user.name=ps commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=ps@loom -c user.name=ps");
 
 const now = new Date().toISOString();
 const baseAllow = resolveConfig({}).permission.allow; // the config allow a profile-less spawn must keep

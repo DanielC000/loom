@@ -46,6 +46,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rghc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -83,7 +84,8 @@ async function seedWorkerInDb(db, sfx) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `loom-rghc-repo-${sfx}-`));
   registerForCleanup(repo); // this file's own cleanup only rmSync's LOOM_HOME, never this separate repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# rghc\n");
-  execSync(`git init -q && git config user.email rghc@loom && git config user.name rghc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email rghc@loom && git config user.name rghc`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   const P = `rghc-${sfx}`, workerId = `rghc-${sfx}-wkr`;
   const { worktreePath, branch } = await createWorktree(repo, P, `t-${sfx}`);
@@ -110,7 +112,7 @@ try {
       // runGateSequential's call site) — mutating here is mutating DURING the gate's own execution
       // window, i.e. strictly after `admitStamp` was already taken.
       fs.writeFileSync(path.join(wt, "late.txt"), "late work\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "late commit"`, { cwd: wt });
+      commitAll(wt, "late commit", GIT_ID);
       return { passed: true };
     };
     const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
@@ -162,7 +164,7 @@ try {
     // happens BEFORE the subject's own `fn` (and its `admitStamp`) ever runs, since the blocker still
     // holds the only slot.
     fs.writeFileSync(path.join(subjectWt, "late.txt"), "late work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "late commit during queue wait"`, { cwd: subjectWt });
+    commitAll(subjectWt, "late commit during queue wait", GIT_ID);
 
     const [rBlocker, rSubject] = await Promise.all([pBlocker, pSubject]);
     check("(B) setup: the blocker ran before the subject (proves the subject genuinely queued)", startOrder[0] === "blocker" && startOrder[1] === "subject");
@@ -193,7 +195,7 @@ try {
     const { db, workerId } = await seedWorker("d");
     const fakeGate = async (_gate, wt) => {
       fs.writeFileSync(path.join(wt, "late.txt"), "late work\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "late commit"`, { cwd: wt });
+      commitAll(wt, "late commit", GIT_ID);
       return { passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL x" };
     };
     const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });

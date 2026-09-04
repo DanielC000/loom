@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4321; // distinct from prod (4317) and the resume-mode probe (4319)
 const tmpHome = path.join(os.tmpdir(), `loom-smoke-home-${Date.now()}-${process.pid}`);
@@ -84,7 +85,8 @@ realLog(`[smoke] hook/relay server on 127.0.0.1:${PORT}`);
 const repo = path.join(os.tmpdir(), `loom-smoke-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# smoke\n");
-execSync(`git init -q && git add . && git -c user.email=s@s -c user.name=s commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=s@s -c user.name=s");
 
 const geometry = { cols: 120, rows: 40 };
 const sessionEnv = { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1", CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1" };

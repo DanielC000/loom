@@ -36,6 +36,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce, pollUntil } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecgs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -74,7 +75,8 @@ try {
     // A semicolon is a valid NTFS/POSIX filename character but a shell metacharacter — exactly the case
     // the allowlist exists to reject before it ever reaches a shell-executed command string.
     fs.writeFileSync(path.join(H.repo, "packages", "daemon", "test", "placeholder;evil.mjs"), BASE_TEST);
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: H.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: H.repo });
+    commitAll(H.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -83,7 +85,7 @@ try {
     const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
     H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "placeholder;evil.mjs"), BASE_TEST.replace("placeholder", "placeholder (renamed)"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: comment tweak"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: comment tweak", GIT_ID);
     seed(db, H);
 
     const confirm = await sessions.confirmWorkerMerge(H.mgrId, H.workerId);
@@ -102,7 +104,8 @@ try {
     mkdirp(path.join(I.repo, "packages", "daemon", "scripts"));
     fs.writeFileSync(path.join(I.repo, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
     fs.writeFileSync(path.join(I.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: I.repo });
+    commitAll(I.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -111,7 +114,7 @@ try {
     const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
     I.worktreePath = worktreePath; I.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: tweak fixture output"`, { cwd: worktreePath });
+    commitAll(worktreePath, "chore: tweak fixture output", GIT_ID);
     seed(db, I);
 
     const confirm = await sessions.confirmWorkerMerge(I.mgrId, I.workerId);
@@ -138,7 +141,8 @@ try {
     fs.writeFileSync(path.join(J.repo, "packages", "daemon", "scripts", "test-daemon.mjs"), REAL_TEST_DAEMON_SCRIPT);
     fs.writeFileSync(path.join(J.repo, "packages", "daemon", "test", "kickoff-real.mjs"), BASE_TEST);
     fs.writeFileSync(path.join(J.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: J.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: J.repo });
+    commitAll(J.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -148,7 +152,7 @@ try {
     J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "kickoff-real.mjs"), BASE_TEST.replace("backed by a fixture", "backed by a fixture (updated)"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update kickoff test + its backing fixture"`, { cwd: worktreePath });
+    commitAll(worktreePath, "test: update kickoff test + its backing fixture", GIT_ID);
     seed(db, J);
 
     const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
@@ -176,7 +180,8 @@ try {
     fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "consumer-a.mjs"), CONSUMER("consumer-a"));
     fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "consumer-b.mjs"), CONSUMER("consumer-b"));
     fs.writeFileSync(path.join(K.repo, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v1\");\n");
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: K.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: K.repo });
+    commitAll(K.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0; let capturedGate;
@@ -188,7 +193,7 @@ try {
     // untouched — exactly the shape that used to slip through with partial coverage.
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "consumer-a.mjs"), CONSUMER("consumer-a (updated)"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "fixtures", "fake-cli.mjs"), "console.log(\"fixture v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update one consumer + the shared fixture"`, { cwd: worktreePath });
+    commitAll(worktreePath, "test: update one consumer + the shared fixture", GIT_ID);
     seed(db, K);
 
     const confirm = await sessions.confirmWorkerMerge(K.mgrId, K.workerId);
@@ -215,7 +220,8 @@ try {
     fs.mkdirSync(L1.repo, { recursive: true });
     registerForCleanup(L1.repo);
     fs.writeFileSync(path.join(L1.repo, "README.md"), "# ecg\n");
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: L1.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: L1.repo });
+    commitAll(L1.repo, "init", GIT_ID);
 
     // L2: needs the tsconfig fixtures `emitCompareSoundnessOk` reads.
     makeRepoWithBaseSrcFile(L2, BASE_SRC);
@@ -242,7 +248,7 @@ try {
     L1.worktreePath = wt1.worktreePath; L1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
     mkdirp(path.join(L1.worktreePath, "packages", "other"));
     fs.writeFileSync(path.join(L1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: unrelated cap-slot occupant"`, { cwd: L1.worktreePath });
+    commitAll(L1.worktreePath, "chore: unrelated cap-slot occupant", GIT_ID);
     seed(db, L1);
 
     const wt2 = await createWorktree(L2.repo, L2.projId, L2.taskId);
@@ -250,7 +256,7 @@ try {
     // Pre-wait: a COMMENT-ONLY edit — eligible for the reduced gate, classified BEFORE admission (case A).
     fs.writeFileSync(path.join(L2.worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo"`, { cwd: L2.worktreePath });
+    commitAll(L2.worktreePath, "docs: fix comment typo", GIT_ID);
     seed(db, L2);
 
     // Fire L1's confirm first — a REAL gate, held open until manually released, occupying the daemon's
@@ -291,7 +297,7 @@ try {
     // (comment fix + token flip) is no longer transpile-identical.
     fs.writeFileSync(path.join(L2.worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)").replace("x === 0", "x === 1"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold during the cap-queue wait"`, { cwd: L2.worktreePath });
+    commitAll(L2.worktreePath, "fix: correct isReady threshold during the cap-queue wait", GIT_ID);
 
     releaseGate1("go");
     const confirm1 = await p1;
@@ -337,7 +343,8 @@ try {
     fs.mkdirSync(M1.repo, { recursive: true });
     registerForCleanup(M1.repo);
     fs.writeFileSync(path.join(M1.repo, "README.md"), "# ecg\n");
-    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: M1.repo });
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: M1.repo });
+    commitAll(M1.repo, "init", GIT_ID);
 
     makeRepoWithBaseSrcFile(M2, BASE_SRC);
 
@@ -363,7 +370,7 @@ try {
     M1.worktreePath = wt1.worktreePath; M1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
     mkdirp(path.join(M1.worktreePath, "packages", "other"));
     fs.writeFileSync(path.join(M1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: unrelated cap-slot occupant"`, { cwd: M1.worktreePath });
+    commitAll(M1.worktreePath, "chore: unrelated cap-slot occupant", GIT_ID);
     seed(db, M1);
 
     const wt2 = await createWorktree(M2.repo, M2.projId, M2.taskId);
@@ -371,7 +378,7 @@ try {
     // M2's OWN work — an unrelated file, deliberately outside emit-compare's scope so it can never itself
     // affect eligibility once squashed onto main (its content becomes byte-identical on both sides).
     fs.writeFileSync(path.join(M2.worktreePath, "feature-m2.txt"), "work for M2\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: M2's own work"`, { cwd: M2.worktreePath });
+    commitAll(M2.worktreePath, "feat: M2's own work", GIT_ID);
 
     // Land it NOW, directly (mirrors merge-gate-reuse.mjs (M)/(N)) — M2 is a PURE preLanded re-confirm from
     // here on; its own branch never changes again in this scenario.
@@ -382,7 +389,7 @@ try {
     // classification a real, genuinely eligible diff to find (M2's branch still has the untouched BASE_SRC).
     fs.writeFileSync(path.join(M2.repo, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed on main)"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: fix comment typo on main"`, { cwd: M2.repo });
+    commitAll(M2.repo, "docs: fix comment typo on main", GIT_ID);
     seed(db, M2);
 
     const p1 = sessions.confirmWorkerMerge(M1.mgrId, M1.workerId);
@@ -418,7 +425,7 @@ try {
     // byte-stable throughout.
     fs.writeFileSync(path.join(M2.repo, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed on main)").replace("x === 0", "x === 1"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold on main during the cap-queue wait"`, { cwd: M2.repo });
+    commitAll(M2.repo, "fix: correct isReady threshold on main during the cap-queue wait", GIT_ID);
 
     releaseGate1("go");
     const confirm1 = await p1;

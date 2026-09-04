@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rsn-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -48,7 +49,8 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# rsn\n");
-  execSync(`git init -q && git config user.email rsn@loom && git config user.name rsn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email rsn@loom && git config user.name rsn`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const repo = path.join(os.tmpdir(), `loom-rsn-repo-${sfx}`);
@@ -68,7 +70,7 @@ const authorTaskId = `rsn-author-task-${sfx}`;
 const { worktreePath: authorWt, branch: authorBranch } = await createWorktree(repo, projId, authorTaskId);
 cleanupDirs.push(authorWt);
 fs.writeFileSync(path.join(authorWt, "feature.txt"), "the reviewed change\n");
-execSync(`git add . && git ${GIT_ID} commit -q -m "feature"`, { cwd: authorWt });
+commitAll(authorWt, "feature", GIT_ID);
 // The exact value spawnWorker captures as `reviewForkFrom.headSha` (resolveGitRef on the reviewed branch)
 // BEFORE cutting the review worktree — see Session.reviewBaseSha's doc.
 const reviewedHeadSha = execSync(`git rev-parse ${authorBranch}`, { cwd: repo }).toString().trim();
@@ -83,7 +85,7 @@ async function buildReviewWorker(tag, { authoredExtraCommit }) {
   cleanupDirs.push(worktreePath);
   if (authoredExtraCommit) {
     fs.writeFileSync(path.join(worktreePath, "review-note.txt"), "an actual review-authored change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "review edit"`, { cwd: worktreePath });
+    commitAll(worktreePath, "review edit", GIT_ID);
   }
   db.insertSession({
     id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath,

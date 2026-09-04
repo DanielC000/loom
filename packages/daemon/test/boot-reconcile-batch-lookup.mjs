@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { simpleGit } from "simple-git";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bbl-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -66,7 +67,8 @@ function seedWorker(p) {
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -112,7 +114,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "landed work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BBL-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: B.repo });
     B.worktreePath = worktreePath; B.branch = branch;
   }
@@ -171,7 +173,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "landed work behind a blinded scan\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BBL-TASK-D" -m "Loom-Worker-Branch: ${branch}"`, { cwd: D.repo });
     D.worktreePath = worktreePath; D.branch = branch;
   }

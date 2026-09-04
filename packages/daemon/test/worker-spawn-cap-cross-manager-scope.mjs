@@ -34,6 +34,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -57,7 +58,8 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const repo = path.join(os.tmpdir(), `loom-wxmgr-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-spawn-cap-cross-manager-scope test\n");
-execSync(`git init -q && git add . && git -c user.email=wxmgr@loom -c user.name=wxmgr commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=wxmgr@loom -c user.name=wxmgr");
 
 const CAP = 2; // per-manager cap, shared config for both managers on this one project
 const now = new Date().toISOString();

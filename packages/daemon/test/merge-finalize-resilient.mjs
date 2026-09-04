@@ -36,6 +36,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mfr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -85,12 +86,13 @@ async function setupWorker(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mfr\n");
   // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
-  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file} part 1"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file} part 1`, GIT_ID);
   fs.writeFileSync(path.join(worktreePath, `${p.file}.2`), "worker change 2\n"); // 2nd commit → must collapse to ONE
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file} part 2"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file} part 2`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -104,10 +106,11 @@ async function setupWorker(p) {
 async function setupBusyWorker(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mfr\n");
-  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mfr@loom && git config user.name mfr`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   await removeWorktree(p.repo, worktreePath); // detach the branch from its worktree (branch retained)
   // The leftover dir the busy handle "couldn't release": a plain dir that fs.rm will be forced to fail on.
   // Tagged with p.tag (not just sfx) so two busy workers in the same run get DISTINCT leftover dirs.

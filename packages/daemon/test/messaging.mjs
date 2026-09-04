@@ -17,6 +17,7 @@ import { removeWorktree } from "../dist/git/worktrees.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -36,7 +37,8 @@ const projId = `msg-proj-${sfx}`, agentId = `msg-agent-${sfx}`, taskId = `msg-ta
 const repo = path.join(os.tmpdir(), `loom-msg-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# messaging test\n");
-execSync(`git init -q && git add . && git -c user.email=msg@loom -c user.name=msg commit -q -m "init"`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=msg@loom -c user.name=msg");
 const now = new Date().toISOString();
 
 // --- seed the daemon's (isolated) DB directly: project, agent, task(todo), manager session ---

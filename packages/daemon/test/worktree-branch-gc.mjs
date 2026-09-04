@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bgc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -69,7 +70,8 @@ try {
   // (`git symbolic-ref --short refs/remotes/origin/HEAD`) without bare-repo scaffolding. ---
   fs.mkdirSync(R1, { recursive: true });
   fs.writeFileSync(path.join(R1, "README.md"), "# r1\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R1 });
+  execSync(`git init -q`, { cwd: R1 });
+  commitAll(R1, "init", GIT_ID);
   git(R1, "branch -M main");
   git(R1, "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
 
@@ -83,7 +85,7 @@ try {
   // (B) real commit ahead of mainline, never merged, no worktree — MUST survive the sweep.
   git(R1, `checkout -q -b ${B}`);
   fs.writeFileSync(path.join(R1, "b.txt"), "unmerged work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "b work"`, { cwd: R1 });
+  commitAll(R1, "b work", GIT_ID);
   git(R1, "checkout -q main");
 
   // (C) zero commits ahead (trivially merged) but STILL CHECKED OUT in a worktree — MUST survive.
@@ -113,7 +115,7 @@ try {
   // for the reconcile() call below is the realistic shape of the hazard.
   git(R1, "checkout -q -b other");
   fs.writeFileSync(path.join(R1, "other-only.txt"), "other-only work, not on mainline\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "other-only commit"`, { cwd: R1 });
+  commitAll(R1, "other-only commit", GIT_ID);
   git(R1, `checkout -q -b ${F}`);
   git(R1, "checkout -q other"); // leave the PRIMARY repo parked here — not main — for the reconcile below
 
@@ -123,7 +125,8 @@ try {
   // project bound via `project_init`, per CLAUDE.md) don't crash or misbehave under the new pass. ---
   fs.mkdirSync(R2, { recursive: true });
   fs.writeFileSync(path.join(R2, "README.md"), "# r2\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R2 });
+  execSync(`git init -q`, { cwd: R2 });
+  commitAll(R2, "init", GIT_ID);
   git(R2, "branch -M main");
   db.insertProject({ id: `bgc-p2-${sfx}`, name: "BGC-R2", repoPath: R2, vaultPath: R2, config: {}, createdAt: now, archivedAt: null });
   git(R2, `checkout -q -b ${E}`);
@@ -137,7 +140,8 @@ try {
   // counted; the bad one must survive untouched. ---
   fs.mkdirSync(R3, { recursive: true });
   fs.writeFileSync(path.join(R3, "README.md"), "# r3\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R3 });
+  execSync(`git init -q`, { cwd: R3 });
+  commitAll(R3, "init", GIT_ID);
   const gGood = [`loom/g-good-1-${sfx}`, `loom/g-good-2-${sfx}`, `loom/g-good-3-${sfx}`];
   const gBad = `loom/g-bad-${sfx}`;
   for (const n of gGood) git(R3, `branch ${n}`);
@@ -155,7 +159,8 @@ try {
   // "genuinely swept, found zero" outcome is now VISIBLE (card f96b9d7c), distinct from a read failure. ---
   fs.mkdirSync(R4, { recursive: true });
   fs.writeFileSync(path.join(R4, "README.md"), "# r4\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R4 });
+  execSync(`git init -q`, { cwd: R4 });
+  commitAll(R4, "init", GIT_ID);
   git(R4, "branch -M main");
   git(R4, "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
   db.insertProject({ id: `bgc-p4-${sfx}`, name: "BGC-R4", repoPath: R4, vaultPath: R4, config: {}, createdAt: now, archivedAt: null });

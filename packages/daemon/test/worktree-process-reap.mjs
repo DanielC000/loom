@@ -27,6 +27,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { spawn as spawnProcess } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wpr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -361,7 +362,8 @@ if (process.platform === "win32") {
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git config user.email wpr@loom && git config user.name wpr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wpr@loom && git config user.name wpr`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 // Always seed a task + manager + worker row with `taskId` SET on the worker (Pass A's per-session filter
 // requires `s.taskId` to even consider a session — omitting it, as an earlier version of this test did,
@@ -408,7 +410,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
     fs.writeFileSync(path.join(worktreePath, M.file), "worker change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${M.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${M.file}`, GIT_ID);
     M.worktreePath = worktreePath; M.branch = branch;
   }
   seed(db, M);
@@ -425,7 +427,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(disposable.repo, disposable.projId, disposable.taskId);
     fs.writeFileSync(path.join(worktreePath, disposable.file), "already merged work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${disposable.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${disposable.file}`, GIT_ID);
     // SQUASH-land it onto main directly (what confirmWorkerMerge does) — the worktree survives on disk
     // (a crashed-before-cleanup shape) so boot-reconcile Pass A finalizes it via the trailer.
     execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "WPR-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: disposable.repo });
@@ -440,7 +442,7 @@ try {
     // guard must KEEP this one; a live/protected worktree in production shape. It must NEVER be reaped.
     const { worktreePath, branch } = await createWorktree(stillHoldingWork.repo, stillHoldingWork.projId, stillHoldingWork.taskId);
     fs.writeFileSync(path.join(worktreePath, stillHoldingWork.file), "committed, not yet merged\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${stillHoldingWork.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${stillHoldingWork.file}`, GIT_ID);
     stillHoldingWork.worktreePath = worktreePath; stillHoldingWork.branch = branch;
   }
   seed(db, stillHoldingWork);
@@ -463,7 +465,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     fs.writeFileSync(path.join(worktreePath, G.file), "worker change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${G.file}`, GIT_ID);
     G.worktreePath = worktreePath; G.branch = branch;
   }
   seed(db, G, 'node -e "process.exit(0)"'); // a PASSING gate — confirmWorkerMerge must still reap before running it
@@ -475,7 +477,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(sibling.repo, sibling.projId, sibling.taskId);
     fs.writeFileSync(path.join(worktreePath, sibling.file), "unrelated live work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${sibling.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${sibling.file}`, GIT_ID);
     sibling.worktreePath = worktreePath; sibling.branch = branch;
   }
   seed(db, sibling, 'node -e "process.exit(0)"'); // never confirmed — must stay completely untouched

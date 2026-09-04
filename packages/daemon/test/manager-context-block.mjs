@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -56,7 +57,8 @@ const { RESUME_DOC_WARN_BYTES, resolveResumeDocPath } = await import("../dist/se
 const repo = path.join(os.tmpdir(), `loom-mctxblk-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# manager-context-block test\n");
-execSync(`git init -q && git add . && git -c user.email=mc@loom -c user.name=mc commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=mc@loom -c user.name=mc");
 const vault = path.join(os.tmpdir(), `loom-mctxblk-vault-${Date.now()}-${process.pid}`);
 fs.mkdirSync(vault, { recursive: true });
 
@@ -353,7 +355,8 @@ try {
   const repoR = path.join(os.tmpdir(), `loom-mctxblk-repoR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoR, { recursive: true });
   fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos manager test\n");
-  execSync(`git init -q && git add . && git -c user.email=mc@loom -c user.name=mc commit -q -m init`, { cwd: repoR });
+  execSync(`git init -q`, { cwd: repoR });
+  commitAll(repoR, "init", "-c user.email=mc@loom -c user.name=mc");
   const vaultR = path.join(os.tmpdir(), `loom-mctxblk-vaultR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(vaultR, { recursive: true });
   db.insertProject({ id: "pR", name: "RefProj", repoPath: repoR, vaultPath: vaultR, config: {}, createdAt: now, archivedAt: null, referenceRepos: [refRepoA, refRepoB] });

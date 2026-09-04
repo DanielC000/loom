@@ -38,6 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -70,7 +71,8 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# wstl\n");
-  execSync(`git init -q && git config user.email wstl@loom && git config user.name wstl && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wstl@loom && git config user.name wstl`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const now = new Date().toISOString();
@@ -177,7 +179,7 @@ try {
   const { worktreePath: twt, branch: tbranch } = await createWorktree(repo, "pP", `taskless-${randomUUID()}`);
   worktrees.push(twt);
   fs.writeFileSync(path.join(twt, "spike-finding.txt"), "turned out to be worth landing\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "spike: worth landing"`, { cwd: twt });
+  commitAll(twt, "spike: worth landing", GIT_ID);
   const workerIdT = "wstl-taskless-merge-worker";
   db.insertSession({ id: workerIdT, projectId: "pP", agentId: "agentDev", engineSessionId: null, title: null,
     cwd: twt, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,

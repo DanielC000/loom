@@ -27,6 +27,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -161,7 +162,8 @@ check("(B) a profile with restrictedTools:true ⇒ true (passthrough)", resolveP
 const repo = path.join(os.tmpdir(), `loom-rt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# restricted-tools-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=rt@loom -c user.name=rt commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=rt@loom -c user.name=rt");
 
 const now = new Date().toISOString();
 const db = new Db();

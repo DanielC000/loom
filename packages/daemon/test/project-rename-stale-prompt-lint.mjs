@@ -41,6 +41,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -61,7 +62,8 @@ const OLD_REPO_PATH = path.join(os.tmpdir(), "loom-stale-prompt-fixture", "Inves
 const newRepo = path.join(os.tmpdir(), `loom-stale-prompt-newrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(newRepo, { recursive: true });
 fs.writeFileSync(path.join(newRepo, "README.md"), "# Seismo\n");
-execSync(`git init -q && git add . && git -c user.email=t@loom -c user.name=t commit -q -m init`, { cwd: newRepo });
+execSync(`git init -q`, { cwd: newRepo });
+commitAll(newRepo, "init", "-c user.email=t@loom -c user.name=t");
 
 const now = new Date().toISOString();
 const db = new Db();

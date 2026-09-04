@@ -54,6 +54,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -73,7 +74,8 @@ const {
 const repo = path.join(os.tmpdir(), `loom-lead-resumedoc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead resume-doc lineage test repo\n");
-execSync(`git init -q && git add . && git -c user.email=rd@loom -c user.name=rd commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=rd@loom -c user.name=rd");
 
 const now = new Date().toISOString();
 const db = new Db();

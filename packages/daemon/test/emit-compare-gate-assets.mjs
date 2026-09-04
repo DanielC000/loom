@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecga-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -47,7 +48,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# ecga\n");
-  execSync(`git init -q && git config user.email ecga@loom && git config user.name ecga && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email ecga@loom && git config user.name ecga`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const dbs = [];
@@ -66,7 +68,7 @@ try {
     P.worktreePath = worktreePath; P.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill", "SKILL.md"), "# skill\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: edit SKILL.md"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: edit SKILL.md", GIT_ID);
     seed(db, P);
 
     const confirm = await sessions.confirmWorkerMerge(P.mgrId, P.workerId);
@@ -98,7 +100,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill", "SKILL.md"), "# skill\n");
     mkdirp(path.join(worktreePath, "packages", "daemon", "src"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "second.ts"), "export const y = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: skill doc + add second.ts"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: skill doc + add second.ts", GIT_ID);
     seed(db, Q);
 
     const confirm = await sessions.confirmWorkerMerge(Q.mgrId, Q.workerId);
@@ -118,7 +120,7 @@ try {
     const changedPath = path.join("packages", "daemon", "assets", "skill-fragments", "example.md");
     mkdirp(path.join(worktreePath, "packages", "daemon", "assets", "skill-fragments"));
     fs.writeFileSync(path.join(worktreePath, changedPath), "# fragment\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add fragment"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add fragment", GIT_ID);
 
     const direct = await computeEmitCompareGate(R.repo, worktreePath, baseSha, branch);
     check("(R) direct call: eligible:true", direct.eligible === true);
@@ -145,7 +147,8 @@ try {
     fs.writeFileSync(path.join(S.repo, "README.md"), "# ecga\n");
     mkdirp(path.join(S.repo, "packages", "daemon", "assets", "skills", "doomed-skill"));
     fs.writeFileSync(path.join(S.repo, "packages", "daemon", "assets", "skills", "doomed-skill", "SKILL.md"), "# doomed\n");
-    execSync(`git init -q && git config user.email ecga@loom && git config user.name ecga && git add . && git ${GIT_ID} commit -q -m init`, { cwd: S.repo });
+    execSync(`git init -q && git config user.email ecga@loom && git config user.name ecga`, { cwd: S.repo });
+    commitAll(S.repo, "init", GIT_ID);
     const baseSha = execSync("git rev-parse HEAD", { cwd: S.repo }).toString().trim();
     const { worktreePath, branch } = await createWorktree(S.repo, S.projId, S.taskId);
     S.worktreePath = worktreePath; S.branch = branch; worktrees.push(worktreePath);

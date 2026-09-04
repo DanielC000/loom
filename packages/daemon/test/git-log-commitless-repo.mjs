@@ -36,6 +36,7 @@ process.env.HOME = sandboxHome;        // POSIX
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -51,7 +52,8 @@ execSync("git init -q", { cwd: commitlessRepo });
 const committedRepo = path.join(os.tmpdir(), `loom-gitlog-commitless-committed-${Date.now()}-${process.pid}`);
 fs.mkdirSync(committedRepo, { recursive: true });
 fs.writeFileSync(path.join(committedRepo, "README.md"), "# committed\n");
-execSync('git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m "real commit"', { cwd: committedRepo });
+execSync(`git init -q`, { cwd: committedRepo });
+commitAll(committedRepo, "real commit", "-c user.email=r@loom -c user.name=r");
 
 const notARepo = path.join(os.tmpdir(), `loom-gitlog-commitless-notarepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(notARepo, { recursive: true });

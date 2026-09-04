@@ -32,6 +32,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mci-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -67,7 +68,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mci\n");
   // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
-  execSync(`git init -q && git config user.email mci@loom && git config user.name mci && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mci@loom && git config user.name mci`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -87,9 +89,9 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     fs.writeFileSync(path.join(worktreePath, A.file), "part 1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file} part 1"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file} part 1`, GIT_ID);
     fs.writeFileSync(path.join(worktreePath, `${A.file}.2`), "part 2\n"); // 2 commits → must collapse to ONE
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file} part 2"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file} part 2`, GIT_ID);
     A.worktreePath = worktreePath; A.branch = branch;
     seed(A);
 
@@ -117,7 +119,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     fs.writeFileSync(path.join(worktreePath, B.file), "already merged work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     B.worktreePath = worktreePath; B.branch = branch;
     // Land the branch into main DIRECTLY (the deterministic Loom-Worker-Branch trailer goes on the squash)
     // WITHOUT deleting the branch — simulating a merge that already happened (e.g. an out-of-band confirm).
@@ -167,9 +169,9 @@ try {
     // Worker branch off base: +2 clean commits adding new files (no conflict with main).
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     fs.writeFileSync(path.join(worktreePath, D.file), "part 1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file} part 1"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file} part 1`, GIT_ID);
     fs.writeFileSync(path.join(worktreePath, `${D.file}.2`), "part 2\n"); // 2 commits → must collapse to ONE
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file} part 2"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file} part 2`, GIT_ID);
     D.worktreePath = worktreePath; D.branch = branch;
     seed(D);
 
@@ -178,10 +180,10 @@ try {
     // the reordered probe must still auto-recover up front.
     execSync(`git ${GIT_ID} checkout -q -b mci-d-theirs ${base}`, { cwd: D.repo });
     fs.writeFileSync(path.join(D.repo, "README.md"), "theirs side\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "theirs side"`, { cwd: D.repo });
+    commitAll(D.repo, "theirs side", GIT_ID);
     execSync(`git ${GIT_ID} checkout -q ${mainBranch}`, { cwd: D.repo });          // back to main (advanced HEAD)
     fs.writeFileSync(path.join(D.repo, "README.md"), "main side\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main side"`, { cwd: D.repo });
+    commitAll(D.repo, "main side", GIT_ID);
     try { execSync(`git ${GIT_ID} merge mci-d-theirs`, { cwd: D.repo, stdio: "ignore" }); } catch { /* expected README conflict */ }
     fs.rmSync(path.join(D.repo, ".git", "MERGE_HEAD"), { force: true });          // drop the in-progress marker, KEEP the unmerged index
     check("(d) precondition: NO MERGE_HEAD present", !fs.existsSync(path.join(D.repo, ".git", "MERGE_HEAD")));

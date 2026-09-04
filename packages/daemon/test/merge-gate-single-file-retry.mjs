@@ -47,6 +47,7 @@ import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Poll instead of a blind fixed sleep (a blind sleep is the wall-clock-coincidence flake this suite's own
 // DoD rejects). Bounded generously (8s) so a real bug still fails fast rather than hanging.
@@ -91,7 +92,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# sfr\n");
-  execSync(`git init -q && git config user.email sfr@loom && git config user.name sfr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email sfr@loom && git config user.name sfr`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 // Plants the two files `identifyRetriableTestFile` looks for, relative to the worktree root — the real
@@ -133,7 +135,7 @@ try {
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "flaky-one");
     fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     seed(db, A, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -191,7 +193,7 @@ try {
     J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "flaky-j");
     fs.writeFileSync(path.join(worktreePath, J.file), "work for J\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${J.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${J.file}`, GIT_ID);
     seed(db, J, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
@@ -258,13 +260,13 @@ try {
     worktrees.push(wt1.worktreePath);
     plantTestFile(wt1.worktreePath, "flaky-g");
     fs.writeFileSync(path.join(wt1.worktreePath, G.file), "work for g1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: wt1.worktreePath });
+    commitAll(wt1.worktreePath, `${G.file}`, GIT_ID);
     db.insertSession({ id: worker1Id, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: G.mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
 
     const wt2 = await createWorktree(G.repo, G.projId, task2Id);
     worktrees.push(wt2.worktreePath);
     fs.writeFileSync(path.join(wt2.worktreePath, "feature-g2.txt"), "work for g2\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature-g2.txt"`, { cwd: wt2.worktreePath });
+    commitAll(wt2.worktreePath, "feature-g2.txt", GIT_ID);
     db.insertSession({ id: worker2Id, projectId: G.projId, agentId: G.agentId, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: G.mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
 
     const p1 = sessions.confirmWorkerMerge(G.mgrId, worker1Id);
@@ -376,7 +378,7 @@ try {
     H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "flaky-h");
     fs.writeFileSync(path.join(worktreePath, H.file), "work for h\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${H.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${H.file}`, GIT_ID);
     db.insertSession({ id: H.workerId, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: H.taskId, worktreePath, branch });
 
     // A SEPARATE, unrelated project/worker to occupy the cap-1 slot once it frees — mirrors gate-cancel.mjs
@@ -391,7 +393,7 @@ try {
     const wtHolder = await createWorktree(holderRepo, holderProjId, holderTaskId);
     worktrees.push(wtHolder.worktreePath);
     fs.writeFileSync(path.join(wtHolder.worktreePath, "holder.txt"), "holder\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "holder.txt"`, { cwd: wtHolder.worktreePath });
+    commitAll(wtHolder.worktreePath, "holder.txt", GIT_ID);
     const holderMgrId = `${holderWorkerId}-mgr`;
     db.insertSession({ id: holderMgrId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: holderRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: holderWorkerId, projectId: holderProjId, agentId: holderAgentId, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: holderMgrId, taskId: holderTaskId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
@@ -499,7 +501,7 @@ try {
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "beta");
     fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${F.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${F.file}`, GIT_ID);
     seed(db, F, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
@@ -526,7 +528,7 @@ try {
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "flaky-two");
     fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     seed(db, B, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -558,7 +560,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${C.file}`, GIT_ID);
     seed(db, C, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -599,7 +601,7 @@ try {
     // Deliberately NO plantTestFile() call — and even if there were, "AssertionError: ..." never matches
     // the bare `FAIL <name>` shape identifyRetriableTestFile looks for.
     fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file}`, GIT_ID);
     seed(db, D, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
@@ -659,7 +661,7 @@ try {
     L.worktreePath = worktreePath; L.branch = branch; worktrees.push(worktreePath);
     plantTestFile(worktreePath, "flaky-l");
     fs.writeFileSync(path.join(worktreePath, L.file), "work for L\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${L.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${L.file}`, GIT_ID);
     seed(db, L, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(L.mgrId, L.workerId);

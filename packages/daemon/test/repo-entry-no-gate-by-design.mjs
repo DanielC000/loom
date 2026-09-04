@@ -29,6 +29,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rengbd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -48,7 +49,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const mkRepo = (dir) => {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "README.md"), "# rengbd\n");
-  execSync(`git init -q && git config user.email rengbd@loom && git config user.name rengbd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: dir });
+  execSync(`git init -q && git config user.email rengbd@loom && git config user.name rengbd`, { cwd: dir });
+  commitAll(dir, "init", GIT_ID);
 };
 
 // =====================================================================================================
@@ -86,7 +88,7 @@ async function partA() {
     const workerId = `rengbd-wkr-${label}-${sfx}`;
     const { worktreePath, branch } = await createWorktree(repoPath, projId, taskId, {}, repoKey ?? "primary");
     fs.writeFileSync(path.join(worktreePath, file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${file}`, GIT_ID);
     db.insertTask({ id: taskId, projectId: projId, title: `RENGBD-${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now, repoKey: repoKey ?? null });
     db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: primaryRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch, repoKey: repoKey ?? null });
@@ -156,7 +158,7 @@ async function partA2() {
     const workerId = `rengbd2-wkr-${label}-${sfx}`;
     const { worktreePath, branch } = await createWorktree(repoPath, projId, taskId, {}, repoKey ?? "primary");
     fs.writeFileSync(path.join(worktreePath, file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${file}`, GIT_ID);
     db.insertTask({ id: taskId, projectId: projId, title: `RENGBD2-${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now, repoKey: repoKey ?? null });
     db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: primaryRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch, repoKey: repoKey ?? null });

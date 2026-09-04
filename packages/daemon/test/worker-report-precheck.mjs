@@ -29,6 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wrp-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -63,7 +64,8 @@ function seed(p) {
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# wrp\n");
-  execSync(`git init -q && git config user.email wrp@loom && git config user.name wrp && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wrp@loom && git config user.name wrp`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -101,7 +103,7 @@ try {
   initRepo(C.repo);
   { const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId); C.worktreePath = worktreePath; C.branch = branch; }
   fs.writeFileSync(path.join(C.worktreePath, C.file), "committed worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: C.worktreePath });
+  commitAll(C.worktreePath, `${C.file}`, GIT_ID);
   // daemon-injected untracked `.claude/` noise must NOT count as uncommitted work:
   fs.mkdirSync(path.join(C.worktreePath, ".claude", "skills"), { recursive: true });
   fs.writeFileSync(path.join(C.worktreePath, ".claude", "skills", "noise.md"), "injected\n");
@@ -139,7 +141,7 @@ try {
   initRepo(N.repo);
   { const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId); N.worktreePath = worktreePath; N.branch = branch; }
   fs.writeFileSync(path.join(N.worktreePath, N.file), "real committed work, but the report will lie about it\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${N.file}"`, { cwd: N.worktreePath }); // 1 real commit ahead of base
+  commitAll(N.worktreePath, `${N.file}`, GIT_ID); // 1 real commit ahead of base
   seed(N);
   const rN = await sessions.workerReport(N.workerId, { status: "done", summary: "nothing to see here", noChanges: true });
   check("(nochanges-with-commits) workerReport → reported:false, refused:true", rN.reported === false && rN.refused === true);
@@ -167,7 +169,7 @@ try {
   initRepo(P.repo);
   { const { worktreePath, branch } = await createWorktree(P.repo, P.projId, P.taskId); P.worktreePath = worktreePath; P.branch = branch; }
   fs.writeFileSync(path.join(P.worktreePath, P.file), "real committed work behind a moved repo\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${P.file}"`, { cwd: P.worktreePath }); // clean + 1 ahead
+  commitAll(P.worktreePath, `${P.file}`, GIT_ID); // clean + 1 ahead
   P.dbRepoPath = path.join(os.tmpdir(), `loom-wrp-p-missing-${sfx}`); // never created on disk
   seed(P);
   let threwP = false;

@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync, spawn as spawnProcess } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtk-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -93,7 +94,8 @@ const q = (p) => `"${p}"`; // quote a path for both cmd.exe and posix sh
   const repo = path.join(os.tmpdir(), `loom-gtk-repo-${sfx}`);
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gtk\n");
-  execSync(`git init -q && git config user.email gtk@loom && git config user.name gtk && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gtk@loom && git config user.name gtk`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   const projId = `gtk-proj-${sfx}`, agentId = `gtk-agent-${sfx}`, taskId = `gtk-task-${sfx}`, mgrId = `gtk-mgr-${sfx}`, workerId = `gtk-wkr-${sfx}`;
   const db = new Db();
@@ -108,7 +110,7 @@ const q = (p) => `"${p}"`; // quote a path for both cmd.exe and posix sh
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
   // "worker-lookalike": a REAL process rooted in the SAME worktree — standing in for the confirming

@@ -21,6 +21,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -71,7 +72,8 @@ function makeRepo(repo) {
   // scenario's diff, never reads docs/) so it can't itself trip the read-call/anchor scan.
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
   fs.writeFileSync(path.join(repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
-  execSync(`git init -q && git config user.email gc@loom && git config user.name gc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gc@loom && git config user.name gc`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // ── (4) Pure unit check: the per-worktree exclusivity guard, at the GateSemaphore level ────────────────
@@ -249,7 +251,7 @@ function makeRepo(repo) {
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   worktrees.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerId, projectId: projId, agentId: `${agentId}-w`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
   // Saturate the cap-1 slot with a SECOND, unrelated worker's OWN run_gate so this worker's own run_gate
@@ -415,7 +417,7 @@ function makeRepo(repo) {
   const wtB = await createWorktree(repoB, projB, taskB);
   worktrees.push(wtB.worktreePath);
   fs.writeFileSync(path.join(wtB.worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: wtB.worktreePath });
+  commitAll(wtB.worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerB, projectId: projB, agentId: `agent-b21-b-${sfx}`, engineSessionId: null, title: null, cwd: wtB.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrB, taskId: taskB, worktreePath: wtB.worktreePath, branch: wtB.branch });
 
   // A second, unrelated worker (same project as workerB) whose run_gate saturates cap 1, so workerB's own
@@ -497,7 +499,7 @@ function makeRepo(repo) {
   const wtB = await createWorktree(repo, projId, taskB);
   worktrees.push(wtB.worktreePath);
   fs.writeFileSync(path.join(wtB.worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: wtB.worktreePath });
+  commitAll(wtB.worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerB, projectId: projId, agentId: `agent-wd-w-${sfx}`, engineSessionId: null, title: null, cwd: wtB.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrB, taskId: taskB, worktreePath: wtB.worktreePath, branch: wtB.branch });
 
   // A second, unrelated worker (same project) to saturate cap 1, so workerB's own self-check genuinely
@@ -583,7 +585,7 @@ function makeRepo(repo) {
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   worktrees.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerId, projectId: projId, agentId: `agent-b22-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
   // A second, unrelated worker to saturate cap 1, so the MERGE gate itself (not just a worker self-check)
@@ -682,7 +684,7 @@ function makeRepo(repo) {
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   worktrees.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerId, projectId: projId, agentId: `agent-run-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
   // Cap default (1) with nothing else queued — the merge gate admits (RUNS) immediately, never queues.
@@ -890,14 +892,14 @@ function makeRepo(repo) {
   worktrees.push(wt1.worktreePath);
   fs.mkdirSync(path.join(wt1.worktreePath, "src"), { recursive: true });
   fs.writeFileSync(path.join(wt1.worktreePath, "src", "index.ts"), "export const x = 1;\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feat: real change"`, { cwd: wt1.worktreePath });
+  commitAll(wt1.worktreePath, "feat: real change", GIT_ID);
   db.insertSession({ id: worker1Id, projectId: P1, agentId: `${P1}-agent`, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
 
   const wt2 = await createWorktree(repo, P1, task2Id);
   worktrees.push(wt2.worktreePath);
   fs.mkdirSync(path.join(wt2.worktreePath, "docs"), { recursive: true });
   fs.writeFileSync(path.join(wt2.worktreePath, "docs", "note.md"), "notes\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: wt2.worktreePath });
+  commitAll(wt2.worktreePath, "docs: add note", GIT_ID);
   db.insertSession({ id: worker2Id, projectId: P1, agentId: `${P1}-agent`, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
 
   const p1 = sessions.confirmWorkerMerge(mgrId, worker1Id);

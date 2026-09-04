@@ -37,6 +37,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -74,7 +75,8 @@ function seed(p, gateCommand, columnKey = "in_progress") {
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mrs\n");
-  execSync(`git init -q && git config user.email mrs@loom && git config user.name mrs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mrs@loom && git config user.name mrs`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -95,7 +97,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     fs.writeFileSync(path.join(worktreePath, A.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     A.worktreePath = worktreePath; A.branch = branch;
     seed(A, FAIL_GATE);
 
@@ -113,7 +115,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     fs.writeFileSync(path.join(worktreePath, B.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     B.worktreePath = worktreePath; B.branch = branch;
     // Simulate the incident: the manager manually squash-merged the branch out-of-band WHILE the
     // daemon's own confirmWorkerMerge run is about to fail its gate (e.g. a stale client-timeout retry).
@@ -134,7 +136,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     fs.writeFileSync(path.join(worktreePath, C.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${C.file}`, GIT_ID);
     C.worktreePath = worktreePath; C.branch = branch;
     seed(C, FAIL_GATE, "done"); // card already terminal — e.g. the manager closed it another way
 
@@ -151,7 +153,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     fs.writeFileSync(path.join(worktreePath, D.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file}`, GIT_ID);
     D.worktreePath = worktreePath; D.branch = branch;
     seed(D, FAIL_GATE);
 
@@ -169,7 +171,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     fs.writeFileSync(path.join(worktreePath, E.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${E.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${E.file}`, GIT_ID);
     E.worktreePath = worktreePath; E.branch = branch;
     seed(E, FAIL_GATE);
 
@@ -177,7 +179,7 @@ try {
     // The worker pushes a NEW commit — still fails the SAME gate for the SAME generic "gate" reason, but
     // this is a genuinely distinct op validating different work, not a stale retry of the first.
     fs.writeFileSync(path.join(worktreePath, "feat-e-2.txt"), "more work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat-e-2.txt"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat-e-2.txt", GIT_ID);
     const confirmE2 = await sessions.confirmWorkerMerge(E.mgrId, E.workerId); // op 2: commit #2, gate fails again
 
     check("(E) both calls report merged:false", confirmE1.merged === false && confirmE2.merged === false);

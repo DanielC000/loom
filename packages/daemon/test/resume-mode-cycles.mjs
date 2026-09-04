@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -60,7 +61,8 @@ check("(setup) the default config's fresh target mode is auto (the owner's requi
 const repo = path.join(os.tmpdir(), `loom-rmc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# resume-mode-cycles test\n");
-execSync(`git init -q && git add . && git -c user.email=rmc@loom -c user.name=rmc commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=rmc@loom -c user.name=rmc");
 
 const now = new Date().toISOString();
 const db = new Db();

@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mpgb-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -48,7 +49,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mpgb\n");
-  execSync(`git init -q && git config user.email mpgb@loom && git config user.name mpgb && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mpgb@loom && git config user.name mpgb`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function seed(db, p) {
@@ -74,7 +76,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "sessions", "service.ts"), "nested change\n");
     // An unrelated root-level file, so an already-`/`-scoped glob has something to correctly NOT match.
     fs.writeFileSync(path.join(worktreePath, "root.txt"), "root change\n");
-    execSync(`git add . && git ${GIT_ID} commit -qm "nested + root change"`, { cwd: worktreePath });
+    commitAll(worktreePath, "nested + root change", GIT_ID);
     P.worktreePath = worktreePath; P.branch = branch;
   }
   seed(db, P);

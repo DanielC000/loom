@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // INERT-DIFF GATE SKIP test (card db9b0130 — owner-proposed: "running the full merge gate for a merge
 // that only contains docs is not needed"). REAL git on temp repos, an INJECTED `runGate` seam (mirrors
@@ -152,7 +153,8 @@ function makeRepo(p) {
   // deliberate NON-JS/TS-repo pairing this fixture exists to be contrasted against.
   mkdirp(path.join(p.repo, "src"));
   fs.writeFileSync(path.join(p.repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
-  execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 /** The NON-JS/TS-repo twin of {@link makeRepo} — a repo whose only tracked file is a Python source file
@@ -167,7 +169,8 @@ function makeNonJsTsRepo(p) {
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgid\n");
   mkdirp(path.join(p.repo, "src"));
   fs.writeFileSync(path.join(p.repo, "src", "baseline.py"), "BASELINE = True\n");
-  execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -195,7 +198,7 @@ try {
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs", "investigations"));
     fs.writeFileSync(path.join(worktreePath, "docs", "investigations", "note.md"), "findings\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add finding", GIT_ID);
     seed(db, A, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -228,7 +231,7 @@ try {
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill"));
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "assets", "skills", "some-skill", "SKILL.md"), "# skill\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: edit SKILL.md"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: edit SKILL.md", GIT_ID);
     seed(db, B, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -258,7 +261,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "findings\n");
     mkdirp(path.join(worktreePath, "src"));
     fs.writeFileSync(path.join(worktreePath, "src", "index.ts"), "export const x = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add index + note"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add index + note", GIT_ID);
     seed(db, C, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -306,7 +309,7 @@ try {
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "brand-new-unknown-dir"));
     fs.writeFileSync(path.join(worktreePath, "brand-new-unknown-dir", "whatever.md"), "text\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: new dir"`, { cwd: worktreePath });
+    commitAll(worktreePath, "chore: new dir", GIT_ID);
     seed(db, E, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
@@ -332,7 +335,7 @@ try {
     makeRepo(F);
     mkdirp(path.join(F.repo, "src"));
     fs.writeFileSync(path.join(F.repo, "src", "x.ts"), "export const x = 1;\nexport const y = 2;\nexport const z = 3;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add src/x.ts"`, { cwd: F.repo });
+    commitAll(F.repo, "feat: add src/x.ts", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
@@ -366,7 +369,7 @@ try {
     mkdirp(path.join(worktreePath, "docs-internal"));
     fs.writeFileSync(path.join(worktreePath, "docs-internal", "x.md"), "text\n");
     fs.writeFileSync(path.join(worktreePath, "docsfoo.md"), "text\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "chore: docs-lookalike paths"`, { cwd: worktreePath });
+    commitAll(worktreePath, "chore: docs-lookalike paths", GIT_ID);
     seed(db, G, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
@@ -423,7 +426,7 @@ try {
     worktrees.push(wt1.worktreePath);
     mkdirp(path.join(wt1.worktreePath, "src"));
     fs.writeFileSync(path.join(wt1.worktreePath, "src", "index.ts"), "export const x = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: real change"`, { cwd: wt1.worktreePath });
+    commitAll(wt1.worktreePath, "feat: real change", GIT_ID);
     db.insertSession({ id: worker1Id, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
 
     // worker2: a docs-only (inert) change — cut from the SAME main tip, before worker1 ever squashes.
@@ -431,7 +434,7 @@ try {
     worktrees.push(wt2.worktreePath);
     mkdirp(path.join(wt2.worktreePath, "docs"));
     fs.writeFileSync(path.join(wt2.worktreePath, "docs", "note.md"), "notes\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: wt2.worktreePath });
+    commitAll(wt2.worktreePath, "docs: add note", GIT_ID);
     db.insertSession({ id: worker2Id, projectId: H.projId, agentId: H.agentId, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: H.mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
 
     // Fire worker1's confirm first — a REAL gate, held open until we manually release it.
@@ -519,7 +522,8 @@ try {
     // PRE-wait `isInertMergeDiff` reaches the repo-guard-only-wait path this scenario exists to test.
     mkdirp(path.join(I.repo, "src"));
     fs.writeFileSync(path.join(I.repo, "src", "baseline.ts"), "export const BASELINE = true;\n");
-    execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m init`, { cwd: I.repo });
+    execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid`, { cwd: I.repo });
+    commitAll(I.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
 
@@ -556,14 +560,14 @@ try {
     fs.writeFileSync(path.join(wt1.worktreePath, "docs", "note.md"), "worker1 rewrite\n");
     mkdirp(path.join(wt1.worktreePath, "src"));
     fs.writeFileSync(path.join(wt1.worktreePath, "src", "other.ts"), "export const y = 2;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: real change + docs rewrite"`, { cwd: wt1.worktreePath });
+    commitAll(wt1.worktreePath, "feat: real change + docs rewrite", GIT_ID);
     db.insertSession({ id: worker1Id, projectId: I.projId, agentId: I.agentId, engineSessionId: null, title: null, cwd: wt1.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: I.mgrId, taskId: task1Id, worktreePath: wt1.worktreePath, branch: wt1.branch });
 
     // worker2: a docs-only (inert) change to the SAME line — cut from the SAME base, before worker1 lands.
     const wt2 = await createWorktree(I.repo, I.projId, task2Id);
     worktrees.push(wt2.worktreePath);
     fs.writeFileSync(path.join(wt2.worktreePath, "docs", "note.md"), "worker2 rewrite\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: worker2 rewrite"`, { cwd: wt2.worktreePath });
+    commitAll(wt2.worktreePath, "docs: worker2 rewrite", GIT_ID);
     db.insertSession({ id: worker2Id, projectId: I.projId, agentId: I.agentId, engineSessionId: null, title: null, cwd: wt2.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: I.mgrId, taskId: task2Id, worktreePath: wt2.worktreePath, branch: wt2.branch });
 
     // Fire worker1's confirm first — a REAL gate, held open until we manually release it.
@@ -642,7 +646,7 @@ try {
     worktrees.push(wt3.worktreePath);
     mkdirp(path.join(wt3.worktreePath, "docs"));
     fs.writeFileSync(path.join(wt3.worktreePath, "docs", "another.md"), "worker3 notes\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: worker3 note"`, { cwd: wt3.worktreePath });
+    commitAll(wt3.worktreePath, "docs: worker3 note", GIT_ID);
     db.insertSession({ id: worker3Id, projectId: I.projId, agentId: I.agentId, engineSessionId: null, title: null, cwd: wt3.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: I.mgrId, taskId: task3Id, worktreePath: wt3.worktreePath, branch: wt3.branch });
     // 20s, not a tight bound: this is only a leaked-guard tripwire (a genuine leak hangs FOREVER, so any
     // finite bound catches it) — a tight one risks flaking on ordinary git-subprocess variance this deep
@@ -679,7 +683,7 @@ try {
     // Start docs-only — provably inert against main BEFORE the wait, exactly like (A).
     mkdirp(path.join(worktreePath, "docs"));
     fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "notes\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add note"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add note", GIT_ID);
     seed(db, J, "pnpm gate");
 
     const mainHeadBefore = execSync(`git rev-parse HEAD`, { cwd: J.repo }).toString().trim();
@@ -721,7 +725,7 @@ try {
     // committing further while its own merge waits on the repo guard, which can be minutes.
     mkdirp(path.join(worktreePath, "src"));
     fs.writeFileSync(path.join(worktreePath, "src", "late.ts"), "export const late = true;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: late commit during the guard wait"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: late commit during the guard wait", GIT_ID);
 
     // Sanity check main BEFORE releasing our hold — this is the actual "during the wait" window. (main
     // necessarily DOES move once we release and the confirm's own real gate squashes — that's the
@@ -769,7 +773,8 @@ try {
     fs.writeFileSync(path.join(K.repo, "README.md"), "# mgid-k\n");
     mkdirp(path.join(K.repo, "test"));
     fs.writeFileSync(path.join(K.repo, "test", "reads-docs.mjs"), kFixtureBody);
-    execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid && git add . && git ${GIT_ID} commit -q -m "test: add a test that reads docs/"`, { cwd: K.repo });
+    execSync(`git init -q && git config user.email mgid@loom && git config user.name mgid`, { cwd: K.repo });
+    commitAll(K.repo, "test: add a test that reads docs/", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
@@ -779,7 +784,7 @@ try {
     K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs"));
     fs.writeFileSync(path.join(worktreePath, "docs", "note.md"), "findings\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add finding", GIT_ID);
     seed(db, K, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(K.mgrId, K.workerId);
@@ -810,7 +815,7 @@ try {
     L.worktreePath = worktreePath; L.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "docs", "investigations"));
     fs.writeFileSync(path.join(worktreePath, "docs", "investigations", "note.md"), "findings\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add finding"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add finding", GIT_ID);
     seed(db, L, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(L.mgrId, L.workerId);
@@ -846,7 +851,7 @@ try {
     const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
     M.worktreePath = worktreePath; M.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add repo-root CLAUDE.md"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add repo-root CLAUDE.md", GIT_ID);
     seed(db, M, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(M.mgrId, M.workerId);

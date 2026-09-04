@@ -53,6 +53,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { commitAll } from "./_git-commit.mjs";
 
 // --- Hermetic LOOM_HOME + sandboxed HOME (mirrors codescape-mcp-spawn.mjs) — set BEFORE importing dist. ---
 const tmpHome = path.join(os.tmpdir(), `loom-clh-${Date.now()}-${process.pid}`);
@@ -88,7 +89,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git config user.email clh@loom && git config user.name clh && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email clh@loom && git config user.name clh`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Seeds a manifest file at <homeDir>/.codescape/projects/index.json mapping `repo` to `codescapeId` — the
@@ -267,7 +269,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
 
     // --- (2)+(3) confirmWorkerMerge (Green path): reingest fires BACKGROUNDED (unconditional) ---
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
     const reingestCountBeforeMerge = fake.calls.reingest.length;
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(2) confirmWorkerMerge (Green) lands the merge", confirm.merged === true);
@@ -469,7 +471,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: N.workerAgentId, kickoffPrompt: "GO" });
     liveIdsN.push(worker.id);
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(5) LOOM_DEV off: merge still lands normally (byte-identical lifecycle)", confirm.merged === true);
     await sleep(50);
@@ -506,7 +508,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: N.workerAgentId, kickoffPrompt: "GO" });
     liveIdsN6.push(worker.id);
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
+    commitAll(worker.worktreePath, "change.txt", GIT_ID);
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(6) project not codescape-enabled: merge still lands normally", confirm.merged === true);
     await sleep(50);

@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -25,7 +26,8 @@ const repo = path.join(os.tmpdir(), `loom-mrd-repo-${Date.now()}-${process.pid}`
 try {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# v1\n");
-  execSync(`git init -q && git config user.email mrd@loom && git config user.name mrd && git add . && git commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mrd@loom && git config user.name mrd`, { cwd: repo });
+  commitAll(repo, "init");
 
   // A worker branch with a LARGE multi-file change — the case where the OLD full-patch payload overflowed.
   const { worktreePath, branch } = await createWorktree(repo, "projMRD", "bigdiff-aaaa-1111");
@@ -34,7 +36,7 @@ try {
     const body = Array.from({ length: LINES }, (_, n) => `file ${i} line ${n} — padding to make the patch large`).join("\n") + "\n";
     fs.writeFileSync(path.join(worktreePath, `big-${i}.txt`), body);
   }
-  execSync(`git add . && git -c user.email=mrd@loom -c user.name=mrd commit -qm "big change"`, { cwd: worktreePath });
+  commitAll(worktreePath, "big change", "-c user.email=mrd@loom -c user.name=mrd");
 
   // ── DEFAULT (includePatch:false) → bounded diffstat, NO patch.
   const stat = await diffBranch(repo, branch, "HEAD", { includePatch: false });

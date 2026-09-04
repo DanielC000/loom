@@ -54,6 +54,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcl-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -99,11 +100,12 @@ const now = new Date().toISOString();
   try {
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# mcl\n");
-    execSync(`git init -q && git config user.email mcl@loom && git config user.name mcl && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email mcl@loom && git config user.name mcl`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
     fs.writeFileSync(path.join(worktreePath, file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${file}`, GIT_ID);
 
     db.insertProject({ id: projId, name: "MCL", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: GATE } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
@@ -158,7 +160,8 @@ const now = new Date().toISOString();
   try {
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# mclii\n");
-    execSync(`git init -q && git config user.email mclii@loom && git config user.name mclii && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q && git config user.email mclii@loom && git config user.name mclii`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
 
     db.insertProject({ id: projId, name: "MCLII", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: PASS_GATE } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
@@ -168,7 +171,7 @@ const now = new Date().toISOString();
     // FIRST worker: a normal, complete merge (real removal, no seam needed — nothing holds this dir).
     const first = await createWorktree(repo, projId, taskId);
     fs.writeFileSync(path.join(first.worktreePath, "feat-1.txt"), "first\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat-1`, { cwd: first.worktreePath });
+    commitAll(first.worktreePath, "feat-1", GIT_ID);
     db.insertSession({ id: worker1Id, projectId: projId, agentId, engineSessionId: null, title: null, cwd: first.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: first.worktreePath, branch: first.branch });
 
     const headAfterFirstMerge0 = git(repo, "rev-parse HEAD");
@@ -185,7 +188,7 @@ const now = new Date().toISOString();
     const second = await createWorktree(repo, projId, taskId);
     check("(II) precondition: the re-cut branch reuses the SAME deterministic branch name", second.branch === first.branch);
     fs.writeFileSync(path.join(second.worktreePath, "feat-2.txt"), "second (new work)\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat-2`, { cwd: second.worktreePath });
+    commitAll(second.worktreePath, "feat-2", GIT_ID);
     db.insertSession({ id: worker2Id, projectId: projId, agentId, engineSessionId: null, title: null, cwd: second.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: second.worktreePath, branch: second.branch });
 
     const headBeforeSecondMerge = git(repo, "rev-parse HEAD");

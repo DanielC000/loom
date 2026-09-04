@@ -27,6 +27,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -112,7 +113,8 @@ check("(a) documentConversion works for a role-null session too (orthogonal to r
 const repo = path.join(os.tmpdir(), `loom-dc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# document-conversion-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=dc@loom -c user.name=dc commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=dc@loom -c user.name=dc");
 
 const now = new Date().toISOString();
 const db = new Db();

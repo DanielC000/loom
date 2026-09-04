@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgrd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -49,11 +50,12 @@ const p = {
 try {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgrd\n");
-  execSync(`git init -q && git config user.email mgrd@loom && git config user.name mgrd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mgrd@loom && git config user.name mgrd`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   p.worktreePath = worktreePath; p.branch = branch;
   fs.writeFileSync(path.join(worktreePath, p.file), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
 
   db.insertProject({ id: p.projId, name: "MGRD", repoPath: p.repo, vaultPath: p.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });

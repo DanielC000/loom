@@ -33,6 +33,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-recut-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -61,7 +62,7 @@ const head = (cwd) => git(cwd, "rev-parse HEAD");
 // Commit a file into a checkout (the canonical repo to advance main, or a worktree to add prior work).
 const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
-  execSync(`git add . && git ${GIT_ID} commit -qm "${msg}"`, { cwd: dir });
+  commitAll(dir, `${msg}`, GIT_ID);
 };
 // REAL ancestry proof (card 5150fdc2's (b)/(b2) relaxation) — `git merge-base --is-ancestor <a> <b>`
 // exits 0 iff `a` is an ancestor of (or equal to) `b`; non-zero otherwise. Used instead of a merge-base-
@@ -81,7 +82,8 @@ try {
   // A real repo with one commit on the default branch (this is "old main", C1).
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# recut test\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   // ============================================================================================
   // (a) DIR-PRESENT reuse, EMPTY branch → re-cut onto current main.

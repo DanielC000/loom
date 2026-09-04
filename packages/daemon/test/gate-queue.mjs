@@ -40,6 +40,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -98,7 +99,8 @@ const now = new Date().toISOString();
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gq\n");
-  execSync(`git init -q && git config user.email gq@loom && git config user.name gq && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gq@loom && git config user.name gq`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // ── (unit) SessionService.gateQueueForManager — redaction + shape, no real spawn ─────────────────────────

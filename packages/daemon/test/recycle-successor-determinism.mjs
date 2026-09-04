@@ -46,6 +46,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -97,7 +98,8 @@ function makeRepo(tag) {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo); // the finally block's removeWorktree(repo, wt) only removes the WORKTREE, never this bare repo dir
   fs.writeFileSync(path.join(repo, "README.md"), "# rsd\n");
-  execSync(`git init -q && git config user.email rsd@loom && git config user.name rsd && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email rsd@loom && git config user.name rsd`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   return repo;
 }
 

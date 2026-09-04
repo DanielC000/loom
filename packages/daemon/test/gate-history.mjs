@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // gate_history() (card 753d9911): `listGateEvents` (db.ts) already reads the complete, paginated,
 // JOIN-enriched settled-gate-run series — INCLUDING rejected runs, whose durationMs/gateCap/
@@ -97,7 +98,8 @@ const now = new Date().toISOString();
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gh\n");
-  execSync(`git init -q && git config user.email gh@loom && git config user.name gh && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email gh@loom && git config user.name gh`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // Card e082bf4d: confirmWorkerMergeTracked can legitimately degrade to the async {settled:false, op}
@@ -450,7 +452,7 @@ function seed(db) {
     const { worktreePath, branch } = await createWorktree(repo, P, taskId);
     worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat", GIT_ID);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };

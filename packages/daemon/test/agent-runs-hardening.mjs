@@ -21,6 +21,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -49,7 +50,8 @@ const now = new Date().toISOString();
 const repo = path.join(tmpHome, "repo");
 fs.mkdirSync(path.join(repo, "src"), { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-runs-hardening test\n");
-execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=r@loom -c user.name=r");
 
 try {
   // =====================================================================================================

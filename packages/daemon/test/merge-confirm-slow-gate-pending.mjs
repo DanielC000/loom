@@ -27,6 +27,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createWorktree } from "../dist/git/worktrees.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -63,11 +64,12 @@ const file = "feat.txt";
 
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# msgp\n");
-execSync(`git init -q && git config user.email msgp@loom && git config user.name msgp && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+execSync(`git init -q && git config user.email msgp@loom && git config user.name msgp`, { cwd: repo });
+commitAll(repo, "init", GIT_ID);
 
 const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
 fs.writeFileSync(path.join(worktreePath, file), "work\n");
-execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+commitAll(worktreePath, `${file}`, GIT_ID);
 
 {
   const db = new Database(DB_FILE);

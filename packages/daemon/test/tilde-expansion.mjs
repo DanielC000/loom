@@ -38,6 +38,7 @@ process.env.HOME = sandboxHome;        // POSIX
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { expandTilde } = await import("../dist/paths.js");
@@ -56,7 +57,8 @@ const mkRepo = (relDir) => {
   const r = path.join(sandboxHome, relDir);
   fs.mkdirSync(r, { recursive: true });
   fs.writeFileSync(path.join(r, "README.md"), `# ${relDir}\n`);
-  execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
+  execSync(`git init -q`, { cwd: r });
+  commitAll(r, "init", "-c user.email=r@loom -c user.name=r");
   return r;
 };
 const primary = mkRepo("projects/myrepo");

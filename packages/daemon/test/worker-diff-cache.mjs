@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wdc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -36,7 +37,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
-  execSync(`git add . && git -c user.email=wd@loom -c user.name=wd commit -qm "${msg}"`, { cwd: dir });
+  commitAll(dir, `${msg}`, "-c user.email=wd@loom -c user.name=wd");
 };
 
 // Comfortably larger than any reasonable TTL (the fix's own doc suggests 10-15s) without hard-coding the
@@ -48,7 +49,8 @@ const repo = path.join(os.tmpdir(), `loom-wdc-repo-${Date.now()}-${process.pid}`
 try {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# v1\n");
-  execSync(`git init -q && git config user.email wd@loom && git config user.name wd && git add . && git commit -q -m "init"`, { cwd: repo });
+  execSync(`git init -q && git config user.email wd@loom && git config user.name wd`, { cwd: repo });
+  commitAll(repo, "init");
 
   // ── CASE A — TTL fast path: within the TTL a repeat poll performs ZERO stat walks — true for an
   //    uncommitted edit AND for a committed working-tree WRITE (both are working-tree content changes only

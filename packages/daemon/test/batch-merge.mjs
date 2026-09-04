@@ -34,6 +34,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 const { createWorktree, getTaskMergedInfo, __resetMergedCommitMapCacheForTest } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches, fastForwardCanonicalMain, runBatchedMerge, computeBatchSize } =
@@ -70,7 +71,8 @@ const projId = `bm-proj-${sfx}`;
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# batch-merge\n");
-  execSync(`git init -q && git config user.email bm@loom && git config user.name bm && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email bm@loom && git config user.name bm`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 /** Cut a fresh worker branch off `repo`'s current HEAD, commit one file to it, and return its identity —
@@ -79,7 +81,7 @@ async function cutBranch(repo, label, file, content) {
   const taskId = `bm-task-${label}-${sfx}`;
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, file), content);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${label}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${label}`, GIT_ID);
   return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
 }
 
@@ -91,7 +93,7 @@ async function cutBranchMultiCommit(repo, label, commits) {
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   for (const { file, content, message } of commits) {
     fs.writeFileSync(path.join(worktreePath, file), content);
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${message}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${message}`, GIT_ID);
   }
   return { workerSessionId: `bm-wkr-${label}-${sfx}`, taskId, branch, taskTitle: `feat(test): ${label}`, worktreePath };
 }
@@ -161,19 +163,19 @@ try {
     const repo = path.join(os.tmpdir(), `loom-bm-conflict-${sfx}`);
     makeRepo(repo);
     fs.writeFileSync(path.join(repo, "shared.txt"), "base\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "seed shared.txt"`, { cwd: repo });
+    commitAll(repo, "seed shared.txt", GIT_ID);
     const a = await cutBranch(repo, "ca", "conflict-a.txt", "work a\n");
     // b edits shared.txt on its own branch.
     const bTaskId = `bm-task-cb-${sfx}`;
     const bWt = await createWorktree(repo, projId, bTaskId);
     fs.writeFileSync(path.join(bWt.worktreePath, "shared.txt"), "changed by b\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m cb`, { cwd: bWt.worktreePath });
+    commitAll(bWt.worktreePath, "cb", GIT_ID);
     const b = { workerSessionId: `bm-wkr-cb-${sfx}`, taskId: bTaskId, branch: bWt.branch, taskTitle: "feat(test): cb" };
     // c ALSO edits shared.txt, differently — will conflict against b once b has already landed in the batch.
     const cTaskId = `bm-task-cc-${sfx}`;
     const cWt = await createWorktree(repo, projId, cTaskId);
     fs.writeFileSync(path.join(cWt.worktreePath, "shared.txt"), "changed by c, differently\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m cc`, { cwd: cWt.worktreePath });
+    commitAll(cWt.worktreePath, "cc", GIT_ID);
     const c = { workerSessionId: `bm-wkr-cc-${sfx}`, taskId: cTaskId, branch: cWt.branch, taskTitle: "feat(test): cc" };
 
     const baseMainSha = git(repo, "rev-parse HEAD");
@@ -216,7 +218,7 @@ try {
     let advancedSha;
     const gateThatRacesMain = async () => {
       fs.writeFileSync(path.join(repo, "unrelated-human-commit.txt"), "meanwhile, on main\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "unrelated human commit"`, { cwd: repo });
+      commitAll(repo, "unrelated human commit", GIT_ID);
       advancedSha = git(repo, "rev-parse HEAD");
       return { passed: true };
     };
@@ -292,11 +294,11 @@ try {
     makeRepo(repo);
     const { worktreePath: wtM, branch: brM } = await createWorktree(repo, projId, `bm-task-mc-${sfx}`);
     fs.writeFileSync(path.join(wtM, "mc-1.txt"), "mc1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "mc commit 1"`, { cwd: wtM });
+    commitAll(wtM, "mc commit 1", GIT_ID);
     // Canonical main advances independently, then gets unioned into the worker's OWN worktree — exactly
     // what a real stale-base auto-forward produces: a genuine merge commit on the worker's own branch.
     fs.writeFileSync(path.join(repo, "mc-main-advance.txt"), "advanced\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "mc: main advances independently"`, { cwd: repo });
+    commitAll(repo, "mc: main advances independently", GIT_ID);
     const mainAdvanceSha = git(repo, "rev-parse HEAD");
     execSync(`git ${GIT_ID} merge --no-edit ${mainAdvanceSha}`, { cwd: wtM });
     const m = { workerSessionId: `bm-wkr-mc-${sfx}`, taskId: `bm-task-mc-${sfx}`, branch: brM, taskTitle: "feat(test): mc" };
@@ -515,7 +517,7 @@ try {
     const repo = path.join(os.tmpdir(), `loom-bm-pathset-rename-${sfx}`);
     makeRepo(repo);
     fs.writeFileSync(path.join(repo, "renameable.txt"), "line1\nline2\nline3\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "seed renameable.txt"`, { cwd: repo });
+    commitAll(repo, "seed renameable.txt", GIT_ID);
 
     // "renamer" lands FIRST in the batch and renames the shared file.
     const renamerTaskId = `bm-task-renamer-${sfx}`;
@@ -531,7 +533,7 @@ try {
     const lines = fs.readFileSync(path.join(editorWt.worktreePath, "renameable.txt"), "utf8").split("\n");
     lines[2] = "line3-EDITED";
     fs.writeFileSync(path.join(editorWt.worktreePath, "renameable.txt"), lines.join("\n"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "editor: edit the shared file"`, { cwd: editorWt.worktreePath });
+    commitAll(editorWt.worktreePath, "editor: edit the shared file", GIT_ID);
     const editor = { workerSessionId: `bm-wkr-editor-${sfx}`, taskId: editorTaskId, branch: editorWt.branch, taskTitle: "feat(test): editor", worktreePath: editorWt.worktreePath };
 
     const baseMainSha = git(repo, "rev-parse HEAD");
@@ -573,9 +575,9 @@ try {
     const taintedTaskId = `bm-task-trailer-tainted-${sfx}`;
     const { worktreePath: taintedWt, branch: taintedBranch } = await createWorktree(repo, projId, taintedTaskId);
     fs.writeFileSync(path.join(taintedWt, "trailer-1.txt"), "t1\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat(test): trailer commit 1" -m "Claude-Session: https://claude.ai/code/session_FAKE001"`, { cwd: taintedWt });
+    commitAll(taintedWt, ["feat(test): trailer commit 1", "Claude-Session: https://claude.ai/code/session_FAKE001"], GIT_ID);
     fs.writeFileSync(path.join(taintedWt, "trailer-2.txt"), "t2\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix(test): trailer commit 2" -m "Body text." -m "Claude-Session: https://claude.ai/code/session_FAKE002"`, { cwd: taintedWt });
+    commitAll(taintedWt, ["fix(test): trailer commit 2", "Body text.", "Claude-Session: https://claude.ai/code/session_FAKE002"], GIT_ID);
     const tainted = { workerSessionId: `bm-wkr-trailer-tainted-${sfx}`, taskId: taintedTaskId, branch: taintedBranch, taskTitle: "feat(test): trailer-tainted", worktreePath: taintedWt };
     check("(8) precondition: both of the tainted branch's own commits carry a Claude-Session trailer before landing",
       git(taintedWt, `log --format=%B ${taintedBranch}`).split("Claude-Session").length - 1 === 2);

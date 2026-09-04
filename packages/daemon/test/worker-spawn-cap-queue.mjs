@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // worker_spawn CAP-QUEUED VISIBILITY MARKER test.
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + SessionService driven through the
@@ -134,7 +135,8 @@ const GIT_ID = "-c user.email=wscq@loom -c user.name=wscq";
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# wscq\n");
-  execSync(`git init -q && git config user.email wscq@loom && git config user.name wscq && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wscq@loom && git config user.name wscq`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const now = new Date().toISOString();

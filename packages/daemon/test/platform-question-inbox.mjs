@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -48,7 +49,8 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const repo = path.join(os.tmpdir(), `loom-platform-qi-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform question-inbox test repo\n");
-execSync(`git init -q && git add . && git -c user.email=qi@loom -c user.name=qi commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=qi@loom -c user.name=qi");
 
 const now = new Date().toISOString();
 const db = new Db();

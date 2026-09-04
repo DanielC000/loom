@@ -20,6 +20,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-mgmt-${Date.now()}-${process.pid}`);
 fs.mkdirSync(tmpHome, { recursive: true });
@@ -103,7 +104,8 @@ try {
   const legacyRepo = path.join(os.tmpdir(), `loom-mgmt-legacyrepo-${Date.now()}-${process.pid}`);
   fs.mkdirSync(legacyRepo, { recursive: true });
   fs.writeFileSync(path.join(legacyRepo, "README.md"), "# legacy\n");
-  execSync(`git init -q && git add . && git -c user.email=t@loom -c user.name=t commit -q -m init`, { cwd: legacyRepo });
+  execSync(`git init -q`, { cwd: legacyRepo });
+  commitAll(legacyRepo, "init", "-c user.email=t@loom -c user.name=t");
   db.insertProject(mkProject("pLegacyRepoBound", { repoPath: legacyRepo, vaultPath: legacyRepo }));
   const legacyUnbind = await app.inject({ method: "PATCH", url: "/api/projects/pLegacyRepoBound", payload: { vaultPath: "" } });
   check("A2: PATCH vaultPath:\"\" on a legacy repo-bound project (repoPath===vaultPath, real git repo) → 200 (unbind)", legacyUnbind.statusCode === 200);

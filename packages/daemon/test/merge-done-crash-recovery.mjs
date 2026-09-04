@@ -23,6 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdcr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -65,10 +66,11 @@ function seedCommon(p, taskColumn) {
 async function setupCrashInWindow(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mdcr crash\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   // The merge LANDED on the canonical branch.
   execSync(`git ${GIT_ID} merge --no-ff --no-edit ${branch}`, { cwd: p.repo });
   // ...then removeWorktree + deleteBranch ran, but the process died BEFORE merge_done was recorded.
@@ -83,10 +85,11 @@ async function setupCrashInWindow(p) {
 async function setupPendingReview(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mdcr pending\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "in-flight work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath }); // committed, NOT merged
+  commitAll(worktreePath, `${p.file}`, GIT_ID); // committed, NOT merged
   p.worktreePath = worktreePath; p.branch = branch;
   seedCommon(p, "in_progress"); // NOT done → not a landed merge
 }

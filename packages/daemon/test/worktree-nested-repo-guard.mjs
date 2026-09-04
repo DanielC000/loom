@@ -43,6 +43,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-nrg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -77,10 +78,11 @@ function seed(p) {
 async function setupWorker(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# nrg\n");
-  execSync(`git init -q && git config user.email nrg@loom && git config user.name nrg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email nrg@loom && git config user.name nrg`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -91,7 +93,8 @@ function addNestedRepo(worktreePath, relDir) {
   const dir = path.join(worktreePath, relDir);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "unpushed.txt"), "unpushed work\n");
-  execSync(`git init -q && git config user.email ext@loom && git config user.name ext && git add . && git ${GIT_ID} commit -q -m "unpushed external work"`, { cwd: dir });
+  execSync(`git init -q && git config user.email ext@loom && git config user.name ext`, { cwd: dir });
+  commitAll(dir, "unpushed external work", GIT_ID);
   return dir;
 }
 
@@ -225,7 +228,8 @@ try {
   // The .gitignore is committed to MAIN (inherited by the worktree with no new branch commit) so the
   // nested clone stays 0-ahead/clean from git's point of view — exactly the incident's blind spot.
   fs.writeFileSync(path.join(K.repo, ".gitignore"), "_external/\n");
-  execSync(`git init -q && git config user.email nrg@loom && git config user.name nrg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: K.repo });
+  execSync(`git init -q && git config user.email nrg@loom && git config user.name nrg`, { cwd: K.repo });
+  commitAll(K.repo, "init", GIT_ID);
   const kWt = await createWorktree(K.repo, K.projId, K.taskId); // 0 commits ahead of main — worker "crashed" before committing
   K.worktreePath = kWt.worktreePath; K.branch = kWt.branch;
   const kNestedDir = addNestedRepo(K.worktreePath, path.join("_external", "cloned-repo"));

@@ -58,6 +58,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build daemon (pnpm build), 2) node test/merge-canonical-dirty-overlap-backstop.mjs
 import fs from "node:fs";
 import os from "node:os";
+import { commitAll } from "./_git-commit.mjs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
@@ -99,7 +100,8 @@ function initRepo(repo) {
   tmpDirs.push(repo);
   fs.writeFileSync(path.join(repo, "shared.txt"), "orig\n");
   fs.writeFileSync(path.join(repo, "unrelated.txt"), "orig-unrelated\n");
-  execSync(`git init -q && git config user.email cdo@loom && git config user.name cdo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email cdo@loom && git config user.name cdo`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -145,7 +147,7 @@ async function setup(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   tmpDirs.push(worktreePath);
   fs.writeFileSync(path.join(worktreePath, "shared.txt"), "worker-version\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "shared.txt work"`, { cwd: worktreePath });
+  commitAll(worktreePath, "shared.txt work", GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -168,7 +170,7 @@ try {
   // directly to canonical main, WITH the same trailer mergeBranchLocked's own squash stamps, so
   // findLandedSquashCommit can later recognize it as genuinely landed.
   fs.writeFileSync(path.join(E.repo, "shared.txt"), "worker-version\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "manual out-of-band resolve" -m "Loom-Worker-Branch: ${E.branch}"`, { cwd: E.repo });
+  commitAll(E.repo, ["manual out-of-band resolve", `Loom-Worker-Branch: ${E.branch}`], GIT_ID);
   check("(E) setup: canonical HEAD now carries the branch's exact content", readText(path.join(E.repo, "shared.txt")) === "worker-version\n");
   // THEN re-dirty the SAME path again — unstaged, unrelated content — mirroring "canonical then dirty on P".
   fs.writeFileSync(path.join(E.repo, "shared.txt"), "a further live edit, unrelated to the branch\n");
@@ -240,7 +242,7 @@ try {
     const wt = await createWorktree(repo, `cdo-d-proj-${sfx}`, `cdo-d-task-${sfx}`);
     tmpDirs.push(wt.worktreePath);
     fs.writeFileSync(path.join(wt.worktreePath, "shared.txt"), "worker-version-d\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "shared.txt work d"`, { cwd: wt.worktreePath });
+    commitAll(wt.worktreePath, "shared.txt work d", GIT_ID);
 
     fs.rmSync(path.join(repo, "shared.txt")); // UNSTAGED delete — never `git rm`'d
     const statusRaw = execSync("git status --porcelain --untracked-files=no", { cwd: repo }).toString();
@@ -324,7 +326,7 @@ try {
   const wtC = await createWorktree(C.repo, `cdo-c-proj-${sfx}`, `cdo-c-task-${sfx}`);
   tmpDirs.push(wtC.worktreePath);
   fs.writeFileSync(path.join(wtC.worktreePath, "shared.txt"), "worker-version-c\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "shared.txt work c"`, { cwd: wtC.worktreePath });
+  commitAll(wtC.worktreePath, "shared.txt work c", GIT_ID);
   fs.writeFileSync(path.join(C.repo, "shared.txt"), "LIVE UNCOMMITTED DOCTRINE C\n");
   const headCBefore = git(C.repo, "rev-parse HEAD");
 

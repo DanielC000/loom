@@ -33,6 +33,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -46,7 +47,8 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const repo = path.join(os.tmpdir(), `loom-stale-repokey-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# stale repoKey test repo\n");
-execSync(`git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=x@loom -c user.name=x");
 
 const now = new Date().toISOString();
 const db = new Db(path.join(tmpHome, "test.db"));

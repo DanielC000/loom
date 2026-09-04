@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrcs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -65,12 +66,13 @@ function seed(p, { withTask }) {
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mrcs\n");
-  execSync(`git init -q && git config user.email mrcs@loom && git config user.name mrcs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mrcs@loom && git config user.name mrcs`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function commitChange(worktreePath, file, content, msg) {
   fs.writeFileSync(path.join(worktreePath, file), content);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${msg}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${msg}`, GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

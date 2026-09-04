@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-brmm-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -73,7 +74,8 @@ try {
   // --- seed: a project with the DEFAULT column set (terminal="done", review="review", active="in_progress") ---
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# brmm\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   db.insertProject({ id: projId, name: "BRMM", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: mgrAgentId, projectId: projId, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
   db.insertAgent({ id: devAgentId, projectId: projId, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
@@ -84,7 +86,7 @@ try {
   //     died before finishing bookkeeping — exactly boot-reconcile.mjs's Scenario 1 setup. ---
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, file), "worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${file}`, GIT_ID);
   execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BRMM-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: repo });
   db.insertSession({ id: workerId, projectId: projId, agentId: devAgentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 

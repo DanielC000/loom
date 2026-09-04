@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ri-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -71,12 +72,13 @@ try {
   // --- setup: a real exited worker with a committed-but-unmerged worktree on disk ---
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# ri\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   const wt = await createWorktree(repo, ids.projId, ids.taskId);
   worktreePath = wt.worktreePath;
   const branch = wt.branch;
   fs.writeFileSync(path.join(worktreePath, "work.txt"), "in-flight worker change\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m work`, { cwd: worktreePath });
+  commitAll(worktreePath, "work", GIT_ID);
 
   db.insertProject({ id: ids.projId, name: "RI", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: ids.agentId, projectId: ids.projId, name: "t", startupPrompt: "", position: 0 });

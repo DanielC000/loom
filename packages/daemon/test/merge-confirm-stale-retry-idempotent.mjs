@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mcs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -79,7 +80,8 @@ function seed(p, gateCommand) {
 function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mcs\n");
-  execSync(`git init -q && git config user.email mcs@loom && git config user.name mcs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mcs@loom && git config user.name mcs`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -98,7 +100,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     fs.writeFileSync(path.join(worktreePath, A.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     A.worktreePath = worktreePath; A.branch = branch;
     seed(A, PASS_GATE);
 
@@ -130,7 +132,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     fs.writeFileSync(path.join(worktreePath, B.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     B.worktreePath = worktreePath; B.branch = branch;
     seed(B, undefined); // no gateCommand at all
 
@@ -144,7 +146,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     fs.writeFileSync(path.join(worktreePath, C.file), "work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${C.file}`, GIT_ID);
     C.worktreePath = worktreePath; C.branch = branch;
     seed(C, PASS_GATE);
 

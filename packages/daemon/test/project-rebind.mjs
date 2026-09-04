@@ -34,6 +34,7 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -54,7 +55,8 @@ const mkRepo = (tag) => {
   // an OS-atomic unique dir does (card 11a25f10).
   const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-rebind-${tag}-`));
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
-  execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
+  execSync(`git init -q`, { cwd: r });
+  commitAll(r, "init", "-c user.email=r@loom -c user.name=r");
   return r;
 };
 const repoA = mkRepo("A");

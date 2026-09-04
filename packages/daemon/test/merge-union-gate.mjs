@@ -31,6 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mug-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -72,7 +73,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mug\n");
   fs.writeFileSync(path.join(p.repo, "check.mjs"), LENIENT_CHECK);
-  execSync(`git init -q && git config user.email mug@loom && git config user.name mug && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mug@loom && git config user.name mug`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -94,11 +96,11 @@ try {
     A.worktreePath = worktreePath; A.branch = branch;
     // Worker commits a benign, unrelated change on its branch — never touches check.mjs.
     fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     // Main advances AFTER the branch was cut: check.mjs is tightened to require new-requirement.txt,
     // which NEITHER main NOR the branch actually provides — the union genuinely fails the new gate.
     fs.writeFileSync(path.join(A.repo, "check.mjs"), STRICT_CHECK);
-    execSync(`git add . && git ${GIT_ID} commit -q -m "tighten check.mjs"`, { cwd: A.repo });
+    commitAll(A.repo, "tighten check.mjs", GIT_ID);
     seed(A, "node check.mjs");
 
     const headBefore = git(A.repo, "rev-parse HEAD");
@@ -124,10 +126,10 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch;
     fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     // Main advances with an unrelated, harmless file — the union should merge clean and stay green.
     fs.writeFileSync(path.join(B.repo, "main-advance.txt"), "main moved forward\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance"`, { cwd: B.repo });
+    commitAll(B.repo, "main advance", GIT_ID);
     seed(B, "node check.mjs"); // still the lenient check — always passes
 
     const confirmB = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -146,9 +148,9 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch;
     fs.writeFileSync(path.join(worktreePath, "README.md"), "branch version\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "branch README"`, { cwd: worktreePath });
+    commitAll(worktreePath, "branch README", GIT_ID);
     fs.writeFileSync(path.join(C.repo, "README.md"), "main version\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main README"`, { cwd: C.repo });
+    commitAll(C.repo, "main README", GIT_ID);
     seed(C, "node check.mjs");
 
     const headBefore = git(C.repo, "rev-parse HEAD");
@@ -173,7 +175,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch;
     fs.writeFileSync(path.join(worktreePath, D.file), "already landed work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file}`, GIT_ID);
     // Land the branch into main out-of-band, carrying its deterministic Loom-Worker-Branch trailer,
     // WITHOUT deleting the branch or removing the worktree — the exact idempotent-re-confirm shape
     // merge-reject-notify-suppress.mjs scenario B and merge-orphaned-to-main.mjs (B) also exercise.

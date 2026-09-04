@@ -19,6 +19,7 @@ import { createWorktree, removeWorktree } from "../dist/git/worktrees.js";
 // Honors LOOM_PORT (same env the daemon's paths.ts reads) so a regression run can target an ISOLATED
 // daemon on a non-4317 port and leave a live :4317 daemon untouched. Defaults to 4317 as before.
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -55,7 +56,8 @@ function makeProject(label, gateCommand) {
   };
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), `# merge-gate ${label}\n`);
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
   return p;
 }
 
@@ -77,7 +79,7 @@ function seedRows(p, worktreePath, branch) {
 async function seedWorker(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), `work for ${p.projId}\n`);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   seedRows(p, worktreePath, branch);
   return { worktreePath, branch };
 }
@@ -86,9 +88,9 @@ async function seedWorker(p) {
 async function seedConflict(p) {
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, "README.md"), "branch version\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "branch README"`, { cwd: worktreePath });
+  commitAll(worktreePath, "branch README", GIT_ID);
   fs.writeFileSync(path.join(p.repo, "README.md"), "main version\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "main README"`, { cwd: p.repo });
+  commitAll(p.repo, "main README", GIT_ID);
   seedRows(p, worktreePath, branch);
   return { worktreePath, branch };
 }

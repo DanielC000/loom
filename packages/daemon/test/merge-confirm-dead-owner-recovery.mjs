@@ -32,6 +32,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdo-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -68,11 +69,12 @@ const repo = path.join(os.tmpdir(), `loom-mdo-repo-${sfx}`);
 try {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mdo\n");
-  execSync(`git init -q && git config user.email mdo@loom && git config user.name mdo && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mdo@loom && git config user.name mdo`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, "feat.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+  commitAll(worktreePath, "feat", GIT_ID);
 
   db.insertProject({ id: projId, name: "MDO", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });

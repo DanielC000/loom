@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mom-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -77,7 +78,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mom\n");
   // Configure a git identity so the daemon's PLAIN squash `git commit` (no `-c` overrides) has an author.
-  execSync(`git init -q && git config user.email mom@loom && git config user.name mom && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mom@loom && git config user.name mom`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -99,7 +101,7 @@ try {
     // Simulate the incident: the worker's work landed on MAIN directly (not the assigned branch). The
     // assigned branch stays at the old base — 0 commits ahead of the advanced main HEAD.
     fs.writeFileSync(path.join(A.repo, "orphaned.txt"), "work that went to main\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "orphaned commit on main"`, { cwd: A.repo });
+    commitAll(A.repo, "orphaned commit on main", GIT_ID);
     seed(A);
     reportEvent(A, "done"); // the worker REPORTED done — the orphan hard-flag signal
     check("(A) precondition: assigned branch is 0 commits ahead of main", git(A.repo, `rev-list --count HEAD..${branch}`) === "0");
@@ -123,7 +125,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     fs.writeFileSync(path.join(worktreePath, B.file), "already merged work\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     B.worktreePath = worktreePath; B.branch = branch;
     // Land the branch into main with its deterministic Loom-Worker-Branch trailer (an out-of-band confirm),
     // WITHOUT deleting the branch — the idempotent re-confirm shape.

@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -46,7 +47,8 @@ const { removeWorktree } = await import("../dist/git/worktrees.js");
 const repo = path.join(os.tmpdir(), `loom-wprompt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-prompt test\n");
-execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=wp@loom -c user.name=wp");
 
 const now = new Date().toISOString();
 const db = new Db();
@@ -211,7 +213,8 @@ try {
   repoR = path.join(os.tmpdir(), `loom-wprompt-repoR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoR, { recursive: true });
   fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos worker test\n");
-  execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoR });
+  execSync(`git init -q`, { cwd: repoR });
+  commitAll(repoR, "init", "-c user.email=wp@loom -c user.name=wp");
   db.insertProject({ id: "pWR", name: "WRefProj", repoPath: repoR, vaultPath: repoR, config: {}, createdAt: now, archivedAt: null, referenceRepos: [refRepoA, refRepoB] });
   db.insertAgent({ id: "agentDevRef", projectId: "pWR", name: "Dev", startupPrompt: "DEV_REF_BRIEF", position: 0, profileId: null });
   db.insertSession({
@@ -286,10 +289,10 @@ try {
   check("(6) fresh spawn never sets staleBase", wE1.staleBase === undefined);
   // Worker commits on its branch (>0 ahead ⇒ recutStaleReusedBranch's fail-safe leaves it untouched later).
   fs.writeFileSync(path.join(wE1.worktreePath, "README.md"), "branch version E\n");
-  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "E branch commit"`, { cwd: wE1.worktreePath });
+  commitAll(wE1.worktreePath, "E branch commit", "-c user.email=wp@loom -c user.name=wp");
   // Main advances with a CONFLICTING edit to the SAME file — the auto-forward attempt can't merge clean.
   fs.writeFileSync(path.join(repo, "README.md"), "main version E\n");
-  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "E main commit"`, { cwd: repo });
+  commitAll(repo, "E main commit", "-c user.email=wp@loom -c user.name=wp");
   db.setProcessState(wE1.id, "exited"); // frees the one-live-worker-per-task guard for the re-spawn below
 
   const wE2 = await svc.spawnWorker("mgr1", { taskId: taskE, agentId: "agentDev", kickoffPrompt: "KICKOFF_E2" });
@@ -357,7 +360,8 @@ try {
   const repoRev = path.join(os.tmpdir(), `loom-wprompt-repoRev-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoRev, { recursive: true });
   fs.writeFileSync(path.join(repoRev, "README.md"), "# review-spawn test — mainline\n");
-  execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoRev });
+  execSync(`git init -q`, { cwd: repoRev });
+  commitAll(repoRev, "init", "-c user.email=wp@loom -c user.name=wp");
   db.insertProject({ id: "pRev", name: "RevProj", repoPath: repoRev, vaultPath: repoRev, config: { orchestration: { maxConcurrentWorkers: 10 } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: "agentDevRev", projectId: "pRev", name: "Dev", startupPrompt: "DEV_REV_BRIEF", position: 0, profileId: null });
   db.insertSession({
@@ -373,7 +377,7 @@ try {
   const authorA = await svc.spawnWorker("mgrRev", { taskId: taskRevA, agentId: "agentDevRev", kickoffPrompt: "AUTHOR_A_KICKOFF" });
   worktreesRev.push(authorA.worktreePath);
   fs.writeFileSync(path.join(authorA.worktreePath, "feature.txt"), "author A change\n");
-  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "author A commit"`, { cwd: authorA.worktreePath });
+  commitAll(authorA.worktreePath, "author A commit", "-c user.email=wp@loom -c user.name=wp");
   const authorASha = execSync("git rev-parse HEAD", { cwd: authorA.worktreePath }).toString().trim();
 
   const reviewerA = await svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "REVIEW_A_KICKOFF", reviewOfWorkerSessionId: authorA.id });
@@ -401,7 +405,7 @@ try {
   const authorB = await svc.spawnWorker("mgrRev", { taskId: taskRevB, agentId: "agentDevRev", kickoffPrompt: "AUTHOR_B_KICKOFF" });
   worktreesRev.push(authorB.worktreePath);
   fs.writeFileSync(path.join(authorB.worktreePath, "feature-b.txt"), "author B change\n");
-  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "author B commit"`, { cwd: authorB.worktreePath });
+  commitAll(authorB.worktreePath, "author B commit", "-c user.email=wp@loom -c user.name=wp");
   const authorBSha = execSync("git rev-parse HEAD", { cwd: authorB.worktreePath }).toString().trim();
   db.setProcessState(authorB.id, "exited"); // the author is GONE — reviewOfTaskId must still resolve (no session lookup needed)
 

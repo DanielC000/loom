@@ -48,6 +48,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -60,7 +61,8 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const repo = path.join(os.tmpdir(), `loom-lead-recycle-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead self-recycle test repo\n");
-execSync(`git init -q && git add . && git -c user.email=lr@loom -c user.name=lr commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=lr@loom -c user.name=lr");
 
 const now = new Date().toISOString();
 const db = new Db();

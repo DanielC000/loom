@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -130,7 +131,8 @@ check("(d) Y→all delivers the full store", STORE_SKILLS.every((n) => namesIn(s
 const repo = path.join(os.tmpdir(), `loom-ss-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# skills-subset-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=ss@loom -c user.name=ss commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=ss@loom -c user.name=ss");
 
 const now = new Date().toISOString();
 const db = new Db();

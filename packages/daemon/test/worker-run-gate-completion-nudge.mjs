@@ -45,6 +45,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 // Disables runGateStep's one-time auto-extend (card 24642c3d) for the WHOLE file — a module-load-time
 // constant, so this must be set before gate-runner.js is ever imported (transitively, via service.js
@@ -143,7 +144,8 @@ const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncA
 function makeRepo() {
   const repo = mkdtempManaged("loom-wgn-repo-");
   fs.writeFileSync(path.join(repo, "README.md"), "# wgn\n");
-  execSync(`git init -q && git config user.email wgn@loom && git config user.name wgn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email wgn@loom && git config user.name wgn`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   return repo;
 }
 function seedWorker(projId, repo, gateCommand, worktreePath, branch, orchestrationExtra) {

@@ -36,6 +36,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mtr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -94,7 +95,8 @@ async function setup(sfx, { preLand } = {}) {
   const repo = path.join(reposDir, "repo");
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mtr\n");
-  execSync(`git init -q && git config user.email mtr@loom && git config user.name mtr && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mtr@loom && git config user.name mtr`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   const db = new Db();
   const mgrId = `mtr-mgr-${sfx}`, projId = `mtr-p-${sfx}`, taskId = `mtr-t-${sfx}`, workerId = `mtr-w-${sfx}`;
@@ -106,7 +108,7 @@ async function setup(sfx, { preLand } = {}) {
   db.insertTask({ id: taskId, projectId: projId, title: "MTR-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  commitAll(worktreePath, "feature.txt", GIT_ID);
   db.insertSession({ id: workerId, projectId: projId, agentId: `agent-mtr-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
 
   if (preLand) {

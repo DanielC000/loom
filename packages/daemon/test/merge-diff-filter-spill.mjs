@@ -23,6 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdfs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -47,7 +48,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# mdfs\n");
-  execSync(`git init -q && git config user.email mdfs@loom && git config user.name mdfs && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email mdfs@loom && git config user.name mdfs`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 function seed(db, p) {
@@ -78,7 +80,7 @@ try {
   {
     const { worktreePath, branch } = await createWorktree(SMALL.repo, SMALL.projId, SMALL.taskId);
     fs.writeFileSync(path.join(worktreePath, "small.txt"), "small change\n");
-    execSync(`git add . && git ${GIT_ID} commit -qm "small change"`, { cwd: worktreePath });
+    commitAll(worktreePath, "small change", GIT_ID);
     SMALL.worktreePath = worktreePath; SMALL.branch = branch;
   }
   seed(db, SMALL);
@@ -96,7 +98,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "mcp", "orchestration.ts"), bigBody);
     fs.mkdirSync(path.join(worktreePath, "packages", "web", "src"), { recursive: true });
     fs.writeFileSync(path.join(worktreePath, "packages", "web", "src", "App.tsx"), "web change\n");
-    execSync(`git add . && git ${GIT_ID} commit -qm "big + small + web change"`, { cwd: worktreePath });
+    commitAll(worktreePath, "big + small + web change", GIT_ID);
     BIG.worktreePath = worktreePath; BIG.branch = branch;
   }
   seed(db, BIG);

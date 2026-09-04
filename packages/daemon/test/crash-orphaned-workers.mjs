@@ -1,3 +1,4 @@
+import { commitAll } from "./_git-commit.mjs";
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Crash-orphaned worker recovery test (card 9fc41af5). NO claude, NO live daemon, NO process.exit —
 // drives deriveCrashOrphanedWorkers + SessionService.recoverCrashOrphanedWorkers directly, plus the
@@ -202,7 +203,8 @@ try {
   repoRoots.push(repo);
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# cow\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
   const realProjId = `cow-realproj-${sfx}`;
   const realAgentId = `cow-realag-${sfx}`;
   mkProject(realProjId, repo); mkAgent(realAgentId, realProjId);
@@ -250,7 +252,8 @@ try {
   repoRoots.push(repo2);
   fs.mkdirSync(repo2, { recursive: true });
   fs.writeFileSync(path.join(repo2, "README.md"), "# cow2\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo2 });
+  execSync(`git init -q`, { cwd: repo2 });
+  commitAll(repo2, "init", GIT_ID);
   const realProjId2 = `cow-realproj2-${sfx}`;
   mkProject(realProjId2, repo2); mkAgent(`cow-realag2-${sfx}`, realProjId2);
   const realTaskId2 = mkTask(`cow-realtask2-${sfx}`, realProjId2);
@@ -706,7 +709,8 @@ try {
     repoRoots.push(repo);
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), `# ${label}\n`);
-    execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+    execSync(`git init -q`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
     const projId = `cow-wtrisk-${label}-proj-${sfx}`;
     const agentId = `cow-wtrisk-${label}-ag-${sfx}`;
     mkProject(projId, repo);

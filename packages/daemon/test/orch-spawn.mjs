@@ -18,6 +18,7 @@ import { removeWorktree } from "../dist/git/worktrees.js";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const LOOM = process.env.LOOM_HOME;
@@ -37,7 +38,8 @@ const projId = `osp-proj-${sfx}`, agentId = `osp-agent-${sfx}`, taskId = `osp-ta
 const repo = path.join(os.tmpdir(), `loom-osp-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# orch-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=osp@loom -c user.name=osp commit -q -m "init"`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=osp@loom -c user.name=osp");
 const now = new Date().toISOString();
 
 // --- seed the daemon's (isolated) DB directly: project, agent, task(todo), manager session ---

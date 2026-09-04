@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4403;
 const tmpHome = path.join(os.tmpdir(), `loom-collapserepeat-home-${Date.now()}-${process.pid}`);
@@ -72,7 +73,8 @@ console.log(`[probe] hook server on 127.0.0.1:${PORT}`);
 const repo = path.join(os.tmpdir(), `loom-collapserepeat-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# probe\n");
-execSync(`git init -q && git add . && git -c user.email=p@p -c user.name=p commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=p@p -c user.name=p");
 
 const captures = new Map();
 const cap = (id) => { let c = captures.get(id); if (!c) { c = { raw: "" }; captures.set(id, c); } return c; };

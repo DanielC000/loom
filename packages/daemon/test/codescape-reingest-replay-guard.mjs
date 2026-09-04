@@ -31,6 +31,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { commitAll } from "./_git-commit.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-crrg-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -59,7 +60,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git config user.email crrg@loom && git config user.name crrg && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email crrg@loom && git config user.name crrg`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // ADDITIVE (both fixtures below share ONE homeDir/manifest, mirroring a real codescape install that has
@@ -105,7 +107,7 @@ async function landSquashWithoutFinalizing(p) {
   initRepo(p.repo, "# crrg\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, "feat.txt"), "landed work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m feat`, { cwd: worktreePath });
+  commitAll(worktreePath, "feat", GIT_ID);
   execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "CRRG-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });
   p.worktreePath = worktreePath;
   p.branch = branch;

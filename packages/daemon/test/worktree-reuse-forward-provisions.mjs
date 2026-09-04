@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-reuse-provision-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -36,7 +37,7 @@ const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const head = (cwd) => git(cwd, "rev-parse HEAD");
 const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
-  execSync(`git add . && git ${GIT_ID} commit -qm "${msg}"`, { cwd: dir });
+  commitAll(dir, `${msg}`, GIT_ID);
 };
 
 // A fake `provision` seam (ProvisionDeps.provision) that never runs a real installer — just records
@@ -57,7 +58,8 @@ try {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "package.json"), '{"name":"reuse-provision-fixture"}\n');
   fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lockfileVersion: '6.0'\n");
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 
   // ============================================================================================
   // (1) CLEAN AUTO-FORWARD on the DIR-PRESENT reuse path → provisionWorktreeDeps MUST fire.
@@ -72,7 +74,7 @@ try {
   // names.
   commitInto(repo, "main-advance.txt", "advance\n", "advance main");
   fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lockfileVersion: '6.0'\n# bumped\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "bump lockfile"`, { cwd: repo });
+  commitAll(repo, "bump lockfile", GIT_ID);
   const mainAfterAdvance = head(repo);
   check("(1 setup) branch is stale relative to current main", git(repo, `rev-list --count ${mainAfterAdvance}..${First.branch}`) === "1");
 

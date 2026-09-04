@@ -49,6 +49,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 const PORT = 4400;
 const ATTEMPTS = process.env.PROBE_ATTEMPTS !== undefined ? Number(process.env.PROBE_ATTEMPTS) : 3;
@@ -155,7 +156,8 @@ async function withSession(label, fn) {
   // discriminator is required, not just a per-process one.
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), `loom-repaintprobe-repo-${label}-`));
   fs.writeFileSync(path.join(repo, "README.md"), "# probe\n");
-  execSync(`git init -q && git add . && git -c user.email=p@p -c user.name=p commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", "-c user.email=p@p -c user.name=p");
   spawnedRepos.push(repo);
 
   const geometry = { cols: 120, rows: 40 };

@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bkw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -64,7 +65,8 @@ function seed(p) {
 function initRepo(repo, readme) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), readme);
-  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 // (a) live worker, work UNCOMMITTED, branch still at main (0 ahead) → Pass A misdetects as merged.
@@ -82,7 +84,7 @@ async function setupUnmergedCommit(p) {
   initRepo(p.repo, "# bkw unmerged-commit\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "committed to branch, not merged\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   p.worktreePath = worktreePath; p.branch = branch;
   seed(p);
 }
@@ -93,7 +95,7 @@ async function setupMerged(p, withClaudeNoise) {
   initRepo(p.repo, "# bkw merged\n");
   const { worktreePath, branch } = await createWorktree(p.repo, p.projId, p.taskId);
   fs.writeFileSync(path.join(worktreePath, p.file), "real merged work\n");
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${p.file}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${p.file}`, GIT_ID);
   // SQUASH-land it (what confirmWorkerMerge does): one commit on main carrying the Loom-Worker-Branch
   // trailer; the branch is NOT reachable from HEAD (no merge commit), so Pass A must detect via the trailer.
   execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "BKW-TASK" -m "Loom-Worker-Branch: ${branch}"`, { cwd: p.repo });

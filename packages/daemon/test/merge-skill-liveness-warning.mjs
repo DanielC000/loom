@@ -47,6 +47,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mslw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -78,7 +79,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo);
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mslw\n");
-  execSync(`git init -q && git config user.email mslw@loom && git config user.name mslw && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mslw@loom && git config user.name mslw`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -116,7 +118,7 @@ try {
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     mkdirp(path.join(worktreePath, "src"));
     fs.writeFileSync(path.join(worktreePath, "src", "index.ts"), "export const x = 1;\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add index"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add index", GIT_ID);
     seed(db, A, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
@@ -134,7 +136,7 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     writeSkillAssetFile(worktreePath, "brand-new-skill", "# brand new\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add brand-new-skill"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add brand-new-skill", GIT_ID);
     seed(db, B, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
@@ -161,7 +163,7 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     writeSkillAssetFile(worktreePath, "pristine-skill", "# pristine v2 (this merge's edit)\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: update pristine-skill"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: update pristine-skill", GIT_ID);
     seed(db, C, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
@@ -188,7 +190,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     writeSkillAssetFile(worktreePath, "customized-skill", "# shipped v2 (this merge's edit)\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: update customized-skill"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: update customized-skill", GIT_ID);
     seed(db, D, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
@@ -208,7 +210,7 @@ try {
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     writeSkillAssetFile(worktreePath, "skill-one", "# one\n");
     writeSkillAssetFile(worktreePath, "skill-two", "# two\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add two skills"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add two skills", GIT_ID);
     seed(db, E, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
@@ -227,7 +229,7 @@ try {
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     // No SKILL.md at all here — only a references/** file, so this diff is references-only by construction.
     writeSkillReferenceFile(worktreePath, "refs-only-skill", "note.md", "# a reference note\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "docs: add a reference note"`, { cwd: worktreePath });
+    commitAll(worktreePath, "docs: add a reference note", GIT_ID);
     seed(db, F, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
@@ -248,7 +250,7 @@ try {
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     writeSkillAssetFile(worktreePath, "mixed-skill", "# mixed\n");
     writeSkillReferenceFile(worktreePath, "mixed-skill", "note.md", "# a reference note\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feat: add mixed-skill with a reference"`, { cwd: worktreePath });
+    commitAll(worktreePath, "feat: add mixed-skill with a reference", GIT_ID);
     seed(db, G, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);

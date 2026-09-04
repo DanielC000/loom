@@ -42,6 +42,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup, cleanupPathSync } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgru-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -84,7 +85,8 @@ function makeRepo(p) {
   fs.mkdirSync(p.repo, { recursive: true });
   registerForCleanup(p.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
   fs.writeFileSync(path.join(p.repo, "README.md"), "# mgru\n");
-  execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+  execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru`, { cwd: p.repo });
+  commitAll(p.repo, "init", GIT_ID);
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -109,7 +111,7 @@ try {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
     A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${A.file}`, GIT_ID);
     seed(db, A, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(A.workerId);
@@ -141,7 +143,7 @@ try {
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
     B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${B.file}`, GIT_ID);
     seed(db, B, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(B.workerId);
@@ -149,7 +151,7 @@ try {
 
     // Main advances AFTER the self-check ran — the branch's history now misses this commit.
     fs.writeFileSync(path.join(B.repo, "main-advance-b.txt"), "main moved forward\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance b"`, { cwd: B.repo });
+    commitAll(B.repo, "main advance b", GIT_ID);
 
     const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
     check("(B) confirmWorkerMerge re-ran the gate for real", calls === 2);
@@ -170,10 +172,10 @@ try {
     const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
     C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${C.file}`, GIT_ID);
     // Main advances BEFORE the self-check runs — the branch is stale from the outset.
     fs.writeFileSync(path.join(C.repo, "main-advance-c.txt"), "main moved forward first\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance c"`, { cwd: C.repo });
+    commitAll(C.repo, "main advance c", GIT_ID);
     seed(db, C, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(C.workerId);
@@ -201,7 +203,7 @@ try {
         // headCurrent:false ("treat this result as UNVERIFIED for your current code") even though nothing
         // moves again after this.
         fs.writeFileSync(path.join(wt, "late.txt"), "late work\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "late commit"`, { cwd: wt });
+        commitAll(wt, "late commit", GIT_ID);
       }
       return { passed: true };
     };
@@ -209,7 +211,7 @@ try {
     const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${D.file}`, GIT_ID);
     seed(db, D, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(D.workerId);
@@ -234,7 +236,7 @@ try {
     const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
     E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, E.file), "work for E\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${E.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${E.file}`, GIT_ID);
     seed(db, E, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(E.workerId);
@@ -268,7 +270,7 @@ try {
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${F.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${F.file}`, GIT_ID);
     seed(db, F, "pnpm gate");
 
     const first = await sessions.runWorkerGate(F.workerId);
@@ -296,7 +298,7 @@ try {
     const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
     G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, G.file), "work for G\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${G.file}`, GIT_ID);
     seed(db, G, "pnpm gate");
 
     const selfCheck = await sessions.runWorkerGate(G.workerId);
@@ -305,7 +307,7 @@ try {
 
     // A NEW commit (B) lands on the branch itself AFTER the self-check validated A — main is untouched.
     fs.writeFileSync(path.join(worktreePath, "second-commit.txt"), "commit B\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "second commit B"`, { cwd: worktreePath });
+    commitAll(worktreePath, "second commit B", GIT_ID);
     const shaB = execSync("git rev-parse HEAD", { cwd: worktreePath }).toString().trim();
     check("(G) precondition: the branch really did advance past what was validated", shaB !== shaA);
 
@@ -329,7 +331,7 @@ try {
     const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
     H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, H.file), "work for H\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${H.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${H.file}`, GIT_ID);
     seed(db, H, "pnpm gate");
 
     const selfCheck = await preRestart.runWorkerGate(H.workerId);
@@ -357,7 +359,7 @@ try {
     const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
     I.worktreePath = worktreePath; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, I.file), "work for I\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${I.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${I.file}`, GIT_ID);
     const realMainHead = execSync("git rev-parse HEAD", { cwd: I.repo }).toString().trim();
 
     // A STALE (wrong) requireCanonicalHead — simulating "main advanced after the reuse decision was made".
@@ -398,7 +400,7 @@ try {
         // Main advances WHILE this FIRST gate "run" is in flight — after admission, before settle.
         // Simulates a human REST commit (or, on a peer project, a sibling merge) landing mid-gate.
         fs.writeFileSync(path.join(J.repo, "main-advance-during-gate.txt"), "main moved during the gate\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during gate"`, { cwd: J.repo });
+        commitAll(J.repo, "main advance during gate", GIT_ID);
       }
       return { passed: true };
     };
@@ -406,7 +408,7 @@ try {
     const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
     J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, J.file), "work for J\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${J.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${J.file}`, GIT_ID);
     seed(db, J, "pnpm gate");
 
     const mainHeadBeforeConfirm = execSync("git rev-parse HEAD", { cwd: J.repo }).toString().trim();
@@ -480,7 +482,7 @@ try {
     const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
     K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, K.file), "work for K\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${K.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${K.file}`, GIT_ID);
     seed(db, K, "pnpm gate");
 
     // Seize the ONE gate slot directly on the SAME semaphore confirmWorkerMerge itself uses, via an
@@ -524,7 +526,7 @@ try {
       // stand-in for a same-repo sibling's own squash (which typically lands AFTER this op is admitted,
       // not before), and for what this block does and does not prove.
       fs.writeFileSync(path.join(K.repo, "main-advance-during-queue.txt"), "main moved during the queue wait\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during queue wait"`, { cwd: K.repo });
+      commitAll(K.repo, "main advance during queue wait", GIT_ID);
 
       releaseHolder();
       await holderRun;
@@ -564,7 +566,7 @@ try {
     const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);
     L.worktreePath = worktreePath; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, L.file), "work for L\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${L.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${L.file}`, GIT_ID);
     const mainHeadAtCapture = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
 
     // The reuse path's own sequence: capture HEAD ONCE...
@@ -574,7 +576,7 @@ try {
     // ...then main advances — the EXACT window the old two-separate-reads code was vulnerable to (a
     // GitWriter REST commit/checkout can land at any time; it does not serialize on withCanonicalIndexLock).
     fs.writeFileSync(path.join(L.repo, "main-advance-l.txt"), "main moved after the single capture\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance l"`, { cwd: L.repo });
+    commitAll(L.repo, "main advance l", GIT_ID);
     const mainHeadAfterAdvance = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
     check("(L) precondition: main genuinely advanced past the captured sha", mainHeadAfterAdvance !== freshHead);
 
@@ -621,7 +623,7 @@ try {
     const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
     M.worktreePath = worktreePath; M.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, M.file), "work for M\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${M.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${M.file}`, GIT_ID);
 
     // Precondition: this branch's squash already landed on main — worktree deliberately retained (a
     // stale/racing confirm, or a manager holding it open for follow-up work), mirroring merge-union-gate.mjs
@@ -636,11 +638,11 @@ try {
         // Simulates the worktree SURVIVING the earlier land and gaining a genuinely new commit WHILE the
         // gate is in flight — the "not merely theoretical" case the card names.
         fs.writeFileSync(path.join(worktreePath, "m-followup.txt"), "new work after the earlier land\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "m followup during gate"`, { cwd: worktreePath });
+        commitAll(worktreePath, "m followup during gate", GIT_ID);
         // Main ALSO advances in the same window (a sibling merge, or a human REST commit) — the concrete
         // race `gateBaseMainHead` exists to catch.
         fs.writeFileSync(path.join(M.repo, "main-advance-during-gate-m.txt"), "main moved during the gate\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during gate m"`, { cwd: M.repo });
+        commitAll(M.repo, "main advance during gate m", GIT_ID);
       }
       return { passed: true };
     };
@@ -697,7 +699,7 @@ try {
     const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId);
     N.worktreePath = worktreePath; N.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, N.file), "work for N\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${N.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${N.file}`, GIT_ID);
 
     const landed = await mergeBranch(N.repo, branch, "MGRU-N initial land");
     check("(N) precondition: branch's initial work already landed in main", landed.ok === true);
@@ -710,7 +712,7 @@ try {
         // Nothing whatsoever is added to the worktree/branch — the discriminator this scenario exists to
         // prove: a TRUE pure duplicate must stay idempotent regardless of what main does elsewhere.
         fs.writeFileSync(path.join(N.repo, "unrelated-main-advance-n.txt"), "some other merge landed\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "unrelated main advance n"`, { cwd: N.repo });
+        commitAll(N.repo, "unrelated main advance n", GIT_ID);
       }
       return { passed: true };
     };
@@ -752,7 +754,7 @@ try {
     // conflicting main advance below will ALSO modify, differently, from the same base ("# mgru\n").
     fs.writeFileSync(path.join(worktreePath, "README.md"), "# mgru WORKER\n");
     fs.writeFileSync(path.join(worktreePath, O.file), "work for O\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${O.file} + conflicting readme edit"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${O.file} + conflicting readme edit`, GIT_ID);
     seed(db, O, "pnpm gate");
 
     let releaseHolder;
@@ -778,7 +780,7 @@ try {
       // Main advances WHILE queued, with a CONFLICTING edit to the same line the worker's own branch
       // already changed — the base line was "# mgru\n"; both sides now diverge from it differently.
       fs.writeFileSync(path.join(O.repo, "README.md"), "# mgru MAIN\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during queue (conflicting)"`, { cwd: O.repo });
+      commitAll(O.repo, "main advance during queue (conflicting)", GIT_ID);
 
       releaseHolder();
       await holderRun;
@@ -819,7 +821,7 @@ try {
         // green gate on that second call, not repeat a now-no-op write+commit (which would throw on
         // "nothing to commit").
         fs.writeFileSync(path.join(P.repo, "main-advance-during-gate-p.txt"), "a second, later main advance\n");
-        execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during gate (p)"`, { cwd: P.repo });
+        commitAll(P.repo, "main advance during gate (p)", GIT_ID);
       }
       return { passed: true };
     };
@@ -830,7 +832,7 @@ try {
     const { worktreePath, branch } = await createWorktree(P.repo, P.projId, P.taskId);
     P.worktreePath = worktreePath; P.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, P.file), "work for P\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${P.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${P.file}`, GIT_ID);
     seed(db, P, "pnpm gate");
 
     let releaseHolder;
@@ -855,7 +857,7 @@ try {
     } else {
       // FIRST main advance — WHILE queued, absorbed cleanly by admission's re-union (exactly (K)'s case).
       fs.writeFileSync(path.join(P.repo, "main-advance-during-queue-p.txt"), "the absorbable queue-wait advance\n");
-      execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during queue (p)"`, { cwd: P.repo });
+      commitAll(P.repo, "main advance during queue (p)", GIT_ID);
       const queueWaitSha = execSync("git rev-parse HEAD", { cwd: P.repo }).toString().trim();
 
       releaseHolder();
@@ -916,7 +918,8 @@ try {
     fs.mkdirSync(qRepo, { recursive: true });
     registerForCleanup(qRepo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
     fs.writeFileSync(path.join(qRepo, "README.md"), "# mgru-q\n");
-    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: qRepo });
+    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru`, { cwd: qRepo });
+    commitAll(qRepo, "init", GIT_ID);
 
     const qProjId = `mgru-q-proj-${sfx}`, qAgentId = `mgru-q-agent-${sfx}`;
     const db = new Db(); dbs.push(db);
@@ -936,7 +939,7 @@ try {
       const { worktreePath, branch } = await createWorktree(qRepo, qProjId, taskId);
       worktrees.push(worktreePath);
       fs.writeFileSync(path.join(worktreePath, file), `work for ${label}\n`);
-      execSync(`git add . && git ${GIT_ID} commit -q -m "${file}"`, { cwd: worktreePath });
+      commitAll(worktreePath, `${file}`, GIT_ID);
       db.insertTask({ id: taskId, projectId: qProjId, title: `MGRU-Q-${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
       db.insertSession({ id: mgrId, projectId: qProjId, agentId: qAgentId, engineSessionId: null, title: null, cwd: qRepo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
       db.insertSession({ id: workerId, projectId: qProjId, agentId: qAgentId, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
@@ -988,7 +991,7 @@ try {
     const { worktreePath, branch } = await createWorktree(R.repo, R.projId, R.taskId);
     R.worktreePath = worktreePath; R.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, R.file), "work for R\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${R.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${R.file}`, GIT_ID);
     seed(db, R, "pnpm gate");
 
     // Inject the throw at the exact vulnerable call site named in Code Review: the FIRST "build_gate"
@@ -1018,7 +1021,7 @@ try {
     const { worktreePath: r2Worktree, branch: r2Branch } = await createWorktree(R.repo, R.projId, r2TaskId);
     worktrees.push(r2Worktree);
     fs.writeFileSync(path.join(r2Worktree, "feature-r2.txt"), "work for r2\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "feature-r2.txt"`, { cwd: r2Worktree });
+    commitAll(r2Worktree, "feature-r2.txt", GIT_ID);
     db.insertTask({ id: r2TaskId, projectId: R.projId, title: "MGRU-R2-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
     db.insertSession({ id: r2MgrId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: R.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: r2WorkerId, projectId: R.projId, agentId: R.agentId, engineSessionId: null, title: null, cwd: r2Worktree, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: r2MgrId, taskId: r2TaskId, worktreePath: r2Worktree, branch: r2Branch });
@@ -1044,7 +1047,7 @@ try {
     const { worktreePath: calWorktree, branch: calBranch } = await createWorktree(CAL.repo, CAL.projId, CAL.taskId);
     CAL.worktreePath = calWorktree; CAL.branch = calBranch; worktrees.push(calWorktree);
     fs.writeFileSync(path.join(calWorktree, CAL.file), "work for rcal\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${CAL.file}"`, { cwd: calWorktree });
+    commitAll(calWorktree, `${CAL.file}`, GIT_ID);
     seed(db, CAL, "pnpm gate");
     const calStartedAt = performance.now();
     const calResult = await sessions.confirmWorkerMerge(CAL.mgrId, CAL.workerId);
@@ -1080,14 +1083,15 @@ try {
     fs.mkdirSync(S.repo, { recursive: true });
     registerForCleanup(S.repo); // bare origin repo — never cleaned by the worktrees[]/LOOM_HOME sweep below
     fs.writeFileSync(path.join(S.repo, "README.md"), "# mgru-s\n");
-    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: S.repo });
+    execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru`, { cwd: S.repo });
+    commitAll(S.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
     const { worktreePath, branch } = await createWorktree(S.repo, S.projId, S.taskId);
     S.worktreePath = worktreePath; S.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, S.file), "work for S\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "${S.file}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `${S.file}`, GIT_ID);
     // config: {} (no `orchestration.gateCommand` key at all) — mirrors the already-verified gateless setup
     // in merge-confirm-stale-retry-idempotent.mjs's own `seed(B, undefined)`, rather than this file's own
     // `seed()` (which always sets the key, just to `undefined`) — belt-and-braces against any resolver

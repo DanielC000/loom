@@ -44,6 +44,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync, execFileSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -432,7 +433,8 @@ check("(a) ON adds exactly the codescape key (everything else unchanged)",
 const repo = path.join(os.tmpdir(), `loom-cs-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# codescape-mcp-spawn test\n");
-execSync(`git init -q && git add . && git -c user.email=cs@loom -c user.name=cs commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", "-c user.email=cs@loom -c user.name=cs");
 
 const now = new Date().toISOString();
 const db = new Db();

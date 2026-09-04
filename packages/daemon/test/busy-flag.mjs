@@ -24,6 +24,7 @@ import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+import { commitAll } from "./_git-commit.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 // gateway's loopback write guard (card 4ff9a073) is active by the time this file runs — the daemon
@@ -57,7 +58,8 @@ async function waitForSession(sessionId, pred, timeoutMs, intervalMs = 250) {
 const dir = path.join(os.tmpdir(), `loom-busy-${Date.now()}-${process.pid}`);
 fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# Busy-flag test\n");
-execSync(`git init -q && git add . && git -c user.email=busy@loom -c user.name=busy commit -q -m "init"`, { cwd: dir });
+execSync(`git init -q`, { cwd: dir });
+commitAll(dir, "init", "-c user.email=busy@loom -c user.name=busy");
 
 // Hermeticity bookkeeping: only remove the trust key if WE added it.
 const realClaudeJson = path.join(os.homedir(), ".claude.json");

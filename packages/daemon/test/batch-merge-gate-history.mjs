@@ -55,6 +55,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -75,14 +76,15 @@ function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   registerForCleanup(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# bmgh\n");
-  execSync(`git init -q && git config user.email bmgh@loom && git config user.name bmgh && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+  execSync(`git init -q && git config user.email bmgh@loom && git config user.name bmgh`, { cwd: repo });
+  commitAll(repo, "init", GIT_ID);
 }
 
 async function cutBranch(repo, projId, label, file, content) {
   const taskId = `bmgh-task-${label}-${sfx}`;
   const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
   fs.writeFileSync(path.join(worktreePath, file), content);
-  execSync(`git add . && git ${GIT_ID} commit -q -m "${label}"`, { cwd: worktreePath });
+  commitAll(worktreePath, `${label}`, GIT_ID);
   return { taskId, branch, worktreePath };
 }
 
@@ -111,7 +113,7 @@ try {
     const bTaskId = `bmgh-task-b-${sfx}`;
     const { worktreePath: bWorktreePath, branch: bBranch } = await createWorktree(repo, projId, bTaskId);
     fs.writeFileSync(path.join(bWorktreePath, "feature-b.txt"), "work b\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "b" -m "Claude-Session: https://claude.ai/code/session_BMGHTRAILER"`, { cwd: bWorktreePath });
+    commitAll(bWorktreePath, ["b", "Claude-Session: https://claude.ai/code/session_BMGHTRAILER"], GIT_ID);
     const b = { taskId: bTaskId, branch: bBranch, worktreePath: bWorktreePath };
     worktrees.push(a.worktreePath, b.worktreePath);
     const wA = `bmgh-wkr-a-${sfx}`, wB = `bmgh-wkr-b-${sfx}`;

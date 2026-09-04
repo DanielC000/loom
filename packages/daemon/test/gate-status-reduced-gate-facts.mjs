@@ -28,6 +28,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { cleanupPathSync, registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gsrgf-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -102,7 +103,8 @@ try {
     initRepo(R);
     fs.writeFileSync(path.join(R.repo, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v1\");\n");
     fs.writeFileSync(path.join(R.repo, "packages", "daemon", "test", `${NOT_HERMETIC_NAME}.mjs`), "// needs a live daemon\nconsole.log(\"v1\");\n");
-    execSync(`git init -q && git config user.email gsrgf@loom && git config user.name gsrgf && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R.repo });
+    execSync(`git init -q && git config user.email gsrgf@loom && git config user.name gsrgf`, { cwd: R.repo });
+    commitAll(R.repo, "init", GIT_ID);
     const db = new Db(); dbs.push(db);
     const pty = makeSpyPty();
     const fakeGate = async () => { await sleep(SLOW_GATE_MS); return { passed: true }; };
@@ -111,7 +113,7 @@ try {
     R.worktreePath = worktreePath; R.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", "kickoff-real.mjs"), "// an ordinary hermetic test\nconsole.log(\"v2\");\n");
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "test", `${NOT_HERMETIC_NAME}.mjs`), "// needs a live daemon\nconsole.log(\"v2\");\n");
-    execSync(`git add . && git ${GIT_ID} commit -q -m "test: update kickoff-real + ${NOT_HERMETIC_NAME}"`, { cwd: worktreePath });
+    commitAll(worktreePath, `test: update kickoff-real + ${NOT_HERMETIC_NAME}`, GIT_ID);
     seed(db, R);
 
     const opId = await settleTrackedMerge(sessions, R.mgrId, R.workerId);
@@ -136,7 +138,7 @@ try {
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
-    execSync(`git add . && git ${GIT_ID} commit -q -m "fix: correct isReady threshold"`, { cwd: worktreePath });
+    commitAll(worktreePath, "fix: correct isReady threshold", GIT_ID);
     seed(db, F);
 
     const opId = await settleTrackedMerge(sessions, F.mgrId, F.workerId);

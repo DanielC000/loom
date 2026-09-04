@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrw-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -50,7 +51,8 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const repo = path.join(os.tmpdir(), `loom-mrw-repo-${sfx}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# mrw\n");
-execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+execSync(`git init -q`, { cwd: repo });
+commitAll(repo, "init", GIT_ID);
 
 const projId = `mrw-proj-${sfx}`;
 // db test constructor: (db, opts, control) — the escalate threshold is lowered to 2 attempts so the
