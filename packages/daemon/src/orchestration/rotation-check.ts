@@ -166,22 +166,25 @@ export interface ByteCheckInput {
   preEditBytes: number;
 }
 
+/**
+ * The rules-file union input — ONE field, not two (card 1083e8f4, Finding 2). Before this card,
+ * `RotationCheckInput` carried `rulesText`/`rulesInfo` as two SEPARATE fields with an invariant
+ * (`rulesInfo.readable === true` implies `rulesText !== null`) that nothing enforced — `checkRotation`'s
+ * marker union derived from `rulesText` alone while `rulesCheck` derived from `rulesInfo` alone, so a
+ * caller (or fixture) that set one without the other silently produced `rulesCheck.ok:true` on a union
+ * that never happened. Folding both into one value makes that divergence structurally impossible: the
+ * union source and the reported check are now the SAME read of the SAME field. `null`/omitted means no
+ * rulesPath was supplied at all — the check stays silent, exactly as before this card. `{resolvedPath,
+ * text}` is a successful read (`resolvedPath` mirrors `ArchiveInfo.path`, card f596215c); `{resolvedPath,
+ * error}` is a supplied-but-unreadable path, self-diagnosing via `resolvedPath` + `error`.
+ */
+export type RulesInput = { resolvedPath: string; text: string } | { resolvedPath: string; error: string } | null;
+
 export interface RotationCheckInput {
   activeText: string;
-  /** Union source for markers (present in activeText OR rulesText) — null (the common case) means no
-   *  union, every marker must be found in activeText alone. This is ALSO what a failed rules-file read
-   *  degrades to (see `rulesInfo` below) — `checkMarkers` itself can't tell "no rulesPath supplied" from
-   *  "rulesPath supplied but unreadable," which is exactly the reporting gap card 870edbcf closes. */
-  rulesText?: string | null;
-  /** Present (non-null) whenever a caller supplied a `rulesPath` at all, regardless of whether the read
-   *  succeeded — mirrors `archive`'s optional-input shape so an unreadable rulesPath gets the SAME kind
-   *  of symmetric reporting as an unreadable archivePath (card 870edbcf), instead of the union silently
-   *  degrading to active-only with no trace. `readable:false` means `rulesText` above is null NOT because
-   *  no rulesPath was given, but because reading it failed — `resolvedPath` names exactly what was tried,
-   *  so a wrong-based path is self-diagnosing (mirrors `ArchiveInfo.path`, card f596215c). Omit/null
-   *  entirely when no rulesPath was supplied at all — the check then stays silent, exactly as before this
-   *  card. */
-  rulesInfo?: { resolvedPath: string; readable: boolean } | null;
+  /** Union source for markers (present in activeText OR rules.text) AND the source for `rulesCheck` below
+   *  — see `RulesInput`'s own doc for why this is now one field instead of two. */
+  rules?: RulesInput;
   markers: readonly RotationMarker[];
   /** "" disables the LIVE-COMMITMENTS-style floor check entirely for this seat. */
   commitmentsHeading: string;
@@ -224,27 +227,24 @@ export interface RotationCheckResult {
   unconfiguredWarning?: string;
 }
 
+/** Derives `rulesCheck` from a `RulesInput` — the ONE place this mapping happens, shared by `checkRotation`
+ *  below AND `runResumeDocCheck`'s `docFound:false` early return (card 1083e8f4, Finding 1), so the two
+ *  paths can never disagree about what a supplied `rules` value means. */
+function deriveRulesCheck(rules: RulesInput | undefined): RotationCheckResult["rulesCheck"] {
+  if (!rules) return { checked: false, ok: true };
+  if ("text" in rules) return { checked: true, ok: true, resolvedPath: rules.resolvedPath };
+  return { checked: true, ok: false, resolvedPath: rules.resolvedPath, reason: rules.error };
+}
+
 /** Pure — takes already-read file contents/stats, never touches the filesystem itself (the MCP tool
  *  handler owns all fs I/O and error handling; this function never throws). */
 export function checkRotation(input: RotationCheckInput): RotationCheckResult {
-  const rulesText = input.rulesText ?? null;
+  const rulesText = input.rules && "text" in input.rules ? input.rules.text : null;
   const { missing, satisfiedBy } = checkMarkers(input.activeText, input.markers, rulesText);
   const markerSources: Record<string, "active" | "rules"> = {};
   for (const [token, src] of satisfiedBy) markerSources[token] = src;
 
-  let rulesCheck: RotationCheckResult["rulesCheck"];
-  if (!input.rulesInfo) {
-    rulesCheck = { checked: false, ok: true };
-  } else if (input.rulesInfo.readable) {
-    rulesCheck = { checked: true, ok: true, resolvedPath: input.rulesInfo.resolvedPath };
-  } else {
-    rulesCheck = {
-      checked: true,
-      ok: false,
-      resolvedPath: input.rulesInfo.resolvedPath,
-      reason: `rules path does not exist or is unreadable: ${input.rulesInfo.resolvedPath}`,
-    };
-  }
+  const rulesCheck = deriveRulesCheck(input.rules);
 
   const commitmentsEnabled = input.commitmentsHeading !== "";
   const liveCommitments = commitmentsEnabled
@@ -372,6 +372,23 @@ export interface RunResumeDocCheckResult extends RotationCheckResult {
 export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocCheckResult {
   const configured = opts.markers.length > 0 || opts.commitmentsHeading !== "";
 
+  // Resolved BEFORE the docFound:false early return below (card 1083e8f4, Finding 1) — this used to be
+  // resolved only on the found-doc path, so the early return hardcoded `rulesCheck: {checked:false,
+  // ok:true}` regardless of whether `opts.rulesPath` was actually supplied, contradicting the field's own
+  // doc ("checked:false means no rulesPath was supplied at all") for a seat that hasn't written its resume
+  // doc yet. Resolving it once, up here, and feeding BOTH branches through the same `deriveRulesCheck`
+  // (via `checkRotation` on the found-doc path, directly below on the not-found path) makes the two paths
+  // structurally unable to diverge.
+  let rules: RulesInput = null;
+  if (opts.rulesPath) {
+    try {
+      const text = fs.readFileSync(opts.rulesPath, "utf8");
+      rules = { resolvedPath: opts.rulesPath, text };
+    } catch {
+      rules = { resolvedPath: opts.rulesPath, error: `rules path does not exist or is unreadable: ${opts.rulesPath}` };
+    }
+  }
+
   let activeText: string | null;
   try {
     activeText = fs.readFileSync(opts.resumeDocPath, "utf8");
@@ -386,7 +403,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       ok: false,
       missingMarkers: opts.markers.map((m) => m.token),
       markerSources: {},
-      rulesCheck: { checked: false, ok: true },
+      rulesCheck: deriveRulesCheck(rules),
       liveCommitments: {
         enabled: opts.commitmentsHeading !== "",
         count: null,
@@ -400,18 +417,6 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
     };
     if (!configured) result.unconfiguredWarning = UNCONFIGURED_WARNING;
     return result;
-  }
-
-  let rulesText: string | null = null;
-  let rulesInfo: { resolvedPath: string; readable: boolean } | null = null;
-  if (opts.rulesPath) {
-    try {
-      rulesText = fs.readFileSync(opts.rulesPath, "utf8");
-      rulesInfo = { resolvedPath: opts.rulesPath, readable: true };
-    } catch {
-      rulesText = null;
-      rulesInfo = { resolvedPath: opts.rulesPath, readable: false };
-    }
   }
 
   let archive: ArchiveInfo | null = null;
@@ -438,7 +443,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   }
 
   const result = checkRotation({
-    activeText, rulesText, rulesInfo, markers: opts.markers,
+    activeText, rules, markers: opts.markers,
     commitmentsHeading: opts.commitmentsHeading, commitmentsFloor: opts.commitmentsFloor,
     archive, byteCheck,
   });

@@ -334,6 +334,65 @@ function tmpFile(name, content) {
   fs.rmSync(dangerDoc, { force: true });
 }
 
+// ── rulesCheck on the docFound:false path must NOT contradict its own doc (card 1083e8f4, Finding 1) ──
+// The observed defect: `runResumeDocCheck`'s early return hardcoded `rulesCheck: { checked: false, ok:
+// true }` before `opts.rulesPath` was ever read — so a seat that has NOT yet written its resume doc AND
+// passes a supplied-but-unreadable rulesPath was told "you didn't pass one," the OPPOSITE of card
+// 870edbcf's own diagnosis for exactly this shape. THE DANGEROUS CELL below is docFound:false + a
+// supplied rulesPath that cannot be read.
+{
+  const missingDocPath2 = tmpFile("missing2.md", null); // never written — proves docFound:false
+  const bogusRulesPath2 = path.join(os.tmpdir(), `loom-rot-bogus-rules2-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
+  // never written — proves the supplied-but-unreadable branch
+
+  const r = runResumeDocCheck({
+    resumeDocPath: missingDocPath2,
+    markers: [{ token: "x" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPath: bogusRulesPath2,
+  });
+  check("docFound:false + supplied rulesPath: docFound is false", r.docFound === false);
+  check("docFound:false + supplied rulesPath: rulesCheck.checked is true (a rulesPath WAS supplied — not the pre-fix false)", r.rulesCheck?.checked === true);
+  check("docFound:false + supplied rulesPath: rulesCheck.ok is false (it could not be read)", r.rulesCheck?.ok === false);
+  check("docFound:false + supplied rulesPath: resolvedPath names exactly the path that was tried", r.rulesCheck?.resolvedPath === bogusRulesPath2);
+
+  // POSITIVE CONTROL: docFound:false + NO rulesPath at all must stay silent (checked:false) — proves the
+  // checks above discriminate "supplied" from "not supplied," not just always reporting true.
+  const rNoRules = runResumeDocCheck({
+    resumeDocPath: missingDocPath2,
+    markers: [{ token: "x" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("docFound:false + no rulesPath: rulesCheck stays silent (checked:false) — the control proving the cell above isn't vacuous", rNoRules.rulesCheck?.checked === false && rNoRules.rulesCheck?.ok === true);
+}
+
+// ── checkRotation: the marker-union source and rulesCheck now derive from ONE shared input, not two
+// (card 1083e8f4, Finding 2) — `rules` replaces the old separate `rulesText`/`rulesInfo` fields, so a
+// marker-union hit and rulesCheck.ok can never disagree about whether the rules file was actually read.
+{
+  const rGood = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "SHARED_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/some/path.md", text: "...SHARED_MARKER..." },
+  });
+  check("checkRotation: rules.text satisfies the marker union", rGood.markerSources.SHARED_MARKER === "rules");
+  check("checkRotation: the SAME `rules` input also reports rulesCheck.ok:true", rGood.rulesCheck.checked === true && rGood.rulesCheck.ok === true);
+
+  const rBad = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "SHARED_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/some/bogus.md", error: "rules path does not exist or is unreadable: /some/bogus.md" },
+  });
+  check("checkRotation: an unreadable `rules` input cannot satisfy the marker union", rBad.missingMarkers.includes("SHARED_MARKER"));
+  check("checkRotation: the SAME unreadable `rules` input reports rulesCheck.ok:false", rBad.rulesCheck.checked === true && rBad.rulesCheck.ok === false);
+
+  const rNone = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "SHARED_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("checkRotation: omitted `rules` ⇒ rulesCheck stays silent (checked:false)", rNone.rulesCheck.checked === false && rNone.rulesCheck.ok === true);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, and the impure fs wrapper never throws on a missing doc — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
