@@ -385,7 +385,11 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     healthProbeFailureThreshold: 3,
   });
   await sup.start([]); // NO repoPaths — the health probe must arm anyway
-  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
+  // Card 4e0df6ce: with ZERO repoPaths, start()'s own registration-retry loop never runs at all, so
+  // (unlike every OTHER scenario in this file) `await sup.start(...)` returns with essentially no
+  // cushion for the self-reporting path's async bound-port confirmation — wait for getPort() too, not
+  // just the spawn count, or `portBefore` below can race a still-in-flight report and read `null`.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1 && sup.getPort() !== null, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
   const portBefore = sup.getPort();
   check("(4) serve still spawns normally with zero repoPaths", sup.getSpawnCount() === 1 && typeof pidBefore === "number");

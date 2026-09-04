@@ -172,7 +172,14 @@ check("(a) exactly 2 calls recorded (1 ingest + 1 serve)", calls1.length === 2);
 check("(a) call 1 is 'ingest /fake/repo/one'", calls1[0]?.cmd === "ingest" && calls1[0]?.repoPath === "/fake/repo/one");
 check("(a) call 2 is 'serve'", calls1[1]?.cmd === "serve");
 check("(a) getPort() returns a live numeric port", typeof sup.getPort() === "number" && sup.getPort() > 0);
-check("(a) the serve call's --port matches getPort()", Number(calls1[1]?.port) === sup.getPort());
+// Card 4e0df6ce: the FIRST spawn of a fresh instance now takes the self-reporting path — the recorded
+// `--port` arg is the LITERAL "0" the daemon requested, never the real bound port (that's the whole
+// point: nobody but the child itself ever picks/binds it). `getPort()` reflects the port SELF-REPORTED
+// back on stdout instead, confirmed distinct from "0" and matching the real bound port the fixture's own
+// HTTP listener answers on (already proven live by the surrounding registerProject/resolveProjectId
+// checks below, which round-trip real requests against exactly this port).
+check("(a) the serve call requested --port 0 (self-reporting path, capable fixture)", calls1[1]?.port === "0");
+check("(a) getPort() is the SELF-REPORTED port, not the literal 0 requested", sup.getPort() !== 0 && sup.getPort() > 0);
 check("(a) getPid() returns the live child's pid", typeof sup.getPid() === "number" && sup.getPid() > 0);
 check("(a) CWD CONTRACT: ingest ran from the shared homeDir",
   path.resolve(calls1[0]?.cwd || "") === path.resolve(homeDir));
@@ -436,7 +443,16 @@ for (let expected = 1; expected <= expectedSpawns; expected++) {
 // The last kill above is the one that exhausts restartAttempts — scheduleRestart's give-up branch runs
 // SYNCHRONOUSLY off that death's exit event and never reaches a setTimeout, so this settles quickly and,
 // once null, stays null (no pending timer could ever flip it back).
-for (let i = 0; i < 100 && badBinSup.getPort() !== null; i++) await sleep(50);
+//
+// Card 4e0df6ce: wait on BOTH getPort() AND getPid() — under the self-reporting path, `this.port` can
+// already read `null` from the very START of this scenario (every spawn attempt here gets killed before
+// it ever reports a port, so `this.port` never once left `null`), which would make a `getPort()`-only
+// wait vacuously "done" on its very first check — BEFORE the last kill's own exit event has actually been
+// delivered/processed (a real, if brief, async gap between `process.kill()` and Node's own `exit` event
+// for the target process) — and read a still-live `getPid()` moments too early. `getPid()` only ever
+// clears once THAT death is actually processed, so waiting on it too closes the gap regardless of which
+// spawn (if any) ever made it to a confirmed port.
+for (let i = 0; i < 100 && (badBinSup.getPort() !== null || badBinSup.getPid() !== null); i++) await sleep(50);
 
 check("(bad-bin) after exhausting the bounded restart schedule, getPort() is null (gave up, NOT phantom-alive)",
   badBinSup.getPort() === null);
@@ -534,6 +550,76 @@ check("(d-hang) card daaf7fc9: a genuine client-side abort IS flagged timedOut:t
 check(`(d-hang) card daaf7fc9: the error names our own bound (${HUNG_TIMEOUT_MS}ms)`, typeof hungReg.error === "string" && hungReg.error.includes(String(HUNG_TIMEOUT_MS)));
 hungServer.closeAllConnections();
 await new Promise((resolve) => hungServer.close(resolve));
+
+// ===================== (e) card 4e0df6ce requirement 2: request() targets the REPORTED port =====================
+// A fresh instance takes the self-reporting path (default fixture is capable) — the daemon requests
+// "--port 0" (never itself a connectable target), so if `request()` ever built its outgoing URL from that
+// REQUESTED value instead of the port SELF-REPORTED back on stdout, every control-plane call would target
+// port 0 and fail immediately. This proves the opposite with a REAL round trip against the fixture's own
+// HTTP listener, which is bound to (and only to) the reported port.
+{
+  const reqHomeDir = path.join(tmpHome, "request-targets-reported-home");
+  const reqSup = new CodescapeSupervisor({ homeDir: reqHomeDir, ingestTimeoutMs: 15_000 });
+  await reqSup.start(["/fake/repo/request-target"]);
+  for (let i = 0; i < 100 && reqSup.getPort() === null; i++) await sleep(50);
+  const reportedPort = reqSup.getPort();
+  check("(e) getPort() resolved to a real, non-zero port (never the literal '0' requested)",
+    typeof reportedPort === "number" && reportedPort > 0);
+  const reqResult = await reqSup.registerProject("/fake/repo/request-target-direct");
+  check("(e) request() (via registerProject) actually reaches the live server on the REPORTED port — a call against port 0 would resolve ok:false immediately (see section (d) above)",
+    reqResult.ok === true);
+  reqSup.stop();
+}
+
+// ===================== (f) card 4e0df6ce blocker 1: capability detection + fallback for an installed =====
+// ===================== codescape that hard-exits on --port 0 (REAL SPAWN against a fixture standing in ====
+// ===================== for a build predating f7a5684 — never a mocked exec) =================================
+{
+  const oldBinHomeDir = path.join(tmpHome, "old-bin-home");
+  const oldBinCallsFile = path.join(oldBinHomeDir, "fake-codescape-calls.jsonl");
+  const readOldBinCalls = () => fs.existsSync(oldBinCallsFile)
+    ? fs.readFileSync(oldBinCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+  const readOldBinServeCalls = () => readOldBinCalls().filter((c) => c.cmd === "serve");
+  process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED = "1"; // fixture stands in for a pre-f7a5684 install
+  const oldBinSup = new CodescapeSupervisor({ homeDir: oldBinHomeDir, ingestTimeoutMs: 15_000 });
+  await oldBinSup.start(["/fake/repo/old-bin"]);
+  for (let i = 0; i < 100 && oldBinSup.getPort() === null; i++) await sleep(50);
+
+  check("(f) capability detection confirms the installed binary does NOT support --port 0",
+    oldBinSup.getPortReportCapable() === false);
+  const oldBinServeCalls = readOldBinServeCalls(); // never index the raw calls file — ingest() also records
+  check("(f) the FIRST serve attempt requested --port 0 and was genuinely rejected (real spawn, real exit 1 — never mocked)",
+    oldBinServeCalls[0]?.port === "0" && oldBinServeCalls[0]?.rejected === "port-zero-unsupported");
+  check("(f) the FALLBACK attempt used a real, explicit, non-zero port — never 0",
+    oldBinServeCalls[1]?.port !== "0" && Number(oldBinServeCalls[1]?.port) > 0);
+  check("(f) getPort() reflects that explicit fallback port, live and connectable",
+    oldBinSup.getPort() === Number(oldBinServeCalls[1]?.port));
+
+  // Card 4e0df6ce's own removal-polarity warning, made concrete: without the fallback this exact scenario
+  // is a TOTAL OUTAGE (the --port 0 rejection above is real, not simulated-away) — prove serve genuinely
+  // RECOVERED, not just that getPort() reads a number, by exercising a real control-plane call against it.
+  const fallbackReg = await oldBinSup.registerProject("/fake/repo/old-bin-direct");
+  check("(f) serve genuinely recovered — a real control-plane call succeeds against the fallback port",
+    fallbackReg.ok === true);
+
+  // Restart-on-death on the fallback path reuses the SAME explicit port, exactly as it always did before
+  // this card (blocker 1: the legacy path's deliberately-tolerated narrow TOCTOU is otherwise unchanged) —
+  // and never re-attempts the now-confirmed-unsupported --port 0 (portReportCapable is sticky).
+  const oldBinPortBefore = oldBinSup.getPort();
+  const oldBinPidBefore = oldBinSup.getPid();
+  process.kill(oldBinPidBefore);
+  for (let i = 0; i < 100 && (oldBinSup.getPid() === oldBinPidBefore || readOldBinServeCalls().length < 3); i++) await sleep(50);
+  check("(f) restart-on-death on the fallback path reuses the SAME explicit port",
+    oldBinSup.getPort() === oldBinPortBefore);
+  check("(f) restart-on-death produced a genuinely new pid",
+    oldBinSup.getPid() !== oldBinPidBefore && oldBinSup.getPid() !== null);
+  check("(f) the restart did NOT re-attempt --port 0 (capability stays confirmed-false, sticky, never re-probed)",
+    readOldBinServeCalls()[2]?.port !== "0");
+
+  oldBinSup.stop();
+  delete process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED;
+}
 
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;

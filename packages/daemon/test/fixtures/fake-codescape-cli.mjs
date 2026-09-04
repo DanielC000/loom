@@ -8,7 +8,13 @@
 //     With `--out`, ALSO writes a tiny stub JSON file there (mirrors the real CLI writing a graph.json) so
 //     a downstream `fs.existsSync(graphPath)` gate (codescapeMcpServer) sees a real file.
 //   - `serve --port <p>`  — records the call, then stays alive (a long-lived foreground process, exactly
-//     like the real `serve`) until the supervisor kills it. Card 088afc94 (P4 dynamic registration): ALSO
+//     like the real `serve`) until the supervisor kills it. Card 4e0df6ce: DEFAULT behavior models a
+//     capable (>= f7a5684) installed binary — `--port 0` binds an OS-assigned ephemeral port (Node's own
+//     `listen(0, ...)` semantics), and on EVERY successful invocation (any port, not just 0) the fixture
+//     prints the self-reported-bound-port contract line on stdout: `{"url":"http://127.0.0.1:<port>",
+//     "port":<port>}`. Env `FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED=1` instead models an OLDER, pre-f7a5684
+//     binary: `--port 0` is rejected outright (exit 1, stderr-only banner, no server, before anything
+//     else), and no invocation of this fixture (any port) ever prints the report line. Card 088afc94 (P4 dynamic registration): ALSO
 //     binds a minimal real HTTP listener on that port answering `POST /project` — a simple counter-based
 //     id per unique repoRoot (never codescape's real slugify+sha algorithm; this fixture only needs to be
 //     internally CONSISTENT, not to reimplement their hash), `mode:"ingested"` the first time a repoRoot
@@ -128,9 +134,22 @@ if (args[0] === "ingest") {
   setInterval(() => {}, 1 << 30);
 } else if (args[0] === "serve") {
   const portIdx = args.indexOf("--port");
-  const port = portIdx === -1 ? null : Number(args[portIdx + 1]);
-  record({ cmd: "serve", port: portIdx === -1 ? null : args[portIdx + 1] });
-  if (port) {
+  const portArg = portIdx === -1 ? null : args[portIdx + 1];
+  const requestedPort = portArg == null ? null : Number(portArg);
+  // Card 4e0df6ce: env FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED=1 makes this fixture stand in for a codescape
+  // build PREDATING f7a5684 (the real shape today, per the Codescape peer's own delivered contract):
+  // `--port 0` is rejected OUTRIGHT — exit 1, stderr only, no server ever starts, before doing anything
+  // else — and this "old" binary never emits the self-reported-bound-port JSON contract line on stdout AT
+  // ALL, even on an ordinary explicit-port invocation (that reporting was added in the SAME commit as
+  // --port 0 support), unlike the capable default behavior below.
+  const portZeroUnsupported = process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED === "1";
+  if (portZeroUnsupported && portArg === "0") {
+    record({ cmd: "serve", port: portArg, rejected: "port-zero-unsupported" });
+    process.stderr.write(`invalid --port "0"\n`);
+    process.exit(1);
+  }
+  record({ cmd: "serve", port: portArg });
+  if (requestedPort != null) {
     const registered = new Map(); // repoRoot -> id
     let nextId = 1;
     const server = http.createServer((req, res) => {
@@ -203,7 +222,16 @@ if (args[0] === "ingest") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "not found" }));
     });
-    server.listen(port, "127.0.0.1");
+    server.listen(requestedPort, "127.0.0.1", () => {
+      // Card 4e0df6ce: the self-reported-bound-port contract — printed on stdout on EVERY successful
+      // `serve` invocation (NOT gated to --port 0; both fields derive from the real bound address, never
+      // the requested one), unless this fixture is standing in for an old, pre-f7a5684 binary
+      // (portZeroUnsupported), which never had this capability at all.
+      if (!portZeroUnsupported) {
+        const bound = server.address().port;
+        console.log(JSON.stringify({ url: `http://127.0.0.1:${bound}`, port: bound }));
+      }
+    });
   }
   // Long-lived foreground, like the real `serve` — stays up until killed.
   setInterval(() => {}, 1 << 30);

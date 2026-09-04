@@ -91,6 +91,17 @@ const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
 /**
+ * Card 4e0df6ce: bound (ms) for the self-reporting `--port 0` capability probe embedded in the FIRST spawn
+ * attempt of this instance's life (and any later attempt after {@link CodescapeSupervisor.port} goes back
+ * to `null` — a `stop()`/restart-give-up). How long we wait for EITHER the reported-bound-port stdout line
+ * (see {@link parsePortReportLine}) OR the child's own exit before concluding the attempt is ambiguous and
+ * falling back to a scheduled restart (never left permanently unresolved). Short, mirroring the other
+ * subprocess-probe bounds in this file ({@link DEFAULT_VERSION_PROBE_TIMEOUT_MS} et al.) — a capable
+ * `serve` reports essentially at bind time; an incapable one (predating `f7a5684`) rejects `--port 0`
+ * synchronously, before doing anything else.
+ */
+const DEFAULT_PORT_REPORT_TIMEOUT_MS = 5_000;
+/**
  * Card 4c7a337d: the sliding window (ms) {@link DEFAULT_MAX_RESTARTS_PER_WINDOW} is measured over — see
  * that constant's own doc for what this pair exists to fix.
  */
@@ -222,6 +233,8 @@ export interface CodescapeSupervisorOpts {
   driftStabilityMs?: number;
   /** Test seam: shrink/lengthen {@link DEFAULT_TOOLS_PROBE_TIMEOUT_MS}. */
   toolsProbeTimeoutMs?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_PORT_REPORT_TIMEOUT_MS}. */
+  portReportTimeoutMs?: number;
   /**
    * Test seam: pre-seed {@link projectIds} with ONE `(repoKey(repoRoot) -> codescapeProjectId)` entry,
    * mirroring the `port` seam above (exercise the control-plane client / {@link checkToolDrift} against
@@ -399,7 +412,16 @@ function repoKey(repoRoot: string): string {
   return path.resolve(repoRoot).toLowerCase();
 }
 
-/** Pick a free loopback port by binding ephemeral (`:0`) then releasing it. Async — never blocks. */
+/**
+ * Pick a free loopback port by binding ephemeral (`:0`) then releasing it. Async — never blocks.
+ *
+ * Card 4e0df6ce: this is the LEGACY path only — it has a real, deliberately-tolerated TOCTOU (the gap
+ * between this function's own `close()` and a SEPARATE later-spawned child rebinding the same number),
+ * kept ONLY for a codescape build predating `f7a5684` (which hard-exits on `--port 0`, see
+ * {@link CodescapeSupervisor.spawnServeSelfReporting}'s doc for the capable path that has no such window).
+ * Never called once {@link CodescapeSupervisor} has confirmed the installed binary self-reports its bound
+ * port — see `spawnServe()`'s dispatch.
+ */
 function pickLoopbackPort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -413,6 +435,37 @@ function pickLoopbackPort(): Promise<number> {
       });
     });
   });
+}
+
+/**
+ * Parse ONE stdout line as codescape's self-reported-bound-port contract (card 4e0df6ce; peer-delivered
+ * `f7a5684`): `{"url":"http://127.0.0.1:<port>","port":<port>}`, printed on every `serve` invocation once
+ * the installed binary supports it. Returns the bound port taken STRICTLY from `url` — never reconstructed
+ * from the sibling `port` field — because their server binds IPv4 loopback ONLY; building
+ * `http://localhost:<port>` instead of parsing the given `url` would let `localhost` resolve `::1` and
+ * connect-refuse against a perfectly healthy server. Returns `null` for any line that isn't a well-formed
+ * report — an OLDER binary's banner, ordinary log noise, or anything before the real report line on a
+ * newer one are all simply not this; a non-match is normal, not an error.
+ */
+function parsePortReportLine(line: string): number | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const url = (parsed as { url?: unknown } | null)?.url;
+  if (typeof url !== "string") return null;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" || u.hostname !== "127.0.0.1") return null;
+  const port = Number(u.port);
+  if (!Number.isInteger(port) || port <= 0) return null;
+  return port;
 }
 
 /** The narrow project shape {@link codescapeBootRepoPaths} needs — kept structural so a test can fake it
@@ -453,6 +506,7 @@ export class CodescapeSupervisor {
   private readonly versionProbeRetryDelayMs: number;
   private readonly driftStabilityMs: number;
   private readonly toolsProbeTimeoutMs: number;
+  private readonly portReportTimeoutMs: number;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -467,6 +521,16 @@ export class CodescapeSupervisor {
   private codescapePath: string | undefined;
 
   private port: number | null = null;
+  /**
+   * Card 4e0df6ce: whether the installed `serve` binary understands `--port 0` and self-reports the bound
+   * port on stdout (see {@link parsePortReportLine}) — `null` until the first spawn attempt that needed an
+   * answer has resolved it either way, `true`/`false` once confirmed. Sticky for the rest of this
+   * instance's life (a binary doesn't regress mid-process) — never reset by {@link stop}/{@link start},
+   * unlike the drift-tracking fields above. Only consulted when {@link port} is `null` (the FIRST spawn of
+   * this instance's life, or a fresh attempt after a `stop()`/give-up nulled it — see {@link spawnServe});
+   * an ordinary restart-on-death reuses the already-known `port` explicitly and never touches this.
+   */
+  private portReportCapable: boolean | null = null;
   /** True once `serve` has actually been spawned and hasn't since exited/errored. Distinct from `port`
    *  (which is reserved up-front and reused across a restart-on-death) — getPort() gates on this. */
   private alive = false;
@@ -644,6 +708,7 @@ export class CodescapeSupervisor {
     this.versionProbeRetryDelayMs = opts?.versionProbeRetryDelayMs ?? DEFAULT_VERSION_PROBE_RETRY_DELAY_MS;
     this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
     this.toolsProbeTimeoutMs = opts?.toolsProbeTimeoutMs ?? DEFAULT_TOOLS_PROBE_TIMEOUT_MS;
+    this.portReportTimeoutMs = opts?.portReportTimeoutMs ?? DEFAULT_PORT_REPORT_TIMEOUT_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -680,6 +745,12 @@ export class CodescapeSupervisor {
   /** Test seam — see {@link spawnCount}. */
   getSpawnCount(): number {
     return this.spawnCount;
+  }
+
+  /** Diagnostic/test seam — see {@link portReportCapable}. `null` until the first spawn attempt that
+   *  needed an answer has resolved it either way. */
+  getPortReportCapable(): boolean | null {
+    return this.portReportCapable;
   }
 
   /** Test seam — see {@link versionProbeAttempts}. */
@@ -773,7 +844,12 @@ export class CodescapeSupervisor {
       for (const repoPath of repoPaths) {
         await this.ingest(repoPath);
       }
-      if (this.port == null) this.port = await pickLoopbackPort();
+      // Card 4e0df6ce: no pre-pick here any more — `this.port` starts (or, after a stop()/give-up, goes
+      // back to) `null`, and `spawnServe()` below decides how to resolve it: self-reporting (the child
+      // binds `--port 0` itself and reports the real bound port back on stdout — no window where THIS
+      // process holds a port it isn't using) when the installed binary supports it, falling back to the
+      // legacy pick-then-close-then-respawn path (the original, narrower TOCTOU) only for a binary
+      // confirmed not to.
       this.restartAttempts = 0;
       this.restartTimestamps = [];
       this.lastDriftRestartInstalledBuild = null;
@@ -786,7 +862,9 @@ export class CodescapeSupervisor {
       this.lastToolDriftUnclassified = null;
       this.spawnServe();
       this.startHealthMonitor();
-      console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
+      // Card 4e0df6ce: `this.port` is no longer necessarily known synchronously at this point (a capable
+      // binary reports it asynchronously off its own stdout) — never log a stale/null value here.
+      console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
       // Card 088afc94 P4 follow-up: codescape's `POST /project` dynamic registration (confirmed merged/
       // live, commit 669548e) is now the SANCTIONED id-resolution path. Register every project
       // UNCONDITIONALLY, every boot — idempotent by contract (the subprocess ingest loop just above
@@ -843,56 +921,48 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Spawn `serve` on the reserved port and wire up restart-on-death. Never throws — BOTH a synchronous
-   * spawn failure (thrown from `spawn()` itself) and an asynchronous one (Node's `'error'` event, e.g.
-   * ENOENT on a bad `LOOM_CODESCAPE_BIN` — the single most likely real dev failure) are treated as a
-   * death: `this.child`/`alive` are cleared and a bounded restart is scheduled. This matters because per
-   * Node's own child_process docs, `'error'` and `'exit'` are NOT mutually exclusive — `'exit'` may or
-   * may not follow an `'error'` (platform-dependent, esp. on Windows) — so restart-on-death cannot be
-   * wired off `'exit'` alone: a spawn that only ever errors would otherwise wedge phantom-alive forever
-   * (`getPort()` lying about a serve that never started, and `start()`'s `this.child` guard blocking even
-   * a manual recovery attempt) with the give-up diagnostic never firing (CR finding, spawn-FAILURE bug).
+   * Spawn `serve` and wire up restart-on-death. Never throws. Card 4e0df6ce dispatch:
+   *  - {@link port} already known (an ordinary restart-on-death: the previously-live child released it on
+   *    exit, and NOTHING in between — us or anyone else — separately bound and closed it) — respawn with
+   *    that SAME explicit port, exactly as before this card. No TOCTOU here; there never was one.
+   *  - {@link port} is `null` (the FIRST spawn of this instance's life, or a fresh attempt after a
+   *    `stop()`/give-up nulled it — the ONE site the original TOCTOU actually lived at, see
+   *    {@link pickLoopbackPort}'s own doc): use the self-reporting path when the installed binary is
+   *    known- or maybe-capable ({@link portReportCapable} `true`/`null`), falling back to the legacy
+   *    pick-then-spawn path only once a `--port 0` rejection has confirmed it isn't (card 4e0df6ce
+   *    blocker 1 — an older codescape hard-exits on `--port 0` rather than falling back itself).
    */
   private spawnServe(): void {
-    if (this.stopped || this.port == null) return;
+    if (this.stopped) return;
     // Card b8de5876: `this.codescapePath` (set once by `start()`, not re-derived here) so a restart-on-
     // death spawn — which runs from a `setTimeout`, long after `start()`'s own call stack returned — still
     // resolves the SAME dbPath-first candidate the boot gate just checked, instead of silently falling
     // back to env/bare-PATH on every restart.
     const { command, args: baseArgs } = resolveCodescapeBin(this.codescapePath);
-    const args = [...baseArgs, "serve", "--port", String(this.port)];
-    let child: ChildProcess;
-    try {
-      // Card 194d343d: pin CODESCAPE_HOME explicitly (same value as `cwd`) so serve's env-first resolver
-      // check wins over any upstream cwd-relative walk — must match ingest()'s own CODESCAPE_HOME above,
-      // or ingest and serve can disagree about where the store lives.
-      //
-      // Card 8c13a023 / d671f1b8: no `detached` option below — this child is spawned NON-detached,
-      // deliberately left that way rather than a gap. On Windows that means it's implicitly bound by
-      // Node/libuv to a Windows job object with kill-on-close tied to the PARENT (this daemon process)'s
-      // own lifetime, so any death of the parent — a clean exit, a restart, or an external hard-kill —
-      // already tears this child down with it, with no explicit stop() needed on that platform. Verified
-      // by isolating the ONE variable that flips the outcome: an identical spawn with `detached:true`
-      // survives the parent's death; without it (as here), the child dies every time, including when
-      // killed via `TerminateProcess` (an API with no console-signalling path at all — ruling out a
-      // console/`CTRL_CLOSE` explanation, which would also have taken the still-alive grandparent process
-      // with it). On POSIX a non-detached child is instead reparented on the parent's death and KEEPS
-      // RUNNING — unverified/predicted, not measured here (this repro is Windows-only) — which is why
-      // `index.ts`'s shutdown-cleanup path calls `stop()` explicitly rather than relying on this platform
-      // default: harmless-but-redundant on Windows, load-bearing on a POSIX host running this supervisor
-      // (`LOOM_DEV=1`-gated; never starts for a regular loomctl end user).
-      child = spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODESCAPE_HOME: this.homeDir } });
-    } catch (err) {
-      console.warn(`[codescape] serve spawn failed: ${(err as Error).message}`);
-      // Never a "healthy" run — a synchronous throw means no child ever came up. Clearing spawnedAt (it
-      // may still hold a PRIOR successful spawn's timestamp) stops that stale value from making an
-      // immediate, repeated failure look "healthy" to scheduleRestart's caller below (CR bug (b)).
-      this.spawnedAt = null;
-      this.scheduleRestart(false);
-      return;
+    if (this.port != null) {
+      this.spawnServeExplicit(command, baseArgs, this.port);
+    } else if (this.portReportCapable === false) {
+      void this.spawnServeLegacy(command, baseArgs);
+    } else {
+      this.spawnServeSelfReporting(command, baseArgs);
     }
-    // Count the spawn HERE — the OS-level process now genuinely exists — never from anything the child
-    // itself later does or writes (see {@link spawnCount}'s own doc for why that self-report is unsound).
+  }
+
+  /**
+   * Spawn the child on the given, ALREADY-DECIDED explicit port. Never throws — BOTH a synchronous spawn
+   * failure (thrown from `spawn()` itself) and an asynchronous one (Node's `'error'` event, e.g. ENOENT on
+   * a bad `LOOM_CODESCAPE_BIN` — the single most likely real dev failure) are treated as a death:
+   * `this.child`/`alive` are cleared and a bounded restart is scheduled. This matters because per Node's
+   * own child_process docs, `'error'` and `'exit'` are NOT mutually exclusive — `'exit'` may or may not
+   * follow an `'error'` (platform-dependent, esp. on Windows) — so restart-on-death cannot be wired off
+   * `'exit'` alone: a spawn that only ever errors would otherwise wedge phantom-alive forever (`getPort()`
+   * lying about a serve that never started, and `start()`'s `this.child` guard blocking even a manual
+   * recovery attempt) with the give-up diagnostic never firing (CR finding, spawn-FAILURE bug).
+   */
+  private spawnServeExplicit(command: string, baseArgs: string[], port: number): void {
+    const args = [...baseArgs, "serve", "--port", String(port)];
+    const child = this.trySpawnChild(command, args);
+    if (!child) return;
     this.spawnCount++;
     this.child = child;
     this.alive = true;
@@ -909,8 +979,195 @@ export class CodescapeSupervisor {
     };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
-    // `settled` guards against 'error' and 'exit' BOTH firing for the same death (Node's docs warn this
-    // can happen) — without it a double-fire would double-schedule a restart / double-decrement state.
+    this.wireDeathHandling(child, chunks);
+  }
+
+  /**
+   * Card 4e0df6ce (legacy fallback, blocker 1): the ORIGINAL pick-then-spawn path, kept ONLY for an
+   * installed `serve` confirmed NOT to understand `--port 0` — reserves a port via {@link pickLoopbackPort}
+   * (real, narrow TOCTOU — see that function's own doc) once (not on every restart: `this.port` is reused
+   * exactly as it always was), then spawns explicitly on it.
+   */
+  private async spawnServeLegacy(command: string, baseArgs: string[]): Promise<void> {
+    if (this.stopped) return;
+    let port = this.port;
+    if (port == null) {
+      try {
+        port = await pickLoopbackPort();
+      } catch (err) {
+        console.warn(`[codescape] could not reserve a loopback port for serve: ${(err as Error).message}`);
+        this.spawnedAt = null;
+        this.scheduleRestart(false);
+        return;
+      }
+      if (this.stopped) return; // stop() raced the async port pick
+      this.port = port;
+    }
+    this.spawnServeExplicit(command, baseArgs, port);
+  }
+
+  /**
+   * Card 4e0df6ce: the self-reporting path — spawn with `--port 0` and let the child pick its own ephemeral
+   * port and report it back on stdout (see {@link parsePortReportLine}). Nobody but the child itself ever
+   * binds this port, so the original TOCTOU (bind, read, CLOSE, then a SEPARATE process rebinds the same
+   * number) cannot occur here. `this.port` stays `null` — so `getPort()`/`request()` correctly refuse
+   * ("codescape not running") rather than ever targeting port 0 — until the report line arrives and
+   * REASSIGNS it; this satisfies the card's mandatory latent-instance fix (`this.port` reassigned from the
+   * reported line before any `request()` can fire).
+   *
+   * `this.child`/`spawnCount`/`spawnedAt`/`consecutiveHealthFailures` ARE set immediately on a successful
+   * spawn, exactly like {@link spawnServeExplicit} — `getPid()`/`getSpawnCount()` stay synchronously
+   * accurate; only `port`/`alive` (and therefore `getPort()`) wait on the report.
+   *
+   * Three outcomes before a report ever arrives:
+   *  - the report line parses: confirm {@link portReportCapable}, set `this.port`, hand off to the SAME
+   *    {@link wireDeathHandling} an explicit-port spawn uses.
+   *  - the child exits/errors first: a CLEAN (no signal) non-zero exit, on a still-UNKNOWN capability, is
+   *    the old-binary `--port 0` rejection shape (card 4e0df6ce blocker 1) — confirms `portReportCapable
+   *    = false` so the NEXT attempt uses the legacy path. Anything else (a signal — e.g. this process or a
+   *    test killing the attempt directly — or a capability we've already confirmed) is an ordinary death,
+   *    never a capability verdict.
+   *  - neither arrives within {@link portReportTimeoutMs}: abandon this attempt (kill the child) without
+   *    concluding anything about capability, and let the normal backoff schedule retry.
+   * All three end in {@link scheduleRestart} — never a permanently-stuck attempt.
+   */
+  private spawnServeSelfReporting(command: string, baseArgs: string[]): void {
+    const args = [...baseArgs, "serve", "--port", "0"];
+    const child = this.trySpawnChild(command, args);
+    if (!child) return;
+    this.spawnCount++;
+    this.child = child;
+    this.spawnedAt = Date.now();
+    this.consecutiveHealthFailures = 0;
+
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    const capture = (b: Buffer): void => {
+      chunks.push(b);
+      bytes += b.length;
+      while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
+    };
+    child.stderr?.on("data", capture);
+
+    let stdoutBuf = "";
+    let resolved = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const finish = (): void => {
+      clearTimeout(timer);
+      child.stdout?.off("data", onStdoutData);
+      child.off("exit", onEarlyExit);
+      child.off("error", onEarlyError);
+    };
+
+    const onStdoutData = (b: Buffer): void => {
+      capture(b);
+      if (resolved) return;
+      stdoutBuf += b.toString("utf-8");
+      let idx: number;
+      while ((idx = stdoutBuf.indexOf("\n")) !== -1) {
+        const line = stdoutBuf.slice(0, idx).trim();
+        stdoutBuf = stdoutBuf.slice(idx + 1);
+        if (resolved || !line) continue;
+        const reportedPort = parsePortReportLine(line);
+        if (reportedPort != null) {
+          resolved = true;
+          finish();
+          child.stdout?.on("data", capture); // resume plain diagnostic capture past the report line
+          this.portReportCapable = true;
+          this.port = reportedPort;
+          this.alive = true;
+          this.wireDeathHandling(child, chunks);
+          return;
+        }
+      }
+    };
+    child.stdout?.on("data", onStdoutData);
+
+    const onDeathBeforeReport = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (resolved) return;
+      resolved = true;
+      finish();
+      this.child = null;
+      this.alive = false;
+      this.spawnedAt = null;
+      if (this.stopped) return; // an explicit stop() — not a death, no restart
+      const tail = Buffer.concat(chunks).toString("utf-8").trim().slice(-OUTPUT_TAIL_BYTES);
+      // Card 4e0df6ce: classify by CONTENT, never by (code, signal) alone — on Windows a genuinely
+      // external kill (a test, or a manager) goes through TerminateProcess, which surfaces as `code:1,
+      // signal:null` on the child's exit event: BYTE-IDENTICAL to what this fixture/binary's own clean
+      // `process.exit(1)` rejection produces. `signal` only discriminates on POSIX; requiring the captured
+      // output to actually NAME the flag is what makes this safe on both — nothing but a real "--port 0"
+      // validation failure would ever write "--port" to this child's own stdout/stderr before dying.
+      const looksLikeOldBinaryRejection = this.portReportCapable == null && typeof code === "number" && code !== 0 && /--port/i.test(tail);
+      if (looksLikeOldBinaryRejection) {
+        this.portReportCapable = false;
+        console.warn(`[codescape] serve exited (code ${code}) before reporting a bound port — treating as an installed codescape that doesn't support "--port 0" and falling back to the legacy explicit-port path${tail ? `\n${tail}` : ""}`);
+      } else {
+        console.warn(`[codescape] serve exited (code ${code ?? "null"}, signal ${signal ?? "null"}) before reporting a bound port — scheduling restart${tail ? `\n${tail}` : ""}`);
+      }
+      this.scheduleRestart(false); // never "healthy" — it died before ever confirming a live port
+    };
+    const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null): void => onDeathBeforeReport(code, signal);
+    const onEarlyError = (): void => onDeathBeforeReport(null, null);
+    child.on("exit", onEarlyExit);
+    child.on("error", onEarlyError);
+
+    timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      finish();
+      console.warn(`[codescape] serve did not report a bound port within ${this.portReportTimeoutMs}ms — abandoning this attempt (capability unresolved)`);
+      this.child = null;
+      this.alive = false;
+      this.spawnedAt = null;
+      try { child.kill(); } catch { /* best-effort */ }
+      if (!this.stopped) this.scheduleRestart(false);
+    }, this.portReportTimeoutMs);
+  }
+
+  /**
+   * Attempt `spawn()`, logging + scheduling a bounded restart on a SYNCHRONOUS failure (never a "healthy"
+   * run — no child ever came up) and returning `null`. Card 8c13a023 / d671f1b8: no `detached` option
+   * below — this child is spawned NON-detached, deliberately left that way rather than a gap. On Windows
+   * that means it's implicitly bound by Node/libuv to a Windows job object with kill-on-close tied to the
+   * PARENT (this daemon process)'s own lifetime, so any death of the parent — a clean exit, a restart, or
+   * an external hard-kill — already tears this child down with it, with no explicit stop() needed on that
+   * platform. Verified by isolating the ONE variable that flips the outcome: an identical spawn with
+   * `detached:true` survives the parent's death; without it (as here), the child dies every time, including
+   * when killed via `TerminateProcess` (an API with no console-signalling path at all — ruling out a
+   * console/`CTRL_CLOSE` explanation, which would also have taken the still-alive grandparent process with
+   * it). On POSIX a non-detached child is instead reparented on the parent's death and KEEPS RUNNING —
+   * unverified/predicted, not measured here (this repro is Windows-only) — which is why `index.ts`'s
+   * shutdown-cleanup path calls `stop()` explicitly rather than relying on this platform default:
+   * harmless-but-redundant on Windows, load-bearing on a POSIX host running this supervisor (`LOOM_DEV=1`-
+   * gated; never starts for a regular loomctl end user).
+   *
+   * Card 194d343d: pin CODESCAPE_HOME explicitly (same value as `cwd`) so serve's env-first resolver check
+   * wins over any upstream cwd-relative walk — must match ingest()'s own CODESCAPE_HOME, or ingest and
+   * serve can disagree about where the store lives.
+   */
+  private trySpawnChild(command: string, args: string[]): ChildProcess | null {
+    try {
+      return spawn(command, args, { cwd: this.homeDir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CODESCAPE_HOME: this.homeDir } });
+    } catch (err) {
+      console.warn(`[codescape] serve spawn failed: ${(err as Error).message}`);
+      // Never a "healthy" run — a synchronous throw means no child ever came up. Clearing spawnedAt (it
+      // may still hold a PRIOR successful spawn's timestamp) stops that stale value from making an
+      // immediate, repeated failure look "healthy" to scheduleRestart's caller below (CR bug (b)).
+      this.spawnedAt = null;
+      this.scheduleRestart(false);
+      return null;
+    }
+  }
+
+  /**
+   * Wire the standard "this child is now the live, port-known serve" death handling — shared by both
+   * {@link spawnServeExplicit} and {@link spawnServeSelfReporting} (once a report has confirmed the port).
+   * `settled` guards against 'error' and 'exit' BOTH firing for the same death (Node's docs warn this can
+   * happen) — without it a double-fire would double-schedule a restart / double-decrement state.
+   */
+  private wireDeathHandling(child: ChildProcess, chunks: Buffer[]): void {
     let settled = false;
     const onDeath = (reason: string): void => {
       if (settled) return;
