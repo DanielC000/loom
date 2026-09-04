@@ -30,7 +30,16 @@ if the new doc silently dropped one. Call it with no arguments any time, not jus
 its response before trusting a green:** `configured:false` means this project hasn't set up any
 protection yet — that's not a pass, it's nothing having been checked at all. And even a real pass is a
 narrow one — its own `honestLimitNote` says why: every check is an exact-substring grep, proving a
-token's literal text survived, never that no meaning survived a rewording. If nothing is configured yet
+token's literal text survived, never that no meaning survived a rewording.
+
+**Read the per-leg fields too, not just the overall `ok`.** `archiveCheck` and `byteCheck` report on an
+archive path / a pre-edit byte count you optionally supplied, and both DO drive the overall `ok` when
+checked. `rulesCheck` reports whether an optional rules-file union source you supplied was actually read
+— it deliberately does NOT drive `ok`, so a green overall `ok` never proves the rules file was consulted;
+only `rulesCheck: {checked:true, ok:true}` does that. `markerSources` names which text satisfied each
+marker (`"active"` or `"rules"`) — a `"rules"` source is positive proof that file was read, but only when
+at least one marker is exclusive to the rules file; if every marker also lives in the active doc, every
+source reads `"active"` and tells you nothing. If nothing is configured yet
 and you want this protection, add markers via your own project's config (additive-only from a manager
 session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
 daemon capability, not a doc convention — you don't need to build anything to use it.
