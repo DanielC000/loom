@@ -7,6 +7,7 @@
 //   Requires the daemon built first (reads ../dist/crashlog.js): from packages/daemon run `pnpm build`.
 import "./_guard.mjs";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -113,6 +114,14 @@ if (scenario) {
       const err = new TypeError("loading windowsPtyAgent.js failed: Cannot read properties of undefined (reading 'forEach')");
       Promise.reject(err);
     });
+  } else if (scenario === "fswatch-crash") {
+    // card 34744200: open a REAL fs.watch (what fs.watch()/chokidar surface as `FSEventWrap`, not the
+    // `FSWatcher`/`StatWatcher` the old predicate matched), then force a fatal so the crashlog's resource
+    // snapshot captures it live — proves activeFsWatcherCount actually counts it, not just
+    // fs.watchFile()'s StatWatcher.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-crashlog-fswatch-"));
+    fs.watch(dir, () => {});
+    setImmediate(() => { throw new Error("fswatch crash"); });
   } else if (scenario === "exit-nonzero") {
     process.exit(2); // routes through the synchronous `exit` hook backstop
   } else if (scenario === "exit-clean") {
@@ -162,7 +171,7 @@ if (scenario) {
       const rec = got?.json ?? {};
       check("direct: captured the exception message + stack", rec.error?.message === "direct boom" && typeof rec.error?.stack === "string" && rec.error.stack.length > 0);
       check("direct: kind recorded", rec.kind === "uncaughtException");
-      check("direct: active-watcher count field present (number or null)", "activeWatcherCount" in rec && (rec.activeWatcherCount === null || typeof rec.activeWatcherCount === "number"));
+      check("direct: active-watcher count field present (number or null)", "activeFsWatcherCount" in rec && (rec.activeFsWatcherCount === null || typeof rec.activeFsWatcherCount === "number"));
       check("direct: active-resource breakdown present", "activeResourceCounts" in rec);
       check("direct: open-FD count field present (number or null)", "openFdCount" in rec && (rec.openFdCount === null || typeof rec.openFdCount === "number"));
       check("direct: memory snapshot present", !!rec.memory && typeof rec.memory.rss === "number");
@@ -183,6 +192,24 @@ if (scenario) {
       // The crashlog COMPLEMENTS the console trace — the stack must still reach stderr (Node's default
       // print is suppressed once a listener is attached, so the handler logs it itself).
       check("uncaught: stack still printed to stderr with the [crashlog] prefix", stderr.includes("[crashlog] fatal uncaughtException:"));
+    }
+
+    // ── B2: card 34744200 — a REAL fs.watch (FSEventWrap) must be counted by activeFsWatcherCount ──────
+    // Regression guard for the false-zero: before the fix, the predicate only matched
+    // FSWatcher/StatWatcher, so this assertion FAILED (activeFsWatcherCount stayed 0 against a live
+    // fs.watch) — run fail-first against pre-fix code to confirm this check can actually go red.
+    {
+      const { code, home } = runChild("fswatch", "fswatch-crash");
+      const got = readCrashlog(home);
+      check("fswatch: child crashed as expected (exit 1)", code === 1);
+      check(
+        "fswatch: a live fs.watch is counted in activeFsWatcherCount",
+        !!got && typeof got.json.activeFsWatcherCount === "number" && got.json.activeFsWatcherCount >= 1,
+      );
+      check(
+        "fswatch: FSEventWrap present in the raw breakdown",
+        !!got && (got.json.activeResourceCounts?.FSEventWrap ?? 0) >= 1,
+      );
     }
 
     // ── C: real installed handler — an UNHANDLED REJECTION in a child writes the crashlog + exits 1 ──

@@ -56,8 +56,13 @@ function openFdCount(): number | null {
 
 /**
  * Best-effort snapshot of active libuv resources — the watcher/handle-leak diagnostic. `watcherCount`
- * isolates FSWatcher/StatWatcher (the chokidar class implicated in the unconfirmed crash); `counts` is
- * the full type→count breakdown (Timeout, TCPServerWrap, …) for any other handle leak.
+ * isolates the libuv HANDLE type names `process.getActiveResourcesInfo()` actually reports for a
+ * filesystem watcher (the chokidar class implicated in the unconfirmed crash): `FSEventWrap` (what
+ * `fs.watch()` — and therefore chokidar — surfaces, verified against this runtime, card `34744200`) and
+ * `StatWatcher` (`fs.watchFile()`). `FSWatcher` is kept too for defensiveness (it is the JS-level class
+ * name these wrap, in case a future/other Node build ever surfaces it directly) even though no arm of
+ * that verification produced it. `counts` is the full type→count breakdown (Timeout, TCPServerWrap, …)
+ * for any other handle leak.
  */
 function activeResourceSnapshot(): { watcherCount: number | null; counts: Record<string, number> | null } {
   try {
@@ -66,7 +71,7 @@ function activeResourceSnapshot(): { watcherCount: number | null; counts: Record
     let watcherCount = 0;
     for (const type of info) {
       counts[type] = (counts[type] ?? 0) + 1;
-      if (type === "FSWatcher" || type === "StatWatcher") watcherCount++;
+      if (type === "FSEventWrap" || type === "FSWatcher" || type === "StatWatcher") watcherCount++;
     }
     return { watcherCount, counts };
   } catch {
@@ -112,7 +117,12 @@ export function writeCrashlog(input: CrashlogInput): void {
       signal: input.signal ?? null,
       exitCode: input.exitCode ?? null,
       error,
-      activeWatcherCount: watcherCount,
+      // Renamed from `activeWatcherCount` (card 34744200): that field's predicate was blind to
+      // `FSEventWrap` (what fs.watch()/chokidar actually surface) and could read 0 against thousands of
+      // live watchers — an old record's `activeWatcherCount` is NOT comparable to this field's count, and
+      // the rename makes that a visible absence on old records rather than a misleading zero. See this
+      // function's own doc for the counted type set.
+      activeFsWatcherCount: watcherCount,
       activeResourceCounts: counts,
       openFdCount: openFdCount(),
       memory,
