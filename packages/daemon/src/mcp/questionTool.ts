@@ -147,6 +147,8 @@ export function buildQuestionAsk(
       cancelledReason: null,
       cancelledBy: null,
       cancelledAt: null,
+      // Card 99d41588 — never escalated at ask time; stamped later, only by IdleWatcher.tickStaleRequests.
+      escalatedAt: null,
     },
   };
 }

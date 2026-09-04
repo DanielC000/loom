@@ -146,6 +146,15 @@ const IDLE_NUDGE_BOUNDED_HINT =
  * `notifyIdleWorker`, never re-implemented here) on the same persisted once-per-window cadence as the
  * manager loop (the session's own `idle_nudge_state` columns — workers never call idle_report, so only
  * `last_idle_nudge_at` paces them; policy/snooze stay at the 'watching' default).
+ *
+ * STALE-REQUEST coverage (card 99d41588, `tickStaleRequests` below): a wholly SEPARATE clock from every
+ * loop above — keyed on `questions.created_at` (a Request's own age), never a session's idle/suppression
+ * state. Closes the residual gap the manager loop's own `hasOwnPendingRequest` discount deliberately
+ * leaves open: a session correctly suppressed because it's blocked ONLY on its own pending owner Request
+ * never gets idle-nudged, so its `unanswered` counter never increments and it can never reach
+ * `maxUnansweredNudges`'s `idle_escalated` — meaning that Request could otherwise sit forever with no
+ * path to alert a human. `tickStaleRequests` reaches it (and any other pending Request, regardless of the
+ * asking session's activity) directly off the request row itself.
  */
 export class IdleWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -563,6 +572,49 @@ export class IdleWatcher {
 
     this.tickIdleWorkers(nowMs, nowIso);
     this.tickAnsweredStuckQuestions(nowMs);
+    this.tickStaleRequests(nowMs, nowIso);
+  }
+
+  /**
+   * Stale-owner-Request watchdog (card 99d41588). Independent of the manager idle-nudge loop above:
+   * keyed on `questions.created_at` (the Request's own clock), never any asking session's idle/
+   * suppression state — so it correctly reaches a Request whose asking session is currently busy/live
+   * doing unrelated work, AND a Request whose session is correctly own-Request-suppressed by
+   * cb56cf80/8e87f3b5 (that suppression's own `unanswered` idle-nudge counter never increments for a
+   * suppressed session, so it can never reach `maxUnansweredNudges` — this loop is the ONLY path such a
+   * Request ever gets a human-facing signal at all). Deliberately never reads or mutates
+   * `idle_nudge_state` — a different clock for a different subject, per the card's own DoD.
+   *
+   * `Db.listStalePendingQuestions` is called with `beforeIso=now` (trivially true of any still-pending
+   * row) rather than a precomputed cutoff, because the actual age THRESHOLD is per-project
+   * (`orchestration.staleRequestMinutes`) — one global cutoff can't do that filtering, so it's applied
+   * here per-row instead, against each row's own project's resolved config. Skips a Request whose project
+   * is gone (defensive/TOCTOU) or which has the watchdog disabled (`staleRequestMinutes === 0`), or whose
+   * age hasn't yet crossed that project's threshold.
+   *
+   * `Db.markQuestionEscalated`'s own guarded UPDATE (`state='pending' AND escalated_at IS NULL`) is what
+   * makes this fire EXACTLY ONCE per Request: a later tick never re-returns an already-stamped row from
+   * `listStalePendingQuestions`, and the guard refuses the stamp anyway if the row was answered/cancelled
+   * between the scan and this write — in which case NO event is appended, since an already-resolved
+   * Request needs no alert.
+   */
+  private tickStaleRequests(nowMs: number, nowIso: string): void {
+    const { db } = this.deps;
+    for (const q of db.listStalePendingQuestions(nowIso)) {
+      const project = db.getProject(q.projectId);
+      if (!project) continue; // defensive/TOCTOU — mirrors the manager loop's own "no-project" skip above
+      const staleMinutes = resolveConfig(project.config).orchestration.staleRequestMinutes;
+      if (staleMinutes === 0) continue; // disabled for this project
+      const ageMinutes = (nowMs - Date.parse(q.createdAt)) / 60_000;
+      if (ageMinutes < staleMinutes) continue;
+      if (!db.markQuestionEscalated(q.id, nowIso)) continue; // lost race (answered/cancelled/already escalated) — no alert
+      db.appendEvent({
+        id: randomUUID(), ts: nowIso, managerSessionId: q.sessionId, kind: "request_escalated",
+        detail: { questionId: q.id, title: q.title, ageMinutes: Math.round(ageMinutes) },
+      });
+      // eslint-disable-next-line no-console
+      console.log(`[idle-watcher] ESCALATED stale Request ${q.id} (~${Math.round(ageMinutes)}m pending, session ${q.sessionId})`);
+    }
   }
 
   /**

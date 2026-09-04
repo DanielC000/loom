@@ -1273,6 +1273,22 @@ export type OrchestrationEventKind =
   // without re-deriving it from `listOpenQuestions`. Filed under the ASKING MANAGER (managerSessionId);
   // `detail` carries { questionId, title }.
   | "question_asked"
+  // Card 99d41588 — a PENDING `question_ask` Request (any type) has sat unanswered past
+  // `orchestration.staleRequestMinutes` — the request-AGE twin of `idle_escalated`/`context_escalated`,
+  // but keyed on `questions.created_at` (the request's own clock) rather than any session's idle/
+  // suppression state. Deliberately independent of `cb56cf80`/`8e87f3b5`'s own-Request idle-nudge
+  // suppression: a manager can be correctly suppressed (blocked ONLY on this Request, nothing else
+  // actionable) and STILL never see an `idle_escalated` (its unanswered-nudge counter never increments
+  // because it's never nudged) — this event is what gives that case a path to alert a human at all. Also
+  // fires for a Request whose asking session is busy/live doing unrelated work (idle-state-independent by
+  // design), e.g. an input-type Request that only the owner can act on. Filed under the ASKING SESSION
+  // (managerSessionId = questions.session_id, whatever its role); `detail` carries { questionId, title,
+  // ageMinutes }. Emitted EXACTLY ONCE per request — idle-watcher.ts's tickStaleRequests stamps
+  // `questions.escalated_at` in the same write that appends this event, and only ever scans
+  // `escalated_at IS NULL` rows, so a later tick can never re-fire for the same request. An answered/
+  // consumed/cancelled Request simply drops out of the stale-scan's `state = 'pending'` filter — no
+  // separate clear event exists (mirrors `context_escalated`'s "no context_report to clear it" shape).
+  | "request_escalated"
   // A `held` card was CLEARED (card 9b0373c0, Platform-Audit bb23d15a) — the un-brake audit trail. Emitted
   // from the ONE agent-facing choke point (`updateProjectTask`, mcp/tasks.ts — shared by `tasks_update` AND
   // the Lead's cross-project `project_task_update`) on an agent clearing its OWN agent-set hold (a
@@ -1501,7 +1517,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
   poll_id_guard_tripped: true, event_trigger_fired: true, event_trigger_throttled: true,
-  end_me_refused: true, end_me_complete: true, question_asked: true, task_held_cleared: true,
+  end_me_refused: true, end_me_complete: true, question_asked: true, request_escalated: true, task_held_cleared: true,
   session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
@@ -2827,7 +2843,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
   "fleet_resume_failed",
-  "question_asked",
+  "question_asked", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",
   "platform_escalate",
@@ -3039,6 +3055,14 @@ export interface Question {
   cancelledBy: "agent" | "human" | null;
   /** Set only when `state === "cancelled"`: when the cancellation landed. Null otherwise. */
   cancelledAt: string | null;
+  /** Card 99d41588 — set once, by `idle-watcher.ts`'s `tickStaleRequests`, the instant this still-`pending`
+   *  Request first crosses `orchestration.staleRequestMinutes` (the `request_escalated` event fires in the
+   *  same write). Null until then, and permanently null for a Request that answers/is consumed/cancelled
+   *  before ever going stale. Its ONLY purpose is the scan guard (`state='pending' AND escalated_at IS
+   *  NULL`) that makes the escalation fire exactly once per Request — not a general "was this ever late"
+   *  audit field (an answered Request that WAS escalated first keeps this value forever, so don't read a
+   *  non-null value on an answered row as "still stale"; check `state` too). */
+  escalatedAt: string | null;
 }
 
 /**

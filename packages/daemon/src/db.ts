@@ -1810,6 +1810,13 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   cancelled_reason: "TEXT",
   cancelled_by: "TEXT",
   cancelled_at: "TEXT",
+  // Stale-Request escalation (card 99d41588) — set once by idle-watcher.ts's tickStaleRequests the instant
+  // a still-pending Request first crosses orchestration.staleRequestMinutes; nullable, and stays NULL for
+  // a legacy row and for any row answered/consumed/cancelled before ever going stale. Deliberately added
+  // ONLY here (not to the base CREATE TABLE `questions` block above) so a fresh install and an upgraded
+  // legacy DB both gain it through this ONE ALTER-TABLE path — see migrateQuestions()'s own doc for why an
+  // index referencing a migration-added column must never live in the base unconditional SCHEMA string.
+  escalated_at: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -2599,6 +2606,14 @@ export class Db {
       if (!have.has(name)) this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_questions_task ON questions(task_id)");
+    // Serves listStalePendingQuestions' scan (state='pending' AND escalated_at IS NULL AND created_at <=
+    // ?) — mirrors idx_questions_task's own placement: escalated_at is a migration-ADDED column (see
+    // QUESTION_ADDED_COLUMNS), so this index must live here, never in the base unconditional SCHEMA string
+    // (a legacy DB's CREATE TABLE IF NOT EXISTS is a no-op there, and an index over a not-yet-added column
+    // would throw "no such column: escalated_at").
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_questions_pending_unescalated ON questions(created_at) WHERE state = 'pending' AND escalated_at IS NULL",
+    );
   }
 
   /**
@@ -6888,6 +6903,35 @@ export class Db {
       .all(beforeIso) as Row[]).map(toQuestion);
   }
   /**
+   * Every still-`pending`, not-yet-escalated Request with `createdAt <= beforeIso` — the stale-Request
+   * watchdog's (IdleWatcher.tickStaleRequests, card 99d41588) work set. Oldest-first, structural twin of
+   * `listAnsweredStuckQuestions` above but keyed on `created_at`/`state='pending'` instead of
+   * `answered_at`/`state='answered'` — this is the REQUEST's own age clock, deliberately independent of
+   * any asking session's idle/suppression state (see `request_escalated`'s doc in shared/src/types.ts).
+   * `escalated_at IS NULL` is what makes a later tick never re-return an already-escalated row — the scan
+   * guard `markQuestionEscalated` below relies on to fire the event exactly once per Request. Deliberately
+   * NON-CONSUMING (never touches `state`).
+   */
+  listStalePendingQuestions(beforeIso: string): Question[] {
+    return (this.db.prepare(
+      "SELECT * FROM questions WHERE state = 'pending' AND escalated_at IS NULL AND created_at <= ? ORDER BY created_at",
+    ).all(beforeIso) as Row[]).map(toQuestion);
+  }
+  /**
+   * Stamp `escalated_at` on ONE Request — the write half of the stale-Request watchdog (card 99d41588).
+   * Guarded by `state = 'pending' AND escalated_at IS NULL` in the SAME statement (mirrors cancelQuestion's
+   * observed-not-assumed discipline above) so the caller can tell a genuine first-stamp apart from a race
+   * that already answered/escalated this row between the scan and this write. Returns whether the stamp
+   * actually applied; the caller (tickStaleRequests) MUST only append the `request_escalated` event when
+   * this returns true, or a lost race could fire the event twice for the same Request.
+   */
+  markQuestionEscalated(id: string, escalatedAt: string): boolean {
+    const result = this.db.prepare(
+      "UPDATE questions SET escalated_at = ? WHERE id = ? AND state = 'pending' AND escalated_at IS NULL",
+    ).run(escalatedAt, id);
+    return result.changes > 0;
+  }
+  /**
    * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips
    * them to 'consumed' in the SAME transaction, so a concurrent pull can never double-consume the same
    * row. Returns the questions AS THEY WERE when answered (pre-flip) — the manager's payload.
@@ -8236,6 +8280,7 @@ function toQuestion(r0: unknown): Question {
     cancelledReason: (r.cancelled_reason as string | null) ?? null,
     cancelledBy: (r.cancelled_by as "agent" | "human" | null) ?? null,
     cancelledAt: (r.cancelled_at as string | null) ?? null,
+    escalatedAt: (r.escalated_at as string | null) ?? null,
   };
 }
 // A question row already carrying the joined display columns (agent_name / project_name /

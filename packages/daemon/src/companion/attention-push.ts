@@ -132,6 +132,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
       return "worker-crashed";
     case "question_asked":
       return "decision-pending";
+    // Card 99d41588: a Request going STALE is still fundamentally "a decision needs the human" — same
+    // class as the original ask, not a new one; what differs is the LINE (see alertLine below), which
+    // must carry the age so this reads as an escalation, not a duplicate of the original push.
+    case "request_escalated":
+      return "decision-pending";
     case "idle_escalated":
       return "manager-idle";
     case "idle_report":
@@ -217,6 +222,25 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
       const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
       line = `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
+      break;
+    }
+    case "request_escalated": {
+      // Card 99d41588: same placement discipline as question_asked above — the resolvable questionId goes
+      // BEFORE the (unbounded, truncatable) title, so it survives both the title's own truncation and the
+      // final ALERT_LINE_MAX_CHARS trim. Without an explicit case here this event would fall through to
+      // the bare `default:` below (`${projectName}: decision-pending — ${m8}`) — no request id, no age, no
+      // title — degrading this escalation to exactly the contentless passive signal the card exists to
+      // defeat: live, but nothing a human could act on from the push alone.
+      const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
+      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
+      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+      const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
+      const ageDays = typeof detail.ageMinutes === "number" ? Math.floor(detail.ageMinutes / 1440) : null;
+      const ageStr = ageDays !== null
+        ? ageDays >= 1 ? `${ageDays}d` : `${Math.round((detail.ageMinutes as number))}m`
+        : "?";
+      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
+      line = `${projectName}: Request pending ${ageStr}, unanswered${qRef}${cutFlag} — "${title}" — please answer or dismiss it`;
       break;
     }
     case "idle_escalated":

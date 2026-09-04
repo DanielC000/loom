@@ -3300,6 +3300,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           cancelledReason: state === "cancelled" ? (q.cancelledReason ?? null) : null,
           cancelledBy: state === "cancelled" ? (q.cancelledBy ?? "human") : null,
           cancelledAt: state === "cancelled" ? now : null,
+          // Card 99d41588 — always unescalated at seed time (no seed field for it, mirrors the
+          // provisionConnectionId/provisionBindingState comment above: a spec needing an already-escalated
+          // row seeds pending with a backdated createdAt and lets the real watcher tick escalate it).
+          escalatedAt: null,
         });
         questionIds.push(id);
       }

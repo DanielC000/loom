@@ -198,10 +198,24 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // decision (misleading — see the residual-gap investigation, card 8701bdbb follow-up).
   for (const q of (questions.data ?? []).filter((x) => x.state === "pending")) {
     const label = requestAttentionLabel(q.type); // type-aware — a credential/permission/input ask is not a "decision"
+    // Card 99d41588: `escalatedAt` is stamped ONCE, server-side (IdleWatcher.tickStaleRequests), the
+    // instant this still-pending Request first crosses `orchestration.staleRequestMinutes` — read directly
+    // off the question row rather than cross-referencing a `request_escalated` orchestration event, since
+    // this bell already polls `openQuestions` globally (unlike the idle/context escalation rows below,
+    // which can only surface for a currently-LIVE manager's own fetched event stream — a Request's asking
+    // session may since have exited without ever answering it, and this must still show the escalation).
+    // A row that's ALSO sessionOrphaned takes the orphaned branch instead — "asking session is gone" is
+    // the more actionable fact for a human to know than "and it was also stale before that".
+    const stale = q.escalatedAt != null;
     items.push(q.sessionOrphaned
       ? {
           key: `q-${q.id}`, tone: "amber", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
+        }
+      : stale
+      ? {
+          key: `q-${q.id}`, tone: "red", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
+          text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
         }
       : {
           key: `q-${q.id}`, tone: "cyan", kind: label, questionId: q.id, sessionId: q.sessionId,

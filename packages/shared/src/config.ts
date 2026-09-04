@@ -483,6 +483,19 @@ export interface OrchestrationConfig {
    */
   idleWorkerMinutes: number;
   /**
+   * Stale-owner-Request watchdog (card 99d41588): minutes a `question_ask` Request may sit `pending`
+   * before `idle-watcher.ts`'s `tickStaleRequests` escalates it (a `request_escalated` event — the
+   * human-facing signal the web attention surface + attention-push/event-trigger fan-out already give
+   * `idle_escalated` its readers from). Keyed on the REQUEST's own `created_at`, deliberately independent
+   * of any asking session's idle/suppression state — see `request_escalated`'s own doc in
+   * `shared/src/types.ts` for why this must NOT be folded into `idleNudgeMinutes`/`maxUnansweredNudges`
+   * (a manager correctly suppressed on cb56cf80/8e87f3b5's own-Request carve-out never accrues an
+   * idle-nudge strike, so that clock alone can never reach this one). Default 1440 (24h) — long enough
+   * that a Request pending for a normal review cycle never fires, short enough to close the gap the card
+   * measured (owner Requests sitting 10+ days with zero signal). 0 disables the watcher entirely.
+   */
+  staleRequestMinutes: number;
+  /**
    * Busy-worker LONG-TURN advisory: minutes a LIVE worker may sit `busy` in a SINGLE uninterrupted turn
    * (no turn boundary → `lastActivity` not advancing, since `setBusy` re-stamps it on every turn edge)
    * before the BusyWorkerWatcher surfaces it to the OWNING MANAGER as an informational heads-up (a
@@ -1117,7 +1130,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1633,6 +1646,8 @@ export function resolveConfig(
       idleDefaultSnoozeMinutes: override.orchestration?.idleDefaultSnoozeMinutes ?? d.orchestration.idleDefaultSnoozeMinutes,
       // `??` (not `||`) so an explicit 0 (disables the idle-worker watcher) survives the merge.
       idleWorkerMinutes: override.orchestration?.idleWorkerMinutes ?? d.orchestration.idleWorkerMinutes,
+      // `??` (not `||`) so an explicit 0 (disables the stale-Request watchdog) survives the merge.
+      staleRequestMinutes: override.orchestration?.staleRequestMinutes ?? d.orchestration.staleRequestMinutes,
       // `??` (not `||`) so an explicit 0 (disables the watcher) survives the merge.
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
       // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.

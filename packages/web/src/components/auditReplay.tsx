@@ -24,7 +24,7 @@ function eventTone(e: AuditEvent): Tone {
     return st === "blocked" ? "amber" : st === "done" ? "phosphor" : "cyan";
   }
   if (k === "merge_rejected" || k === "worker_report_rejected" || k === "idle_escalated" ||
-      k === "context_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
+      k === "context_escalated" || k === "request_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
       k === "schedule_fire_failed" || k === "worker_report_undelivered") return "red";
   if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker" ||
       k === "schedule_fire_deferred") return "amber";
@@ -52,6 +52,7 @@ function detailLine(e: AuditEvent): string {
     case "idle_report": return `${s("state")}${s("detail") ? ` — ${s("detail").slice(0, 80)}` : ""}`;
     case "idle_escalated": return `${s("unanswered")} unanswered nudges`;
     case "context_escalated": return `~${s("pct")}% context · ${s("unanswered")} ignored nudges`;
+    case "request_escalated": return `${s("ageMinutes")}m unanswered — "${s("title").slice(0, 60)}"`;
     case "worker_stuck": return `busy ${s("minutesBusy")}m`;
     case "build_gate_retry_attempt": return `gate retry${s("priorClass") ? ` (was ${s("priorClass")})` : ""}`;
     case "build_gate_retry": return `gate retry: ${d.passed != null ? (d.passed ? "passed" : "still failed") : "?"}`;
