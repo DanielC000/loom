@@ -90,3 +90,82 @@ export function readCodescapeToolDriftNote(loomHomeDir: string): string {
     `running older code than what's merged on main.`
   );
 }
+
+/**
+ * Card `ce1bed6e`: the SAME ADDRESSED-signal shape as {@link ToolDriftState} above, for the drift-restart
+ * starvation problem — a build-drift restart deferred (or its one allowance already spent) with nobody
+ * told the actual remaining window, so the party doing the rebuilding has no way to know a further rebuild
+ * would replace the stability-window candidate and starve the restart indefinitely (card `9e6f984d`'s
+ * debounce, `545ef479`'s state machine). Reaches the SAME Platform Lead kickoff channel as the tool-drift
+ * note above, for the SAME reason: private by construction (no REST field, no MCP tool response, no
+ * description text — the Platform Lead session type itself does not exist without `LOOM_DEV=1`), so this
+ * needed zero new disclosure surface and (per the accepted-baseline provenance notes in
+ * codescape-privacy-guard.mjs) zero new entry there — this file and `sessions/platform-lead-prompt.ts` are
+ * already on it (card `350bc307`).
+ *
+ * ⚠️ Deliberately NOT a fix for the PREVENTION audience (the party actually doing the rebuilding, on a
+ * codescape-enabled project) — that is a shared channel reaching ordinary sessions and needs its own
+ * `CODESCAPE_PROMPT_BLOCK_ASSET`-style review; out of scope here. This is the REMEDIATION audience only,
+ * and only reaches it WHEN a Platform Lead actually spawns — see this note's own caller for that bound.
+ */
+export const BUILD_DRIFT_STATE_BASENAME = "build-drift-state.json";
+
+/**
+ * Mirrors `CodescapeSupervisor.getDriftDetail()`'s own return shape (supervisor.ts) FIELD FOR FIELD, but
+ * deliberately re-declared here rather than imported — same discipline as {@link ToolDriftState}, which
+ * has no dependency on supervisor.ts's own types either. `message` is the pre-composed, ready-to-surface
+ * line `getDriftDetail()` already builds (states BOTH the remaining window and that the SAME commit does
+ * not reset it, or the UNRESOLVED/exhausted wording) — persisted verbatim so the wording is derived in
+ * exactly ONE place, never re-derived here.
+ */
+export interface BuildDriftState {
+  /** ISO timestamp of the probe tick that produced this state. */
+  checkedAt: string;
+  message: string | null;
+}
+
+/** Absolute path of the persisted build-drift state file, given the codescape HOME dir. */
+export function buildDriftStatePath(codescapeHomeDir: string): string {
+  return path.join(codescapeHomeDir, BUILD_DRIFT_STATE_BASENAME);
+}
+
+/**
+ * Persist the latest probe result. Best-effort, NEVER throws — same DoD-3 fail-soft discipline as
+ * {@link writeToolDriftState}: a write failure just means the next Lead kickoff sees stale (or no) state
+ * instead of this tick's finding, never a probe-tick failure.
+ */
+export function writeBuildDriftState(codescapeHomeDir: string, state: BuildDriftState): void {
+  try {
+    fs.mkdirSync(codescapeHomeDir, { recursive: true });
+    fs.writeFileSync(buildDriftStatePath(codescapeHomeDir), JSON.stringify(state));
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Read back the latest persisted finding and compose the `[loom:codescape-build-drift]` note, or `""` when
+ * there's nothing to report (no state yet, codescape off, an unreadable/corrupt file, or the last probe
+ * found no pending/unresolved drift) — same fail-soft discipline as {@link readCodescapeToolDriftNote}.
+ *
+ * `loomHomeDir` is `LOOM_HOME` itself, exactly as {@link readCodescapeToolDriftNote} receives it.
+ */
+export function readCodescapeBuildDriftNote(loomHomeDir: string): string {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(buildDriftStatePath(path.join(loomHomeDir, "codescape")), "utf-8");
+  } catch {
+    return "";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return "";
+  }
+  const state = parsed as Partial<BuildDriftState> | null;
+  const message = typeof state?.message === "string" ? state.message : null;
+  if (!message) return "";
+  const checkedAt = typeof state?.checkedAt === "string" ? state.checkedAt : "an unknown time";
+  return `[loom:codescape-build-drift] ${message} Checked ${checkedAt} against the LIVE server: this is a running-process reading, not a source-code one — the daemon serving this kickoff may itself be running older code than what's merged on main.`;
+}

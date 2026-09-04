@@ -57,7 +57,7 @@ fs.mkdirSync(tmpHome, { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { probeAdvertisedTools } = await import("../dist/codescape/tools-probe.js");
-const { writeToolDriftState, readCodescapeToolDriftNote, toolDriftStatePath, TOOL_DRIFT_STATE_BASENAME } = await import("../dist/codescape/drift-notice.js");
+const { writeToolDriftState, readCodescapeToolDriftNote, toolDriftStatePath, TOOL_DRIFT_STATE_BASENAME, writeBuildDriftState, readCodescapeBuildDriftNote, buildDriftStatePath, BUILD_DRIFT_STATE_BASENAME } = await import("../dist/codescape/drift-notice.js");
 const { CodescapeSupervisor } = await import("../dist/codescape/supervisor.js");
 const { CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS, CODESCAPE_TOOL_PREFIX, codescapeUnclassifiedTools } = await import("../dist/pty/host.js");
 const { composeResumeDocOperationalNotes } = await import("../dist/sessions/platform-lead-prompt.js");
@@ -193,6 +193,38 @@ function startFixtureMcpServer(toolNames) {
   check("(notice) a corrupt state file ⇒ note is empty, no throw", readCodescapeToolDriftNote(homeA) === "");
 }
 
+// ===================== card ce1bed6e: writeBuildDriftState / readCodescapeBuildDriftNote — the SAME addressed-signal round trip, for build drift =====================
+{
+  const homeF = path.join(tmpHome, "home-f");
+  const csHomeF = path.join(homeF, "codescape");
+  check("(build-drift notice) no state file at all ⇒ note is empty", readCodescapeBuildDriftNote(homeF) === "");
+
+  writeBuildDriftState(csHomeF, { checkedAt: "2026-09-04T00:00:00.000Z", message: null });
+  check("(build-drift notice) a CLEAN state (message:null — no pending/unresolved drift) ⇒ note is still empty", readCodescapeBuildDriftNote(homeF) === "");
+  check("(build-drift notice) buildDriftStatePath resolves under <codescapeHomeDir>/" + BUILD_DRIFT_STATE_BASENAME,
+    buildDriftStatePath(csHomeF) === path.join(csHomeF, BUILD_DRIFT_STATE_BASENAME) && fs.existsSync(buildDriftStatePath(csHomeF)));
+
+  const pendingMessage = 'codescape serve build drift pending restart (running "build-old" != installed "build-new") — stable 0m4s of 0m15s; rebuilding the SAME commit again does NOT reset this window, only a DIFFERENT installed build does.';
+  writeBuildDriftState(csHomeF, { checkedAt: "2026-09-04T01:23:45.000Z", message: pendingMessage });
+  const note = readCodescapeBuildDriftNote(homeF);
+  check("(build-drift notice) a real finding ⇒ a non-empty, tagged note", note.startsWith("[loom:codescape-build-drift]"));
+  check("(build-drift notice) the note carries the pre-composed message verbatim (remaining window AND the same-commit-does-not-reset-it fact — never re-derived here)",
+    note.includes(pendingMessage));
+  check("(build-drift notice) the note carries the checkedAt timestamp", note.includes("2026-09-04T01:23:45.000Z"));
+  check("(build-drift notice) the note is explicit about observing the RUNNING process, not source",
+    /running.?process|LIVE server/i.test(note));
+
+  const unresolvedMessage = 'codescape serve build drift UNRESOLVED (running "build-old" != installed "build-new") — its one restart for this installed build is already spent; rebuilding the SAME commit again will NOT open a new allowance, only a genuinely DIFFERENT installed build (or a daemon restart) will.';
+  writeBuildDriftState(csHomeF, { checkedAt: "2026-09-04T02:00:00.000Z", message: unresolvedMessage });
+  const unresolvedNote = readCodescapeBuildDriftNote(homeF);
+  check("(build-drift notice) the EXHAUSTED/UNRESOLVED case also composes a non-empty note", unresolvedNote.includes(unresolvedMessage));
+
+  // Corrupt/garbage state file: fail soft, never throw.
+  fs.mkdirSync(csHomeF, { recursive: true });
+  fs.writeFileSync(buildDriftStatePath(csHomeF), "{ not valid json");
+  check("(build-drift notice) a corrupt state file ⇒ note is empty, no throw", readCodescapeBuildDriftNote(homeF) === "");
+}
+
 // ===================== composeResumeDocOperationalNotes: the note actually lands in the Lead's own kickoff channel =====================
 {
   const homeB = path.join(tmpHome, "home-b");
@@ -203,6 +235,7 @@ function startFixtureMcpServer(toolNames) {
 
   const notesClean = composeResumeDocOperationalNotes(homeB, resumeDocPath);
   check("(integration) no codescape state yet ⇒ notes carry nothing tool-drift-related", !notesClean.includes("codescape-tool-drift"));
+  check("(integration) no codescape state yet ⇒ notes carry nothing build-drift-related either", !notesClean.includes("codescape-build-drift"));
 
   writeToolDriftState(csHomeB, { checkedAt: "2026-08-28T02:00:00.000Z", unclassified: ["mcp__codescape__drift_x"], advertisedCount: 16 });
   const notesDrifted = composeResumeDocOperationalNotes(homeB, resumeDocPath);
@@ -213,6 +246,20 @@ function startFixtureMcpServer(toolNames) {
   const notesRecovered = composeResumeDocOperationalNotes(homeB, resumeDocPath);
   check("(integration) once the finding clears, the next kickoff carries nothing tool-drift-related",
     !notesRecovered.includes("codescape-tool-drift"));
+
+  // card ce1bed6e: build-drift rides the SAME channel, independently of tool-drift (both can be present at once).
+  const buildDriftMsg = 'codescape serve build drift pending restart (running "b1" != installed "b2") — stable 0m1s of 0m15s; rebuilding the SAME commit again does NOT reset this window, only a DIFFERENT installed build does.';
+  writeBuildDriftState(csHomeB, { checkedAt: "2026-09-04T04:00:00.000Z", message: buildDriftMsg });
+  const notesBuildDrifted = composeResumeDocOperationalNotes(homeB, resumeDocPath);
+  check("(integration) a real build-drift finding ALSO rides the SAME [loom:*] channel",
+    notesBuildDrifted.includes("[loom:codescape-build-drift]") && notesBuildDrifted.includes(buildDriftMsg));
+  check("(integration) both notices coexist in one compose call without either clobbering the other",
+    notesBuildDrifted.includes("[loom:codescape-tool-drift]") === false /* tool-drift was cleared above */ && notesBuildDrifted.includes("[loom:codescape-build-drift]"));
+
+  writeBuildDriftState(csHomeB, { checkedAt: "2026-09-04T05:00:00.000Z", message: null });
+  const notesBuildRecovered = composeResumeDocOperationalNotes(homeB, resumeDocPath);
+  check("(integration) once the build-drift finding clears, the next kickoff carries nothing build-drift-related",
+    !notesBuildRecovered.includes("codescape-build-drift"));
 }
 
 // ===================== CodescapeSupervisor.checkToolDrift (via the test seam): the ACTUAL call site =====================
@@ -284,6 +331,6 @@ function startFixtureMcpServer(toolNames) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape tool-drift live-wiring (card 350bc307, naming fix card 76a57ff3): every fixture below registers BARE tool names (what a real server actually advertises — it cannot know the \"codescape\" mount-name prefix a client will choose), so probeAdvertisedTools's own boundary normalization (toPrefixedCodescapeToolNames) is exercised for real, not against a circular fixture built from the arrays under test; catches a clean set as clean AND a one-tool drift over the wire (positive control), and never throws against an unreachable server; writeToolDriftState/readCodescapeToolDriftNote round-trip correctly (absent/clean/corrupt all read back empty, fail-soft); the note lands in composeResumeDocOperationalNotes — the SAME [loom:*] channel already injected into every Platform Lead kickoff, the ADDRESSED signal DoD-2 requires, not a log line; and CodescapeSupervisor.checkToolDrift (via its runToolDriftProbeForTest seam) is the real call site — wired end to end against a live server (including DoD-5: a pre-seeded STALE pre-fix all-unclassified state file is overwritten by the very next successful probe, no manual clearing needed) AND fail-soft (no port, or no registered project id) in both negative cases, never persisting or throwing."
+  ? "\n✅ ALL PASS — Codescape tool-drift live-wiring (card 350bc307, naming fix card 76a57ff3): every fixture below registers BARE tool names (what a real server actually advertises — it cannot know the \"codescape\" mount-name prefix a client will choose), so probeAdvertisedTools's own boundary normalization (toPrefixedCodescapeToolNames) is exercised for real, not against a circular fixture built from the arrays under test; catches a clean set as clean AND a one-tool drift over the wire (positive control), and never throws against an unreachable server; writeToolDriftState/readCodescapeToolDriftNote round-trip correctly (absent/clean/corrupt all read back empty, fail-soft); the note lands in composeResumeDocOperationalNotes — the SAME [loom:*] channel already injected into every Platform Lead kickoff, the ADDRESSED signal DoD-2 requires, not a log line; and CodescapeSupervisor.checkToolDrift (via its runToolDriftProbeForTest seam) is the real call site — wired end to end against a live server (including DoD-5: a pre-seeded STALE pre-fix all-unclassified state file is overwritten by the very next successful probe, no manual clearing needed) AND fail-soft (no port, or no registered project id) in both negative cases, never persisting or throwing. Card ce1bed6e: writeBuildDriftState/readCodescapeBuildDriftNote round-trip the SAME addressed-signal shape for build drift (pending AND exhausted/UNRESOLVED messages both compose a non-empty note, absent/clean/corrupt all read back empty), and it rides the SAME composeResumeDocOperationalNotes channel independently of (and alongside) tool-drift."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -6,7 +6,7 @@ import { resolveCodescapeConfig, type ProjectConfigOverride } from "@loom/shared
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 import { resolveCodescapeProjectId } from "./manifest.js";
 import { probeAdvertisedTools } from "./tools-probe.js";
-import { writeToolDriftState } from "./drift-notice.js";
+import { writeToolDriftState, writeBuildDriftState } from "./drift-notice.js";
 import { codescapeUnclassifiedTools } from "../pty/host.js";
 
 /**
@@ -318,6 +318,41 @@ interface RunResult {
 type DriftCheckState = "match" | "mismatch" | "not-checked:running-absent" | "not-checked:installed-null" | "not-checked:installed-read-failed";
 
 /**
+ * Card ce1bed6e: the detail {@link CodescapeSupervisor.getDriftCheckState} deliberately never carried —
+ * it is a coarse diagnostic/test seam only. This is the shape `served_status` surfaces instead, so a
+ * project's OWN manager (never a reader of THIS daemon's console — see this card) can read whether the
+ * shared `codescape serve` process is mid-drift, how much of the stability window remains, and — the
+ * whole point, since a bare "deferring" is what invites the fatal same-commit rebuild — that rebuilding
+ * the SAME installed commit does NOT reset the window; only a genuinely DIFFERENT installed build does.
+ * Every field below `state` is only meaningful when `state === "mismatch"`; all read `null`/`false`
+ * otherwise (including a resolved `"match"`, which has nothing left to report).
+ */
+export interface CodescapeDriftDetail {
+  state: DriftCheckState | null;
+  /** The mismatched installed/running build ids, or both `null` when `state !== "mismatch"`. */
+  installedBuild: string | null;
+  runningBuild: string | null;
+  /**
+   * `true` once this daemon lifetime already spent its ONE restart for `installedBuild` and it still
+   * has not resolved — the SECOND non-convergence path (a restart fired and came back still mismatched),
+   * which gets no further retry until the installed build changes again or the daemon restarts. When
+   * `true`, `remainingMs` is `null` — there is no window counting down; nothing further will happen on
+   * its own.
+   */
+  restartExhausted: boolean;
+  /** ms remaining in the stability window before a restart fires, floored at 0, or `null` when no window
+   *  is currently running (no mismatch, or `restartExhausted`). */
+  remainingMs: number | null;
+  /** The full stability window this instance enforces (config/default) — always populated, so a caller
+   *  can compute "stable X of Y" itself even when it wants to build its own message. */
+  driftStabilityMs: number;
+  /** A ready-to-surface, human-readable line stating BOTH the remaining window AND that rebuilding the
+   *  SAME commit does not reset it (or the UNRESOLVED/exhausted message). `null` when `state !==
+   *  "mismatch"`. */
+  message: string | null;
+}
+
+/**
  * Run a child process to completion ASYNCHRONOUSLY, resolving a {@link RunResult}. NEVER rejects — a
  * spawn error, non-zero exit, or timeout all resolve `ok:false`. Captures a bounded stdout+stderr tail
  * for diagnostics. Mirrors `python/venv.ts`'s `runAsync` (a fresh copy: different subsystem, same
@@ -430,6 +465,20 @@ function sleep(ms: number): Promise<void> {
  */
 function formatIntervalMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`;
+}
+
+/**
+ * Card ce1bed6e: render a duration as `<minutes>m<seconds>s` (e.g. `4m12s`, `15m0s`) for
+ * {@link CodescapeSupervisor.getDriftDetail}'s human-facing message — `driftStabilityMs` defaults to
+ * 15 minutes, so {@link formatIntervalMs}'s bare-seconds form ("900s") is correct but illegible for this
+ * caller; this is a separate function rather than a change to that one, which existing log lines already
+ * depend on staying in its current form.
+ */
+function formatMinSec(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m${seconds}s`;
 }
 
 /**
@@ -619,6 +668,19 @@ export class CodescapeSupervisor {
   /** Epoch ms {@link driftCandidateBuild} was first observed — paired with it, see that field's doc. */
   private driftCandidateFirstSeenAt: number | null = null;
   /**
+   * Card ce1bed6e: the `(installedBuild, runningBuild)` pair from the MOST RECENT probe tick that
+   * announced `"mismatch"` — set unconditionally the moment {@link checkBuildDrift} enters the mismatch
+   * branch, so it stays populated through BOTH the deferring-restart state and the POST-EXHAUSTION
+   * UNRESOLVED state. This is deliberately a DIFFERENT lifetime than {@link driftCandidateBuild}, which
+   * is cleared the instant a build's one restart fires (see the `installedBuild ===
+   * lastDriftRestartInstalledBuild` branch below) — without a separate pair, {@link getDriftDetail} would
+   * have nothing to report for exactly the UNRESOLVED case the served_status surface exists to name.
+   * Reset to `null` on the "match" branch (a resolved drift has nothing left to report) and on
+   * {@link stop}/{@link start}, same as every other drift-tracking field.
+   */
+  private lastMismatchInstalledBuild: string | null = null;
+  private lastMismatchRunningBuild: string | null = null;
+  /**
    * Card ebd755ab (Gap 1): the `(installedBuild, runningBuild)` pair — joined as a single string key —
    * for which the exhausted-restart diagnostic (see the `installedBuild === lastDriftRestartInstalledBuild`
    * branch in {@link checkBuildDrift}) was already announced, or `null` if none. Distinct from
@@ -803,6 +865,35 @@ export class CodescapeSupervisor {
     return this.driftCheckState;
   }
 
+  /**
+   * Card ce1bed6e: the served_status-facing detail {@link getDriftCheckState} deliberately never carried
+   * (see that method's own doc — it is a coarse diagnostic/test seam). Computed fresh from the SAME
+   * instance fields {@link checkBuildDrift} maintains on every probe tick — never cached separately, so
+   * it cannot go stale relative to the next tick.
+   */
+  getDriftDetail(): CodescapeDriftDetail {
+    const state = this.driftCheckState;
+    if (state !== "mismatch") {
+      return { state, installedBuild: null, runningBuild: null, restartExhausted: false, remainingMs: null, driftStabilityMs: this.driftStabilityMs, message: null };
+    }
+    const installedBuild = this.lastMismatchInstalledBuild;
+    const runningBuild = this.lastMismatchRunningBuild;
+    const restartExhausted = installedBuild != null && installedBuild === this.lastDriftRestartInstalledBuild;
+    if (restartExhausted) {
+      return {
+        state, installedBuild, runningBuild, restartExhausted, remainingMs: null, driftStabilityMs: this.driftStabilityMs,
+        message: `codescape serve build drift UNRESOLVED (running "${runningBuild}" != installed "${installedBuild}") — its one restart for this installed build is already spent; rebuilding the SAME commit again will NOT open a new allowance, only a genuinely DIFFERENT installed build (or a daemon restart) will.`,
+      };
+    }
+    let remainingMs: number | null = null;
+    if (this.driftCandidateBuild === installedBuild && this.driftCandidateFirstSeenAt != null) {
+      remainingMs = Math.max(0, this.driftStabilityMs - (Date.now() - this.driftCandidateFirstSeenAt));
+    }
+    const message = remainingMs == null ? null :
+      `codescape serve build drift pending restart (running "${runningBuild}" != installed "${installedBuild}") — stable ${formatMinSec(this.driftStabilityMs - remainingMs)} of ${formatMinSec(this.driftStabilityMs)}; rebuilding the SAME commit again does NOT reset this window, only a DIFFERENT installed build does.`;
+    return { state, installedBuild, runningBuild, restartExhausted, remainingMs, driftStabilityMs: this.driftStabilityMs, message };
+  }
+
   /** Diagnostic/test seam — see {@link lastToolDriftUnclassified}. `null` before the first tool-drift
    *  probe ever completes. */
   getUnclassifiedTools(): string[] | null {
@@ -889,6 +980,8 @@ export class CodescapeSupervisor {
       this.driftCandidateFirstSeenAt = null;
       this.lastExhaustedDriftAnnounced = null;
       this.driftCheckState = null;
+      this.lastMismatchInstalledBuild = null;
+      this.lastMismatchRunningBuild = null;
       this.lastHealthAnsweredErrorStatus = null;
       this.lastToolDriftUnclassified = null;
       this.spawnServe();
@@ -941,6 +1034,8 @@ export class CodescapeSupervisor {
     this.driftCandidateFirstSeenAt = null;
     this.lastExhaustedDriftAnnounced = null;
     this.driftCheckState = null;
+    this.lastMismatchInstalledBuild = null;
+    this.lastMismatchRunningBuild = null;
     this.lastHealthAnsweredErrorStatus = null;
     this.lastToolDriftUnclassified = null;
     if (this.child) {
@@ -1360,6 +1455,12 @@ export class CodescapeSupervisor {
           this.lastHealthAnsweredErrorStatus = null;
         }
         await this.checkBuildDrift(res.json);
+        // Card ce1bed6e: same freshness discipline as checkToolDrift's own writeToolDriftState call below —
+        // persist on EVERY successful round-trip, even a "nothing to report" result (getDriftDetail()'s
+        // message:null case), so a since-resolved drift doesn't linger stale in what
+        // readCodescapeBuildDriftNote reads back. Reads whatever checkBuildDrift just set, regardless of
+        // which of its internal branches fired this tick.
+        writeBuildDriftState(this.homeDir, { checkedAt: new Date().toISOString(), message: this.getDriftDetail().message });
         await this.checkToolDrift();
         return;
       }
@@ -1599,6 +1700,9 @@ export class CodescapeSupervisor {
       // Clears any in-progress stability window so a LATER new drift starts a fresh one, not a stale one.
       this.driftCandidateBuild = null;
       this.driftCandidateFirstSeenAt = null;
+      // Card ce1bed6e: a resolved drift has nothing left for getDriftDetail() to report.
+      this.lastMismatchInstalledBuild = null;
+      this.lastMismatchRunningBuild = null;
       if (this.lastExhaustedDriftAnnounced != null) {
         // Card ebd755ab (Gap 1 reset): the pair we'd previously announced as permanently unresolved has
         // now resolved — announce the recovery so it isn't indistinguishable from "still unresolved".
@@ -1608,6 +1712,11 @@ export class CodescapeSupervisor {
       return;
     }
     this.announceDriftCheckState("mismatch");
+    // Card ce1bed6e: set unconditionally, BEFORE the exhausted-guard/stability-window branches below —
+    // getDriftDetail() needs this pair populated in EVERY mismatch sub-state, including the
+    // already-exhausted UNRESOLVED one, where driftCandidateBuild itself is never (re)set for this build.
+    this.lastMismatchInstalledBuild = installedBuild;
+    this.lastMismatchRunningBuild = runningBuild;
     if (installedBuild === this.lastDriftRestartInstalledBuild) {
       // Card ebd755ab (Gap 1): the one-restart-per-build guard is correct policy (unchanged below) — the
       // defect was that this path returned silently forever, making a permanently-broken deploy

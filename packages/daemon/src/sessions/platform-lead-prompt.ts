@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
 import { resumeDocSizeWarning } from "./resume-doc-notes.js";
-import { readCodescapeToolDriftNote } from "../codescape/drift-notice.js";
+import { readCodescapeToolDriftNote, readCodescapeBuildDriftNote } from "../codescape/drift-notice.js";
 
 /**
  * Card 2fed1663 — lineage-scope the Platform Lead resume doc so concurrent Leads never contend on one
@@ -183,6 +183,13 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
  *    a directive, so a non-empty finding rides the SAME already-established channel as the two checks
  *    above rather than a new, easy-to-ignore surface. Fails soft like the others: no state yet, or
  *    codescape disabled/never probed, silently contributes nothing.
+ * 4. **Codescape build drift** (card `ce1bed6e`) — {@link readCodescapeBuildDriftNote}, the SAME
+ *    ADDRESSED-signal shape as check 3, for the drift-restart starvation problem: a build-drift restart
+ *    deferred (or its one allowance already spent) with the remaining stability window unstated, so a
+ *    rebuild of the SAME commit looks safe when it would actually replace the candidate and starve the
+ *    restart. This is the REMEDIATION audience only (the Lead notices and can intervene) — it does not
+ *    reach the PREVENTION audience (a codescape-enabled project's own session, who could just not rebuild
+ *    again); that is a separate, shared channel out of this card's scope. Fails soft like the others.
  *
  * Returns "" when none of the checks above fire (the common, healthy-state case).
  *
@@ -204,6 +211,9 @@ export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath
 
   const toolDriftNote = readCodescapeToolDriftNote(homePath);
   if (toolDriftNote) notes.push(toolDriftNote);
+
+  const buildDriftNote = readCodescapeBuildDriftNote(homePath);
+  if (buildDriftNote) notes.push(buildDriftNote);
 
   let resolvedMtimeMs: number | null = null;
   try {

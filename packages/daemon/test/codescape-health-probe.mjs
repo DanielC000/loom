@@ -186,6 +186,19 @@ process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 process.env.LOOM_DEV = "1"; // gate: isLoomDev() + a resolvable codescape CLI (card 503a30a0)
 
 const { CodescapeSupervisor } = await import("../dist/codescape/supervisor.js");
+const { buildDriftStatePath } = await import("../dist/codescape/drift-notice.js");
+
+// Card ce1bed6e: reads the PERSISTED build-drift state file directly (never through
+// readCodescapeBuildDriftNote, which expects a LOOM_HOME and joins its own "codescape" subdir — this
+// file's own `homeDir` opt IS already the supervisor's own home, matching production's `CODESCAPE_HOME_DIR`
+// directly, no extra nesting). Returns `undefined` if nothing's been persisted yet (never throws).
+const readPersistedBuildDriftMessage = (homeDir) => {
+  try {
+    return JSON.parse(fs.readFileSync(buildDriftStatePath(homeDir), "utf8")).message;
+  } catch {
+    return undefined;
+  }
+};
 
 const readCalls = (callsFile) => fs.existsSync(callsFile)
   ? fs.readFileSync(callsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
@@ -1457,6 +1470,108 @@ for (const kind of ["PASS", "diagnostic"]) {
     bigLogger.printed.filter((l) => l.includes(`${kind} output capped`)).length === 1);
 }
 
+// ===================== (18) card ce1bed6e: getDriftDetail() — the served_status-facing detail — actually FIRES with a remaining-window message while pending, fires the UNRESOLVED message once the one restart is spent, and stays SILENT (message:null) on both a genuine resolution and an ordinary no-drift path ====
+{
+  // (18a) the full pending -> exhausted -> resolved lifecycle, sampled at each stage.
+  const homeDir = path.join(tmpHome, "drift-detail-lifecycle-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as every other scenario in this file: intervalMs/timeoutMs must stay safely above
+    // real child-process startup latency (~70-85ms observed, more under host load).
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+    driftStabilityMs: 600, // long enough (vs. the 300ms probe interval) to reliably sample a mid-window remainingMs before it fires
+  });
+  await sup.start(["/fake/repo/drift-detail-lifecycle"]);
+
+  // ---- PENDING: sampled the moment the first mismatch tick is observed (still well inside the window) ----
+  await waitForCompletedCondition(() => sup.getDriftCheckState() === "mismatch", () => sup.getCompletedProbeTickCount());
+  const pending = sup.getDriftDetail();
+  check("(18a) PENDING: state reads mismatch", pending.state === "mismatch");
+  check("(18a) PENDING: installedBuild/runningBuild are the real mismatched pair",
+    pending.installedBuild === "build-new" && pending.runningBuild === "build-old");
+  check("(18a) PENDING: restartExhausted is false (no restart has fired yet for this build)", pending.restartExhausted === false);
+  check("(18a) PENDING: remainingMs is a real countdown, > 0 and <= the configured window",
+    typeof pending.remainingMs === "number" && pending.remainingMs > 0 && pending.remainingMs <= 600);
+  check("(18a) PENDING: driftStabilityMs reports the configured window", pending.driftStabilityMs === 600);
+  check("(18a) PENDING: message names BOTH builds, the elapsed-of-window form, AND that the SAME commit does not reset it",
+    pending.message != null && pending.message.includes('installed "build-new"') && pending.message.includes('running "build-old"')
+    && pending.message.includes(" of 0m1s") && pending.message.includes("does NOT reset this window"));
+  check("(18a) PENDING: the SAME message was actually PERSISTED to disk this tick (writeBuildDriftState really fired from the real probe cycle, not just computed in-memory)",
+    readPersistedBuildDriftMessage(homeDir) === pending.message);
+
+  // ---- EXHAUSTED/UNRESOLVED: wait for the one allowed restart to fire, then for the respawned child
+  // (which inherits the SAME stale FAKE_CODESCAPE_HEALTH_BUILD) to be observed as still mismatched. ----
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
+  await waitForCompletedCondition(() => sup.getDriftDetail().restartExhausted === true, () => sup.getCompletedProbeTickCount());
+  const exhausted = sup.getDriftDetail();
+  check("(18a) EXHAUSTED: state still reads mismatch", exhausted.state === "mismatch");
+  check("(18a) EXHAUSTED: restartExhausted flips true once the one restart for this build is spent", exhausted.restartExhausted === true);
+  check("(18a) EXHAUSTED: remainingMs is null — no window is counting down; nothing further happens on its own",
+    exhausted.remainingMs === null);
+  check("(18a) EXHAUSTED: message says UNRESOLVED and that the SAME commit will NOT open a new allowance",
+    exhausted.message != null && exhausted.message.includes("UNRESOLVED") && exhausted.message.includes("will NOT open a new allowance")
+    && exhausted.message.includes("genuinely DIFFERENT installed build"));
+  check("(18a) EXHAUSTED: the UNRESOLVED message was persisted too — the Platform Lead's next kickoff would carry it",
+    readPersistedBuildDriftMessage(homeDir) === exhausted.message);
+
+  // ---- RESOLVED: the installed side reverts to match the already-running build — a genuine recovery. ----
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-old";
+  await waitForCompletedCondition(() => sup.getDriftCheckState() === "match", () => sup.getCompletedProbeTickCount());
+  const resolved = sup.getDriftDetail();
+  check("(18a) RESOLVED: state reads match", resolved.state === "match");
+  check("(18a) RESOLVED: SILENT — installedBuild/runningBuild/message all null, restartExhausted false, remainingMs null (nothing left to report)",
+    resolved.installedBuild === null && resolved.runningBuild === null && resolved.message === null
+    && resolved.restartExhausted === false && resolved.remainingMs === null);
+  check("(18a) RESOLVED: the persisted state was overwritten to message:null too — a since-cleared drift does not linger stale on disk (the SAME freshness discipline writeToolDriftState already has)",
+    readPersistedBuildDriftMessage(homeDir) === null);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+{
+  // (18b) NEGATIVE CONTROL, the ordinary no-drift path: running and installed match from the very first
+  // tick (a normal single-rebuild-then-settle, never a burst) — getDriftDetail() must stay silent
+  // throughout, never having had anything to report in the first place (distinct from (18a)'s RESOLVED
+  // check above, which proves silence AFTER a real drift — this proves silence when none ever occurred).
+  const homeDir = path.join(tmpHome, "drift-detail-no-drift-home");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-same";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-same";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  await sup.start(["/fake/repo/drift-detail-no-drift"]);
+  await waitForCompletedCondition(() => sup.getDriftCheckState() === "match", () => sup.getCompletedProbeTickCount());
+  // No settle sleep needed here (unlike this file's flood-catch windows elsewhere): getDriftDetail() is a
+  // SYNCHRONOUS read of already-current instance fields, not a separate polling loop of its own — once
+  // driftCheckState reads "match", nothing a LATER tick could still change would make this read differently.
+  const noDrift = sup.getDriftDetail();
+  check("(18b) an ordinary no-drift path never has anything to report: message stays null",
+    noDrift.state === "match" && noDrift.message === null && noDrift.remainingMs === null && noDrift.restartExhausted === false);
+  check("(18b) the persisted state on disk is ALSO message:null — the Platform Lead's kickoff channel carries nothing for a healthy no-drift daemon",
+    readPersistedBuildDriftMessage(homeDir) === null);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -1478,6 +1593,6 @@ const suppressionNote = () => {
   return parts.length > 0 ? ` (${parts.join("; ")} — FAIL lines above are never capped.)` : "";
 };
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe (17 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe (18 scenarios + control): wedge detection/restart, give-up terminality, sub-threshold non-restart, zero-project arming, build-drift detection/dedup/burst-collapse/give-up, drift-check-state distinguishability, sustained-500 non-wedge, unbounded-cadence rate ceiling, getDriftDetail()'s served_status-facing remaining-window/UNRESOLVED messages actually firing and staying silent when there's nothing to report, and (card 5112d392 DoD-2) this file's own PASS-output and forwarded-diagnostic volume are both capped and positive-controlled. See this file's own scenario-header comments for the full per-scenario DoD."
   : `\n❌ ${failures} FAILURE(S).${suppressionNote()}`);
 process.exit(failures === 0 ? 0 : 1);
