@@ -1,1 +1,3 @@
 **Codescape (code-graph) is available for this project.** Load `/codescape` before you start orienting — the graph gives you structure, exact `file:line` coordinates, and reachability in far fewer reads than exploring by hand; open files only afterward, at the coordinates it gives you.
+
+If `/graph/health`'s `build` field still names an old commit shortly after you rebuild codescape, do not rebuild the same commit again to try to hurry a restart along — rebuilding the SAME installed commit does NOT reset `serve`'s stability window before its automatic restart. Only a genuinely different installed build (or a daemon restart) resets that window; repeated same-commit rebuilds just keep delaying the restart indefinitely.
