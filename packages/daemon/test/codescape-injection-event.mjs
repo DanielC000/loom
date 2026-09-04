@@ -145,6 +145,17 @@ function writeManifest(homeDir, entries) {
   check("(2-injected-unstamped) stamped:false (not null — it WAS asked, the manifest read just returned nothing) — the card's §NEW sixth state", unstampedStatus.stamped === false);
   check("(2-injected-unstamped) EXACT text: base ONLY, no stamp suffix appended", unstampedStatus.text === "Codescape is available for this project.");
   check("(2 negative control) stamped and unstamped texts actually DIFFER (proves the stamp branch is live, not dead code)", stampedStatus.text !== unstampedStatus.text);
+
+  // --- manager review finding: lastIngestedAt:"" — the text branch (truthiness) and `stamped` (was
+  // `!= null`) used to DISAGREE here: text correctly omits the stamp (falsy), but `!= null` wrongly
+  // recorded stamped:true (a non-null empty string). Both predicates must now describe the SAME
+  // condition. The prior fixtures only used null/a-real-date, which is exactly why this slipped through.
+  const okEmptyStamp = { ok: true, lastIngestedAt: "" };
+  const emptyStampStatus = composeCodescapeInjectionStatus(okEmptyStamp, asset);
+  check("(2-injected-empty-stamp) injected:true, reason:null", emptyStampStatus.injected === true && emptyStampStatus.reason === null);
+  check("(2-injected-empty-stamp) stamped:false — text and stamped MUST AGREE for a falsy-but-non-null lastIngestedAt (the regression this fixture pins)", emptyStampStatus.stamped === false);
+  check("(2-injected-empty-stamp) EXACT text: base ONLY, no stamp suffix appended (empty string is falsy, same as the null case)", emptyStampStatus.text === "Codescape is available for this project.");
+  check("(2-injected-empty-stamp) text is BYTE-IDENTICAL to the null-stamp case (both take the falsy branch)", emptyStampStatus.text === unstampedStatus.text);
 }
 
 // ===================== (3)+(4) END-TO-END: the event fires at all five real call sites =====================

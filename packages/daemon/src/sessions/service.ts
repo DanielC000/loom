@@ -2139,8 +2139,14 @@ export function composeCodescapeInjectionStatus(
   if (!asset || "error" in asset) {
     return { injected: false, reason: asset?.error === "empty" ? "asset-empty" : "asset-unreadable", stamped: null, text: null };
   }
+  // `stamped` MUST use the SAME predicate (truthiness) as the text branch above, not `!= null` — an
+  // empty-string `lastIngestedAt` is falsy (so `text` correctly omits the stamp) but is NOT `null` (so
+  // `!= null` would wrongly record `stamped:true` for a block that rendered with no stamp at all — the
+  // exact "two states, one signature" defect the card's §NEW section is about, reintroduced inside the
+  // fix for it). Whether `""` is reachable from `resolveCodescapeLastIngested` today is irrelevant: both
+  // predicates describe the SAME condition and must never be allowed to disagree.
   const text = info.lastIngestedAt ? `${asset.text} Graph last indexed: ${info.lastIngestedAt}.` : asset.text;
-  return { injected: true, reason: null, stamped: info.lastIngestedAt != null, text };
+  return { injected: true, reason: null, stamped: !!info.lastIngestedAt, text };
 }
 
 /** Derived from {@link FROM_MANAGER_TAG} — see that constant's doc for why this must never be a second
