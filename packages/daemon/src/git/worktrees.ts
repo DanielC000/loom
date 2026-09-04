@@ -2748,8 +2748,10 @@ const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
  * branch's own PREVIOUS cherry-picked commit, not `batchHeadBefore` — which is exactly why this trailer
  * exists: without it, verification would have nothing but the tip's own too-narrow `sha^` to fall back to.
  *
- * A SOLO squash merge ({@link mergeBranchLocked}) stamps this too (card 756a2cd8), as a follow-up amend once
- * the squash commit's real sha exists. 🔴 **Its digest is NOT computed against `merge-base(HEAD, branch)`**
+ * A SOLO squash merge ({@link mergeBranchLocked}) stamps this too — originally (card 756a2cd8) as a
+ * follow-up amend once the squash commit's real sha existed; since card c862f14c, computed from the
+ * STAGED index before the single commit lands (see {@link stagedPathSetDigest}), which that card's own DoD
+ * proves yields the identical value the amend used to. 🔴 **Its digest is NOT computed against `merge-base(HEAD, branch)`**
  * — an earlier version of this code was, and that was the bug: `merge-base(HEAD, branch)` is the branch's
  * PRE-landing fork point, and `sha^` (the LANDED base) coincides with it ONLY for an UP-TO-DATE branch (main
  * hasn't advanced past the branch's own fork point at squash time). When main HAS advanced, the two diverge
@@ -2758,11 +2760,12 @@ const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
  * branch's own pre-landing diff still names the original path) — and a genuinely landed commit could read as
  * unverified (fails closed, never a false green, but still a real degradation on the path that handles the
  * MAJORITY of merges). Fixed by stamping from the LANDED range instead: the base is `sha^` — canonical HEAD
- * as it stood immediately before the squash commit landed — re-derived off the just-created commit rather
- * than merge-base, so it's trivially and unconditionally identical to what {@link verifyPersistedPathSet}'s
- * own `sha^` fallback already recomputes. (Solo lands exactly one commit, so unlike the batched case above,
- * this trailer is redundant with the default `sha^` fallback by construction — it's stamped anyway to keep
- * the two paths structurally uniform and the base explicit rather than implicit.)
+ * as it stands immediately before the squash commit lands — read as plain `HEAD` one step BEFORE the commit
+ * (card c862f14c; previously re-derived as `preAmendSha^` one step after), so it's trivially and
+ * unconditionally identical to what {@link verifyPersistedPathSet}'s own `sha^` fallback already recomputes.
+ * (Solo lands exactly one commit, so unlike the batched case above, this trailer is redundant with the
+ * default `sha^` fallback by construction — it's stamped anyway to keep the two paths structurally uniform
+ * and the base explicit rather than implicit.)
  *
  * {@link verifyPersistedPathSet} prefers this trailer's value when present and falls back to `sha^` when
  * absent — backward compatible by construction: every pre-756a2cd8 solo-squash and pre-phase-2 batched
@@ -2791,6 +2794,15 @@ function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
   for (const m of body.matchAll(globalRe)) last = m;
   return last;
 }
+
+/**
+ * The flag portion of every `changedPathsBetween`-family diff invocation, factored out to ONE array so a
+ * new caller can never drift its own copy out of parity with this one (card c862f14c — {@link
+ * stagedPathsAgainstHead}'s own doc explains why flag parity, not staged-vs-range timing, is the actual
+ * divergence hazard between a pre-commit staged read and a post-commit range read). See {@link
+ * changedPathsBetween}'s own doc for why `--no-renames` and `core.quotePath=false` are each load-bearing.
+ */
+const NAME_ONLY_DIFF_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames"] as const;
 
 /**
  * The raw changed-path list between `base` and `ref` — the single git-diff invocation {@link
@@ -2836,10 +2848,30 @@ function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
 async function changedPathsBetween(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string[]> {
-  const args = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", `${base}..${ref}`];
+  const args = [...NAME_ONLY_DIFF_FLAGS, `${base}..${ref}`];
   const raw = timeoutMs === undefined
     ? await git.raw(args)
     : await withTimeout(git.raw(args), timeoutMs, "git diff --name-only (changed paths)");
+  return raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean);
+}
+
+/**
+ * The pre-commit counterpart to {@link changedPathsBetween}: the currently-STAGED index diffed against
+ * `HEAD`, using the identical {@link NAME_ONLY_DIFF_FLAGS} so the two invocations cannot silently drift
+ * out of flag parity (card c862f14c). Used by {@link mergeBranchLocked} to capture the
+ * `Loom-Worker-PathSet` digest from the staged index BEFORE the squash commit lands, instead of
+ * recomputing it from `sha^..sha` in a follow-up amend afterward — card c862f14c's DoD-1 proves the two
+ * are the SAME two tree objects (a commit's tree is exactly the index it was made from, and its parent is
+ * exactly what `HEAD` was before it), so this is not an approximation of the old value, it's the same
+ * value read earlier.
+ */
+async function stagedPathsAgainstHead(
+  git: Pick<SimpleGit, "raw">, timeoutMs?: number,
+): Promise<string[]> {
+  const args = [...NAME_ONLY_DIFF_FLAGS, "--cached", "HEAD"];
+  const raw = timeoutMs === undefined
+    ? await git.raw(args)
+    : await withTimeout(git.raw(args), timeoutMs, "git diff --cached --name-only (staged changed paths)");
   return raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean);
 }
 
@@ -2888,14 +2920,19 @@ async function changedPathsBetween(
  * merges. **Both routes share one root cause — a digest recorded from the branch's PRE-landing diff instead
  * of the LANDED range — and both are CLOSED by fixing that root cause, not by patching each route
  * separately.** As of card 756a2cd8, every fresh solo-squash commit whose `Loom-Worker-Base`/
- * `Loom-Worker-PathSet` capture succeeds (see {@link LOOM_WORKER_BASE_TRAILER}'s doc) stamps the digest from
- * `sha^..sha` — the LANDED range — same as the batched path's `batchHeadBefore..landedSha` already did via
- * `d62dad73`. Neither route can occur against a digest computed that way: `sha^`/`batchHeadBefore` and `sha`
- * are both fixed, immutable commit objects once landed, so the range a stamp records and the range
- * `verifyPersistedPathSet` later recomputes are the SAME git objects, not merely usually-equal ones. Both
- * routes remain real ONLY for a commit that predates this fix, or whose best-effort trailer capture failed —
- * there the caller sees the trailers simply ABSENT (not a wrong digest) and degrades to the weaker
- * `trailer-only` verification tier, which is an honest omission, not a false negative.
+ * `Loom-Worker-PathSet` capture succeeds (see {@link LOOM_WORKER_BASE_TRAILER}'s doc) stamps a digest equal
+ * to `sha^..sha` — the LANDED range — same as the batched path's `batchHeadBefore..landedSha` already did
+ * via `d62dad73`. (Card c862f14c changed HOW that value is obtained on the solo path — {@link
+ * stagedPathSetDigest} over the staged index BEFORE the commit lands, in the single commit's own message,
+ * rather than a follow-up `git commit --amend` recomputing it from `sha^..sha` AFTER — but not WHAT value
+ * it is: that card's own DoD proves the staged-index digest and the `sha^..sha` digest are the same two
+ * tree objects, so this paragraph's guarantee is unchanged.) Neither route above can occur against a digest
+ * equal to that one: `sha^`/`batchHeadBefore` and `sha` are both fixed, immutable commit objects once
+ * landed, so the range a stamp records and the range `verifyPersistedPathSet` later recomputes are the SAME
+ * git objects, not merely usually-equal ones. Both routes remain real ONLY for a commit that predates this
+ * fix, or whose best-effort trailer capture failed — there the caller sees the trailers simply ABSENT (not
+ * a wrong digest) and degrades to the weaker `trailer-only` verification tier, which is an honest omission,
+ * not a false negative.
  *
  * Exported for {@link batch-merge.ts}'s per-branch PathSet stamp (card d62dad73 phase 2) — that caller
  * computes this digest over `batchHeadBefore..landedSha`: the batch tip as it stood immediately before this
@@ -2908,8 +2945,23 @@ async function changedPathsBetween(
 export async function changedPathSetDigest(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string> {
-  const paths = (await changedPathsBetween(git, base, ref, timeoutMs)).sort();
-  return createHash("sha256").update(paths.join("\n")).digest("hex");
+  return pathSetDigest(await changedPathsBetween(git, base, ref, timeoutMs));
+}
+
+/**
+ * The staged counterpart to {@link changedPathSetDigest} — same sort+hash over {@link
+ * stagedPathsAgainstHead}'s pre-commit path list, so a digest captured before the squash commit lands is
+ * byte-identical to one {@link changedPathSetDigest} would have computed from `sha^..sha` afterward (card
+ * c862f14c DoD-1/DoD-3).
+ */
+async function stagedPathSetDigest(git: Pick<SimpleGit, "raw">, timeoutMs?: number): Promise<string> {
+  return pathSetDigest(await stagedPathsAgainstHead(git, timeoutMs));
+}
+
+/** Shared sort+hash core for {@link changedPathSetDigest} and {@link stagedPathSetDigest} — kept as ONE
+ * function so the two can never compute the digest differently from the same path list. */
+function pathSetDigest(paths: string[]): string {
+  return createHash("sha256").update([...paths].sort().join("\n")).digest("hex");
 }
 
 /**
@@ -5888,9 +5940,10 @@ async function mergeBranchLocked(
     const subject = toConventionalSubject(rawSubject);
     // The worker-commit-log body (card 8b7b81e0 DoD-3) needs the branch's OWN pre-landing commit range —
     // merge-base(HEAD, branch)..branch, the worker's real authored history — computed HERE, before the
-    // squash lands. Deliberately UNRELATED to the PathSet/Base stamp below, which now uses the LANDED range
-    // instead (see that block's own doc for why the two must not share a base). Best-effort: a capture
-    // failure just omits the body from this commit.
+    // squash lands. Deliberately UNRELATED to the PathSet/Base stamp below, which captures the STAGED
+    // index against current HEAD instead (proven equivalent to the landed `sha^..sha` range — see that
+    // block's own doc, card c862f14c, for why the two must not share a base and for that equivalence
+    // proof). Best-effort: a capture failure just omits the body from this commit.
     let workerCommitLogBody: string | undefined;
     try {
       const mergeBaseForSquashMeta = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, squash metadata)")).trim();
@@ -5900,58 +5953,49 @@ async function mergeBranchLocked(
       console.warn(`[git] mergeBranchLocked: worker-commit-log body capture failed for ${branch}: ${(e as Error).message}`);
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
-    const message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n`;
+    let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n`;
+    // Card c862f14c: stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` into THIS message, from the STAGED
+    // index, instead of a follow-up `git commit --amend` (the pre-fix shape this replaces — see that
+    // card's own DoD for the three problems the amend caused: an orphan window, doubled hooks, and a
+    // `commit-msg` hook's own trailer work getting silently discarded because the amend rebuilds the
+    // message from this in-memory JS string). `base` = canonical `HEAD` as it stands RIGHT NOW, immediately
+    // before the squash lands — identical to the old `preAmendSha^` (a commit's parent IS whatever `HEAD`
+    // was before it was made), just read one step earlier. `digest` is computed from the CURRENTLY-STAGED
+    // index via {@link stagedPathSetDigest}, which card c862f14c's DoD-1 proves is byte-identical to what
+    // {@link changedPathSetDigest} would compute from `sha^..sha` after the commit: a commit's tree IS the
+    // index it was made from, and its parent IS whatever `HEAD` was before it — so the staged-vs-HEAD diff
+    // and the landed `sha^..sha` diff are the SAME two tree objects, not merely usually-equal ones.
+    // 🔴 LOAD-BEARING ADJACENCY (card c862f14c DoD, a proviso of the DoD-1 proof, not just today's code
+    // shape): no git call may land between this capture and the single `git commit` below that could move
+    // canonical `HEAD` or mutate the index — doing so would break the tree-identity the proof rests on. Do
+    // not insert one. Best-effort, matching the old amend's own posture: a failure here just omits both
+    // trailers (the commit still lands, degrading to the existing `trailer-only` tier) rather than failing
+    // an otherwise-successful merge.
+    try {
+      const base = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
+      const digest = await stagedPathSetDigest(git, timeoutMs);
+      message = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${base}\nLoom-Worker-PathSet: ${digest}\n`;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[git] mergeBranchLocked: Loom-Worker-Base/PathSet capture failed for ${branch} — commit lands ` +
+        `without either trailer: ${(e as Error).message}`);
+    }
     try {
       await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
     } catch (e) {
       const cleanupIssue = await resetOrSkip("commit-failure cleanup");
       return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
     }
-    const preAmendSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
-    // Stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` via a follow-up amend (card 756a2cd8, mirroring
-    // d62dad73 phase 2's batched stamp — see LOOM_WORKER_BASE_TRAILER's own doc above for the defect this
-    // closes): computed from the LANDED range, NOT the branch's own pre-landing diff (`merge-base(HEAD,
-    // branch)..branch`, the pre-fix shape this replaces). Those two can genuinely differ with NO conflict
-    // involved — e.g. a clean rename-following squash (main renames a path the branch also edited; the
-    // squash lands cleanly under the renamed path while a pre-landing-diff digest still names the original
-    // one). The base is `preAmendSha^` — canonical HEAD as it stood immediately before THIS commit, i.e.
-    // before the squash landed — re-derived straight off the just-created commit rather than reusing a value
-    // captured earlier in this function: no git call between the squash staging and this commit moves
-    // canonical HEAD (`--squash` never advances it), so `preAmendSha^` already IS that same pre-squash HEAD,
-    // with nothing to go stale between capture and use. This is the LANDED base every solo-squash commit
-    // already gets for free via `verifyPersistedPathSet`'s own `sha^` fallback — stamping it explicitly here
-    // just makes that base durable and machine-readable instead of implicit, and keeps the solo and batched
-    // paths structurally uniform. The amend itself only rewrites the MESSAGE, never the tree — `preAmendSha`'s
-    // parent and tree are unaffected by whether the amend below actually lands, so `base` and `digest` stay
-    // valid regardless. Best-effort, matching {@link landBranchCommitsIndividually}'s own PathSet capture: a
-    // failure here just omits both trailers (the commit above already landed and stays valid without them,
-    // degrading to the existing `trailer-only` tier) rather than failing an otherwise-successful merge.
-    try {
-      const base = (await withTimeout(git.raw(["rev-parse", `${preAmendSha}^`]), timeoutMs, "git rev-parse sha^ (canonical, pathset base)")).trim();
-      const digest = await changedPathSetDigest(git, base, preAmendSha, timeoutMs);
-      const amendedMessage = `${message.replace(/\s+$/, "")}\nLoom-Worker-Base: ${base}\nLoom-Worker-PathSet: ${digest}\n`;
-      await withTimeout(git.raw(["commit", "--amend", "-m", amendedMessage]), timeoutMs, "git commit --amend (canonical, pathset)");
-    } catch (e) {
-      // Best-effort; the commit still lands, just without either trailer — but this IS a real degradation of
-      // a brand-new, live commit (not a legacy artifact), so it must be logged here, at the moment it happens
-      // — findLandedSquashCommit/scanMergedCommitMap only ever see the trailers' ABSENCE later and can't tell
-      // a capture failure apart from genuinely predating them (card 9f776570).
-      // eslint-disable-next-line no-console
-      console.warn(`[git] mergeBranchLocked: Loom-Worker-Base/PathSet capture failed for ${branch} — commit lands ` +
-        `without either trailer: ${(e as Error).message}`);
-    }
-    // Card 756a2cd8 Code Review follow-up: re-read HEAD UNCONDITIONALLY, AFTER the amend try/catch above,
-    // rather than trusting `preAmendSha`. `withTimeout` (git/bounded.ts) settles independent of the git
-    // child it wraps — on expiry it rejects and walks away while the child is left alone, still mutating —
-    // so `git commit --amend` above can land ON DISK (HEAD now the amended sha) while its own `withTimeout`
-    // call times out; control then reaches the catch above, which logs a "capture failed" warning and falls
-    // through here. Returning `preAmendSha` in that case would hand the caller a real, but now UNREACHABLE-
-    // from-HEAD, orphaned sha — the persisted `mergedSha` and git's own HEAD would silently disagree. Mirrors
+    // Re-read HEAD UNCONDITIONALLY rather than trusting a value captured before this call (mirrors the
+    // reasoning that used to guard the old follow-up amend, card 756a2cd8's Code Review follow-up):
+    // `withTimeout` (git/bounded.ts) settles independent of the git child it wraps — on expiry it rejects
+    // and walks away while the child is left alone, still mutating — so this commit could land ON DISK
+    // while its own `withTimeout` call times out and control falls through to the catch below. Mirrors
     // {@link landBranchCommitsIndividually}'s own post-loop read (`git/batch-merge.ts`): read once,
     // unconditionally, and fail LOUD (`ok:false`) if that read itself fails, rather than returning a value
     // that might no longer be what HEAD actually points at.
     try {
-      const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-amend)")).trim();
+      const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
       return { ok: true, sha, subject };
     } catch (e) {
       return { ok: false, reason: `squash landed but failed to read the result: ${(e as Error).message}` };
