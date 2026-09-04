@@ -5503,6 +5503,60 @@ async function deriveWorkerCommitLogBody(
 }
 
 /**
+ * Card 591906ae: `ownTipSubject`/`ownTipSubjectConventional` ({@link SessionService.reviewWorkerMerge} in
+ * `sessions/service.ts`) answer for the branch's TIP commit only — but `merge_batch` (`git/batch-merge.ts`)
+ * lands EVERY commit on a batched branch verbatim (a rebase/cherry-pick, never a squash: a 3-commit branch
+ * puts 3 commits on main), so a bad subject on a NON-tip commit reaches mainline invisibly to those two
+ * fields alone. This recovers the branch's own non-tip commit subjects — `<mergeBase>..<branch>`,
+ * oldest-first, `--no-merges` for the same reason {@link deriveWorkerCommitLogBody} excludes them (a
+ * union-merge replaying main's own history onto the branch is never the worker's own commit) — with the
+ * LAST entry (the tip, already covered by `ownTipSubject`) dropped so this never duplicates that field.
+ *
+ * Returns `undefined` (field omitted entirely by the caller) whenever there is nothing to add beyond the
+ * tip: no commits at all, or exactly one (the overwhelmingly common single-commit branch, where the tip IS
+ * the whole contribution) — deliberately, so a single-commit branch's review result stays byte-identical
+ * to before this card rather than getting noisier. Bounded by the SAME
+ * {@link WORKER_COMMIT_LOG_MAX_ENTRIES}/{@link WORKER_COMMIT_LOG_MAX_CHARS} caps
+ * {@link deriveWorkerCommitLogBody} already uses (one shared pair of knobs, not a second pair to drift out
+ * of sync) — `truncated:true` says so explicitly rather than silently dropping the tail. Best-effort: any
+ * git error/timeout degrades to `undefined`, exactly like every other advisory field on this review.
+ */
+export async function deriveOwnNonTipCommitSubjects(
+  repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
+): Promise<{ subjects: string[]; truncated: boolean } | undefined> {
+  let all: string[];
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const mergeBase = (await withTimeout(
+      git.raw(["merge-base", base, branch]), timeoutMs, "git merge-base (own non-tip commit subjects)",
+    )).trim();
+    const raw = await withTimeout(
+      git.raw(["log", "--no-merges", "--reverse", "--format=%s", `${mergeBase}..${branch}`]),
+      timeoutMs, "git log (canonical, own non-tip commit subjects)",
+    );
+    all = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return undefined;
+  }
+  // Drop the tip — the LAST entry in this oldest-first range — it's already covered by ownTipSubject.
+  const nonTip = all.slice(0, -1);
+  if (nonTip.length === 0) return undefined;
+
+  const subjects: string[] = [];
+  let usedChars = 0;
+  let truncated = false;
+  for (const s of nonTip) {
+    if (subjects.length >= WORKER_COMMIT_LOG_MAX_ENTRIES || usedChars + s.length + 1 > WORKER_COMMIT_LOG_MAX_CHARS) {
+      truncated = true;
+      continue;
+    }
+    subjects.push(s);
+    usedChars += s.length + 1;
+  }
+  return { subjects, truncated };
+}
+
+/**
  * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
  * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
  * task = one clean commit on main (not a real-commit + a noise merge-commit). Returns the new squash

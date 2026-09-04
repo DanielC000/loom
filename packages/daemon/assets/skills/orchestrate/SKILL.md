@@ -512,8 +512,9 @@ what you checked. Found none? Treat it as live.
      `ownTipSubject`/`ownTipSubjectConventional`, but that's the branch's TIP commit only. For a
      single-commit branch (the common case) the tip is the whole contribution, so that's a complete
      check. For a branch with more than one commit it is NOT sufficient — every commit on the branch
-     lands verbatim, so read and title-check the branch's full commit log before routing it into a batch
-     instead of a solo confirm; no tool field currently exposes the non-tip subjects.
+     lands verbatim, so also check `ownNonTipCommitSubjects`/`ownNonTipCommitSubjectsConventional`
+     (that same review step) before routing it into a batch instead of a solo confirm — no need to
+     hand-run the branch's commit log yourself.
    - **The scope is REQUIRED**, and it comes from the **project's own documented list** — a "**Commit
      scopes**" section in that project's `CLAUDE.md`. Pick the scope that names the subsystem the change
      lands in. If the project has **no such list yet**, **DERIVE one at intake** from the repo's real
@@ -594,9 +595,10 @@ what you checked. Found none? Treat it as live.
      counting runs can show a saving exactly where batching cost more time than it saved.
    - **Before batching, run the retitle check named in the card-titling bullet above on every candidate**
      — a batch never picks up a retitle. For a single-commit branch, comparing `ownTipSubject` to the card
-     title is enough. For a MULTI-commit branch it is not — check every commit's own subject on the
-     branch, since each lands verbatim and only the tip is covered by that field. Any branch that fails
-     the check (single- or multi-commit) merges solo instead; batch the rest normally.
+     title is enough. For a MULTI-commit branch it is not — also read `ownNonTipCommitSubjects`/
+     `ownNonTipCommitSubjectsConventional` from that same review, since each commit lands verbatim and
+     only the tip is covered by `ownTipSubject`. Any branch that fails the check (single- or multi-commit)
+     merges solo instead; batch the rest normally.
    - **Never card, retitle, plan, or dispatch off an intermediate `progress` report — wait for `done`,
      then verify against the tree.** A progress report is the least reliable artifact a worker produces:
      it narrates intent that may not have survived contact with the code, and it's written at the point

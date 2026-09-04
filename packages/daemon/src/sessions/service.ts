@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -13240,6 +13240,7 @@ export class SessionService {
     patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
     behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean; tasklessSubjectPreview?: string;
     ownTipSubject?: string; ownTipSubjectConventional?: boolean;
+    ownNonTipCommitSubjects?: string[]; ownNonTipCommitSubjectsConventional?: boolean; ownNonTipCommitSubjectsTruncated?: boolean;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
@@ -13280,6 +13281,15 @@ export class SessionService {
       : tasklessRawSubject;
     const ownTipSubjectConventional = ownTipSubject !== undefined
       ? toConventionalSubject(ownTipSubject) === ownTipSubject
+      : undefined;
+    // Card 591906ae: the branch's NON-TIP commit subjects — ownTipSubject/ownTipSubjectConventional above
+    // answer for the tip only, but a merge_batch lands EVERY commit on the branch verbatim, so a bad
+    // subject two commits down is invisible to those two fields alone. Computed for EVERY worker
+    // regardless of task (mirrors ownTipSubject's own a32533a1 unconditionality) — undefined for the
+    // common single-commit branch, where the tip already IS the whole contribution.
+    const ownNonTipCommitSubjects = await deriveOwnNonTipCommitSubjects(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+    const ownNonTipCommitSubjectsConventional = ownNonTipCommitSubjects
+      ? ownNonTipCommitSubjects.subjects.every((s) => toConventionalSubject(s) === s)
       : undefined;
     // RETRACTED-PREMISE backstop (card cf60a32a — the mechanical half of `0fa32321`): a 4th warn-never-block
     // sibling, distinct from `coerced` above — `coerced` is blind to a title that's ALREADY valid
@@ -13371,6 +13381,11 @@ export class SessionService {
       ...(subjectPreview ?? {}),
       ...(tasklessSubjectPreview ? { tasklessSubjectPreview } : {}),
       ...(ownTipSubject !== undefined ? { ownTipSubject, ownTipSubjectConventional } : {}),
+      ...(ownNonTipCommitSubjects ? {
+        ownNonTipCommitSubjects: ownNonTipCommitSubjects.subjects,
+        ownNonTipCommitSubjectsConventional,
+        ...(ownNonTipCommitSubjects.truncated ? { ownNonTipCommitSubjectsTruncated: true } : {}),
+      } : {}),
     };
   }
 

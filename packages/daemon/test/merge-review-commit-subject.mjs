@@ -29,6 +29,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (G) NEGATIVE CONTROL for (F): a TASKED worker whose branch's own tip commit is ALREADY conventional
 //       form gets `ownTipSubject` === that commit message verbatim and `ownTipSubjectConventional === true`
 //       — proving the flag isn't hardcoded false and genuinely discriminates on the commit's own form.
+//   (H) Card 591906ae — a MULTI-commit branch whose NON-tip commit is bare prose (never conventional)
+//       gets `ownNonTipCommitSubjects` === [that non-tip subject] (oldest-first, tip excluded) and
+//       `ownNonTipCommitSubjectsConventional === false` — proving the check actually FIRES RED on a
+//       real non-conventional non-tip subject, the exact gap `ownTipSubject` alone cannot see (its own
+//       tip commit here IS conventional, so a tip-only check would wrongly read this branch as clean).
+//   (I) POSITIVE CONTROL for (H) — a MULTI-commit branch where EVERY commit (non-tip included) is
+//       already conventional form gets `ownNonTipCommitSubjectsConventional === true`, proving the flag
+//       isn't hardcoded false and genuinely discriminates on the non-tip commits' own form.
+//   (J) SINGLE-commit branch (cases A/B/C/E/G above) must NOT get noisier: `ownNonTipCommitSubjects` is
+//       absent entirely — asserted explicitly here against case (A)'s review.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-review-commit-subject.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -81,6 +91,8 @@ const B = { projId: `mrcs-b-proj-${sfx}`, agentId: `mrcs-b-top-${sfx}`, taskId: 
 const C = { projId: `mrcs-c-proj-${sfx}`, agentId: `mrcs-c-top-${sfx}`, taskId: `mrcs-c-task-${sfx}`, mgrId: `mrcs-c-mgr-${sfx}`, workerId: `mrcs-c-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-prose-${sfx}`), title: "Refresh the dashboard" };
 const D = { projId: `mrcs-d-proj-${sfx}`, agentId: `mrcs-d-top-${sfx}`, taskId: `mrcs-d-task-${sfx}`, mgrId: `mrcs-d-mgr-${sfx}`, workerId: `mrcs-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-taskless-${sfx}`) };
 const E = { projId: `mrcs-e-proj-${sfx}`, agentId: `mrcs-e-top-${sfx}`, taskId: `mrcs-e-task-${sfx}`, mgrId: `mrcs-e-mgr-${sfx}`, workerId: `mrcs-e-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-own-conv-${sfx}`), title: "Refresh the dashboard" };
+const H = { projId: `mrcs-h-proj-${sfx}`, agentId: `mrcs-h-top-${sfx}`, taskId: `mrcs-h-task-${sfx}`, mgrId: `mrcs-h-mgr-${sfx}`, workerId: `mrcs-h-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-multi-bad-${sfx}`), title: "fix(daemon): tidy up widgets" };
+const I = { projId: `mrcs-i-proj-${sfx}`, agentId: `mrcs-i-top-${sfx}`, taskId: `mrcs-i-task-${sfx}`, mgrId: `mrcs-i-mgr-${sfx}`, workerId: `mrcs-i-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-multi-clean-${sfx}`), title: "fix(daemon): tidy up widgets" };
 
 try {
   // ── (A) ALREADY-CONVENTIONAL: commitSubject unchanged, coerced:false ───────────────────────────────────
@@ -180,10 +192,47 @@ try {
     check("(G) commitSubject (solo/card-title preview) is still coerced", review.coerced === true);
     check("(G) ownTipSubject === the branch's own tip commit, VERBATIM (not the card title, not re-coerced)", review.ownTipSubject === ownSubject);
     check("(G) ownTipSubjectConventional is TRUE for an already-conventional tip commit — proves the flag genuinely discriminates, not hardcoded false", review.ownTipSubjectConventional === true);
+    // ── (J) SINGLE-commit branches must not get noisier: ownNonTipCommitSubjects absent ────────────────────
+    check("(J) ownNonTipCommitSubjects is absent for a single-commit branch (no noisier than before this card)", review.ownNonTipCommitSubjects === undefined);
+    check("(J) ownNonTipCommitSubjectsConventional is absent for a single-commit branch", review.ownNonTipCommitSubjectsConventional === undefined);
+  }
+
+  // ── (H) Card 591906ae — MULTI-commit branch, a NON-conventional NON-tip subject ─────────────────────────
+  initRepo(H.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
+    H.worktreePath = worktreePath; H.branch = branch;
+    // Non-tip commit: bare prose (the defect this card exists to surface). Tip commit: conventional form —
+    // deliberately, so a tip-only check (ownTipSubject/ownTipSubjectConventional) would wrongly read this
+    // branch as clean, proving the new field catches what the old ones structurally cannot.
+    commitChange(worktreePath, "widget.ts", "export const a = 1;\n", "tidy up widgets");
+    commitChange(worktreePath, "widget2.ts", "export const b = 2;\n", "fix(daemon): finish widget tidy-up");
+    seed(H, { withTask: true });
+
+    const review = await sessions.reviewWorkerMerge(H.mgrId, H.workerId);
+    check("(H) ownTipSubject is the branch's TIP commit (conventional) — the OLD field, still correct on its own", review.ownTipSubject === "fix(daemon): finish widget tidy-up");
+    check("(H) ownTipSubjectConventional is TRUE for the tip — a tip-only check would wrongly call this branch clean", review.ownTipSubjectConventional === true);
+    check("(H) ownNonTipCommitSubjects === [the bare-prose non-tip subject], oldest-first, tip excluded", Array.isArray(review.ownNonTipCommitSubjects) && review.ownNonTipCommitSubjects.length === 1 && review.ownNonTipCommitSubjects[0] === "tidy up widgets");
+    check("(H) ownNonTipCommitSubjectsConventional is FALSE — the check actually fires red on the real non-tip defect", review.ownNonTipCommitSubjectsConventional === false);
+    check("(H) ownNonTipCommitSubjectsTruncated is absent (well under the bound)", review.ownNonTipCommitSubjectsTruncated === undefined);
+  }
+
+  // ── (I) POSITIVE CONTROL for (H) — MULTI-commit branch where EVERY commit is already conventional ───────
+  initRepo(I.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
+    I.worktreePath = worktreePath; I.branch = branch;
+    commitChange(worktreePath, "widget.ts", "export const a = 1;\n", "fix(daemon): start widget tidy-up");
+    commitChange(worktreePath, "widget2.ts", "export const b = 2;\n", "fix(daemon): finish widget tidy-up");
+    seed(I, { withTask: true });
+
+    const review = await sessions.reviewWorkerMerge(I.mgrId, I.workerId);
+    check("(I) ownNonTipCommitSubjects === [the ALREADY-conventional non-tip subject]", Array.isArray(review.ownNonTipCommitSubjects) && review.ownNonTipCommitSubjects.length === 1 && review.ownNonTipCommitSubjects[0] === "fix(daemon): start widget tidy-up");
+    check("(I) ownNonTipCommitSubjectsConventional is TRUE — proves the flag isn't hardcoded false and genuinely discriminates on the non-tip commits' own form", review.ownNonTipCommitSubjectsConventional === true);
   }
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E]) {
+  for (const p of [A, B, C, D, E, H, I]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -197,6 +246,10 @@ console.log(failures === 0
     "worker_merge_confirm's own result echoes the identical subject that actually landed, and " +
     "ownTipSubject/ownTipSubjectConventional (card a32533a1) now surface the branch's OWN, uncoerced tip " +
     "commit subject for a TASKED worker too — the exact byte-for-byte subject a merge_batch would land, " +
-    "genuinely discriminating conventional vs. non-conventional regardless of the card title's own form."
+    "genuinely discriminating conventional vs. non-conventional regardless of the card title's own form — " +
+    "and ownNonTipCommitSubjects/ownNonTipCommitSubjectsConventional (card 591906ae) now surface a " +
+    "multi-commit branch's OTHER commits too, genuinely firing red on a real non-conventional non-tip " +
+    "subject even when the tip alone reads clean, while staying absent (no noisier) for the common " +
+    "single-commit case."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
