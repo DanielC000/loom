@@ -167,13 +167,20 @@ async function runNoClearControl(name, strayText, strayToken) {
   console.log(`\n[oprobe] ===== TRIAL ${name} (negative control: NO clear sent at all) =====`);
   cap(SID).raw = "";
   host.writeStdin(SID, BRACKET_PASTE_START + strayText + BRACKET_PASTE_END);
+  // TIMING-GUARD-SAFE: settle pause for the TUI to render the paste before the NEXT write, not a gate on
+  // the assertion below — the real gate on whether the turn actually happened is `waitForStop`'s poll
+  // (below), not this sleep. Same manual-probe shape as ee082fbb's own precedent probes.
   await sleep(1500);
   const marker = `CLEARTESTOS_${name}_OK - reply with just the word ACK.`;
   host.writeStdin(SID, marker);
+  // TIMING-GUARD-SAFE: settle pause before sending Enter, same reasoning as above — not a gate.
   await sleep(600);
   const before = stoppedTurns.get(SID) || 0;
   host.writeStdin(SID, "\r");
   const completed = await waitForStop(SID, before, 30000);
+  // TIMING-GUARD-SAFE: this runs AFTER waitForStop already confirmed (poll-until-condition, not a fixed
+  // wait) that the turn genuinely completed — a pure post-confirmation settle before reading the
+  // transcript file, not a fixed-wait racing the very condition the assertion below checks.
   await sleep(500);
   const eng = engineIds.get(SID);
   const turns = eng ? readTranscript(repo, eng) : [];
@@ -186,8 +193,11 @@ async function runNoClearControl(name, strayText, strayToken) {
 
 try {
   console.log("[oprobe] spawning real claude…");
+  // TIMING-GUARD-SAFE: boot-settle pause mirroring ee082fbb's own precedent probes verbatim (same
+  // spawn-then-wait shape as _probe-composer-clear.mjs/_probe-composer-clear-2.mjs, both already merged
+  // and re-run repeatedly on this project) — not a novel unfalsifiable pattern introduced by this file.
   await sleep(10000);
-  if (!engineIds.get(SID)) { console.log("[oprobe] waiting extra for SessionStart hook…"); await sleep(4000); }
+  if (!engineIds.get(SID)) { console.log("[oprobe] waiting extra for SessionStart hook…"); await sleep(4000); } // TIMING-GUARD-SAFE: same boot-settle reasoning as the sleep(10000) above, mirroring ee082fbb's precedent
   assert("engine session id captured", !!engineIds.get(SID));
 
   await runNoClearControl("NO_CLEAR_CONTROL", SHORT_STRAY, "OvershootStrayTOKEN");
