@@ -2241,12 +2241,22 @@ export class OrchestrationMcpRouter {
           try {
             const r = await sessions.runWorkerGate(sessionId);
             if (!r.settled) {
-              const staleWarning = r.staleAgainstWorktree
-                ? " WARNING: staleAgainstWorktree is true — your worktree has changed since this run started, so do not trust its outcome for your current code."
-                : "";
+              // ADDRESSED DIRECTIVE, NOT A PASSIVE NOTICE (card cfd11b13): a live specimen (worker
+              // `684ff2c2`) read a bare `staleAgainstWorktree:true` WARNING correctly — it declined to
+              // trust the attached result — but its only stated next step was to WAIT for the stale op to
+              // settle on its own, holding one of only two daemon-global gate lanes for ~18 minutes. The
+              // gap wasn't the detector; it was that NOTHING told the worker a worker cannot cancel its own
+              // gate op (`gate_cancel` is manager-only — never registered on this role's own tool surface,
+              // see the `role === "worker"` branch above), so the correct remedy (escalate to the manager,
+              // who CAN cancel it) was never named. Name all three explicitly, every time this fires: the
+              // caller can't cancel it, the manager can (with the exact opId), and to report that up NOW
+              // rather than park waiting for settle.
+              const note = r.staleAgainstWorktree
+                ? `gate still running, but staleAgainstWorktree is true — your worktree has changed (a new commit or an uncommitted edit) since THIS run started, so do not trust its outcome for your current code. You cannot cancel this op yourself. Your MANAGER can, via gate_cancel(${r.op.opId}) — report this up NOW (worker_report progress or blocked, naming that opId) instead of waiting for it to settle. Do not poll or re-call run_gate to fetch its result.`
+                : `gate still running. Do NOT poll or re-call to fetch the result — worker_report progress with awaiting:"background" and END your turn; the [loom:gate-done]/[loom:gate-failed] nudge starts your next turn with the result.`;
               return ok({
                 opId: r.op.opId, status: "pending", attachedToInFlight: r.attachedToInFlight, staleAgainstWorktree: r.staleAgainstWorktree,
-                note: `gate still running.${staleWarning} Do NOT poll or re-call to fetch the result — worker_report progress with awaiting:"background" and END your turn; the [loom:gate-done]/[loom:gate-failed] nudge starts your next turn with the result.`,
+                note,
               });
             }
             if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
