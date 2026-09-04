@@ -1467,7 +1467,12 @@ export type OrchestrationEventKind =
   // being cut and its post-gate fast-forward, so the batch's single gate never validated main's real
   // current tree — the batch is abandoned (never landed) and every candidate falls back to its own
   // individual gate, exactly like today. Filed under the confirming MANAGER (managerSessionId); `detail`
-  // carries { opId, repoPath, baseMainSha, currentMainSha, branches: [{ workerSessionId, taskId, branch }] }
+  // carries { opId, repoPath, baseMainSha, currentMainSha, reason, branches: [{ workerSessionId, taskId,
+  // branch }] } — `currentMainSha` is the canonical HEAD `fastForwardCanonicalMain` observed instead of
+  // `baseMainSha`; it is typed optional (mirroring `RunBatchedMergeResult`) but in practice is ALWAYS
+  // present whenever this event fires, since `forfeited` and `currentMainSha` are only ever set together
+  // — an absent value would be OMITTED from `detail` (not emitted as `null` or `"undefined"`), matching
+  // how `appendEvent` (db.ts) already drops any undefined-valued key on JSON.stringify.
   // — the per-branch identity list is what keeps "which branches did this one batch opId cover" recoverable
   // (LOOM_GATE_OP_ID is a cross-project contract read by Codescape's gate child; batching re-means its
   // per-run unit from "one branch" to "up to maxWorkers branches" without renaming/dropping it — see

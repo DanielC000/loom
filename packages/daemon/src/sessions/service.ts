@@ -16060,7 +16060,11 @@ export class SessionService {
       this.gateSemaphore.endSquash(finalRepoPath, opId);
 
       if (result.forfeited) {
-        evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, reason: result.reason });
+        // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
+        // through as-is rather than defaulted to null: appendEvent's JSON.stringify (db.ts) drops an
+        // undefined-valued key entirely, so an absent value is OMITTED from the stored detail, never the
+        // literal string "undefined" — same shape `reason` already relies on here.
+        evtBatch("batch_merge_forfeited", { repoPath: finalRepoPath, baseMainSha, currentMainSha: result.currentMainSha, reason: result.reason });
       }
 
       if (!result.ok) {

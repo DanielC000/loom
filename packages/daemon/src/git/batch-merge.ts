@@ -572,6 +572,10 @@ export interface RunBatchedMergeResult {
   forfeited?: boolean;
   reason?: string;
   gateDetail?: BatchGateResult;
+  /** Set iff `forfeited` is true — the canonical HEAD `fastForwardCanonicalMain` observed instead of
+   *  `baseMainSha` (card 456f63a4: this was computed by `fastForwardCanonicalMain` but previously
+   *  dropped here instead of reaching the caller). */
+  currentMainSha?: string;
 }
 
 /**
@@ -614,7 +618,7 @@ export async function runBatchedMerge(
   if (!ff.ok) {
     return {
       ok: false, landed, dropped, baseMainSha, batchHeadSha, gatePassed: true, gateDetail: gate,
-      forfeited: !!ff.forfeited, reason: ff.reason,
+      forfeited: !!ff.forfeited, reason: ff.reason, currentMainSha: ff.currentMainSha,
     };
   }
   return { ok: true, landed, dropped, baseMainSha, batchHeadSha, gatePassed: true, gateDetail: gate };

@@ -306,6 +306,74 @@ try {
     }
   }
 
+  // ── (e2e, FORFEIT) card 456f63a4 — the batch_merge_forfeited event now carries the REAL advanced-to ──
+  // ── currentMainSha, previously computed by fastForwardCanonicalMain (git/batch-merge.ts) but dropped ──
+  // ── before ever reaching RunBatchedMergeResult, hence never reaching sessions/service.ts's evtBatch ──
+  // ── call. Forces a REAL forfeit through the actual SessionService.mergeBatch pipeline (not the ──
+  // ── git/batch-merge.ts unit fixture in test/batch-merge.mjs): the gate command itself lands a real ──
+  // ── commit on CANONICAL main while the batch gate is "running" — mirroring test/batch-merge.mjs's own ──
+  // ── gateThatRacesMain, but via a real spawned process — then records the resulting HEAD to a file so ──
+  // ── the test can assert the EMITTED VALUE against it, not merely that the key exists. ──────────────
+  {
+    const repo = path.join(os.tmpdir(), `loom-bmgh-forfeit-${sfx}`);
+    makeRepo(repo);
+    const projId = `bmgh-forfeit-proj-${sfx}`;
+    const agentId = `bmgh-forfeit-agent-${sfx}`;
+    const mgrId = `bmgh-forfeit-mgr-${sfx}`;
+    const shaFile = path.join(os.tmpdir(), `loom-bmgh-forfeit-sha-${sfx}.txt`);
+
+    const db = new Db(); dbs.push(db);
+    // The gate command races main itself: it lands a real commit on the CANONICAL repo (not the batch
+    // worktree) while "running", then APPENDS the resulting HEAD to shaFile — the batch's own
+    // fast-forward check (right after ITS OWN gate step returns) must see canonical main has moved. This
+    // SAME gateCommand also fires again for each candidate's individual fallback re-gate (mergeBatch's own
+    // fallback path re-gates every originally-batched branch — see its DoD), so shaFile ends up with ONE
+    // line per gate invocation, oldest first: line 1 is the sha the ORIGINAL batch gate produced (the one
+    // fastForwardCanonicalMain actually observed and the forfeit event actually carries), later lines are
+    // from the fallback's own re-gates and are deliberately NOT what this test compares against.
+    const raceGateCmd = `git -C "${repo}" -c user.email=bmgh-forfeit@loom -c user.name=bmgh-forfeit commit -q -m race --allow-empty && git -C "${repo}" rev-parse HEAD >> "${shaFile}"`;
+    db.insertProject({ id: projId, name: "BMGH-FORFEIT", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: raceGateCmd } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
+    db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    const a = await cutBranch(repo, projId, "fbf-a", "fbf-feature-a.txt", "work a\n");
+    const b = await cutBranch(repo, projId, "fbf-b", "fbf-feature-b.txt", "work b\n");
+    worktrees.push(a.worktreePath, b.worktreePath);
+    const wA = `bmgh-fbf-wkr-a-${sfx}`, wB = `bmgh-fbf-wkr-b-${sfx}`;
+    for (const [wId, w, label] of [[wA, a, "fbf-a"], [wB, b, "fbf-b"]]) {
+      db.insertTask({ id: w.taskId, projectId: projId, title: `feat(test): ${label}`, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      db.insertSession({ id: wId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: w.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: w.taskId, worktreePath: w.worktreePath, branch: w.branch });
+    }
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+
+    const result = await sessions.mergeBatch(mgrId, [wA, wB]);
+    check("(e2e, FORFEIT) ok:false — a genuine forfeit falls back, same top-level shape as a red gate", result.ok === false);
+
+    check("(e2e, FORFEIT) precondition: the race gate command actually recorded an advanced sha", fs.existsSync(shaFile));
+    // First line = the ORIGINAL batch gate's own race commit — the sha fastForwardCanonicalMain actually
+    // observed. At least 2 more lines are expected below it (one per fallback re-gate of the 2 candidates).
+    const shaLines = fs.existsSync(shaFile) ? fs.readFileSync(shaFile, "utf8").split("\n").map((l) => l.trim()).filter(Boolean) : [];
+    check("(e2e, FORFEIT) precondition: the fallback also re-ran the race gate per candidate (>=3 total lines: 1 batch + 2 fallback)", shaLines.length >= 3);
+    const advancedSha = shaLines[0];
+
+    const forfeitEvent = db.getLatestEventForManagerByKind(mgrId, "batch_merge_forfeited");
+    check("(e2e, FORFEIT) a batch_merge_forfeited event was actually filed", !!forfeitEvent);
+    const detail = forfeitEvent?.detail ?? {};
+    // THE DISCRIMINATING ASSERTION for this card: reverting sessions/service.ts's evtBatch call (or
+    // batch-merge.ts's RunBatchedMergeResult/runBatchedMerge plumbing) back to dropping the value makes
+    // this go undefined/missing while every other check in this block (the forfeit itself, the fallback,
+    // the reason field which was ALREADY emitted before this card) stays green.
+    check("(e2e, FORFEIT) detail.currentMainSha is present and equals the REAL advanced-to sha the gate command observed — not merely present",
+      typeof detail.currentMainSha === "string" && !!advancedSha && detail.currentMainSha === advancedSha);
+    check("(e2e, FORFEIT) detail.currentMainSha is NOT the stale baseMainSha it forfeited from", detail.currentMainSha !== detail.baseMainSha);
+    check("(e2e, FORFEIT) detail.reason (pre-existing, now also documented by this card) is present", typeof detail.reason === "string" && detail.reason.length > 0);
+    check("(e2e, FORFEIT) detail.currentMainSha is never the literal string \"undefined\"", detail.currentMainSha !== "undefined");
+
+    try { fs.rmSync(shaFile, { force: true }); } catch { /* best-effort scratch cleanup */ }
+  }
+
   // ── (unit) toGateHistoryRow's widened emitCompareReduced fallback for a batched row with NO pending_gate_ops row at all ──
   {
     const db = new Db(); dbs.push(db);
