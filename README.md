@@ -48,7 +48,7 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 
 ## Quick start
 
-You need **Node 22+** and a working `claude` CLI on your machine. **On Windows, Loom needs build 18309+ (Windows 10 version 1903, May 2019, or later, or Windows 11)** — that's node-pty's own floor for using ConPTY; below it node-pty falls back to winpty, a path Loom has never tested or claimed support for, and `install.ps1` checks this and refuses to install below it. Install Loom globally from npm (published as [`loomctl`](https://www.npmjs.com/package/loomctl)) — that gives you the `loom` command:
+You need **Node 22+** and a working `claude` CLI on your machine. **On Windows, Loom needs build 18309+ (Windows 10 version 1903, May 2019, or later, or Windows 11)** — that's node-pty's own floor for using ConPTY; below it node-pty falls back to winpty, a path Loom has never tested or claimed support for. `install.ps1` (see [One-line install](#one-line-install) below) checks this and refuses to install below it — installing directly via `npm i -g loomctl`, as below, runs **no such check**, so confirm your build meets the floor first if you're using that route. Install Loom globally from npm (published as [`loomctl`](https://www.npmjs.com/package/loomctl)) — that gives you the `loom` command:
 
 ```sh
 npm i -g loomctl
