@@ -277,6 +277,17 @@ try {
     );
     check("(L) L2 genuinely reached the semaphore's CAP-queue wait before L1 released", queued);
 
+    // Card 8142d47c audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent. `confirm2Settled`
+    // can only flip once L2's `acquire()` waiter (gate-semaphore.ts:596-610, a plain Promise resolved by an
+    // explicit `grant()`/`resolve()` call, never a setTimeout) is granted a cap slot — which happens only once
+    // L1 releases, and L1's own release is gated behind `fakeGate`'s Promise, resolved ONLY by this test's own
+    // explicit `releaseGate1("go")` call below, issued SEQUENTIALLY AFTER this assertNeverWithControl already
+    // completes. No production timer sits on this check's path, so no host-speed delay could ever flip
+    // `confirm2Settled` early. Injection-verified (uniform global.setTimeout scaling up to 500x left the
+    // outcome unchanged, confirming there is nothing on this path for a delay factor to act on; an adversarial
+    // non-uniform probe against the shared _timing-guard.mjs positiveControl mechanism itself, unrelated to
+    // this site, DID throw once pushed past its own ~150ms margin — proving the injection method is
+    // non-vacuous, not that this site has any margin to lose).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(L) L2's confirm does NOT settle while L1's held-open gate still occupies the cap's only slot",
@@ -405,6 +416,13 @@ try {
     );
     check("(M) M2 genuinely reached the semaphore's CAP-queue wait before M1 released", queued);
 
+    // Card 8142d47c audit of this site: same mechanism and same verdict as (L) above — PROVEN SAFE BY
+    // CONSTRUCTION. `confirm2Settled` can only flip once M2's `acquire()` waiter (gate-semaphore.ts:596-610,
+    // a plain Promise resolved by an explicit `grant()`/`resolve()` call, never a setTimeout) is granted a
+    // cap slot, gated behind M1's own `fakeGate` Promise, resolved ONLY by this test's own explicit
+    // `releaseGate1("go")` call below, issued SEQUENTIALLY AFTER this assertNeverWithControl already
+    // completes. See (L)'s own comment above for the injection evidence (uniform scaling up to 500x
+    // unchanged; adversarial non-uniform probe against the shared harness DID throw, proving non-vacuity).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(M) M2's confirm does NOT settle while M1's held-open gate still occupies the cap's only slot",

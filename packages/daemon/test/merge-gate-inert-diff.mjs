@@ -454,6 +454,17 @@ try {
     const worker2Queued = await waitUntilRepoGuardQueued(sessions, H.projId, H.repo, 10000);
     check("(H) worker2 genuinely reached its own repo-guard-only wait before worker1 landed", worker2Queued);
 
+    // Card 8142d47c audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent. `worker2Settled`
+    // can only flip once worker2's `acquireRepoGuardOnly` waiter (gate-semaphore.ts:774-806, a plain Promise
+    // pushed onto `repoGuardOnlyWaiters` and resolved only by `freeRepoPath`'s explicit `resolve()` call —
+    // zero setTimeout anywhere in this method) is handed the repo guard, which happens only once worker1
+    // releases it — gated behind worker1's own `fakeGate` Promise, resolved ONLY by this test's explicit
+    // `releaseGate1("go")` call below, issued SEQUENTIALLY AFTER this assertNeverWithControl already
+    // completes. No production timer sits on this check's path, so no host-speed delay could ever flip
+    // `worker2Settled` early. Injection-verified (uniform global.setTimeout scaling up to 500x left the
+    // outcome unchanged; an adversarial non-uniform probe against the shared _timing-guard.mjs positiveControl
+    // mechanism itself, unrelated to this site, DID throw once pushed past its own ~150ms margin — proving
+    // the injection method is non-vacuous, not that this site has any margin to lose).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(H) the inert worker2 confirm does NOT settle while worker1's real gate is still running",
@@ -586,6 +597,14 @@ try {
     const worker2Queued = await waitUntilRepoGuardQueued(sessions, I.projId, I.repo, 10000);
     check("(I) worker2 genuinely reached its own repo-guard-only wait before worker1 landed", worker2Queued);
 
+    // Card 8142d47c audit of this site: same mechanism and same verdict as (H) above — PROVEN SAFE BY
+    // CONSTRUCTION. `worker2Settled` can only flip once worker2's `acquireRepoGuardOnly` waiter
+    // (gate-semaphore.ts:774-806, resolved only by `freeRepoPath`'s explicit `resolve()`, zero setTimeout)
+    // is handed the guard, gated behind worker1's own `fakeGate` Promise, resolved ONLY by this test's
+    // explicit `releaseGate1("go")` call below, issued SEQUENTIALLY AFTER this assertNeverWithControl
+    // already completes. See (H)'s own comment above for the injection evidence (uniform scaling up to
+    // 500x unchanged; adversarial non-uniform probe against the shared harness DID throw, proving
+    // non-vacuity).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(I) the inert worker2 confirm does NOT settle while worker1's real gate is still running",
@@ -705,6 +724,15 @@ try {
     const queued = await waitUntilRepoGuardQueued(sessions, J.projId, J.repo, 10000);
     check("(J) worker's confirm genuinely reached its own repo-guard-only wait before we release our hold", queued);
 
+    // Card 8142d47c audit of this site: PROVEN SAFE BY CONSTRUCTION, not injection-dependent — the most
+    // direct case of the three in this file. `confirmSettled` can only flip once the worker's
+    // `acquireRepoGuardOnly` waiter (gate-semaphore.ts:774-806, resolved only by `freeRepoPath`'s explicit
+    // `resolve()`, zero setTimeout anywhere in this method) is handed the guard, which happens only once
+    // THIS TEST releases its own directly-held hold via the explicit `releaseTestHold()` call below, issued
+    // SEQUENTIALLY AFTER this assertNeverWithControl already completes — there is no intervening worker1/
+    // fakeGate indirection at all here. No production timer sits on this check's path. See (H)'s own comment
+    // above for the injection evidence (uniform scaling up to 500x unchanged; adversarial non-uniform probe
+    // against the shared harness DID throw, proving non-vacuity).
     const WINDOW_MS = 150;
     const neverSettled = await assertNeverWithControl({
       label: "(J) the confirm does NOT settle while the test hold is still held",
