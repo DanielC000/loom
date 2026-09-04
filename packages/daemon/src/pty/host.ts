@@ -7998,6 +7998,39 @@ export class PtyHost {
   }
 
   /**
+   * Drop EVERY still-queued `[loom:worker-report]` nudge FROM one worker (matched via `senderId ===
+   * workerSessionId`, scoped to `reportEventId`-tagged entries so nothing else this worker ever sent gets
+   * caught) — card 84a2eb2d's fix, called from `finalizeMerge` right after it appends that worker's
+   * `merge_done` event. Byte-identical splice/FIFO-restore mechanics to `purgeQueuedByReportEventIds`
+   * above; only the match predicate differs.
+   *
+   * DELIBERATELY WORKER-SCOPED, unlike `purgeQueuedByReportEventIds` (which keys on ONE report's own event
+   * id specifically so an unread EARLIER report is never dropped by a LATER report's own read — see that
+   * method's own doc). This is safe here for a reason that method doesn't have: `merge_done` is a
+   * TERMINAL, per-worker event — once it fires, that worker's task lifecycle is over. There is no longer
+   * anything a manager COULD do with an earlier `progress`/`done` report about the now-finalized branch
+   * (nothing left to redirect the worker toward, and its concurrency slot is being freed right after this
+   * call — see `finalizeMerge`'s own `maybeDrainCapQueue`), so every queued report nudge for this worker,
+   * whichever one(s) never drained, is unconditionally stale at this point. Never called from anywhere
+   * `merge_request` fires (review-start, before any merge decision is made) — see report-resolution.ts's
+   * own doc on why that kind is deliberately excluded from "resolves a report" too; purging on a REQUEST
+   * would risk dropping a report the manager hasn't actually acted on yet.
+   */
+  purgeQueuedWorkerReportNudgesForWorker(managerSessionId: string, workerSessionId: string): QueuedMessage[] {
+    const live = this.live.get(managerSessionId);
+    if (!live?.alive) return [];
+    const removed: QueuedMessage[] = [];
+    for (let i = live.pending.length - 1; i >= 0; i--) {
+      const m = live.pending[i]!;
+      if (m.reportEventId != null && m.senderId === workerSessionId) {
+        removed.push(m);
+        live.pending.splice(i, 1);
+      }
+    }
+    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+  }
+
+  /**
    * Drop still-queued `[loom:worker-idle]` / `[loom:worker-spawn-broken]` nudges for ONE worker from its
    * manager's pending FIFO (auditor finding 2e3a8e6f — delivery-vs-watchdog TIMING race). Mirrors
    * `purgeQueuedByQuestionIds`'s exact mechanics (synchronous splice, no drain/submit boundary crossed) but

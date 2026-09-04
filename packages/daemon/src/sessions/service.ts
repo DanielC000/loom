@@ -8491,6 +8491,26 @@ export class SessionService {
   }
 
   /**
+   * Card 84a2eb2d: called from `finalizeMerge` right after it appends a worker's `merge_done` event — an
+   * OBJECTIVE signal (the branch actually finalized), never an inference about what the manager "probably
+   * knows", that the manager has demonstrably acted on this worker's work. ADDITIVE to
+   * `purgeQueuedWorkerReportNudge`/d09d58e7 above (that path — triggered by `worker_report_get` reading a
+   * report straight from durable storage — is UNTOUCHED); this is a second, independent trigger for the
+   * SAME underlying problem: the original dedup only ever fired from `worker_report_get`, so a manager that
+   * learned a report's content some OTHER way (e.g. reading git directly, then firing a merge/batch) left
+   * its queued nudge to drain as a wasted turn confirming something already landed. See
+   * `pty.purgeQueuedWorkerReportNudgesForWorker`'s own doc for why keying this one on the WORKER id (rather
+   * than one specific report's event id) is safe specifically at `merge_done` time. Best-effort: a purge
+   * failure here must never fail the merge it's riding along with.
+   */
+  purgeQueuedWorkerReportNudgesOnMerge(managerSessionId: string, workerSessionId: string): void {
+    const removed = this.pty.purgeQueuedWorkerReportNudgesForWorker(managerSessionId, workerSessionId);
+    for (const m of removed) {
+      if (m.onDeliver) { try { m.onDeliver("read"); } catch { /* purge must never fail the merge */ } }
+    }
+  }
+
+  /**
    * Manager-driven ABSOLUTE permission-mode override (worker_set_mode, card 610abe29) — the manual
    * recovery affordance for a worker landed in (or pushed into) a bad mode: a worker can never change its
    * own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker —
@@ -18461,6 +18481,11 @@ export class SessionService {
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
+    // Card 84a2eb2d: this worker's branch just objectively finalized — drop any `[loom:worker-report]`
+    // nudge still queued for it (see purgeQueuedWorkerReportNudgesOnMerge's own doc for why worker-scoped
+    // keying is safe here). Best-effort, right after the merge_done append above so this fires on every
+    // path that reaches this point (solo confirm, batch via finishAlreadyMerged, boot-reconcile Pass A).
+    try { this.purgeQueuedWorkerReportNudgesOnMerge(args.managerSessionId, args.workerSessionId); } catch { /* never let a purge fail the merge */ }
     // A retained worktree (nested-repo guard above, hit OR inconclusively truncated) is still checked
     // out on `branch` — `git branch -D` would only fail ("checked out at ...") and warn for a reason we
     // already know, so skip it; the branch is deleted on a later confirm once the worktree is actually gone.
