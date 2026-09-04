@@ -188,6 +188,16 @@ function ForfeitTag() {
 // STEP's duration; this one is the WHOLE RUN's elapsed time since admission (worktree prep + every step).
 // Whole-run elapsed is always ≥ the worst step, so on a project with a heavy build step this fires EARLIER
 // relative to the daemon's signal. That is the safe direction for a warning, not an equivalence.
+//
+// ⚠️ THE HEALTHY BAND IS WORKLOAD-DEPENDENT, AND APPEARS TO SCALE WITH BATCH SIZE K. The ~16–20 min anchor
+// above is itself a K=2 `merge_batch` measurement (~15.1–18.9 min) — ⛔ NOT a solo-gate figure — so it does
+// not describe a larger batch. Against it, a K=4 batch was observed still healthy past 20 minutes (opId
+// 07520fa5, 2026-09-05). ⚠️ BOUND THAT: it is ONE live reading off a running gate, reported rather than
+// measured here — a direction, never a second band, and it must not acquire the K=2 range's authority.
+// ⇒ A correct cue may legitimately fire on a large HEALTHY batch. ⛔ Do NOT read that as this constant being
+// mistuned — a batch genuinely approaching its bound is exactly what the cue is for. If you retune, measure
+// per-K rather than widening one band to cover every K: a band stretched to keep the largest batch amber
+// goes quiet on the smaller runs it must still catch.
 const LONG_RUN_WARN_FRACTION = 0.80;
 
 /** The per-ROW long-run verdict for a running gate: `warn` flips its elapsed clock from amber to red once
