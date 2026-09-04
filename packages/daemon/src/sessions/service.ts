@@ -15962,19 +15962,23 @@ export class SessionService {
     // NOT_HERMETIC clause just above — before this card, a mixed diff (a transpile-identical compiled file
     // PLUS an inert path) reported only the compiled-file count, leaving the inert path unaccounted for and
     // indistinguishable from a silently dropped one (see EmitCompareGateResult.inertPathsSkipped's own doc).
-    // Card cf4aa7d1: `emitCompareIdenticalCount` is `changedTsFiles.length` (git/worktrees.ts,
-    // `computeEmitCompareGate`) — the transpile-identity check only ever iterates that list, so a
-    // test-only diff (no compiled `.ts` file changed at all) leaves it at 0 WITHOUT the check ever running.
-    // The old leading clause ("0 compiled file(s) proven transpile-identical") rendered that skip as a
-    // measured zero — the same null-vs-0 conflation this codebase polices everywhere else (see
+    // Card cf4aa7d1: `emitCompareIdenticalCount` is `changedTsFiles.length + changedScriptFiles.length`
+    // (git/worktrees.ts, `computeEmitCompareGate` — card 82662e98 folded the .mjs-script population into
+    // this SAME count; see EmitCompareGateResult.identicalFileCount's own doc for why one field, not two)
+    // — the transpile-identity check only ever iterates those two lists, so a test-only diff (no compiled
+    // `.ts` or `packages/daemon/scripts/**` file changed at all) leaves it at 0 WITHOUT the check ever
+    // running. The old leading clause ("0 compiled file(s) proven transpile-identical") rendered that skip
+    // as a measured zero — the same null-vs-0 conflation this codebase polices everywhere else (see
     // `gate-history.mjs`'s own "(1) changed-test-files arm ... VACUOUS" fixture, which already documents
     // this exact ambiguity for the STRUCTURED field; this clause now says the same thing in the
     // human-readable one). `emitCompareIdenticalCount > 0` is only ever true when the check ran AND every
-    // changed compiled file passed it (any failure returns `notReducible` before `eligible:true`, so a
-    // partial/failed check can never reach here) — so the two clauses below are exhaustive and unambiguous.
+    // changed compiled/script file passed it (any failure returns `notReducible` before `eligible:true`,
+    // so a partial/failed check can never reach here) — so the two clauses below are exhaustive and
+    // unambiguous. Wording is deliberately "file(s)", not "compiled file(s)" (card 82662e98) — a script
+    // proven inert here was never compiled, so the old wording would have been actively wrong for it.
     const emitCompareCompiledClause = emitCompareIdenticalCount > 0
-      ? `${emitCompareIdenticalCount} compiled file(s) proven transpile-identical (card 2154b6ad)`
-      : "no compiled file(s) changed in this diff — transpile-identity check not applicable (card cf4aa7d1)";
+      ? `${emitCompareIdenticalCount} file(s) proven transpile/parse-identical (card 2154b6ad, 82662e98)`
+      : "no compiled .ts or scripts/** file changed in this diff — transpile-identity check not applicable (card cf4aa7d1)";
     // Card cf4aa7d1: a reduced gate that ran a changed test file DIRECTLY (`--only=<file>`) is an ISOLATION
     // run — structurally incapable of catching a regression whose defect class only manifests in the full
     // suite (order-dependence, shared-state coupling). This is true of ANY count of directly-run test

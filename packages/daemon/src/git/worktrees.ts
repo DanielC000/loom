@@ -3015,15 +3015,59 @@ function pathSetDigest(paths: string[]): string {
 const INERT_MERGE_PATH_PREFIXES = ["docs/"];
 
 /**
- * Whether a single path falls under an {@link INERT_MERGE_PATH_PREFIXES} prefix — the ONE predicate both
- * {@link isInertMergeDiff} (below) and {@link computeEmitCompareGate}'s classification loop (further down
- * this file) test against, so the boundary semantics `merge-gate-inert-diff.mjs` scenario (G) pins
- * (`docs-internal/`, `docsfoo.md` must NOT match) can never drift between the two call sites — card
- * b97f643d, Code Review: reusing the LIST alone still left the `startsWith` PREDICATE written twice, which
- * is the identical divergence risk one level down from a second hand-copied list.
+ * Root-level, EXACT-match file paths proven inert by the SAME `readFileSync`/`existsSync`/`readdirSync`/
+ * `createReadStream` corpus measurement {@link INERT_MERGE_PATH_PREFIXES}'s own doc describes for `docs/`
+ * (card 82662e98) — a `startsWith` PREFIX cannot express these at all: `"README.md"` has no directory
+ * component to match, so a root file needs its own exact-equality list, not a wider prefix. Verified
+ * (2026-09-04): zero real reads of any of these five names anywhere in `packages/daemon/test/*.mjs`. The
+ * only `README.md` hits found were `path.join(<throwaway-fixture-repo>, "README.md")` in
+ * `merge-gate.mjs`/`merge-union-gate.mjs`/`worker-prompt.mjs`/`worktrees.mjs` — a SYNTHETIC git fixture
+ * repo each test builds itself (`makeProject(...)`), never this project's own root file — the identical
+ * "synthetic fixture ≠ real content" distinction {@link ASSET_READING_TEST_REPO_PATHS}'s own membership
+ * doc already draws for `assets/**`.
+ *
+ * 🔴 `CLAUDE.md` IS DELIBERATELY, PERMANENTLY EXCLUDED — do not add it here without re-deriving this
+ * argument first: `test/kickoff-real-spawn.mjs` reads THIS repo's own real root `CLAUDE.md` and embeds
+ * real content (`claudeMd.slice(0, 4000)`) into realistic kickoff payloads it uses to exercise the
+ * bracketed-paste escaping path — a genuine, non-synthetic behavioral dependency on its actual bytes.
+ * This exact case is already investigated and pinned as a regression test: card `5149c036`,
+ * `merge-gate-inert-diff.mjs` scenario (M) and `emit-compare-gate.mjs` scenario (O) both assert a
+ * CLAUDE.md-only (or CLAUDE.md-alongside-comment-only-.ts) diff must still force the full gate. Adding
+ * CLAUDE.md here would directly regress both.
+ *
+ * Same per-repo re-verification requirement as {@link INERT_MERGE_PATH_PREFIXES} — {@link
+ * isInertMergeDiff} re-checks each of these against THIS repo's own corpus (via {@link
+ * repoTreeReferencesInertPrefix}) at gate time, never trusting this list alone for a project other than
+ * Loom.
+ */
+const INERT_MERGE_EXACT_PATHS = ["README.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md"];
+
+/** Escapes every ERE metacharacter in `s` so it can be interpolated into {@link
+ *  repoTreeReferencesInertPrefix}'s `git grep -E` pattern as a LITERAL — needed the moment a token can
+ *  contain a real metacharacter (a root filename's `.`, e.g. `README.md`), unlike every prefix
+ *  {@link INERT_MERGE_PATH_PREFIXES} has held so far (`docs` has none). An unescaped `.` only WIDENS the
+ *  match (matches any character in its place), which is the safe direction (a spurious match just forces
+ *  one extra full gate) — but a precise match is still what this function is for, so escape rather than
+ *  rely on that asymmetry. */
+function escapeEreLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whether a single path falls under an {@link INERT_MERGE_PATH_PREFIXES} prefix OR matches an {@link
+ * INERT_MERGE_EXACT_PATHS} entry exactly — the ONE predicate both {@link isInertMergeDiff} (below) and
+ * {@link computeEmitCompareGate}'s classification loop (further down this file) test against, so the
+ * boundary semantics `merge-gate-inert-diff.mjs` scenario (G) pins (`docs-internal/`, `docsfoo.md` must
+ * NOT match) can never drift between the two call sites — card b97f643d, Code Review: reusing the LIST
+ * alone still left the `startsWith` PREDICATE written twice, which is the identical divergence risk one
+ * level down from a second hand-copied list. The exact-path arm (card 82662e98) cannot have that same
+ * boundary failure mode at all — `===` never matches a path that merely shares a prefix or suffix with a
+ * listed name (`sub/README.md`, `README.md.bak`, `NOTREADME.md` all correctly fail), so it needs no
+ * analogous pinned scenario for false-widening, only for the CLAUDE.md exclusion (see that list's own
+ * doc).
  */
 function isInertMergePath(p: string): boolean {
-  return INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix));
+  return INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)) || INERT_MERGE_EXACT_PATHS.includes(p);
 }
 
 /**
@@ -3071,6 +3115,17 @@ export async function isInertMergeDiff(
   for (const prefix of INERT_MERGE_PATH_PREFIXES) {
     const bareToken = prefix.replace(/\/+$/, "");
     const referenced = await repoTreeReferencesInertPrefix(repoPath, baseSha, bareToken, timeoutMs);
+    if (referenced) return false;
+  }
+  // Card 82662e98: same per-repo re-verification, extended to the exact-path list — a project other than
+  // Loom whose own tests genuinely read one of these root filenames (a real, non-Loom-specific risk this
+  // list's own doc already reasons about for CLAUDE.md) must not have its gate silently skipped either.
+  // `escapeEreLiteral` is required here (unlike the prefix loop above, which has never held a token with
+  // an ERE metacharacter): a bare "README.md" would let the "." match ANY character in `git grep -E`,
+  // over-matching — safe (forces an unnecessary full gate, never a missed one) but imprecise, so escape
+  // rather than lean on that asymmetry.
+  for (const exactPath of INERT_MERGE_EXACT_PATHS) {
+    const referenced = await repoTreeReferencesInertPrefix(repoPath, baseSha, escapeEreLiteral(exactPath), timeoutMs);
     if (referenced) return false;
   }
   return true;
@@ -3396,11 +3451,17 @@ export async function changedSkillNames(
   });
 }
 
-/** Compiled-source and non-compiled-test path scopes {@link computeEmitCompareGate} classifies changed
- *  paths into — see that function's own doc for why only these two, and why everything else fails closed. */
+/** Compiled-source, non-compiled-script, and non-compiled-test path scopes {@link computeEmitCompareGate}
+ *  classifies changed paths into — see that function's own doc for why only these, and why everything
+ *  else fails closed. {@link EMIT_COMPARE_SCRIPTS_PREFIX} (card 82662e98) is classified through the SAME
+ *  transpile-compare mechanism as {@link EMIT_COMPARE_SRC_PREFIX}, but at a DIFFERENT compiler `target`
+ *  (see that classification arm's own comment for why: an `.mjs` script is never compiled — the checked-
+ *  in source IS what Node runs — so downleveling any syntax at all would compare something that never
+ *  executes). */
 const EMIT_COMPARE_SRC_PREFIX = "packages/daemon/src/";
 const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
 const EMIT_COMPARE_ASSETS_PREFIX = "packages/daemon/assets/";
+const EMIT_COMPARE_SCRIPTS_PREFIX = "packages/daemon/scripts/";
 
 /** The static source-TEXT guards (Code Review, `docs/investigations/c4ccae66-.../findings.md`) — these
  *  grep raw file content rather than compiled behavior, so {@link computeEmitCompareGate}'s emit-compare
@@ -3677,8 +3738,14 @@ export interface EmitCompareGateResult {
    *  {@link notHermeticExcluded}/{@link inertPathsSkipped} above already follow, so a reduced gate never
    *  silently drops accounting for why the certified asset-reading tests ran. */
   changedAssetPaths: string[];
-  /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
-   *  caller so a skip is never silent (card 2154b6ad DoD-5). */
+  /** Count of changed compiled `.ts` files PLUS changed `packages/daemon/scripts/**\/*.mjs` files (card
+   *  82662e98) proven transpile/parse-identical — diagnostic only, surfaced by the caller so a skip is
+   *  never silent (card 2154b6ad DoD-5). Deliberately ONE combined count, not two: both populations are
+   *  proven inert by the identical "compare before/after with comments+whitespace stripped" mechanism,
+   *  just at a different compiler `target` (see {@link EMIT_COMPARE_SCRIPTS_PREFIX}'s own doc for why) —
+   *  splitting this into a second field would mean threading a new field through every persisted consumer
+   *  of this one (sessions/service.ts's `emitCompareIdenticalCount` rides a reconciliation event payload,
+   *  not just this return value) for a distinction that's diagnostic wording only, not behavior. */
   identicalFileCount: number;
   reason?: string;
   /** Card 2db8a3dd (introduced this field), CORRECTED by card 4def0708 (the operational-failure sites
@@ -3714,13 +3781,17 @@ export interface EmitCompareGateResult {
    *  reaches this catch-all at all: {@link isInertMergePath}'s skip, checked before either prefix test on
    *  every path, removes it from consideration via `continue`, not a terminal return.
    *
-   *  📌 OPERATIONAL NOTE (card 4e6e1882 DoD-5): this decline is an ORDINARY commit shape on this repo, not
-   *  an edge case. `INERT_MERGE_PATH_PREFIXES` names only `docs/` as inert, so any other root-level path
-   *  (`CLAUDE.md`, `README.md`, `package.json`, `bin/**`, `.github/**`, …) sorts before `packages/` in
-   *  git's own `--name-status` ordering and, being non-inert, reaches the catch-all on the SAME diff where
+   *  📌 OPERATIONAL NOTE (card 4e6e1882 DoD-5, updated by card 82662e98): this decline is an ORDINARY
+   *  commit shape on this repo, not an edge case. `INERT_MERGE_PATH_PREFIXES`/`INERT_MERGE_EXACT_PATHS`
+   *  name only `docs/` and five root filenames (`README.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`,
+   *  `CONTRIBUTING.md`, `SECURITY.md`) as inert — those five are now SKIPPED via `isInertMergePath` before
+   *  ever reaching this catch-all (same as `docs/**`). Every OTHER root-level path — most notably
+   *  `CLAUDE.md` (deliberately excluded, see {@link INERT_MERGE_EXACT_PATHS}'s own doc), plus
+   *  `package.json`, `bin/**`, `.github/**`, … — still sorts before `packages/` in git's own
+   *  `--name-status` ordering and, being non-inert, still reaches the catch-all on the SAME diff where
    *  daemon source is also touched — before any daemon-src terminal ever gets a chance to fire. Editing
-   *  `CLAUDE.md` alongside daemon source (routine on this project) declines to `null` regardless of what
-   *  the daemon change is. ⚠️ FRAGILE: inside `packages/`, an in-scope daemon path is only ever visited
+   *  `CLAUDE.md` alongside daemon source (routine on this project) still declines to `null` regardless of
+   *  what the daemon change is. ⚠️ FRAGILE: inside `packages/`, an in-scope daemon path is only ever visited
    *  before `packages/shared/**`/`packages/web/**` today because the string `daemon` happens to sort
    *  first — an alphabetical accident, not a design property. Adding a `packages/api/`, `packages/cli/`,
    *  or `packages/core/` directory would silently flip today's `false` (e.g. `2d8d2e42` above, which reads
@@ -3748,7 +3819,10 @@ export interface EmitCompareGateResult {
  * {@link isInertMergeDiff} above, which proves a diff can skip the gate ENTIRELY: this proves only that the
  * diff's COMPILED BEHAVIOR is unchanged, so `pnpm build` (real typecheck) and the static source-text guards
  * below still run UNCONDITIONALLY — only the runtime test suite itself is ever skipped, and only for
- * `packages/daemon/src/**\/*.ts`, a changed `test/*.mjs` file, and a changed `packages/daemon/assets/**` path
+ * `packages/daemon/src/**\/*.ts`, `packages/daemon/scripts/**\/*.mjs` (card 82662e98 — proven inert the
+ * SAME way as the compiled-file comparison below, just at a different compiler `target`; see {@link
+ * EMIT_COMPARE_SCRIPTS_PREFIX}'s own doc), a changed `test/*.mjs` file, and a changed
+ * `packages/daemon/assets/**` path
  * (card 3fbd95e0 — the last of these carries no proof of unchanged behavior, unlike the compiled-file
  * comparison above; it only widens the run to include {@link ASSET_READING_TEST_REPO_PATHS}, the certified
  * set of tests that actually read that tree, same "always run this fixed set, never predict a narrower one"
@@ -3878,6 +3952,11 @@ export async function computeEmitCompareGate(
   if (entries.length === 0) return notApplicableHere("empty diff — nothing to prove inert from");
 
   const changedTsFiles: string[] = [];
+  // Card 82662e98: changed packages/daemon/scripts/**/*.mjs paths proven transpile-identical — same
+  // "proven inert via comparison" shape as changedTsFiles, kept as a SEPARATE list (not folded into
+  // changedTsFiles) purely so the two populations stay distinguishable for anyone reading this function;
+  // both fold into the SAME `identicalFileCount` diagnostic on the way out (see the return statement).
+  const changedScriptFiles: string[] = [];
   const changedTestFiles: string[] = [];
   // Card 17cd1f30: paths classified as NOT_HERMETIC (see EmitCompareGateResult.notHermeticExcluded's own
   // doc) — filtered OUT of changedTestFiles rather than blocking eligibility.
@@ -3928,6 +4007,16 @@ export async function computeEmitCompareGate(
     if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
       if (status !== "M") return notReducible(`non-modify status "${status}" on compiled file ${p}`);
       changedTsFiles.push(p);
+      continue;
+    }
+    // Card 82662e98: packages/daemon/scripts/**/*.mjs — the harness/tooling scripts that fell to the
+    // catch-all below before this existed (e.g. an added pointer comment in test-daemon.mjs forcing a
+    // full ~17.5min gate for a provably comment-only change). Same fail-closed shape as the .ts arm above
+    // (non-modify status refuses outright), but proven via a DIFFERENT compiler `target` — see the
+    // transpile-compare loop below and EMIT_COMPARE_SCRIPTS_PREFIX's own doc for why.
+    if (p.startsWith(EMIT_COMPARE_SCRIPTS_PREFIX) && p.endsWith(".mjs")) {
+      if (status !== "M") return notReducible(`non-modify status "${status}" on script file ${p}`);
+      changedScriptFiles.push(p);
       continue;
     }
     if (p.startsWith(EMIT_COMPARE_TEST_PREFIX) && p.endsWith(".mjs")) {
@@ -4017,7 +4106,7 @@ export async function computeEmitCompareGate(
     return notApplicableHere(`path outside emit-compare scope: ${p}`);
   }
 
-  if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0 && changedAssetPaths.length === 0) {
+  if (changedTsFiles.length === 0 && changedScriptFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0 && changedAssetPaths.length === 0) {
     // Every remaining changed path was a DELETED test/*.mjs file, or one already certified inert by
     // INERT_MERGE_PATH_PREFIXES and skipped above (card b97f643d) — an excluded-dir (fixtures/, census/)
     // path already returned notEligible above (card 44968963), so it can never reach here. Nothing left
@@ -4040,9 +4129,16 @@ export async function computeEmitCompareGate(
   // exactly the full gate's own coverage — zero — not a regression the reduction introduced.
 
   if (changedTsFiles.length > 0) {
+    // TS-ONLY precondition (emitDecoratorMetadata / const enum) — N/A to changedScriptFiles below, which
+    // is why this check is gated on changedTsFiles specifically rather than the combined condition on the
+    // shared `typescript` import just below. See EMIT_COMPARE_SCRIPTS_PREFIX's own doc for why: a plain
+    // `.mjs` script is never compiled by THIS repo's tsconfig chain at all (it's not part of the `dist/`
+    // build `emitCompareSoundnessOk` reasons about), so neither mechanism can apply to it.
     if (!(await emitCompareSoundnessOk(worktreePath))) {
       return notReducible("soundness precondition (emitDecoratorMetadata / const enum) not verified");
     }
+  }
+  if (changedTsFiles.length > 0 || changedScriptFiles.length > 0) {
     let tsModule: TypeScriptModule;
     try {
       const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
@@ -4064,13 +4160,45 @@ export async function computeEmitCompareGate(
       } catch {
         return notApplicableHere(`could not read branch content for ${p}`);
       }
-      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule).outputText;
-      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule).outputText;
+      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
+      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
+      if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
+    }
+    // Card 82662e98: `.mjs` scripts, at `ESNext` (NOT ES2022, unlike the .ts loop above — see
+    // EMIT_COMPARE_SCRIPTS_PREFIX's own doc). `ESNext` is the only target that structurally cannot
+    // downlevel any syntax the compiler recognizes at all (there is no ceiling below "newest known"), so
+    // this comparison is a faithful comment/whitespace-stripped REPRINT of what Node actually executes —
+    // never a lossy transform that could map two genuinely different scripts onto the same output. Spiked
+    // directly (2026-09-04): at `target: ES2022` (the .ts loop's choice), a `using` declaration explodes
+    // into ~30 lines of disposal-helper machinery that has nothing to do with what an untranspiled `.mjs`
+    // actually runs; at `ESNext` the same input reprints unchanged.
+    for (const p of changedScriptFiles) {
+      let before: string;
+      let after: string;
+      try {
+        before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
+      } catch {
+        return notApplicableHere(`could not read base content for ${p}`);
+      }
+      try {
+        after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
+      } catch {
+        return notApplicableHere(`could not read branch content for ${p}`);
+      }
+      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;
+      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;
       if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
     }
   }
 
-  return { eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, changedAssetPaths, identicalFileCount: changedTsFiles.length, notApplicable: false };
+  return {
+    eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, changedAssetPaths,
+    // Card 82662e98: both populations are "proven inert via parse/transpile comparison" — folded into ONE
+    // diagnostic count rather than a second field threaded through every persisted consumer of this one
+    // (sessions/service.ts's emitCompareIdenticalCount is part of a reconciliation event payload, not just
+    // this function's own return). See EmitCompareGateResult.identicalFileCount's own doc.
+    identicalFileCount: changedTsFiles.length + changedScriptFiles.length, notApplicable: false,
+  };
 }
 
 /**
@@ -4131,13 +4259,18 @@ interface TypeScriptModule {
 }
 
 /** Single-file, syntax-only transpile with `removeComments:true` forced — see {@link computeEmitCompareGate}'s
- *  own doc for why this (not a hand-rolled scanner, not the real `dist/` build) is the right tool. Matches
- *  `tsconfig.base.json`'s real `target`/`module` so the emitted SYNTAX shape (e.g. downleveling) is
- *  representative; every other option is irrelevant here since `transpileModule` never type-checks. */
-function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModule): { outputText: string } {
+ *  own doc for why this (not a hand-rolled scanner, not the real `dist/` build) is the right tool.
+ *  `target` is caller-supplied (card 82662e98) rather than hardcoded — the `.ts` call site passes
+ *  `ES2022` to match `tsconfig.base.json`'s real target, so the emitted SYNTAX shape (e.g. downleveling)
+ *  is representative of what `dist/` actually ships; the `.mjs`-script call site passes `ESNext` instead,
+ *  because a script is never compiled at all — see {@link EMIT_COMPARE_SCRIPTS_PREFIX}'s own doc for why
+ *  `ES2022` would be UNSOUND there (it can downlevel syntax the original file never runs through).
+ *  `module` stays fixed at `NodeNext` for both — every other option is irrelevant here since
+ *  `transpileModule` never type-checks. */
+function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModule, target: unknown): { outputText: string } {
   return tsModule.transpileModule(text, {
     compilerOptions: {
-      target: tsModule.ScriptTarget.ES2022,
+      target,
       module: tsModule.ModuleKind.NodeNext,
       removeComments: true,
       sourceMap: false,

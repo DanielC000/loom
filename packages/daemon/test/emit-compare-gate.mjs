@@ -28,12 +28,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (M) card dd4349ff — RED-PROOF: buildReducedGateCommand must invoke a changed test file THROUGH THE
 //       HARNESS (`test:daemon --only=<names>`), never as a bare `node <path>`.
 //   (E) SCOPE BOUNDARY — an ADDED .ts file (status A, not M) -> FULL gate (fails closed on non-modify).
-//   (F) SCOPE BOUNDARY — a changed path outside both scoped prefixes (packages/daemon/scripts/**) -> FULL
-//       gate, even though every OTHER changed path in the same diff is a comment-only .ts edit. Card
-//       2db8a3dd: this is also the NOT-APPLICABLE-TO-THIS-REPO polarity — the exact catch-all shape a
+//   (F) SCOPE BOUNDARY — a changed path outside both scoped prefixes (packages/web/**, still genuinely
+//       out of scope after card 82662e98 widened emit-compare to cover packages/daemon/scripts/** too)
+//       -> FULL gate, even though every OTHER changed path in the same diff is a comment-only .ts edit.
+//       Card 2db8a3dd: this is also the NOT-APPLICABLE-TO-THIS-REPO polarity — the exact catch-all shape a
 //       genuinely non-Loom-layout repo hits on its first changed path, always. Asserts
 //       `computeEmitCompareGate`'s own `notApplicable:true` directly, AND that the merge-confirm result's
 //       `emitCompareReduced` is OMITTED (never a fabricated `false`) — distinct from (B)'s real `false`.
+//   (P) card 82662e98 — COMMENT-ONLY packages/daemon/scripts/**/*.mjs edit -> REDUCED gate, the SAME shape
+//       as (A) but for the new scripts/** scope (a plain parse/reprint at `target:ESNext`, not a `.ts`
+//       compile at `target:ES2022` — see EMIT_COMPARE_SCRIPTS_PREFIX's own doc for why the target differs).
+//   (Q) card 82662e98 — an ADDED packages/daemon/scripts/**/*.mjs file (status A, not M) -> FULL gate, the
+//       SAME shape as (E) but for scripts.
+//   (R) card 82662e98 — a REAL BEHAVIORAL one-token edit to a packages/daemon/scripts/**/*.mjs file -> FULL
+//       gate — the polarity-trap negative control: proves the new comparison correctly REFUSES a genuine
+//       code change, not just accepts a comment-only one.
 //   (G) SOUNDNESS — Code Review (manager #128): emitDecoratorMetadata:true in the PACKAGE tsconfig
 //       (packages/daemon/tsconfig.json), NOT the base one, must ALSO force FULL gate on an otherwise
 //       comment-only .ts edit.
@@ -77,6 +86,15 @@ const {
   writeRealTestDaemonScript,
 } = await import("./_emit-compare-fixtures.mjs");
 
+// Card 82662e98 — (P)/(Q)/(R)'s own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above
+// (a comment line + one behavioral token to flip), scoped local to this file since no other test in the
+// suite needs it.
+const BASE_SCRIPT = [
+  "// prints a friendly status line",
+  "console.log(\"ready\");",
+  "",
+].join("\n");
+
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -117,7 +135,7 @@ try {
     // .ts file changed and was proven transpile-identical) — the count must stay fully informative, never
     // swap to the "not applicable" wording that's reserved for the test-only arm.
     check("(A) card cf4aa7d1: the informative compiled-count wording is used (the check genuinely ran)",
-      typeof confirm.warning === "string" && /1 compiled file\(s\) proven transpile-identical/.test(confirm.warning));
+      typeof confirm.warning === "string" && /1 file\(s\) proven transpile\/parse-identical/.test(confirm.warning));
     // Card cf4aa7d1 (negative control): no test file was run in isolation here (a comment-only .ts edit
     // touches no test/*.mjs path) — the isolation caveat must NOT appear on a reduction that never ran a
     // test file directly.
@@ -281,9 +299,9 @@ try {
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"),
       BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
-    mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
-    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "helper.mjs"), "console.log(1);\n");
-    commitAll(worktreePath, "docs: comment fix + new script helper", GIT_ID);
+    mkdirp(path.join(worktreePath, "packages", "web", "src"));
+    fs.writeFileSync(path.join(worktreePath, "packages", "web", "src", "helper.ts"), "export const z = 1;\n");
+    commitAll(worktreePath, "docs: comment fix + new web helper", GIT_ID);
 
     // Card 2db8a3dd: THIS is the shape a genuinely non-Loom-layout repo hits on its FIRST changed path,
     // always — the predicate could never have been eligible here, independent of the OTHER (reducible)
@@ -304,6 +322,82 @@ try {
     // has nothing to do with (B)'s reason. A cross-project reader (or a same-repo web-only diff) must see
     // this OMITTED, never a fabricated `false`.
     check("(F) emitCompareReduced OMITTED, not fabricated false — the predicate never had a chance to apply here", confirm.emitCompareReduced === undefined);
+  }
+
+  // ── (P) card 82662e98 — COMMENT-ONLY packages/daemon/scripts/**/*.mjs edit -> REDUCED gate ────────────
+  {
+    const P = mk("p");
+    makeRepoWithBaseSrcFile(P, BASE_SRC);
+    mkdirp(path.join(P.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(P.repo, "packages", "daemon", "scripts", "example.mjs"), BASE_SCRIPT);
+    commitAll(P.repo, "chore: add example script", GIT_ID);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(P.repo, P.projId, P.taskId);
+    P.worktreePath = worktreePath; P.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "example.mjs"),
+      BASE_SCRIPT.replace("prints a friendly status line", "prints a friendly status line (comment fix)"));
+    commitAll(worktreePath, "docs: fix script comment", GIT_ID);
+    seed(db, P);
+
+    const confirm = await sessions.confirmWorkerMerge(P.mgrId, P.workerId);
+    check("(P) merged:true", confirm.merged === true);
+    check("(P) gateRan:true — a real (smaller) gate still spawns", confirm.gateRan === true);
+    check("(P) captured command is NOT the full gate", capturedGate !== FULL_GATE);
+    check("(P) captured command does NOT run the full test:daemon suite", !capturedGate.includes("test:daemon"));
+    check("(P) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
+    check("(P) a distinguishing warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
+    check("(P) the reduced-gate warning names the file(s) count", typeof confirm.warning === "string" && /1 file\(s\) proven transpile\/parse-identical/.test(confirm.warning));
+  }
+
+  // ── (Q) card 82662e98 — an ADDED packages/daemon/scripts/**/*.mjs file (status A, not M) -> FULL gate ──
+  {
+    const Q = mk("q");
+    makeRepoWithBaseSrcFile(Q, BASE_SRC);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(Q.repo, Q.projId, Q.taskId);
+    Q.worktreePath = worktreePath; Q.branch = branch; worktrees.push(worktreePath);
+    mkdirp(path.join(worktreePath, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "new-helper.mjs"), BASE_SCRIPT);
+    commitAll(worktreePath, "feat: add new-helper.mjs", GIT_ID);
+    seed(db, Q);
+
+    const confirm = await sessions.confirmWorkerMerge(Q.mgrId, Q.workerId);
+    check("(Q) gateRan:true", confirm.gateRan === true);
+    check("(Q) captured command IS the full gate — an ADDED script file fails closed", capturedGate === FULL_GATE);
+  }
+
+  // ── (R) card 82662e98 — a REAL BEHAVIORAL one-token edit to a scripts/**/*.mjs file -> FULL gate
+  //        (the polarity-trap negative control: correctly REFUSES a genuine code change) ─────────────────
+  {
+    const R = mk("r");
+    makeRepoWithBaseSrcFile(R, BASE_SRC);
+    mkdirp(path.join(R.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(R.repo, "packages", "daemon", "scripts", "example.mjs"), BASE_SCRIPT);
+    commitAll(R.repo, "chore: add example script", GIT_ID);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(R.repo, R.projId, R.taskId);
+    R.worktreePath = worktreePath; R.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "scripts", "example.mjs"),
+      BASE_SCRIPT.replace("ready", "steady"));
+    commitAll(worktreePath, "fix: change script status text", GIT_ID);
+    seed(db, R);
+
+    const confirm = await sessions.confirmWorkerMerge(R.mgrId, R.workerId);
+    check("(R) gateRan:true", confirm.gateRan === true);
+    check("(R) captured command IS the full gate — a real behavioral script edit fails closed", capturedGate === FULL_GATE);
+    check("(R) emitCompareReduced:false — a real, decidable not-reduced verdict, not omitted", confirm.emitCompareReduced === false);
   }
 
   // ── (G) SOUNDNESS — Code Review (manager #128): emitDecoratorMetadata:true in the PACKAGE tsconfig
@@ -365,7 +459,7 @@ try {
     // "reduced" warning fired — a warning that fires but omits the path would pass the old, weaker
     // assertion identically, which is exactly the defect this card fixes.
     check("(N) the reduced-gate warning names the transpile-identical count",
-      typeof confirm.warning === "string" && /1 compiled file\(s\) proven transpile-identical/.test(confirm.warning));
+      typeof confirm.warning === "string" && /1 file\(s\) proven transpile\/parse-identical/.test(confirm.warning));
     check("(N) ⭐ THE 8ee4f11e FIX: the skipped inert docs/ path is NAMED in the warning, not silently dropped",
       typeof confirm.warning === "string" && confirm.warning.includes("docs/investigations/findings.md"));
   }
@@ -452,7 +546,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); and the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O). See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
+  ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O); and card 82662e98 — a comment-only packages/daemon/scripts/**/*.mjs edit now reduces too (P), while an added script file (Q) and a real one-token behavioral script edit (R) both still fail closed. See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

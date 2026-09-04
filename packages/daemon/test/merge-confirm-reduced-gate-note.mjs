@@ -174,7 +174,7 @@ try {
     // never ran, so the leading clause must say so honestly rather than rendering that skip as a measured
     // "0 compiled file(s) proven transpile-identical".
     check("(O) card cf4aa7d1: the leading clause honestly reports the compiled-check as not applicable (no compiled file changed), not a measured zero",
-      /no compiled file\(s\) changed in this diff — transpile-identity check not applicable/.test(nudgeText));
+      /no compiled \.ts or scripts\/\*\* file changed in this diff — transpile-identity check not applicable/.test(nudgeText));
     check("(O) card cf4aa7d1: the stale \"0 compiled file(s) proven transpile-identical\" wording is gone",
       !/0 compiled file\(s\) proven transpile-identical/.test(nudgeText));
     // Card cf4aa7d1 DoD-3 (positive control, isolation caveat): the one changed test file WAS run via
