@@ -36,6 +36,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       asymmetry that yielded a silent "agent not found" on a prefix agent_get itself resolved fine):
 //       an unambiguous 8-char prefix resolves, a full id still works, and an ambiguous prefix is REJECTED
 //       naming the candidate ids — never resolved to an arbitrary match.
+//   (g3) card ae1e50a7 (parity with the manager surface's no-retype prompt-edit modes): agent_update's
+//       `appendToStartupPrompt` concatenates; `replaceInStartupPrompt` REJECTS a 0-occurrence / ambiguous
+//       (2+) `old` or one combined with `startupPrompt` in the same call, with NO write in every red case,
+//       and APPLIES byte-exactly on a genuine single-occurrence match — proving resolveStartupPromptEdit
+//       (the pure algorithm shared with the manager surface) fires correctly here too. Also proves the
+//       prompt-edit modes and the (g) least-privilege role gate compose correctly: an append combined with
+//       an elevated-role profileId in the SAME call is still REJECTED, with no prompt write either.
 //   (h) the single-record reads (agent_get/profile_get/project_get) return FULL records (so the operator
 //       stops reading via empty-payload mutators), not-found on an unknown id.
 //   (i) a kanbanColumns config — the board-rename the operator wrongly called "not implemented" — is
@@ -480,6 +487,49 @@ try {
   check("(g2) profile_assign: the ambiguous call assigned NOTHING to either candidate",
     db.getAgent(ID_PFX_DUP_A)?.profileId == null && db.getAgent(ID_PFX_DUP_B)?.profileId == null);
 
+  // ============ (g3) agent_update — appendToStartupPrompt / replaceInStartupPrompt parity (card ae1e50a7) ============
+  // resolveStartupPromptEdit (agents/validate.ts) is now the SAME pure algorithm the manager surface's
+  // agent_update (agent-get-append.mjs) already exercises — this proves it fires correctly on the setup
+  // surface too, INCLUDING composed with this surface's own (g) least-privilege role gate.
+  const ID_G3 = "e3000001-0000-4000-8000-000000000001";
+  const BRIEF_G3 = "ALPHA LINE\nBETA CLAUSE TO EDIT\nGAMMA LINE\nDELTA LINE";
+  db.insertAgent({ id: ID_G3, projectId: created.id, name: "G3Replacer", startupPrompt: BRIEF_G3, position: 13, profileId: null });
+
+  const g3Append = await call("agent_update", { agentId: ID_G3, appendToStartupPrompt: "MORE CONTEXT" });
+  check("(g3) appendToStartupPrompt CONCATENATES onto the existing prompt (blank-line joined)",
+    g3Append.startupPrompt === `${BRIEF_G3}\n\nMORE CONTEXT` && !g3Append.error);
+  check("(g3) append is persisted", db.getAgent(ID_G3)?.startupPrompt === `${BRIEF_G3}\n\nMORE CONTEXT`);
+  db.updateAgent(ID_G3, { startupPrompt: BRIEF_G3 }); // reset for the replaceInStartupPrompt cases below
+
+  const g3Zero = await call("agent_update", { agentId: ID_G3, replaceInStartupPrompt: { old: "NOT PRESENT ANYWHERE", new: "X" } });
+  check("(g3-red) replaceInStartupPrompt: 0 occurrences REJECTED", typeof g3Zero.error === "string" && g3Zero.error.includes("0 occurrences"));
+  check("(g3-red) 0 occurrences: NO write", db.getAgent(ID_G3)?.startupPrompt === BRIEF_G3);
+
+  const g3Ambiguous = await call("agent_update", { agentId: ID_G3, replaceInStartupPrompt: { old: "LINE", new: "X" } });
+  check("(g3-red) replaceInStartupPrompt: ambiguous (3 occurrences of 'LINE') REJECTED",
+    typeof g3Ambiguous.error === "string" && g3Ambiguous.error.includes("not unique"));
+  check("(g3-red) ambiguous: NO write", db.getAgent(ID_G3)?.startupPrompt === BRIEF_G3);
+
+  const g3Combined = await call("agent_update", { agentId: ID_G3, startupPrompt: "X", replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "Y" } });
+  check("(g3-red) replaceInStartupPrompt combined with startupPrompt: REJECTED (mutually exclusive)",
+    typeof g3Combined.error === "string" && g3Combined.error.includes("at most ONE"));
+  check("(g3-red) combined: NO write", db.getAgent(ID_G3)?.startupPrompt === BRIEF_G3);
+
+  const g3Applied = await call("agent_update", { agentId: ID_G3, replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "BETA CLAUSE HAS BEEN EDITED" } });
+  const g3Expected = "ALPHA LINE\nBETA CLAUSE HAS BEEN EDITED\nGAMMA LINE\nDELTA LINE";
+  check("(g3-green) single-occurrence replace: returned startupPrompt is BYTE-IDENTICAL to expected",
+    !g3Applied.error && g3Applied.startupPrompt === g3Expected);
+  check("(g3-green) single-occurrence replace: the STORED value matches too", db.getAgent(ID_G3)?.startupPrompt === g3Expected);
+
+  // Composition check: an append PLUS an elevated-role profileId in the SAME call is STILL rejected by
+  // the (g) least-privilege role gate (which reads v.patch.profileId AFTER the prompt-mode resolution) —
+  // proves the two additions don't silently disable each other — and the rejected call makes NO write.
+  const g3ElevBefore = db.getAgent(ID_G3)?.startupPrompt;
+  const g3Elev = await call("agent_update", { agentId: ID_G3, appendToStartupPrompt: "SHOULD NOT LAND", profileId: "elevatedRig" });
+  check("(g3) an append combined with an elevated profileId is STILL REJECTED (role gate untouched)",
+    typeof g3Elev.error === "string" && /platform|elevat|cannot/i.test(g3Elev.error));
+  check("(g3) the rejected combined call made NO prompt write either", db.getAgent(ID_G3)?.startupPrompt === g3ElevBefore);
+
   // ============ (h) single-record READ tools — stop reading via empty-payload mutators ============
   const gotAgent = await call("agent_get", { agentId: agent.id });
   check("(h) agent_get: returns the FULL agent record incl. startupPrompt",
@@ -622,6 +672,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 22 (project_create (incl. VAULT-ONLY)/project_init (sanctioned-base bootstrap, traversal-rejected)/configure/update + agent_create + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write + template_list/template_apply (onboarding C2, project-scope guarded)), project_init confines to WORKSPACE_ROOT and refuses traversal/escape/clobber, a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, and skill_write is confirm-first + bounded to the USER store (never the bundled/dev set) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the Setup Assistant surface is the curated, fail-closed subset of 22 (project_create (incl. VAULT-ONLY)/project_init (sanctioned-base bootstrap, traversal-rejected)/configure/update + agent_create + agent_update (least-privilege, no elevated-rig assignment) + agent_get/profile_get/project_get reads + project_archive (soft, reserved-guarded) + manager|plain spawn + list_all_* + skill_list/skill_write + template_list/template_apply (onboarding C2, project-scope guarded)), project_init confines to WORKSPACE_ROOT and refuses traversal/escape/clobber, a setup session 404s on /mcp-platform, /mcp-orch AND /mcp-audit, a non-setup session can never reach /mcp-setup, every config path rejects gateCommand/alertWebhook, session_spawn refuses platform/auditor/worker/setup, a kanbanColumns layout is accepted by the AGENT validator, skill_write is confirm-first + bounded to the USER store (never the bundled/dev set), and agent_update's appendToStartupPrompt/replaceInStartupPrompt modes (card ae1e50a7) now work here too — rejecting a 0/2+-occurrence or combined-mode replace with no write while a genuine single-occurrence match applies byte-exactly, composing correctly with the least-privilege role gate (an append plus an elevated-role profileId in one call is still rejected) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

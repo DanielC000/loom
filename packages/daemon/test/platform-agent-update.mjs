@@ -82,12 +82,18 @@ try {
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
   // 0) surface: agent_update is registered; its inputSchema does NOT expose endpoint/ioSchema (human-only).
+  // Card ae1e50a7 added appendToStartupPrompt/replaceInStartupPrompt (the manager surface's no-retype
+  // prompt-edit modes, now at parity here) — the exhaustive-count assertion below tracks that legitimate
+  // growth explicitly (6 named keys, not a bare length check) so it stays scoped to its real intent: NO
+  // endpoint/ioSchema, ever, on this MCP surface — not "exactly the four keys this test happened to know
+  // about when it was written."
   const tools = (await client.listTools()).tools;
   const au = tools.find((t) => t.name === "agent_update");
   check("agent_update is registered on loom-platform", !!au);
   const auProps = Object.keys(au?.inputSchema?.properties ?? {});
-  check("agent_update inputSchema exposes ONLY agentId/name/startupPrompt/profileId (no endpoint/ioSchema)",
-    auProps.length === 4 && ["agentId", "name", "startupPrompt", "profileId"].every((k) => auProps.includes(k)) &&
+  const AU_EXPECTED_PROPS = ["agentId", "name", "startupPrompt", "appendToStartupPrompt", "replaceInStartupPrompt", "profileId"];
+  check(`agent_update inputSchema exposes ONLY ${AU_EXPECTED_PROPS.join("/")} (no endpoint/ioSchema)`,
+    auProps.length === AU_EXPECTED_PROPS.length && AU_EXPECTED_PROPS.every((k) => auProps.includes(k)) &&
     !auProps.includes("endpoint") && !auProps.includes("ioSchema"));
 
   // ===================== (1) PATCH semantics — present keys applied, omitted left as-is =====================

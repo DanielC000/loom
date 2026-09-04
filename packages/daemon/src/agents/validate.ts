@@ -27,6 +27,51 @@ export type AgentPatch = {
   ioSchema?: unknown | null;
 };
 
+/**
+ * PURE resolver for the three mutually-exclusive ways an `agent_update`-shaped call can touch
+ * `startupPrompt` — `startupPrompt` (full replace), `appendToStartupPrompt` (concatenate onto the
+ * existing prompt, blank-line joined), `replaceInStartupPrompt` (edit ONE clause mid-document; `old`
+ * must occur EXACTLY ONCE in `current` — 0 or 2+ occurrences is REJECTED with no result). Deliberately
+ * has NO db access, NO session/auth lookup, and NO projectId: it is shared across three MCP surfaces
+ * (`orchestration.ts`'s manager-scoped `agent_update`, `platform.ts`'s LOOM_DEV-gated cross-project
+ * `agent_update`, `setup.ts`'s least-privilege cross-project `agent_update`) with THREE DIFFERENT
+ * privilege models — each caller keeps its OWN auth/scoping checks around this call. Passing a session
+ * or projectId in here would leak a trust boundary into shared code; if a caller ever needs one, that's
+ * a sign this function has grown beyond pure text resolution and should be reconsidered, not extended.
+ * Returns the resolved `startupPrompt` (or `undefined` if none of the three modes were given — PATCH
+ * semantics: caller leaves the field untouched). Throws (never resolves) on: more than one mode given,
+ * `replaceInStartupPrompt.old === ""`, `old` not found in `current` (0 occurrences), or `old` ambiguous
+ * (2+ occurrences) — every thrown message names the exact reason, no write should ever follow a throw.
+ */
+export function resolveStartupPromptEdit(
+  current: string | null | undefined,
+  patch: { startupPrompt?: string; appendToStartupPrompt?: string; replaceInStartupPrompt?: { old: string; new: string } },
+): string | undefined {
+  const modesGiven = [patch.startupPrompt !== undefined, patch.appendToStartupPrompt !== undefined, patch.replaceInStartupPrompt !== undefined]
+    .filter(Boolean).length;
+  if (modesGiven > 1) {
+    throw new Error("agent_update: pass at most ONE of startupPrompt (full replace), appendToStartupPrompt (append), or replaceInStartupPrompt (mid-document edit)");
+  }
+  if (patch.appendToStartupPrompt !== undefined) {
+    return current ? `${current}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt;
+  }
+  if (patch.replaceInStartupPrompt !== undefined) {
+    const { old: oldStr, new: newStr } = patch.replaceInStartupPrompt;
+    if (oldStr === "") throw new Error("agent_update: replaceInStartupPrompt.old must not be empty");
+    const cur = current ?? "";
+    const firstIdx = cur.indexOf(oldStr);
+    if (firstIdx === -1) {
+      throw new Error("agent_update: replaceInStartupPrompt.old was not found in the agent's current startupPrompt (0 occurrences) — no write made");
+    }
+    const secondIdx = cur.indexOf(oldStr, firstIdx + oldStr.length);
+    if (secondIdx !== -1) {
+      throw new Error("agent_update: replaceInStartupPrompt.old is not unique — it occurs more than once in the current startupPrompt; supply more surrounding context so it matches exactly once — no write made");
+    }
+    return cur.slice(0, firstIdx) + newStr + cur.slice(firstIdx + oldStr.length);
+  }
+  return patch.startupPrompt;
+}
+
 export function validateAgentPatch(
   raw: unknown,
   hasProfile: (id: string) => boolean,

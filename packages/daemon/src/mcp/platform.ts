@@ -26,7 +26,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { recordBoardReadForProjects } from "../orchestration/board-read.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
-import { validateAgentPatch } from "../agents/validate.js";
+import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
@@ -1082,11 +1082,13 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
           startupPrompt: z.string().optional(),
+          appendToStartupPrompt: z.string().optional(),
+          replaceInStartupPrompt: z.object({ old: z.string(), new: z.string() }).optional(),
           profileId: z.string().nullable().optional(),
         }),
       },
@@ -1101,7 +1103,22 @@ export class PlatformMcpRouter {
         // PRESENT (clears) while an omitted key stays absent (left as-is) — the same presence semantics
         // the REST path relies on. allowEndpointFlags:false: endpoint/ioSchema aren't in the inputSchema,
         // so they can't arrive — the flag is belt-and-suspenders against the human-only Agent Runs surface.
-        const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
+        const { agentId: _aid, appendToStartupPrompt, replaceInStartupPrompt, ...rawPatch } = rawArgs as Record<string, unknown>;
+        // resolveStartupPromptEdit (agents/validate.ts) is the SAME pure algorithm the manager-surface
+        // agent_update (orchestration.ts → sessions.updateAgentPreset) uses for mode resolution — shared
+        // because it's pure text transformation with no auth/scoping baked in. This surface's OWN
+        // cross-project resolution (getByIdPrefix above) stays entirely outside the shared helper.
+        let resolvedStartupPrompt: string | undefined;
+        try {
+          resolvedStartupPrompt = resolveStartupPromptEdit(resolved.startupPrompt, {
+            startupPrompt: rawPatch.startupPrompt as string | undefined,
+            appendToStartupPrompt: appendToStartupPrompt as string | undefined,
+            replaceInStartupPrompt: replaceInStartupPrompt as { old: string; new: string } | undefined,
+          });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+        if (resolvedStartupPrompt !== undefined) rawPatch.startupPrompt = resolvedStartupPrompt;
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.

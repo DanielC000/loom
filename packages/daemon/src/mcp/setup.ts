@@ -10,7 +10,7 @@ import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
-import { validateAgentPatch } from "../agents/validate.js";
+import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
@@ -396,11 +396,13 @@ export class SetupMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
           startupPrompt: z.string().optional(),
+          appendToStartupPrompt: z.string().optional(),
+          replaceInStartupPrompt: z.object({ old: z.string(), new: z.string() }).optional(),
           profileId: z.string().nullable().optional(),
         }),
       },
@@ -414,7 +416,23 @@ export class SetupMcpRouter {
         // Drop agentId; the rest IS the PATCH. Raw args so an explicit profileId:null is PRESENT (clears)
         // while an omitted key stays absent (left as-is) — the same presence semantics the REST path relies
         // on. allowEndpointFlags:false (also absent from inputSchema) keeps the Agent Runs surface human-only.
-        const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
+        const { agentId: _aid, appendToStartupPrompt, replaceInStartupPrompt, ...rawPatch } = rawArgs as Record<string, unknown>;
+        // resolveStartupPromptEdit (agents/validate.ts) is the SAME pure algorithm the manager-surface
+        // agent_update (orchestration.ts → sessions.updateAgentPreset) uses for mode resolution — shared
+        // because it's pure text transformation with no auth/scoping baked in. This surface's OWN
+        // least-privilege role check (below) and cross-project resolution (getByIdPrefix above) stay
+        // entirely outside the shared helper.
+        let resolvedStartupPrompt: string | undefined;
+        try {
+          resolvedStartupPrompt = resolveStartupPromptEdit(resolved.startupPrompt, {
+            startupPrompt: rawPatch.startupPrompt as string | undefined,
+            appendToStartupPrompt: appendToStartupPrompt as string | undefined,
+            replaceInStartupPrompt: replaceInStartupPrompt as { old: string; new: string } | undefined,
+          });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+        if (resolvedStartupPrompt !== undefined) rawPatch.startupPrompt = resolvedStartupPrompt;
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
         // LEAST-PRIVILEGE (setup-only, ON TOP of the shared validator): a non-null profileId is validated to

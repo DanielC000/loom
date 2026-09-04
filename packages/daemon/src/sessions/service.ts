@@ -16,6 +16,7 @@ import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.j
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
+import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
@@ -12868,28 +12869,11 @@ export class SessionService {
     this.requireManager(managerSessionId, "agent_update");
     const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
-    const modesGiven = [patch.startupPrompt !== undefined, patch.appendToStartupPrompt !== undefined, patch.replaceInStartupPrompt !== undefined]
-      .filter(Boolean).length;
-    if (modesGiven > 1) {
-      throw new Error("agent_update: pass at most ONE of startupPrompt (full replace), appendToStartupPrompt (append), or replaceInStartupPrompt (mid-document edit)");
-    }
-    let startupPrompt = patch.startupPrompt;
-    if (patch.appendToStartupPrompt !== undefined) {
-      startupPrompt = agent.startupPrompt ? `${agent.startupPrompt}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt;
-    } else if (patch.replaceInStartupPrompt !== undefined) {
-      const { old: oldStr, new: newStr } = patch.replaceInStartupPrompt;
-      if (oldStr === "") throw new Error("agent_update: replaceInStartupPrompt.old must not be empty");
-      const current = agent.startupPrompt ?? "";
-      const firstIdx = current.indexOf(oldStr);
-      if (firstIdx === -1) {
-        throw new Error("agent_update: replaceInStartupPrompt.old was not found in the agent's current startupPrompt (0 occurrences) — no write made");
-      }
-      const secondIdx = current.indexOf(oldStr, firstIdx + oldStr.length);
-      if (secondIdx !== -1) {
-        throw new Error("agent_update: replaceInStartupPrompt.old is not unique — it occurs more than once in the current startupPrompt; supply more surrounding context so it matches exactly once — no write made");
-      }
-      startupPrompt = current.slice(0, firstIdx) + newStr + current.slice(firstIdx + oldStr.length);
-    }
+    // Mode resolution (mutual exclusion + append/occurs-exactly-once-replace) is the SHARED pure
+    // algorithm — see resolveStartupPromptEdit's own doc comment for why it's pure and shared across
+    // three differently-privileged surfaces. This call site's own requireManager/requireOwnProject
+    // above are this surface's OWN privilege checks; they stay here, not inside the shared helper.
+    const startupPrompt = resolveStartupPromptEdit(agent.startupPrompt, patch);
     this.db.updateAgent(agent.id, { name: patch.name, startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId: agent.id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
     const updated = this.db.getAgent(agent.id)!;

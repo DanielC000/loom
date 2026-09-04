@@ -20,6 +20,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       invariant, surface-subset.mjs) with the SAME implementation: template_list reads the canonical
 //       catalog; template_apply stands up a named template's agents + starter card on an EXISTING
 //       project, rejecting an unknown templateName/projectId/profileName with nothing written.
+//   (h) card ae1e50a7 (parity with the manager surface's no-retype prompt-edit modes): agent_update's
+//       `appendToStartupPrompt` concatenates; `replaceInStartupPrompt` REJECTS a 0-occurrence / ambiguous
+//       (2+) `old` or one combined with `startupPrompt` in the same call, with NO write in every red case,
+//       and APPLIES byte-exactly on a genuine single-occurrence match — proving resolveStartupPromptEdit
+//       (the pure algorithm shared with the manager surface, agent-get-append.mjs) fires correctly here too.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-mgmt-surface.mjs
 import fs from "node:fs";
@@ -419,6 +424,41 @@ try {
   check("(g) project_get on an unknown id is still a plain not-found error (columns fold-in doesn't disturb the error path)",
     unknownProjectGet.error === "project not found" && unknownProjectGet.columns === undefined);
 
+  // ===================== (h) agent_update — appendToStartupPrompt / replaceInStartupPrompt parity (card ae1e50a7) =====================
+  // resolveStartupPromptEdit (agents/validate.ts) is now the SAME pure algorithm the manager surface's
+  // agent_update (agent-get-append.mjs) already exercises — this proves it fires correctly on the
+  // platform Lead surface too. This surface has no least-privilege role gate (it's the fully-elevated
+  // Lead), so there's no composition case to prove here, unlike the setup surface's (g3).
+  const ID_H = "f4000001-0000-4000-8000-000000000001";
+  const BRIEF_H = "ALPHA LINE\nBETA CLAUSE TO EDIT\nGAMMA LINE\nDELTA LINE";
+  db.insertAgent({ id: ID_H, projectId: "pOrd", name: "HReplacer", startupPrompt: BRIEF_H, position: 20, profileId: null });
+
+  const hAppend = await call("agent_update", { agentId: ID_H, appendToStartupPrompt: "MORE CONTEXT" });
+  check("(h) appendToStartupPrompt CONCATENATES onto the existing prompt (blank-line joined)",
+    hAppend.startupPrompt === `${BRIEF_H}\n\nMORE CONTEXT` && !hAppend.error);
+  check("(h) append is persisted", db.getAgent(ID_H)?.startupPrompt === `${BRIEF_H}\n\nMORE CONTEXT`);
+  db.updateAgent(ID_H, { startupPrompt: BRIEF_H }); // reset for the replaceInStartupPrompt cases below
+
+  const hZero = await call("agent_update", { agentId: ID_H, replaceInStartupPrompt: { old: "NOT PRESENT ANYWHERE", new: "X" } });
+  check("(h-red) replaceInStartupPrompt: 0 occurrences REJECTED", typeof hZero.error === "string" && hZero.error.includes("0 occurrences"));
+  check("(h-red) 0 occurrences: NO write", db.getAgent(ID_H)?.startupPrompt === BRIEF_H);
+
+  const hAmbiguous = await call("agent_update", { agentId: ID_H, replaceInStartupPrompt: { old: "LINE", new: "X" } });
+  check("(h-red) replaceInStartupPrompt: ambiguous (3 occurrences of 'LINE') REJECTED",
+    typeof hAmbiguous.error === "string" && hAmbiguous.error.includes("not unique"));
+  check("(h-red) ambiguous: NO write", db.getAgent(ID_H)?.startupPrompt === BRIEF_H);
+
+  const hCombined = await call("agent_update", { agentId: ID_H, startupPrompt: "X", replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "Y" } });
+  check("(h-red) replaceInStartupPrompt combined with startupPrompt: REJECTED (mutually exclusive)",
+    typeof hCombined.error === "string" && hCombined.error.includes("at most ONE"));
+  check("(h-red) combined: NO write", db.getAgent(ID_H)?.startupPrompt === BRIEF_H);
+
+  const hApplied = await call("agent_update", { agentId: ID_H, replaceInStartupPrompt: { old: "BETA CLAUSE TO EDIT", new: "BETA CLAUSE HAS BEEN EDITED" } });
+  const hExpected = "ALPHA LINE\nBETA CLAUSE HAS BEEN EDITED\nGAMMA LINE\nDELTA LINE";
+  check("(h-green) single-occurrence replace: returned startupPrompt is BYTE-IDENTICAL to expected",
+    !hApplied.error && hApplied.startupPrompt === hExpected);
+  check("(h-green) single-occurrence replace: the STORED value matches too", db.getAgent(ID_H)?.startupPrompt === hExpected);
+
   await client.close();
 } finally {
   db.close();
@@ -427,6 +467,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, template_apply rejects an unknown templateName/projectId with nothing written, and list_all_sessions' scope axis (card 2fb68e76) defaults to archived-excluded (byte-identical to its pre-scope behavior) while scope:\"archived\"/\"all\" opt archived rows in and exempt them from the state filter — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P2 management surface works for a platform session (reads / profiles / session_spawn|stop / project update+archive / schedules / template_list+template_apply mirrored from loom-setup), the role gate holds (manager/worker/plain → no surface), session_spawn NEVER mints a platform or worker session (only manager|plain) and creates nothing on rejection, project_archive refuses the reserved home, template_apply rejects an unknown templateName/projectId with nothing written, list_all_sessions' scope axis (card 2fb68e76) defaults to archived-excluded (byte-identical to its pre-scope behavior) while scope:\"archived\"/\"all\" opt archived rows in and exempt them from the state filter, and agent_update's appendToStartupPrompt/replaceInStartupPrompt modes (card ae1e50a7) now work here too, rejecting a 0/2+-occurrence or combined-mode replace with no write while a genuine single-occurrence match applies byte-exactly — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
