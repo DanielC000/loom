@@ -1366,7 +1366,7 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
  */
 export function formatWeakerPassWarning(retriedFile: string, outputTail?: string): string {
   if (isTimeoutKillEntry(retriedFile, outputTail)) {
-    return `⚠ WEAKER PASS: the first gate attempt killed '${retriedFile}' on a timeout, not an assertion failure — passed only after retrying it in isolation once. This is NOT evidence of an order-dependent/cross-test-pollution bug; treat it as a timeout (possibly host-load-related), not a correctness signal.`;
+    return `⚠ WEAKER PASS: the first gate attempt killed '${retriedFile}' on a timeout, not an assertion failure — passed only after retrying it in isolation once. This is NOT evidence of an order-dependent/cross-test-pollution bug. The cause of the timeout is not established by this signal alone — read the retained gate output before attributing it.`;
   }
   return `⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`;
 }

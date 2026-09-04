@@ -159,6 +159,11 @@ const now = new Date().toISOString();
   check("(unit weaker-pass — POSITIVE CONTROL) ...and differs from the plain generic wording for the same file", timeoutWarning !== formatWeakerPassWarning("kickoff-real-spawn"));
   check("(unit weaker-pass — POSITIVE CONTROL) ...and names the timeout + file explicitly instead", timeoutWarning.includes("timeout") && timeoutWarning.includes("kickoff-real-spawn"));
   check("(unit weaker-pass — POSITIVE CONTROL) still opens with the same '⚠ WEAKER PASS' marker every reader already greps for", timeoutWarning.startsWith("⚠ WEAKER PASS:"));
+  // Manager review: names NO cause (the card's own §NON-NEGOTIABLE — a contrast case already killed "host
+  // load" as an attribution) and points the reader at the retained output instead of asserting anything
+  // beyond what the signature itself proves.
+  check("(unit weaker-pass — POSITIVE CONTROL) asserts NO cause for the timeout — no 'host-load'/'contention' guess, retracted by manager review", !/host.load|contention/i.test(timeoutWarning));
+  check("(unit weaker-pass — POSITIVE CONTROL) points the reader at the retained gate output rather than a guessed cause", timeoutWarning.includes("not established") && timeoutWarning.includes("retained gate output"));
 
   // FAIL-SAFE, this card's own §NON-NEGOTIABLE — an UNRECOGNISED signature (a genuine assertion failure,
   // no "exit timeout" anywhere) must keep TODAY'S generic wording unchanged. Never assert "timeout" from
