@@ -286,6 +286,54 @@ function tmpFile(name, content) {
   fs.rmSync(vaultRoot, { recursive: true, force: true });
 }
 
+// ── rulesCheck — a SUPPLIED-but-unreadable rulesPath is reported, not silently swallowed (card 870edbcf)
+// The observed defect: `rulesPath` is a UNION input, so a rules file that cannot be read just degrades
+// the union to active-only with NO trace — `ok:true`, `missingMarkers:[]`, every `markerSources`
+// `"active"`, byte-identical to a correctly-read rules file. THE DANGEROUS CELL below is exactly that
+// shape: a marker the active doc satisfies on its own, PLUS a rulesPath that cannot be read — a test
+// that lets the rules file itself supply a marker would never exercise this cell at all.
+{
+  const dangerDoc = tmpFile("danger.md", "prose containing DANGER_MARKER right here, nothing else\n");
+  const bogusRulesPath = path.join(os.tmpdir(), `loom-rot-bogus-rules-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
+  // never written — proves the "supplied but unreadable" branch, mirrors missingDocPath's own pattern above
+
+  // ── THE DANGEROUS CELL: rulesPath supplied + unreadable + active doc satisfies every marker alone ──
+  const dangerResult = runResumeDocCheck({
+    resumeDocPath: dangerDoc,
+    markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPath: bogusRulesPath,
+  });
+  check("rulesCheck DANGEROUS CELL: overall ok is unaffected (DoD-2 decision — markers genuinely satisfied via active)", dangerResult.ok === true && dangerResult.missingMarkers.length === 0);
+  check("rulesCheck DANGEROUS CELL: marker source correctly attributed to 'active', never falsely to a rules file never read", dangerResult.markerSources.DANGER_MARKER === "active");
+  check("rulesCheck DANGEROUS CELL: rulesCheck.checked is true (a rulesPath WAS supplied)", dangerResult.rulesCheck?.checked === true);
+  check("rulesCheck DANGEROUS CELL: rulesCheck.ok is false — this is the loud signal the old code never produced", dangerResult.rulesCheck?.ok === false);
+  check("rulesCheck DANGEROUS CELL: resolvedPath names exactly the path that was tried", dangerResult.rulesCheck?.resolvedPath === bogusRulesPath);
+  check("rulesCheck DANGEROUS CELL: reason names the resolved path too (self-diagnosing, mirrors archiveCheck)", (dangerResult.rulesCheck?.reason ?? "").includes(bogusRulesPath));
+
+  // ── supplied-and-readable: unchanged, now also reports ok:true with the resolved path ──
+  const rulesFilePath = tmpFile("rules-ok.md", "some rules content, irrelevant to the marker\n");
+  const readableResult = runResumeDocCheck({
+    resumeDocPath: dangerDoc,
+    markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPath: rulesFilePath,
+  });
+  check("rulesCheck supplied+readable: checked:true, ok:true, resolvedPath set", readableResult.rulesCheck?.checked === true && readableResult.rulesCheck?.ok === true && readableResult.rulesCheck?.resolvedPath === rulesFilePath);
+  check("rulesCheck supplied+readable: no reason on a successful read", readableResult.rulesCheck?.reason === undefined);
+  fs.rmSync(rulesFilePath, { force: true });
+
+  // ── not supplied at all: must stay silent — absence of rulesPath is not a failure ──
+  const noRulesResult = runResumeDocCheck({
+    resumeDocPath: dangerDoc,
+    markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("rulesCheck not supplied: checked:false, ok:true, no resolvedPath/reason (silent, as before this card)", noRulesResult.rulesCheck?.checked === false && noRulesResult.rulesCheck?.ok === true && noRulesResult.rulesCheck?.resolvedPath === undefined);
+
+  fs.rmSync(dangerDoc, { force: true });
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, and the impure fs wrapper never throws on a missing doc — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);

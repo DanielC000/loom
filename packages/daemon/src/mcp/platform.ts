@@ -1952,7 +1952,11 @@ export class PlatformMcpRouter {
           "the rules file, mirroring the frozen rotation-gate.mjs script's own --rules semantics; this " +
           "is a union, NEVER a replacement — a marker present in NEITHER still fails. Like `archivePath`, " +
           "`rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise) — omit it and " +
-          "behavior is byte-identical to a call with no rules file at all.",
+          "behavior is byte-identical to a call with no rules file at all. ⚠️ If `rulesPath` IS supplied " +
+          "but cannot be read (e.g. a wrong base — vault-ROOT-relative instead of this project's own " +
+          "vaultPath), the union silently degrades to active-only and the overall `ok`/markers are " +
+          "UNAFFECTED — always check the returned `rulesCheck` field (card 870edbcf) when you pass this " +
+          "argument: `rulesCheck.ok:false` names the exact resolved path that could not be read.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),

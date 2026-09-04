@@ -169,8 +169,19 @@ export interface ByteCheckInput {
 export interface RotationCheckInput {
   activeText: string;
   /** Union source for markers (present in activeText OR rulesText) — null (the common case) means no
-   *  union, every marker must be found in activeText alone. */
+   *  union, every marker must be found in activeText alone. This is ALSO what a failed rules-file read
+   *  degrades to (see `rulesInfo` below) — `checkMarkers` itself can't tell "no rulesPath supplied" from
+   *  "rulesPath supplied but unreadable," which is exactly the reporting gap card 870edbcf closes. */
   rulesText?: string | null;
+  /** Present (non-null) whenever a caller supplied a `rulesPath` at all, regardless of whether the read
+   *  succeeded — mirrors `archive`'s optional-input shape so an unreadable rulesPath gets the SAME kind
+   *  of symmetric reporting as an unreadable archivePath (card 870edbcf), instead of the union silently
+   *  degrading to active-only with no trace. `readable:false` means `rulesText` above is null NOT because
+   *  no rulesPath was given, but because reading it failed — `resolvedPath` names exactly what was tried,
+   *  so a wrong-based path is self-diagnosing (mirrors `ArchiveInfo.path`, card f596215c). Omit/null
+   *  entirely when no rulesPath was supplied at all — the check then stays silent, exactly as before this
+   *  card. */
+  rulesInfo?: { resolvedPath: string; readable: boolean } | null;
   markers: readonly RotationMarker[];
   /** "" disables the LIVE-COMMITMENTS-style floor check entirely for this seat. */
   commitmentsHeading: string;
@@ -189,6 +200,15 @@ export interface RotationCheckResult {
   ok: boolean;
   missingMarkers: string[];
   markerSources: Record<string, "active" | "rules">;
+  /** Symmetric twin of `archiveCheck` for the `rulesPath` union input (card 870edbcf). `checked:false`
+   *  means no rulesPath was supplied at all (silent, as before this card). `checked:true, ok:false` means
+   *  one WAS supplied but could not be read — `resolvedPath` names exactly what was tried and `reason`
+   *  explains it, so a wrong-based path (e.g. vault-root-relative instead of project-vault-relative) is
+   *  self-diagnosing instead of a mystery. Deliberately NOT folded into the overall `ok` below (see the
+   *  comment at that computation) — a failed rulesPath read only means the union's extra source was
+   *  unavailable, not that any marker actually went missing from the doc; always read this field
+   *  alongside `ok`, the same way `unconfiguredWarning` must be read alongside a vacuous `ok:true`. */
+  rulesCheck: { checked: boolean; ok: boolean; resolvedPath?: string; reason?: string };
   liveCommitments: {
     enabled: boolean;
     count: number | null;
@@ -211,6 +231,20 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   const { missing, satisfiedBy } = checkMarkers(input.activeText, input.markers, rulesText);
   const markerSources: Record<string, "active" | "rules"> = {};
   for (const [token, src] of satisfiedBy) markerSources[token] = src;
+
+  let rulesCheck: RotationCheckResult["rulesCheck"];
+  if (!input.rulesInfo) {
+    rulesCheck = { checked: false, ok: true };
+  } else if (input.rulesInfo.readable) {
+    rulesCheck = { checked: true, ok: true, resolvedPath: input.rulesInfo.resolvedPath };
+  } else {
+    rulesCheck = {
+      checked: true,
+      ok: false,
+      resolvedPath: input.rulesInfo.resolvedPath,
+      reason: `rules path does not exist or is unreadable: ${input.rulesInfo.resolvedPath}`,
+    };
+  }
 
   const commitmentsEnabled = input.commitmentsHeading !== "";
   const liveCommitments = commitmentsEnabled
@@ -249,6 +283,15 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   }
 
   const configured = input.markers.length > 0 || commitmentsEnabled;
+  // DoD-2 decision (card 870edbcf): rulesCheck deliberately does NOT drive `ok` here, unlike archiveCheck.
+  // Rejected: folding it in like archiveCheck — that would flip a green result to false purely because an
+  // OPTIONAL supplementary verification source was unavailable, even when every marker is still genuinely
+  // present in the active doc itself (the union's whole point is that this is a legitimate pass). That
+  // would also be a behavior change for any existing caller that passes rulesPath speculatively. Chosen
+  // instead: report-only, with `rulesCheck` always present and loud whenever a rulesPath was supplied and
+  // failed — the same "loud field, ok unaffected" shape this module already uses for `unconfiguredWarning`
+  // on a vacuous `ok:true`. archiveCheck stays different on purpose: it validates a required rotation
+  // ARTIFACT (the archive this rotation is producing), not an optional verification aid.
   const ok = missing.length === 0 && liveCommitments.ok && archiveCheck.ok && byteCheck.ok;
 
   const result: RotationCheckResult = {
@@ -256,6 +299,7 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     ok,
     missingMarkers: missing.map((m) => m.token),
     markerSources,
+    rulesCheck,
     liveCommitments,
     archiveCheck,
     byteCheck,
@@ -302,8 +346,11 @@ export interface RunResumeDocCheckOptions {
   markers: readonly RotationMarker[];
   commitmentsHeading: string;
   commitmentsFloor: number;
-  /** Optional union source for markers — an internal seam (a real path a caller resolves), not currently
-   *  exposed as MCP-tool input (kept minimal for this card; see rotation-check.ts's own module doc). */
+  /** Optional union source for markers — a real path a caller resolves and vault-contains before calling
+   *  in (card 3c30258f exposed this as MCP-tool input on both `resume_doc_check` surfaces; see
+   *  rotation-check.ts's own module doc). A supplied-but-unreadable path degrades the union to
+   *  active-only, same as before, but is now reported via the result's `rulesCheck` (card 870edbcf) —
+   *  see this file's module doc. */
   rulesPath?: string | null;
   archivePath?: string | null;
   preEditBytes?: number | null;
@@ -339,6 +386,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       ok: false,
       missingMarkers: opts.markers.map((m) => m.token),
       markerSources: {},
+      rulesCheck: { checked: false, ok: true },
       liveCommitments: {
         enabled: opts.commitmentsHeading !== "",
         count: null,
@@ -355,8 +403,15 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   }
 
   let rulesText: string | null = null;
+  let rulesInfo: { resolvedPath: string; readable: boolean } | null = null;
   if (opts.rulesPath) {
-    try { rulesText = fs.readFileSync(opts.rulesPath, "utf8"); } catch { rulesText = null; }
+    try {
+      rulesText = fs.readFileSync(opts.rulesPath, "utf8");
+      rulesInfo = { resolvedPath: opts.rulesPath, readable: true };
+    } catch {
+      rulesText = null;
+      rulesInfo = { resolvedPath: opts.rulesPath, readable: false };
+    }
   }
 
   let archive: ArchiveInfo | null = null;
@@ -383,7 +438,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   }
 
   const result = checkRotation({
-    activeText, rulesText, markers: opts.markers,
+    activeText, rulesText, rulesInfo, markers: opts.markers,
     commitmentsHeading: opts.commitmentsHeading, commitmentsFloor: opts.commitmentsFloor,
     archive, byteCheck,
   });
