@@ -495,7 +495,11 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     versionProbeTimeoutMs: 2000,
   });
   await sup.start(["/fake/repo/drift-absent"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   await sleep(500); // several probe intervals — an absent `build` field must never be treated as a mismatch
@@ -532,7 +536,11 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     versionProbeTimeoutMs: 2000,
   });
   await sup.start(["/fake/repo/drift-null"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   await sleep(500);
@@ -571,7 +579,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   });
   const warnings = captureWarnings();
   await sup.start([`/fake/repo/drift-installed-unresolved-${installedFailureMode}`]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   // Drive a deterministic number of COMPLETED probe ticks instead of sleeping through a wall-clock window
@@ -644,7 +656,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   };
 
   await sup.start(["/fake/repo/drift-installed-unresolved-reason-change"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
 
   await waitForDiagCount(1);
   check("(8b) exactly one diagnostic for the FIRST failure reason", diagCount() === 1);
@@ -697,7 +713,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/drift-installed-honest-null"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   // Card 1aabf969: was a fixed `sleep(500)` — same real subprocess round trip as scenario (9) below (the
@@ -744,7 +764,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     versionProbeTimeoutMs: 2000,
   });
   await sup.start(["/fake/repo/drift-version-unused"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   // Card 1aabf969: was a fixed `sleep(500)` — a single probe tick here is a REAL round trip (health fetch
@@ -854,7 +878,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/drift-burst"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
 
   // Drive THREE distinct installed builds, one per COMPLETED probe tick (never a blind sleep — see this
   // file's own header on why margin and counting are separate axes) — each new distinct build seen
@@ -1004,7 +1032,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/version-retry-success"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
 
   // Card 3ce4e749: was `waitForCompletedCondition(() => getCompletedProbeTickCount() >= 1, ...)` — "ANY
   // completed tick", never necessarily the tick whose OWN loop ran the version probe. Under load the FIRST
@@ -1068,7 +1100,6 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 // finishes (attempt 1 hangs out, attempt 2 succeeds).
 {
   const homeDir = path.join(tmpHome, "any-tick-vs-reaching-attempts-control-home");
-  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
   fs.mkdirSync(homeDir, { recursive: true }); // needed up front — the wedge file below must exist before start()
   const wedgeFile = path.join(homeDir, "control-health-wedge");
   fs.writeFileSync(wedgeFile, "1"); // tick 1's /graph/health never answers — bails BEFORE reaching checkBuildDrift
@@ -1088,15 +1119,19 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     versionProbeRetryDelayMs: 50,
   });
   await sup.start(["/fake/repo/control"]);
-  // TIMING-GUARD-SAFE: fully-awaited-completion — this bounded startup poll only waits for the spawn to be
-  // recorded; it does NOT guard the negative check 4 lines below. That check is guarded by the condition-
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  //
+  // This wait does NOT guard the negative check 4 lines below. That check is guarded by the condition-
   // driven `waitForCompletedCondition` call immediately after this line (not a fixed duration — it only
   // resolves once tick 1 has genuinely completed), with zero fixed wait between that await and the check.
   // The zero-attempts read is also structurally guaranteed, not merely timed to be likely: tick 2's version
   // probe is fixture-forced to hang for its full versionProbeTimeoutMs(2000ms) budget before it could ever
-  // complete, while this poll observes tick 1's completion within one pollMs(25ms) tick — nowhere near
+  // complete, while that next poll observes tick 1's completion within one pollMs(25ms) tick — nowhere near
   // enough time for a second tick to exist, let alone touch versionProbeAttempts.
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
 
   const tick1Ok = await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
   check("(control) tick 1 (wedged health) completed", tick1Ok);
@@ -1186,7 +1221,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/version-retry-exhausted"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card 998cb0d3: progress-keyed off the supervisor's own parent-side spawn counter (never the child's
+  // self-report file — see scenario (1)'s identical comment for why), same shape as every other setup
+  // wait in this file that only needs "has the initial serve spawned" rather than a specific calls-file
+  // count.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
 
   const firstTickReached = await waitForTickReachingAttempts(sup, 3);
