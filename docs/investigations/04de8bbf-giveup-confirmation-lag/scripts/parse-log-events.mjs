@@ -45,6 +45,15 @@ function positiveControl() {
 // The ACTUAL classification line (not the budget-drop / requeue-success / suppressed / false-negative
 // variants that also contain the substring "GIVE-UP RECOVERY" -- disambiguate by anchoring the full
 // phrase, per the card's measurement-trap #4).
+//
+// ⚠️ STALE AGAINST ANY CORPUS CAPTURED AFTER `71f20fa9` (2026-08-29): that commit changed the log
+// wording from "no engine output observed" (matched below) to "no confirming hook observed"
+// (`awaitGiveUpConfirmSettle` hardening). This investigation's own corpus (2026-07-30) predates the
+// change, so ITS PUBLISHED FINDING IS NOT WRONG -- but reusing this regex UNMODIFIED against a
+// post-2026-08-29 log silently undercounts true give-ups (measured on card `6ecba03b`'s corpus: 233/302,
+// 77%, went uncounted). Before reusing this parser against a newer snapshot, widen the pattern to match
+// BOTH wordings -- see `docs/investigations/6ecba03b-payload-confirm-rate/scripts/payload-confirm.mjs`'s
+// own `GIVEUP_TRUE_RE` for the corrected, both-wordings, positive/negative-controlled version.
 const GIVEUP_RE = /^\[submit\] (\S+) GIVE-UP RECOVERY after (\d+) Enter attempts — no engine output observed/;
 // Post this investigation's observability fix, this line carries " gen=<N>" before the trailing
 // " — awaiting confirmation" (log-only addition to pty/host.ts's fireEnterAndVerify, see findings.md).

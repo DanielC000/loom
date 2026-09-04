@@ -290,3 +290,13 @@ generation" by joining a submit to its confirming hook. See the commit for the e
 
 `SUBMIT_VERIFY_TIMEOUT_MS`, the `>`/`>=` comparison, `c933238`, message-size, and the paste-reassert echo
 were not touched, per the card's standing constraints.
+
+## ⚠️ Reuse warning (added 2026-09-04, card `6ecba03b`) — scripts are stale for a post-`71f20fa9` corpus
+
+This investigation's published findings above **stand** — this corpus (2026-07-30) predates the give-up
+log-wording change in `71f20fa9` (2026-08-29). **But `scripts/parse-log-events.mjs`'s `GIVEUP_RE` matches
+only the OLD wording** ("no engine output observed") and will silently undercount give-ups against any
+corpus captured after that commit (measured elsewhere: 233/302, 77%, went uncounted on a post-change
+snapshot). Before reusing these scripts against a newer log, widen the pattern per the comment at
+`parse-log-events.mjs:48` — do not treat a clean rerun on new data as confirming or extending this
+investigation's numbers without first checking that.
