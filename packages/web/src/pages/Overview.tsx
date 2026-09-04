@@ -207,6 +207,10 @@ export default function Overview() {
       </section>
 
       {/* --- Board (the project's kanban — same component, project-scoped) --- */}
+      {/* OWNER-RULED CONSTRAINT (card c6bdf358, 2026-07-20): this embed and its position directly under
+          Terminals stay EXACTLY as they are — this is the owner's primary board surface. Do not remove,
+          collapse, summarize, or reorder it as part of an unrelated Overview change; that needs its own
+          explicit owner sign-off, not an incidental cleanup. */}
       <section>
         <SectionLabel>Board</SectionLabel>
         <Board projectId={projectId} />
