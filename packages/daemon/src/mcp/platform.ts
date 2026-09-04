@@ -33,6 +33,7 @@ import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe, currentColumns } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
+import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
 import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
 
@@ -1105,7 +1106,7 @@ export class PlatformMcpRouter {
         // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
         const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
-        const updated = db.getAgent(resolved.id);
+        const updated = agentFields(db.getAgent(resolved.id));
         return ok(warning ? { ...updated, promptWarning: warning } : updated);
       },
     );
@@ -1258,7 +1259,7 @@ export class PlatformMcpRouter {
         description: "List every live project across the platform, INCLUDING the reserved/system home (the ordinary project picker hides reserved ones; this admin view does not). Excludes archived projects. Returns project rows.",
         inputSchema: strictShape({}),
       },
-      async () => ok(db.listAllProjects()),
+      async () => ok(db.listAllProjects().map(projectFields)),
     );
 
     server.registerTool(
@@ -1365,7 +1366,7 @@ export class PlatformMcpRouter {
         description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
         inputSchema: strictShape({}),
       },
-      async () => ok(db.listProfiles()),
+      async () => ok(db.listProfiles().map(profileFields)),
     );
 
     server.registerTool(
@@ -1479,8 +1480,11 @@ export class PlatformMcpRouter {
         description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Accepts the full id OR an unambiguous 8-char id-prefix (the short id shown in the UI). Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: strictShape({ agentId: z.string() }),
       },
-      async ({ agentId }) =>
-        ok(getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent")),
+      async ({ agentId }) => {
+        const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
+        if ("error" in agent) return ok(agent);
+        return ok(agentFields(agent));
+      },
     );
 
     server.registerTool(
@@ -1489,8 +1493,11 @@ export class PlatformMcpRouter {
         description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: strictShape({ profileId: z.string() }),
       },
-      async ({ profileId }) =>
-        ok(getByIdPrefix(profileId, (id) => db.getProfile(id), () => db.listProfiles(), "profile")),
+      async ({ profileId }) => {
+        const profile = getByIdPrefix(profileId, (id) => db.getProfile(id), () => db.listProfiles(), "profile");
+        if ("error" in profile) return ok(profile);
+        return ok(profileFields(profile));
+      },
     );
 
     server.registerTool(
@@ -1502,7 +1509,7 @@ export class PlatformMcpRouter {
       async ({ projectId }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok({ ...project, columns: currentColumns(db, project.id) });
+        return ok({ ...projectFields(project), columns: currentColumns(db, project.id) });
       },
     );
 
@@ -1549,7 +1556,7 @@ export class PlatformMcpRouter {
         const v = validateProfile({ ...base, ...patchNoId }, { previousRole: existing.role, patch: patchNoId });
         if (!v.ok) return ok({ error: `invalid profile: ${v.error}` });
         db.updateProfile(profileId, v.value);
-        return ok(db.getProfile(profileId));
+        return ok(profileFields(db.getProfile(profileId)));
       },
     );
 
@@ -1564,7 +1571,7 @@ export class PlatformMcpRouter {
         if ("error" in agent) return ok(agent);
         if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
         db.updateAgent(agent.id, { profileId });
-        return ok(db.getAgent(agent.id));
+        return ok(agentFields(db.getAgent(agent.id)));
       },
     );
 
@@ -2056,7 +2063,7 @@ export class PlatformMcpRouter {
         // write), so this compares old-vs-new correctly — the SAME shared lint the REST PATCH path uses,
         // so a rename produces identical warnings regardless of which surface performed it.
         const staleStartupPrompts = lintStalePromptsOnProjectChange(db, projectId, project, { name, vaultPath, repoPath });
-        return ok({ ...db.getProject(projectId)!, staleStartupPrompts });
+        return ok({ ...projectFields(db.getProject(projectId)), staleStartupPrompts });
       },
     );
 
