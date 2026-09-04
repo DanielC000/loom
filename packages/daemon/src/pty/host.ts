@@ -1977,6 +1977,12 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
  * PRIOR-ATTEMPT NOTE: an EARLIER HTTP-mount attempt was abandoned because it scoped by Loom's own
  * project.id, which never matched codescape's OWN path-derived id — the MCP never registered, silently.
  * Resolving via `resolveProjectId` (never a reimplemented hash) is what fixes that class of bug for good.
+ *
+ * ⭐ Card 42f50ca1: the returned URL bakes `port` in literally. `buildMcpServers`' caller writes this into
+ * a session's `--mcp-config` at `createPty` time (fresh spawn/resume/fork/recycle) — the running `claude`
+ * process holds that URL for the rest of its life and never re-reads `getPort()`. So the supervisor's port
+ * MUST stay stable for as long as a session that mounted it stays alive; see the reuse-on-restart doc at
+ * `codescape/supervisor.ts`'s `spawnServe()` for why that stability is deliberate, not incidental.
  */
 export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | null; worktreeId?: string | null; resolveProjectId?: (repoPath: string) => string | null }): { type: "http"; url: string } | null {
   if (opts.port == null || !opts.resolveProjectId) return null;
