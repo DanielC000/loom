@@ -4089,6 +4089,18 @@ export class OrchestrationMcpRouter {
     // STRICTER than `gate_queue`'s own redaction (which still returns a foreign project's row with
     // taskId/branch/workerLabel omitted): `gate_history` never returns a foreign-project row at all, so it
     // cannot widen anything `gate_queue` already exposes.
+    //
+    // MANAGER-ONLY IS DELIBERATE, NOT INCIDENTAL (card bb134d3e) — decided twice. `1baac6da` introduced
+    // this tool scoped to managers by name (subject line: "expose gate history to managers"). Later,
+    // `b0c7fd19` widened the WORKER surface for gate visibility and chose a self-scoped `gate_status`
+    // (resolve an opId the caller already holds) rather than this project-wide, enumerable history —
+    // someone stood at this exact fork a second time and took the other branch on purpose. Discriminator:
+    // a worker RESOLVES an opId it already holds (`run_gate` returns it) via `gate_status`; ENUMERATING
+    // settled ops across sessions is a manager concern under depth-1, which is exactly what this tool is.
+    //
+    // Both times this boundary has bitten in practice (cards `be260976`, `19456eb6`), the proximate cause
+    // was a manager writing a worker DoD around a tool the worker doesn't have — check the worker's
+    // pinned tested surface (`orchestration.ts:2346`) before drafting a DoD step that needs `gate_history`.
     server.registerTool(
       "gate_history",
       {
