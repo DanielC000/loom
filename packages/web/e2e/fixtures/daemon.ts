@@ -600,6 +600,16 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     };
 
     const seedCompanion: LoomDaemon["seedCompanion"] = async (opts = {}) => {
+      // DELIBERATELY un-sliced — unlike seedLiveSession's/spawnShell's `.slice(0, 8)` project names, this
+      // one keeps the FULL uuid (46 chars total). This worker-scoped daemon is shared across every spec in
+      // the worker, and this project's name lingers in it (only sessions get archived in afterEach, not
+      // projects) long enough for a LATER spec's Settings page to render it in the Project A/B `<select>`
+      // (ProjectLinksPanel, Settings.tsx) — a native `<select>` auto-sizes its closed box to its widest
+      // `<option>`, so this is the one fixture name long enough (past the ~38-char / ~8px-per-char
+      // overflow threshold) to have caught the real overflow defect fixed under card 7539206b, exercised
+      // by settings-narrow-viewport.spec.ts's page-wide overflow measurement. Slicing this to match its
+      // siblings would leave that suite green while silently deleting the only fixture exercising the
+      // long-name path — see card 1dc4199d. Do not shorten it.
       const project = await createProject(`companion-${randomUUID()}`);
       const name = opts.name ?? "Ada";
       // The agent's own `name` is what the Companion page's header label actually renders (via the
