@@ -508,9 +508,12 @@ what you checked. Found none? Treat it as live.
      commit, and a title that slips through is coerced by a merge-code safety-net. Allowed types:
      `feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert`. Title it right — don't lean on
      the net. **A BATCHED landing (`merge_batch`) is different: it never rewrites or coerces a subject at
-     all — each worker's own commit subjects land verbatim.** Before routing a worker into a batch instead
-     of a solo confirm, title-check its own tip commit the same way — `worker_merge`'s review step exposes
-     it as `ownTipSubject`/`ownTipSubjectConventional`.
+     all — each worker's own commit subjects land verbatim.** `worker_merge`'s review step exposes
+     `ownTipSubject`/`ownTipSubjectConventional`, but that's the branch's TIP commit only. For a
+     single-commit branch (the common case) the tip is the whole contribution, so that's a complete
+     check. For a branch with more than one commit it is NOT sufficient — every commit on the branch
+     lands verbatim, so read and title-check the branch's full commit log before routing it into a batch
+     instead of a solo confirm; no tool field currently exposes the non-tip subjects.
    - **The scope is REQUIRED**, and it comes from the **project's own documented list** — a "**Commit
      scopes**" section in that project's `CLAUDE.md`. Pick the scope that names the subsystem the change
      lands in. If the project has **no such list yet**, **DERIVE one at intake** from the repo's real
@@ -589,9 +592,11 @@ what you checked. Found none? Treat it as live.
      failure is logged), so treat it as worth a look rather than a shrug. And measure savings in gate
      **wall-clock**, never gate-run count — a "reduced" gate is a fraction the length of a full one, so
      counting runs can show a saving exactly where batching cost more time than it saved.
-   - **Before batching, run the retitle check named in the card-titling bullet above** (`ownTipSubject`
-     vs. the card title) on every candidate — a batch never picks up a retitle. Any branch that fails it
-     merges solo instead; batch the rest normally.
+   - **Before batching, run the retitle check named in the card-titling bullet above on every candidate**
+     — a batch never picks up a retitle. For a single-commit branch, comparing `ownTipSubject` to the card
+     title is enough. For a MULTI-commit branch it is not — check every commit's own subject on the
+     branch, since each lands verbatim and only the tip is covered by that field. Any branch that fails
+     the check (single- or multi-commit) merges solo instead; batch the rest normally.
    - **Never card, retitle, plan, or dispatch off an intermediate `progress` report — wait for `done`,
      then verify against the tree.** A progress report is the least reliable artifact a worker produces:
      it narrates intent that may not have survived contact with the code, and it's written at the point
