@@ -94,6 +94,12 @@ const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.j
 
 const GIT_ID = "-c user.email=pgo@loom -c user.name=pgo";
 const now = new Date().toISOString();
+// card d7f3416b: both sweeps now require a `beforeInstant` bound (rows minted before it are swept, rows
+// minted at/after it are not). Every fixture row in this file is stamped `startedAt: now` — this is a
+// FAR-FUTURE bound (well after `now`) used everywhere the original (pre-card) tests exercised the sweeps
+// with NO bound in mind, so every existing row still qualifies as "predates the bound" exactly as before.
+// Section (3d) below is the one place that deliberately narrows the bound to prove the new behavior itself.
+const FAR_FUTURE_BOUND = new Date(Date.parse(now) + 3600_000).toISOString();
 
 class SeamHost extends createSeamHost(PtyHost) {}
 class SpyHost extends SeamHost {
@@ -187,7 +193,7 @@ const upgradeDbFile = path.join(tmpHome, "upgrade.db");
     // The whole POINT of the surfaced_pending backfill: a legacy leftover row must still be swept by
     // reconcileOrphanedGateOps on the very next boot after this migration, exactly as it would have been
     // under the old row-existence-means-pending semantics.
-    check("(1b) the legacy row is picked up by listSurfacedPendingGateOps (still reconcilable)", upgradedDb.listSurfacedPendingGateOps().some((r) => r.opId === "legacy-op-1"));
+    check("(1b) the legacy row is picked up by listSurfacedPendingGateOps (still reconcilable)", upgradedDb.listSurfacedPendingGateOps(FAR_FUTURE_BOUND).some((r) => r.opId === "legacy-op-1"));
   }
   try { upgradedDb?.close(); } catch { /* ignore */ }
 }
@@ -277,12 +283,12 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
 
   db.markPendingGateOpSurfaced("op-a");
   check("(2) markPendingGateOpSurfaced flips surfacedPending true without touching state", db.listPendingGateOps()[0].surfacedPending === true && db.listPendingGateOps()[0].state === "pending");
-  check("(2) it is now selected by listSurfacedPendingGateOps", db.listSurfacedPendingGateOps().some((r) => r.opId === "op-a"));
+  check("(2) it is now selected by listSurfacedPendingGateOps", db.listSurfacedPendingGateOps(FAR_FUTURE_BOUND).some((r) => r.opId === "op-a"));
 
   db.settlePendingGateOp("op-a");
   check("(2) settlePendingGateOp marks state='settled'", db.listPendingGateOps()[0].state === "settled");
   check("(2) the row is NEVER deleted by settling — it survives its own terminal state", db.listPendingGateOps().length === 1);
-  check("(2) a settled row drops out of listSurfacedPendingGateOps (no longer 'pending')", !db.listSurfacedPendingGateOps().some((r) => r.opId === "op-a"));
+  check("(2) a settled row drops out of listSurfacedPendingGateOps (no longer 'pending')", !db.listSurfacedPendingGateOps(FAR_FUTURE_BOUND).some((r) => r.opId === "op-a"));
   // (card 4c5bf820) settlePendingGateOp called with NO verdict arg (the backward-compat overload, e.g. the
   // "merge" onSettle call site) leaves verdict/verdictPayload null — never a fabricated value.
   check("(2, card 4c5bf820) settlePendingGateOp(opId) with no verdict arg leaves verdict=null", db.listPendingGateOps()[0].verdict === null && db.listPendingGateOps()[0].verdictPayload === null);
@@ -402,7 +408,7 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.markPendingGateOpSurfaced("surfaced-then-settled-1");
   db.settlePendingGateOp("surfaced-then-settled-1");
 
-  const cleared = sessions.reconcileOrphanedGateOps();
+  const cleared = sessions.reconcileOrphanedGateOps(FAR_FUTURE_BOUND);
   check("(3) reconcileOrphanedGateOps reports exactly 2 reconciled (not 4)", cleared === 2);
 
   const rowsAfter = db.listPendingGateOps();
@@ -433,7 +439,7 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
 
   // Re-running the sweep with nothing left in 'pending' state is a harmless no-op — boot calls this
   // unconditionally on every start, restart-triggered or not.
-  const clearedAgain = sessions.reconcileOrphanedGateOps();
+  const clearedAgain = sessions.reconcileOrphanedGateOps(FAR_FUTURE_BOUND);
   check("(3) re-running the sweep with nothing left to reconcile is a harmless no-op", clearedAgain === 0);
 
   db.close();
@@ -502,7 +508,7 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.insertPendingGateOp({ opId: "gate-recoverable-fail", kind: "gate", key: `gate:${workerId}-r6`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   db.appendEvent({ id: "evt-worker-gate-6", ts: now, managerSessionId: workerId, workerSessionId: workerId, taskId: null, kind: "worker_gate", detail: { passed: false, durationMs: 1800, phase: "test", failedStep: "pnpm test", failingTest: "daemon/test/bar.mjs", exitCode: 1, opId: "gate-recoverable-fail" } });
 
-  const cleared = sessions.reconcileOrphanedGateOps();
+  const cleared = sessions.reconcileOrphanedGateOps(FAR_FUTURE_BOUND);
   check("(3b) reconcileOrphanedGateOps reports all 6 rows reconciled (5 recovered + 1 genuinely unrecoverable)", cleared === 6);
 
   const rowsAfter = db.listPendingGateOps();
@@ -589,7 +595,7 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.insertPendingGateOp({ opId: "batch-settled-1", kind: "merge", key: `merge-batch:${mgrId}-2`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
   db.settlePendingGateOp("batch-settled-1");
 
-  const cleared = sessions.reconcileUnsurfacedPendingGateOps();
+  const cleared = sessions.reconcileUnsurfacedPendingGateOps(FAR_FUTURE_BOUND);
   check("(3c) reconcileUnsurfacedPendingGateOps reports exactly 3 reconciled (not 5)", cleared === 3);
 
   const rowsAfter = db.listPendingGateOps();
@@ -608,9 +614,66 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
 
   // Re-running with nothing left in 'pending'+unsurfaced state is a harmless no-op, same discipline as
   // section (3)'s own re-run check — boot calls this unconditionally on every start.
-  const clearedAgain = sessions.reconcileUnsurfacedPendingGateOps();
+  const clearedAgain = sessions.reconcileUnsurfacedPendingGateOps(FAR_FUTURE_BOUND);
   check("(3c) re-running the sweep with nothing left to reconcile is a harmless no-op", clearedAgain === 0);
   check("(3c) the still-surfaced-pending control row is STILL untouched after the re-run too", db.listPendingGateOps().find((r) => r.opId === "surfaced-untouched-1").state === "pending");
+
+  db.close();
+}
+
+// ===== (3d) card d7f3416b — THE NEW BOUND ITSELF: a row minted AFTER the captured boot instant must NOT be
+// swept by EITHER sweep, while a genuinely pre-boot row still IS. Before this card, `listSurfacedPendingGateOps`/
+// `listUnsurfacedPendingGateOps` selected `surfaced_pending={1,0} AND state='pending'` with NO time bound at
+// all — the state EVERY op is minted in — so an ordinary op minted moments into a fresh boot (still genuinely
+// running) would be swept right alongside a true restart orphan. POSITIVE CONTROL: run this section against
+// the pre-fix build (no `beforeInstant` bound applied inside listSurfacedPendingGateOps/
+// listUnsurfacedPendingGateOps) and the two "LEFT UNTOUCHED" assertions below FAIL — the post-boot row gets
+// swept too, exactly the defect this card fixes. =====
+{
+  const P = "pgo-boundary";
+  const db = new Db(path.join(tmpHome, "boundary.db"));
+  const host = new SpyHost({
+    onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+    onBusy(id, busy) { db.setBusy(id, busy); },
+    onContextStats() {}, onRateLimited() {},
+    onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+  });
+  const sessions = new SessionService(db, host, new OrchestrationControl());
+
+  db.insertProject({ id: P, name: "PGO-BOUNDARY", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P}-mgr`, projectId: P, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
+  db.insertAgent({ id: `${P}-dev`, projectId: P, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
+  const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
+  db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: null });
+
+  const bootInstant = new Date(Date.parse(now) + 10_000).toISOString(); // the boot this sweep is bounded to
+  const preBootAt = new Date(Date.parse(now) + 5_000).toISOString();    // minted BEFORE this boot — a genuine restart orphan
+  const postBootAt = new Date(Date.parse(now) + 15_000).toISOString(); // minted AFTER this boot — still genuinely running, must be spared
+
+  // (3d-1) the SURFACED sweep (section (3)'s own domain): one pre-boot row, one post-boot row, both
+  // surfaced+pending.
+  db.insertPendingGateOp({ opId: "surfaced-pre-boot", kind: "gate", key: `gate:${workerId}-pre`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: preBootAt, state: "pending", surfacedPending: true });
+  db.insertPendingGateOp({ opId: "surfaced-post-boot", kind: "gate", key: `gate:${workerId}-post`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: postBootAt, state: "pending", surfacedPending: true });
+
+  const clearedSurfaced = sessions.reconcileOrphanedGateOps(bootInstant);
+  check("(3d-1) reconcileOrphanedGateOps(bootInstant) sweeps ONLY the pre-boot row, not the post-boot one", clearedSurfaced === 1);
+  const rowsAfterSurfaced = db.listPendingGateOps();
+  check("(3d-1) the pre-boot row IS marked 'orphaned-by-restart'", rowsAfterSurfaced.find((r) => r.opId === "surfaced-pre-boot").state === "orphaned-by-restart");
+  check("(3d-1) the post-boot row is LEFT UNTOUCHED — still state='pending' — a genuinely-running op minted THIS boot must never be mistaken for a restart orphan", rowsAfterSurfaced.find((r) => r.opId === "surfaced-post-boot").state === "pending");
+  check("(3d-1) no nudge was pushed for the post-boot (still-running) row", !host.enqueueCalls.some((c) => c.text.includes("surfaced-post-boot")));
+  check("(3d-1) a nudge WAS pushed for the genuinely pre-boot orphan", host.enqueueCalls.some((c) => c.text.includes("surfaced-pre-boot")));
+
+  // (3d-2) the UNSURFACED sweep (section (3c)'s own domain): same shape, one pre-boot + one post-boot row,
+  // both surfaced_pending=0 (the mergeBatch/deploy/early-crash-gate shape this sweep exists for).
+  db.insertPendingGateOp({ opId: "unsurfaced-pre-boot", kind: "merge", key: `merge-batch:${mgrId}-pre`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: preBootAt, state: "pending", surfacedPending: false });
+  db.insertPendingGateOp({ opId: "unsurfaced-post-boot", kind: "merge", key: `merge-batch:${mgrId}-post`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: postBootAt, state: "pending", surfacedPending: false });
+
+  const clearedUnsurfaced = sessions.reconcileUnsurfacedPendingGateOps(bootInstant);
+  check("(3d-2) reconcileUnsurfacedPendingGateOps(bootInstant) sweeps ONLY the pre-boot row, not the post-boot one", clearedUnsurfaced === 1);
+  const rowsAfterUnsurfaced = db.listPendingGateOps();
+  check("(3d-2) the pre-boot unsurfaced row IS marked 'orphaned-by-restart'", rowsAfterUnsurfaced.find((r) => r.opId === "unsurfaced-pre-boot").state === "orphaned-by-restart");
+  check("(3d-2) the post-boot unsurfaced row is LEFT UNTOUCHED — still state='pending' — a genuinely-running mergeBatch/deploy op minted THIS boot must never be mistaken for a restart orphan", rowsAfterUnsurfaced.find((r) => r.opId === "unsurfaced-post-boot").state === "pending");
 
   db.close();
 }
@@ -666,5 +729,8 @@ console.log(failures === 0
   + " reconcileUnsurfacedPendingGateOps (card 7239c712) marks a mergeBatch/deployOwnProject/early-crash-'gate'"
   + " row's surfaced_pending=0+state='pending' tombstone 'orphaned-by-restart' too, but pushes NO nudge at all"
   + " and leaves every surfaced_pending=1 row completely untouched — the two sweeps partition the table."
+  + " (card d7f3416b) both sweeps now take a `beforeInstant` bound and correctly spare a row minted AFTER"
+  + " it (still genuinely running, minted moments into THIS boot) while still sweeping a genuinely pre-boot"
+  + " row — proven for both the surfaced and unsurfaced sweep."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

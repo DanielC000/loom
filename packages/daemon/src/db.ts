@@ -6554,9 +6554,13 @@ export class Db {
   /** Boot-time read of every row still owed a reconciliation pass — see SessionService.reconcileOrphanedGateOps
    *  and the schema doc for why this is `surfaced_pending=1 AND state='pending'`, NOT every surviving row:
    *  a fast op that settled cleanly before a crash is `state:'settled'` and must never resurface a synthetic
-   *  failure nudge (that would invert the signal this table exists to give). */
-  listSurfacedPendingGateOps(): PendingGateOp[] {
-    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 1 AND state = 'pending'").all() as PendingGateOpRow[]).map(toPendingGateOp);
+   *  failure nudge (that would invert the signal this table exists to give).
+   *  `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows minted strictly before it —
+   *  callers pass the CAPTURED boot instant so "this row predates this process" is true by construction
+   *  rather than by hoping nothing raced the sweep between `app.listen` and this call. Rows are stamped
+   *  `started_at` with `new Date().toISOString()` at mint time, so a lexicographic TEXT compare is exact. */
+  listSurfacedPendingGateOps(beforeInstant: string): PendingGateOp[] {
+    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 1 AND state = 'pending' AND started_at < ?").all(beforeInstant) as PendingGateOpRow[]).map(toPendingGateOp);
   }
   /** Boot-time read of the COMPLEMENT set (card 7239c712): rows still `state:'pending'` at boot that were
    *  NEVER told "pending" to any caller (`surfaced_pending = 0`) — either a "merge"/"deploy" op minted by a
@@ -6567,9 +6571,14 @@ export class Db {
    *  reconcileUnsurfacedPendingGateOps` is this table's sole reader — see its own doc for why these rows get
    *  no synthetic nudge (nobody was ever told "pending" in the first place). Excludes legacy pre-e3e40167
    *  rows by construction: `migratePendingGateOps` backfills those to `surfaced_pending = 1` specifically so
-   *  they are NOT mistaken for this "never surfaced" set (see the schema doc). */
-  listUnsurfacedPendingGateOps(): PendingGateOp[] {
-    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 0 AND state = 'pending'").all() as PendingGateOpRow[]).map(toPendingGateOp);
+   *  they are NOT mistaken for this "never surfaced" set (see the schema doc).
+   *  `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows minted strictly before it, for the
+   *  same reason as {@link listSurfacedPendingGateOps} above — `surfaced_pending=0 AND state='pending'` is
+   *  the state EVERY op is minted in, so without this bound the sweep would also catch an op minted moments
+   *  after boot, during its own first ~12s (or its whole life, for a mergeBatch/deploy row) before this
+   *  process ever got a chance to run it. */
+  listUnsurfacedPendingGateOps(beforeInstant: string): PendingGateOp[] {
+    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 0 AND state = 'pending' AND started_at < ?").all(beforeInstant) as PendingGateOpRow[]).map(toPendingGateOp);
   }
   /**
    * Scoped id-or-prefix lookup for `gate_status`'s tombstone fallback (once a live GateSemaphore lookup

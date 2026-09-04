@@ -95,7 +95,7 @@ try {
   check("precondition: held target is alive in the host", host.isAlive(heldTarget));
   check("precondition: held target never reached ready (no SessionStart fired)", db.listWakesForSession(heldTarget).length === 1); // sanity: wake present before the sweep
 
-  const cleared = svc.reconcileOrphanedGateOps();
+  const cleared = svc.reconcileOrphanedGateOps(new Date().toISOString());
   check("reconcileOrphanedGateOps processed both orphaned rows", cleared === 2);
 
   check("SESSION-DEAD: fallback wake SURVIVES an undelivered (session-dead) settle nudge", db.listWakesForSession(deadTarget).some((w) => w.id === fallbackWakeId1));

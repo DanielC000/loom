@@ -1455,9 +1455,10 @@ async function main(): Promise<void> {
   // an async [loom:gate-*]/[loom:merge-*] nudge that can now never arrive via the normal settle path — this
   // resurfaces a synthetic terminal nudge for each one and clears the row. Runs AFTER the fleet-resume
   // passes above (same ordering reason as the sweep above: a resumed owning session must be live to
-  // receive the push). Never gates boot.
+  // receive the push). Never gates boot. Bounded to rows minted before `bootStartedAt` (card d7f3416b) —
+  // without that bound, a row minted moments into THIS boot (still genuinely running) could be swept.
   try {
-    const cleared = sessions.reconcileOrphanedGateOps();
+    const cleared = sessions.reconcileOrphanedGateOps(bootStartedAt.toISOString());
     if (cleared > 0) console.log(`[boot] orphaned gate/merge-op sweep: resurfaced ${cleared} restart-killed op(s) to their owning session(s)`);
   } catch (err) {
     console.warn(`[boot] orphaned gate/merge-op sweep failed (continuing boot): ${(err as Error).message}`);
@@ -1469,9 +1470,11 @@ async function main(): Promise<void> {
   // a crash mid-run strands it `state:'pending'` forever, invisible to the sweep above. This one closes just
   // that: no caller was ever told "pending" for these rows, so — deliberately, see
   // reconcileUnsurfacedPendingGateOps's own doc — it pushes NO nudge to anyone; it only stops `gate_status`
-  // from claiming `pending` forever for a row nothing will ever settle. Never gates boot.
+  // from claiming `pending` forever for a row nothing will ever settle. Never gates boot. Bounded to rows
+  // minted before `bootStartedAt` (card d7f3416b) — every op is minted `surfaced_pending=0`, so without
+  // this bound an ordinary op minted moments into THIS boot could be swept while still genuinely running.
   try {
-    const cleared = sessions.reconcileUnsurfacedPendingGateOps();
+    const cleared = sessions.reconcileUnsurfacedPendingGateOps(bootStartedAt.toISOString());
     if (cleared > 0) console.log(`[boot] unsurfaced gate-op sweep: marked ${cleared} restart-stranded op(s) 'orphaned-by-restart' (no nudge — none was ever told "pending")`);
   } catch (err) {
     console.warn(`[boot] unsurfaced gate-op sweep failed (continuing boot): ${(err as Error).message}`);

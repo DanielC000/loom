@@ -7642,10 +7642,15 @@ export class SessionService {
    * (recovered + genuinely-orphaned rows both count). Runs AFTER the fleet-resume passes (mirrors
    * reconcileDeadOwnerMergeOps's own placement) so a resumed owning session is live to receive the push
    * rather than queuing into a session that isn't there yet.
+   *
+   * `beforeInstant` (ISO string, card d7f3416b): the caller's captured boot instant, threaded straight into
+   * {@link Db.listSurfacedPendingGateOps} — bounds the sweep to rows minted strictly before THIS process
+   * started, so an op minted during this very boot (still genuinely running) can never be mistaken for a
+   * restart orphan just because it happens to still be `state:'pending'` when this sweep runs.
    */
-  reconcileOrphanedGateOps(): number {
+  reconcileOrphanedGateOps(beforeInstant: string): number {
     let cleared = 0;
-    for (const row of this.db.listSurfacedPendingGateOps()) {
+    for (const row of this.db.listSurfacedPendingGateOps(beforeInstant)) {
       // STRUCTURALLY UNREACHABLE for "deploy" (card bed91595): `deployOwnProject`'s tombstone is minted
       // and settled back-to-back in one synchronous span (see that insert's own comment) — it never calls
       // `markPendingGateOpSurfaced`, so `surfaced_pending` stays 0 for every deploy row, and this method's
@@ -7755,10 +7760,16 @@ export class SessionService {
    * `reconcileOrphanedGateOps`. Returns the count reconciled for the same boot-log line. Runs alongside that
    * method at boot (see index.ts) — order between the two does not matter, since they operate on disjoint
    * row sets (`surfaced_pending=1` vs `=0`).
+   *
+   * `beforeInstant` (ISO string, card d7f3416b): the caller's captured boot instant, threaded straight into
+   * {@link Db.listUnsurfacedPendingGateOps} — bounds the sweep to rows minted strictly before THIS process
+   * started. Without this, `surfaced_pending=0 AND state='pending'` is the state EVERY op is minted in (the
+   * flag only flips ~12s after mint, if ever), so an ordinary op minted moments after boot would be swept
+   * (and marked `orphaned-by-restart`) while it is still genuinely running.
    */
-  reconcileUnsurfacedPendingGateOps(): number {
+  reconcileUnsurfacedPendingGateOps(beforeInstant: string): number {
     let cleared = 0;
-    for (const row of this.db.listUnsurfacedPendingGateOps()) {
+    for (const row of this.db.listUnsurfacedPendingGateOps(beforeInstant)) {
       try {
         this.db.markPendingGateOpOrphaned(row.opId);
         cleared++;
