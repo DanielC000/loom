@@ -2440,8 +2440,11 @@ export type TurnRoute = CompanionRoute;
 /**
  * Coalescing classification (owner-directed, 2026-07-03; AMENDED 2026-08-28 by card eac3464d): `"warning"`
  * = a Loom operational nudge (idle/context/busy-stuck watchdogs, restart/boot continuation notes,
- * rate-limit/usage nudges, memory-recall injection) — always safe to concatenate with its neighbors into
- * one turn, from ANY sender. `"agent"` = a message AUTHORED by an agent or a human TO the recipient (a
+ * memory-recall injection — full producer enumeration at drainPending's warning-kind branch, card
+ * 8f1d7912) — always safe to concatenate with its neighbors into one turn, from ANY sender. Rate-limit
+ * replay is NOT a producer here: `resumeAfterRateLimit` replays `live.lastPrompt` via a direct
+ * `this.submit()` call, deliberately bypassing `enqueueStdin`/`live.pending` (and this classification)
+ * entirely. `"agent"` = a message AUTHORED by an agent or a human TO the recipient (a
  * Lead's `session_message`, a human composer turn, a worker→manager report, a manager→worker
  * direction/redirect, a companion inbound or proactive reminder/heartbeat) — drained ONE-PER-TURN
  * **ACROSS senders** (the 2026-07-03 guarantee this classification exists to protect: two DIFFERENT
