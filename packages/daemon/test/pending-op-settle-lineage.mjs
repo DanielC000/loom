@@ -38,6 +38,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        to pending, A worker_recycles to B mid-flight, [loom:gate-done] lands on B, never on A. (A worker
 //        recycling while its own background run_gate is still in flight is a live fleet pattern, not just
 //        a theoretical mirror of the merge case.)
+//   (D)  MERGE_BATCH / MANAGER RECYCLE (card 985d8d97): manager A calls mergeBatchTracked with 2 ready
+//        worker branches, degrades to pending, A recycles to B mid-flight, the batch gate PASSES and both
+//        branches land — [loom:merge-batch-done] lands on B, never on dead A. `mergeBatchTracked`'s own
+//        async settle callback (added by card f944d4e4/commit 51d85532, itself already calling
+//        `resolveSettleNudgeTarget` from day one) had NO dedicated recycle-survival coverage before this —
+//        an untested correct path is one refactor from becoming an untested broken one. Card 985d8d97's own
+//        incident was NOT this bug (the daemon that dropped that nudge was simply running code from before
+//        51d85532 existed at all — see that card's own resolution) but the routing code this scenario
+//        proves correct is exactly what a manager recycling mid-batch depends on, so the gap is worth
+//        closing on its own merits.
 //
 // (A)/(B)/(C) run SEQUENTIALLY — each needs a real gate that outlives the SessionService's own
 // `syncAttachBudgetMs` (shrunk to 100ms here via a test-only DI seam — card 0faaaa55 — from the 12s
@@ -49,12 +59,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // concurrency here. (The wall-clock case for concurrency is largely moot now regardless — three sequential
 // 400ms sleeps cost ~1.2s, not the ~45s three sequential 15s sleeps used to.)
 //
-// Uses the injectable `runGate` seam (SessionService opts.runGate) instead of a real spawned gate command
-// (unlike merge-confirm-completion-nudge.mjs, which deliberately needs a REAL process for its timeout/kill
-// scenario) — this test is about NOTIFICATION ROUTING, not gate execution semantics, so a controllable
-// async function is the right-sized fake, keyed by worktree path so (A) can pass while (B) fails. The real
-// async GAP between "pending" and "settled" stays real wall-clock (bounded by `syncAttachBudgetMs`) — that
-// timing IS the bug, so it is not mocked away, only the gate's own child-process plumbing is.
+// (A)/(B)/(C) use the injectable `runGate` seam (SessionService opts.runGate) instead of a real spawned
+// gate command (unlike merge-confirm-completion-nudge.mjs, which deliberately needs a REAL process for its
+// timeout/kill scenario) — this test is about NOTIFICATION ROUTING, not gate execution semantics, so a
+// controllable async function is the right-sized fake, keyed by worktree path so (A) can pass while (B)
+// fails. The real async GAP between "pending" and "settled" stays real wall-clock (bounded by
+// `syncAttachBudgetMs`) — that timing IS the bug, so it is not mocked away, only the gate's own
+// child-process plumbing is.
+// (D) does NOT go through that seam: `mergeBatchTracked`'s own gate closure calls `runGateSequential`
+// directly (sessions/service.ts) rather than `this.runGate ?? runGateSequential` — the injectable DI point
+// (A)/(B)/(C) rely on) — so (D) needs a REAL spawned gate process, the same established pattern
+// merge-batch-completion-notice.mjs / merge-confirm-completion-nudge.mjs already use for this identical
+// async-settle-nudge shape (a synthetic `node -e` command in an isolated temp repo — not a "manufactured
+// merge gate" in the shared/capped/~20-minute production sense the /worker doctrine warns against).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/pending-op-settle-lineage.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -285,9 +302,61 @@ try {
     worktrees.push([repo, worktreePath]);
   };
 
+  // ==================== (D): merge_batch settle-nudge survives a manager recycle ====================
+  const SLOW_BATCH_GATE_MS = 600;
+  const scenarioD_mergeBatchRecycle = async () => {
+    const P = "posl-batch", repo = makeRepo();
+    // Real gateCommand (see the header note above) — passes after a delay comfortably past syncAttachBudgetMs
+    // (100ms) so mergeBatchTracked degrades to pending, same shape as (A)/(B)/(C)'s injected slowGate.
+    db.insertProject({ id: P, name: "POSL-Batch", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: `node -e "setTimeout(()=>process.exit(0), ${SLOW_BATCH_GATE_MS})"` } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-mgr`, projectId: P, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
+    const mgrAId = `${P}-mgr1`;
+    db.insertSession({ id: mgrAId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+    // 2 ready worker branches — the minimum mergeBatchTracked actually batches (fewer than 2 falls straight
+    // to a solo confirm, already covered by (A)/(B)).
+    const workers = [];
+    for (const label of ["d1", "d2"]) {
+      const taskId = `td-${label}`;
+      const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+      const file = `${label}.txt`;
+      fs.writeFileSync(path.join(worktreePath, file), "work\n");
+      commitAll(worktreePath, label, GIT_ID);
+      db.insertTask({ id: taskId, projectId: P, title: label, body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+      const workerId = `${P}-wkr-${label}`;
+      db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrAId, taskId, worktreePath, branch });
+      workers.push({ workerId, taskId, branch, file });
+    }
+
+    const first = await svc.mergeBatchTracked(mgrAId, workers.map((w) => w.workerId));
+    check("(D) degrades to pending past the sync-wait budget", first.settled === false);
+
+    // Manager A recycles to B WHILE the batch merge op is still running in the background.
+    const mgrB = await svc.recycleManager(mgrAId, "successor: a merge_batch confirm is still pending in the background — you'll get its [loom:merge-batch-*] nudge when it settles.");
+    check("(D) recycleManager produced a fresh successor session", !!mgrB && mgrB.id !== mgrAId);
+    db.setProcessState(mgrAId, "exited"); // SeamHost's fake pty never fires a real exit — stamp it dead
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrB.id && /\[loom:merge-batch-done\]/.test(c.text)), 30_000);
+    const onSuccessor = host.enqueueCalls.filter((c) => c.sessionId === mgrB.id && /\[loom:merge-batch-(done|failed|unknown)\]/.test(c.text));
+    const onDeadPredecessor = host.enqueueCalls.filter((c) => c.sessionId === mgrAId && /\[loom:merge-batch-(done|failed|unknown)\]/.test(c.text));
+    check("(D) the batch completion nudge landed on the LIVE SUCCESSOR B, exactly once", onSuccessor.length === 1);
+    check("(D) it is the DONE shape", onSuccessor[0] && /\[loom:merge-batch-done\]/.test(onSuccessor[0].text));
+    for (const w of workers) {
+      check(`(D) it names branch ${w.branch}`, !!onSuccessor[0] && onSuccessor[0].text.includes(w.branch));
+      check(`(D) it names task ${w.taskId}`, !!onSuccessor[0] && onSuccessor[0].text.includes(w.taskId));
+    }
+    check("(D) it carries the SAME opId the pending response returned", onSuccessor[0] && onSuccessor[0].text.includes(first.op.opId));
+    check("(D) pushed with kind:\"warning\" (matches mergeBatchTracked's own header doc — a Loom operational nudge)", onSuccessor[0] && onSuccessor[0].kind === "warning");
+    check("(D) NO batch completion nudge ever landed on the dead predecessor A", onDeadPredecessor.length === 0);
+    check("(D) both branches actually landed on main (the underlying batch-merge behavior is unaffected by this fix)", workers.every((w) => fs.existsSync(path.join(repo, w.file))));
+    worktrees.push([repo, undefined]); // both worker worktrees + the batch worktree are removed by finalize
+  };
+
   await scenarioA_mergeSuccess();
   await scenarioB_mergeRejection();
   await scenarioC_gateRecycle();
+  await scenarioD_mergeBatchRecycle();
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -295,6 +364,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every PendingOpRegistry settle push (confirmWorkerMergeTracked's generic echo, rejectNotify's rich rejection, finishAlreadyMerged's success announcement, runWorkerGate's echo, and the durable boot sweep) resolves its target through the CURRENT session lineage at settle time: unchanged for a never-recycled session, unchanged (best-effort no-op) for a fully-dead lineage, and routed to the live successor — including the SUPPRESSING rejection push, not just the generic echo — when the originating manager/worker recycled mid-op. Never delivered to the dead predecessor."
+  ? "\n✅ ALL PASS — every PendingOpRegistry settle push (confirmWorkerMergeTracked's generic echo, rejectNotify's rich rejection, finishAlreadyMerged's success announcement, runWorkerGate's echo, mergeBatchTracked's aggregate batch echo, and the durable boot sweep) resolves its target through the CURRENT session lineage at settle time: unchanged for a never-recycled session, unchanged (best-effort no-op) for a fully-dead lineage, and routed to the live successor — including the SUPPRESSING rejection push, not just the generic echo — when the originating manager/worker recycled mid-op. Never delivered to the dead predecessor."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
