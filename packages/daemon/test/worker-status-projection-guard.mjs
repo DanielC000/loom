@@ -68,7 +68,7 @@ const EXPECTED_KEYS = [
   // derived/computed fields layered on top by the worker_status handler
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs", "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
-  "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "pendingMerge", "worktreePathAliases",
+  "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "lastFlushAttribution", "pendingMerge", "worktreePathAliases",
   "reportedState", "awaitingReview", "staleReport", "directive", "staleDirective", "parkedDirective",
   "archivedWithoutReport", "unresolvedCascade",
 ].sort();
