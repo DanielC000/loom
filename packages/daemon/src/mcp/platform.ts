@@ -36,6 +36,7 @@ import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
 import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
+import { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } from "./projectMemorySearch.js";
 
 /** Backstop cap on a default `events_search` read (limit omitted) — same posture as
  *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
@@ -1467,6 +1468,40 @@ export class PlatformMcpRouter {
           eff,
         );
         return ok({ hits, returned: hits.length, truncated });
+      },
+    );
+
+    server.registerTool(
+      "project_memory_search",
+      {
+        description: "Case-insensitive LITERAL substring search over every project_memory note's title+text across the platform (or one project) — the project_memory sibling of agent_prompt_search, for the SAME class of cross-project 'has this propagated' question but over the higher-circulation surface: a memory note reaches every session whose kickoff matches it (workers included), where an agent prompt only reaches whoever holds that agent. `query` is a plain substring, not a regex/FTS query. Optional `projectId` narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. Read-only — there is no cross-project memory WRITE on this surface; a project's store is its own to curate (use session_message or a board card to ask for a correction). Bounded: collects EVERY match first, then orders by `retrievalCount` DESCENDING (severity/'where the eye lands' — the note keeping HIGH circulation is the dangerous one, since circulation is what turns a wrong note into live doctrine; a stale note nobody ever sees again is comparatively harmless) before capping at `limit` (default " + DEFAULT_MEMORY_SEARCH_CAP + ", max " + MAX_MEMORY_SEARCH_CAP + ") with `truncated:true` when more matches exist and `totalMatches` naming the real count — narrow with projectId or a more specific query rather than raising limit past the cap. This ordering is a SUPPORTING convenience, not a substitute for reading the full returned set: every hit ships INLINE with its own snippet in this ONE result specifically so there is no per-query 'go read this set' round-trip to selectively skip. `asOf` (ISO) is this call's own read timestamp — `retrievalCount` increments on its own schedule, so two reads a moment apart can legitimately disagree; that's drift, not a contradiction to reconcile. `retrievalCountCaveat` restates, once, the field's known blind spot: a hit's `retrievalCount:0` (or `everDelivered:false`) CANNOT distinguish a note that has never matched a kickoff from one that keeps matching and keeps losing the delivery-budget race against other pinned/related notes — 0 is NOT evidence the note is harmless. Each hit is {projectId, projectName, key, title, pinned, retrievalCount, everDelivered, lastRetrievedAt, snippet} — snippet is a short excerpt around the first match in title or text, NOT the full body (memory_list/memory_read already cover reading one project's notes in full).",
+        inputSchema: strictShape({
+          query: z.string().min(1),
+          projectId: z.string().optional(),
+          limit: z.number().int().positive().optional(),
+        }),
+      },
+      async ({ query, projectId, limit }) => {
+        let projects = db.listAllProjects();
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          projects = [project];
+        }
+        const eff = Math.max(1, Math.min(limit ?? DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP));
+        const { hits, truncated, totalMatches } = searchProjectMemory(
+          projects.map((p) => ({ id: p.id, name: p.name, notes: db.listProjectMemory(p.id) })),
+          query,
+          eff,
+        );
+        return ok({
+          hits,
+          returned: hits.length,
+          truncated,
+          totalMatches,
+          asOf: new Date().toISOString(),
+          retrievalCountCaveat: "retrievalCount:0 (everDelivered:false) cannot distinguish never-matched from matched-then-evicted — it is not evidence the note is harmless.",
+        });
       },
     );
 

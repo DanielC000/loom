@@ -19,8 +19,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) agent_prompt_search is a case-insensitive cross-project substring search over every agent's
 //       startupPrompt, bounded/capped with a snippet (not the full prompt) per hit; its `limit` clamp
 //       (card 07ce7c0c) defaults to DEFAULT_PROMPT_SEARCH_CAP and never exceeds MAX_PROMPT_SEARCH_CAP.
-//   (4) TRUST GATE — all three tools are PRESENT on loom-platform but ABSENT from every agent-facing
-//       surface: loom-orchestration (manager AND worker), loom-setup, and the in-project loom-tasks.
+//   (5) card 9fe04d18 — project_memory_search is agent_prompt_search's project_memory sibling: a
+//       case-insensitive cross-project substring search over every note's title+text, matches collected
+//       IN FULL before capping and then ordered by retrievalCount DESCENDING (supporting, not
+//       load-bearing — every hit still ships inline with its own snippet in ONE result), an explicit
+//       `totalMatches`/`truncated`/`asOf` on the envelope, and a `retrievalCountCaveat` stating the
+//       field's known blind spot (0 does not mean harmless — never-matched and matched-then-evicted both
+//       read as 0). Read-only; its `limit` clamp defaults to DEFAULT_MEMORY_SEARCH_CAP and never exceeds
+//       MAX_MEMORY_SEARCH_CAP.
+//   (4) TRUST GATE — all FOUR tools (the three above plus project_memory_search) are PRESENT on
+//       loom-platform but ABSENT from every agent-facing surface: loom-orchestration (manager AND
+//       worker), loom-setup, and the in-project loom-tasks.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-forensics-reads.mjs
 import fs from "node:fs";
@@ -57,6 +66,7 @@ const { WakeService } = await import("../dist/orchestration/wake.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } = await import("../dist/mcp/promptSearch.js");
+const { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } = await import("../dist/mcp/projectMemorySearch.js");
 
 // --- a real temp git repo so a spawn (never reached here) would have a valid cwd; createPty is faked ---
 const repo = path.join(os.tmpdir(), `loom-forensics-repo-${Date.now()}-${process.pid}`);
@@ -108,8 +118,8 @@ try {
   const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
   const platToolNames = (await client.listTools()).tools.map((t) => t.name);
-  check("(0) all three tools are registered on loom-platform",
-    ["platform_config_get", "events_search", "agent_prompt_search"].every((n) => platToolNames.includes(n)));
+  check("(0) all four tools are registered on loom-platform",
+    ["platform_config_get", "events_search", "agent_prompt_search", "project_memory_search"].every((n) => platToolNames.includes(n)));
 
   // ===================== (1) platform_config_get — secret-shaped redaction =====================
   db.setPlatformConfig({
@@ -300,6 +310,96 @@ try {
   check("(3) unit: searchAgentPrompts stops at the FIRST match per agent (one hit per agent, not per occurrence)",
     pureHits.hits.length === 1 && pureHits.truncated === false);
 
+  // ===================== (5) project_memory_search — cross-project, retrievalCount-ordered =====================
+  check("(5) loom-platform registers project_memory_search", platToolNames.includes("project_memory_search"));
+
+  // Seed notes across two projects. "carrier-home" (pHome) and "carrier-target" (pTarget) both match the
+  // query via TEXT; "titled-carrier" (pTarget) matches only via TITLE — proving the title+text contract.
+  // Retrieval counts are bumped via touchProjectMemoryRetrieved (the SAME mechanism a real kickoff-digest
+  // delivery uses) so the ordering assertion below reflects genuine field semantics, not a hand-set column.
+  db.upsertProjectMemory("pHome", { key: "carrier-home", text: "this note discusses a zero spawn budget claim" }, 1000);
+  db.upsertProjectMemory("pTarget", { key: "carrier-target", text: "an independent absorbed copy: zero spawn budget again" }, 1000);
+  db.upsertProjectMemory("pTarget", { key: "titled-carrier", title: "Zero Spawn Budget", text: "body text never mentions the phrase" }, 1000);
+  db.upsertProjectMemory("pTarget", { key: "unrelated", text: "nothing to do with any of this" }, 1000);
+  const carrierHomeId = db.getProjectMemoryByKey("pHome", "carrier-home").id;
+  const carrierTargetId = db.getProjectMemoryByKey("pTarget", "carrier-target").id;
+  const titledCarrierId = db.getProjectMemoryByKey("pTarget", "titled-carrier").id;
+  db.touchProjectMemoryRetrieved([carrierHomeId]); // rc=1
+  for (let i = 0; i < 5; i++) db.touchProjectMemoryRetrieved([carrierTargetId]); // rc=5 (highest)
+  // titled-carrier + unrelated stay at rc=0 (never touched) — the ambiguous, "never matched" case.
+
+  const spawnBudget = await call("project_memory_search", { query: "spawn budget" });
+  check("(5) case-insensitive substring match finds all THREE carriers across both projects (2 via text, 1 via title)",
+    spawnBudget.hits.length === 3 &&
+    ["carrier-home", "carrier-target", "titled-carrier"].every((k) => spawnBudget.hits.some((h) => h.key === k)) &&
+    !spawnBudget.hits.some((h) => h.key === "unrelated"));
+  check("(5) each hit carries project identity + a snippet containing the match, case-insensitively",
+    spawnBudget.hits.every((h) => !!h.projectId && !!h.projectName && typeof h.snippet === "string" && h.snippet.toLowerCase().includes("spawn budget")));
+  check("(5) results are ordered by retrievalCount DESCENDING by default (5 before 1 before 0)",
+    spawnBudget.hits[0].key === "carrier-target" && spawnBudget.hits[0].retrievalCount === 5 &&
+    spawnBudget.hits[1].key === "carrier-home" && spawnBudget.hits[1].retrievalCount === 1 &&
+    spawnBudget.hits[2].key === "titled-carrier" && spawnBudget.hits[2].retrievalCount === 0);
+  check("(5) everDelivered mirrors retrievalCount > 0 (true for the touched notes, false for the never-touched one)",
+    spawnBudget.hits.find((h) => h.key === "carrier-target").everDelivered === true &&
+    spawnBudget.hits.find((h) => h.key === "carrier-home").everDelivered === true &&
+    spawnBudget.hits.find((h) => h.key === "titled-carrier").everDelivered === false);
+  check("(5) the envelope carries totalMatches, asOf (ISO), and a retrievalCountCaveat naming the 0-ambiguity",
+    spawnBudget.totalMatches === 3 && typeof spawnBudget.asOf === "string" && !Number.isNaN(Date.parse(spawnBudget.asOf)) &&
+    typeof spawnBudget.retrievalCountCaveat === "string" &&
+    spawnBudget.retrievalCountCaveat.toLowerCase().includes("never-matched") && spawnBudget.retrievalCountCaveat.toLowerCase().includes("evicted"));
+
+  const spawnBudgetScoped = await call("project_memory_search", { query: "spawn budget", projectId: "pTarget" });
+  check("(5) projectId narrows to just that project's notes (2 of the 3 carriers)",
+    spawnBudgetScoped.hits.length === 2 && spawnBudgetScoped.hits.every((h) => h.projectId === "pTarget"));
+
+  const noMemMatch = await call("project_memory_search", { query: "totally-absent-zzz-query" });
+  check("(5) no match returns an empty, non-truncated hit list with totalMatches:0",
+    noMemMatch.hits.length === 0 && noMemMatch.truncated === false && noMemMatch.totalMatches === 0);
+
+  const memCapped = await call("project_memory_search", { query: "spawn budget", limit: 1 });
+  check("(5) an explicit limit below the match count caps hits, reports truncated:true, and still names the real totalMatches",
+    memCapped.hits.length === 1 && memCapped.truncated === true && memCapped.totalMatches === 3 &&
+    memCapped.hits[0].key === "carrier-target"); // the highest-retrievalCount hit survives the cap
+
+  const badProjectMem = await call("project_memory_search", { query: "spawn budget", projectId: "ghost" });
+  check("(5) an unknown projectId is an explicit error", badProjectMem.error === "project not found");
+
+  // Clamp tests (mirrors the agent_prompt_search clamp block above): seed well past both caps under one
+  // dedicated project + unique token so counts are exact regardless of the "spawn budget" notes above.
+  db.insertProject({ id: "pMemClamp", name: "MemClamp", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const MEM_CLAMP_TOTAL = MAX_MEMORY_SEARCH_CAP + 10;
+  for (let i = 0; i < MEM_CLAMP_TOTAL; i++) {
+    db.upsertProjectMemory("pMemClamp", { key: `clamp-note-${i}`, text: "contains memclamptoken here" }, 100000);
+  }
+  const memClampDefault = await call("project_memory_search", { query: "memclamptoken" });
+  check(`(5) clamp: omitted limit defaults to DEFAULT_MEMORY_SEARCH_CAP (${DEFAULT_MEMORY_SEARCH_CAP})`,
+    memClampDefault.hits.length === DEFAULT_MEMORY_SEARCH_CAP && memClampDefault.truncated === true && memClampDefault.totalMatches === MEM_CLAMP_TOTAL);
+  const memClampOverMax = await call("project_memory_search", { query: "memclamptoken", limit: 999999 });
+  check(`(5) clamp: a limit far past the ceiling clamps to MAX_MEMORY_SEARCH_CAP (${MAX_MEMORY_SEARCH_CAP}), never returns unbounded hits`,
+    memClampOverMax.hits.length === MAX_MEMORY_SEARCH_CAP && memClampOverMax.truncated === true);
+  const memClampAtMax = await call("project_memory_search", { query: "memclamptoken", limit: MAX_MEMORY_SEARCH_CAP });
+  check("(5) clamp: a limit exactly at the ceiling is honored unclamped", memClampAtMax.hits.length === MAX_MEMORY_SEARCH_CAP);
+
+  // Unit: the pure search function honors its own ordering + truncation contract directly (no MCP layer).
+  const pureMemHits = searchProjectMemory(
+    [{
+      id: "p1", name: "P1", notes: [
+        { id: "n1", projectId: "p1", key: "low", title: "", text: "alpha low", pinned: false, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 1, version: 1, requestIds: null },
+        { id: "n2", projectId: "p1", key: "high", title: "", text: "alpha high", pinned: false, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 9, version: 1, requestIds: null },
+        { id: "n3", projectId: "p1", key: "none", title: "beta only in title", text: "unrelated", pinned: false, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0, version: 1, requestIds: null },
+      ],
+    }],
+    "alpha", 5,
+  );
+  check("(5) unit: searchProjectMemory orders by retrievalCount DESCENDING (9 before 1) and matches title separately from text",
+    pureMemHits.hits.length === 2 && pureMemHits.hits[0].key === "high" && pureMemHits.hits[1].key === "low" && pureMemHits.truncated === false && pureMemHits.totalMatches === 2);
+  const pureMemTitleHit = searchProjectMemory(
+    [{ id: "p1", name: "P1", notes: [{ id: "n3", projectId: "p1", key: "none", title: "beta only in title", text: "unrelated", pinned: false, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0, version: 1, requestIds: null }] }],
+    "beta", 5,
+  );
+  check("(5) unit: searchProjectMemory matches a query that appears ONLY in title (not text)",
+    pureMemTitleHit.hits.length === 1 && pureMemTitleHit.hits[0].key === "none");
+
   await client.close();
 
   // ===================== (4) TRUST GATE — ABSENT from every agent-facing surface =====================
@@ -310,7 +410,7 @@ try {
   const workerTools = await listTools(orchRouter.buildServer("W", "worker"));
   const taskTools = await listTools(new TaskMcpRouter(db, wakes).buildServer("pTarget", "M"));
 
-  for (const t of ["platform_config_get", "events_search", "agent_prompt_search"]) {
+  for (const t of ["platform_config_get", "events_search", "agent_prompt_search", "project_memory_search"]) {
     check(`(4) ${t} IS on loom-platform and ABSENT from setup/manager/worker/in-project`,
       platformTools.includes(t) && !setupTools.includes(t) && !mgrTools.includes(t) && !workerTools.includes(t) && !taskTools.includes(t));
   }
@@ -324,6 +424,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform surface's three forensics reads (platform_config_get, events_search, agent_prompt_search) close the raw-sqlite-forensics gap: platform_config_get redacts codescape/TLS-key-path secret-shaped fields while passing operational tuning through; events_search is a bounded, kind/project/session/task-filterable page not limited to gate-run kinds (an unrecognized kind is an EXPLICIT error naming the valid kinds, never a silent [] — card 39f79291 — while a recognized kind is still bound as a query param, never interpolated — injection-safe); agent_prompt_search is a bounded, snippeted, cross-project substring search. All three are PRESENT only on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface."
+  ? "\n✅ ALL PASS — the platform surface's four forensics reads (platform_config_get, events_search, agent_prompt_search, project_memory_search) close the raw-sqlite-forensics gap: platform_config_get redacts codescape/TLS-key-path secret-shaped fields while passing operational tuning through; events_search is a bounded, kind/project/session/task-filterable page not limited to gate-run kinds (an unrecognized kind is an EXPLICIT error naming the valid kinds, never a silent [] — card 39f79291 — while a recognized kind is still bound as a query param, never interpolated — injection-safe); agent_prompt_search is a bounded, snippeted, cross-project substring search over agent startupPrompts; project_memory_search is its project_memory sibling — title+text substring match, EVERY hit collected before capping and ordered by retrievalCount descending, with an explicit totalMatches/truncated/asOf and a retrievalCountCaveat naming the field's 0-ambiguity. All four are PRESENT only on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
