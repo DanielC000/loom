@@ -368,16 +368,20 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  no inbound links" — structurally distinguishable from the field being absent altogether. */
 export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
 
-/** `backlinksOverride`, when given, skips the per-note {@link annotateBacklinks} DB round-trip in favor
- *  of a value the caller already resolved in bulk (card 41c3f546 — see `listProjectMemoryEntries`,
- *  below) — a LIST caller must never let this fall through to the single-note path per row, since that
- *  is exactly the O(N²) cost {@link annotateBacklinksBulk} exists to replace. */
-function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlinksOverride?: string[]): ProjectMemoryEntryWithLinks {
+/** `backlinks` is a REQUIRED, already-resolved value — never an optional override with a per-note
+ *  fallback (card d305f1a2 residual: the old `backlinksOverride?` defaulted to {@link annotateBacklinks}'s
+ *  per-note DB round-trip when omitted, so a future LIST caller that forgot to pass it would silently
+ *  reintroduce the O(N²) cost {@link annotateBacklinksBulk} exists to replace, with no error and no test
+ *  failure — a doc comment was the only thing stopping it). Making it required moves that guarantee from
+ *  prose to the type system: `listProjectMemoryEntries` resolves its corpus-wide bulk value and passes it
+ *  in; `readProjectMemory` resolves its own single-note value via {@link annotateBacklinks} and passes
+ *  that. Neither caller can omit it. */
+function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlinks: string[]): ProjectMemoryEntryWithLinks {
   return {
     ...entry,
     requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds),
     everDelivered: entry.retrievalCount > 0,
-    backlinks: backlinksOverride ?? annotateBacklinks(db, projectId, entry.key),
+    backlinks,
   };
 }
 
@@ -405,9 +409,11 @@ export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemo
   return corpus.map((e) => withLinks(db, projectId, e, backlinksByKey.get(e.key) ?? []));
 }
 
-/** Read ONE note in full by key, annotated with its linked Requests' LIVE state (card e6d270b3). */
+/** Read ONE note in full by key, annotated with its linked Requests' LIVE state (card e6d270b3). An
+ *  on-demand single-note read, so it resolves its own backlinks via {@link annotateBacklinks} (the
+ *  per-note path) rather than the bulk resolver a listing amortizes across many rows. */
 export function readProjectMemory(db: Db, projectId: string, key: string): ProjectMemoryEntryWithLinks | { error: string } {
   const found = db.getProjectMemoryByKey(projectId, key.trim());
   if (!found) return { error: `no memory note with key "${key}" on this project` };
-  return withLinks(db, projectId, found);
+  return withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key));
 }

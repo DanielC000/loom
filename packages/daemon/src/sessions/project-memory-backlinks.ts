@@ -77,6 +77,32 @@ export interface InboundBacklink {
   key: string;
 }
 
+/** One corpus note paired with its already-extracted wikilink keys — computed once, shared by both
+ *  {@link findInboundBacklinks} and {@link findInboundBacklinksBulk} via {@link matchesFor} below. */
+interface EntryWithKeys {
+  entry: ProjectMemoryEntry;
+  keys: string[];
+}
+
+/**
+ * Card d305f1a2 — the match predicate (self-link exclusion + `keys.includes(targetKey)`) and the
+ * ordering (`updatedAt` desc, `key` asc tiebreak) used to be copied separately into {@link
+ * findInboundBacklinks} and {@link findInboundBacklinksBulk} — a real shared-unit-divergence risk held
+ * only by test/project-memory-backlinks.mjs's §2b equivalence check, not by structure. Both now call
+ * THIS function, so the two paths cannot diverge: there is exactly one implementation of "what counts as
+ * a backlink and how they're ordered" for either caller to run.
+ */
+function matchesFor(withKeys: EntryWithKeys[], targetKey: string, cap: number): { matches: InboundBacklink[]; totalFound: number } {
+  const matching = withKeys
+    .filter((x) => x.entry.key !== targetKey && x.keys.includes(targetKey))
+    .map((x) => x.entry)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+  return {
+    matches: matching.slice(0, cap).map((m) => ({ key: m.key })),
+    totalFound: matching.length,
+  };
+}
+
 /**
  * Every OTHER note in the project whose text wikilinks to `targetKey`, most-recently-updated first,
  * capped at `cap` (default {@link MAX_BACKLINKS}), alongside the TRUE total found (before the cap). A
@@ -93,6 +119,19 @@ export interface InboundBacklink {
  * corpus, run SYNCHRONOUSLY on the daemon's single event loop. A LIST caller must never call this per
  * row — use {@link findInboundBacklinksBulk}, which amortizes the corpus fetch and the per-note regex
  * extraction ONCE across every row instead of paying for either N times.
+ *
+ * **Card d305f1a2 — still O(N²), by measurement, deliberately:** re-measured live against this
+ * project's own real corpus (2026-09-04: 502 notes, ~1.5MB) — `findInboundBacklinksBulk` (below) over
+ * the WHOLE corpus runs in ~22ms; a uniform-key-length synthetic scaling series (1x/2x/4x/8x that same
+ * corpus) put the empirical growth exponent at ~1.75-1.90, consistent with the O(N²) shape this comment
+ * already predicted. Left unindexed anyway: this project's OWN `memory.maxNotes` config caps the
+ * UNPINNED population at 500 (owner decision #2, `evictProjectMemoryOverCap`) — live-checked the same
+ * day, 494 of 502 notes are unpinned and sitting right at that cap, with only 8 pinned (pinned notes are
+ * exempt from eviction and are the only unbounded growth path). Even at the platform-wide hard ceiling
+ * (`MEMORY_CONFIG_MAX.maxNotes` = 1000, i.e. ~2x today's corpus) the SAME scaling series measured only
+ * ~31ms. An inverted index would remove the asymptotic risk entirely, but the risk is currently bounded
+ * by config, not by luck — re-measure before reaching for it if `maxNotes` is ever raised meaningfully
+ * past its current default, or if the pinned population grows into the hundreds.
  */
 export function findInboundBacklinks(
   db: Db,
@@ -100,14 +139,8 @@ export function findInboundBacklinks(
   targetKey: string,
   cap: number = MAX_BACKLINKS,
 ): { matches: InboundBacklink[]; totalFound: number } {
-  const all = db.listProjectMemory(projectId);
-  const matching = all
-    .filter((m) => m.key !== targetKey && extractWikilinkKeys(m.text).includes(targetKey))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
-  return {
-    matches: matching.slice(0, cap).map((m) => ({ key: m.key })),
-    totalFound: matching.length,
-  };
+  const withKeys = db.listProjectMemory(projectId).map((entry) => ({ entry, keys: extractWikilinkKeys(entry.text) }));
+  return matchesFor(withKeys, targetKey, cap);
 }
 
 /**
@@ -116,13 +149,16 @@ export function findInboundBacklinks(
  * (see {@link findInboundBacklinks}'s own doc comment for the O(N²) cost this replaces). The caller
  * fetches `corpus` itself (typically `db.listProjectMemory(projectId)`) and passes it once;
  * `extractWikilinkKeys` then runs exactly ONCE per note — not once per note per target — and the
- * per-target match/sort runs as an array filter over those already-extracted key lists, never a fresh
- * regex scan, which is what turns the cost from O(N × corpus bytes) into O(N × average links-per-note).
+ * per-target match/sort runs through the SAME {@link matchesFor} helper {@link findInboundBacklinks}
+ * uses, over those already-extracted key lists, never a fresh regex scan — which is what turns the cost
+ * from O(N × corpus bytes) into O(N × average links-per-note) per target (still O(N²) overall; see the
+ * card d305f1a2 note on {@link findInboundBacklinks} above for why that's left as-is for now).
  *
  * Keyed by note `key`, with exactly one entry per note in `corpus`. Semantics — self-link exclusion,
  * most-recently-updated-first ordering, the `cap`/`totalFound` split — are IDENTICAL to calling
- * {@link findInboundBacklinks} once per note; this function changes only HOW the corpus is fetched and
- * scanned, never WHAT is returned.
+ * {@link findInboundBacklinks} once per note (now structurally so, both routing through {@link
+ * matchesFor}); this function changes only HOW the corpus is fetched and scanned, never WHAT is
+ * returned.
  */
 export function findInboundBacklinksBulk(
   corpus: ProjectMemoryEntry[],
@@ -131,14 +167,7 @@ export function findInboundBacklinksBulk(
   const withKeys = corpus.map((entry) => ({ entry, keys: extractWikilinkKeys(entry.text) }));
   const result = new Map<string, { matches: InboundBacklink[]; totalFound: number }>();
   for (const target of corpus) {
-    const matching = withKeys
-      .filter((x) => x.entry.key !== target.key && x.keys.includes(target.key))
-      .map((x) => x.entry)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
-    result.set(target.key, {
-      matches: matching.slice(0, cap).map((m) => ({ key: m.key })),
-      totalFound: matching.length,
-    });
+    result.set(target.key, matchesFor(withKeys, target.key, cap));
   }
   return result;
 }
