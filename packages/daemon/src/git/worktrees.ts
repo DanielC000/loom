@@ -3492,18 +3492,26 @@ const EMIT_COMPARE_SCRIPTS_PREFIX = "packages/daemon/scripts/";
  *  Adding a guard here means deciding against the criterion above, never "the filename matches so it
  *  belongs."
  *
- *  ⚠️ Card 6bb60fd0 — THE GLOB IS WRONG IN A SECOND, MORE DANGEROUS DIRECTION TOO: it would also DROP
- *  `fixed-wait-witness-guard.mjs` from this list. That guard is diff-scoped (it greps the real `git diff`,
- *  not the test corpus) and so contains ZERO `readdirSync` occurrences — a `readdirSync` filter cannot
- *  find it BY CONSTRUCTION. Dropping it would recreate exactly the defect card a18c39ba shipped to fix:
- *  the guard silently inert on precisely the diff class it polices.
+ *  ⚠️ Card 6bb60fd0 — THE GLOB IS WRONG IN A SECOND, MORE DANGEROUS DIRECTION TOO, AND THIS DIRECTION
+ *  MOVES ON ITS OWN CLOCK: a `readdirSync`-presence filter is not a reliable proxy for this list's
+ *  membership criterion in EITHER direction, independent of this array, so which specific files it wrongly
+ *  drops (or picks up) can change without this array changing at all. Card 5784fb8f caught exactly that:
+ *  this comment used to cite `fixed-wait-witness-guard.mjs` as a guard the glob could never find, reasoning
+ *  it "contains ZERO `readdirSync` occurrences … BY CONSTRUCTION" — true when written, false by
+ *  2026-09-04, once cards 40643460/21e12d47 gave it its own unrelated `readdirSync` call (a supplementary
+ *  untracked/uncommitted-file check, `listNulBearingTestFiles`) that has nothing to do with why it belongs
+ *  here (its CORE scan stays diff-scoped against `git diff`, per the criterion above, not the test corpus).
+ *  ⛔ Don't cite that file, or any other, as a standing counter-example — re-derive the current mismatch
+ *  yourself (`grep -l readdirSync packages/daemon/test/*guard*.mjs` vs. this array) before relying on one.
+ *  The defect this guarded against — dropping a guard from a naive glob and recreating what card a18c39ba
+ *  shipped to fix (a guard silently inert on precisely the diff class it polices) — is unaffected by any of
+ *  this: a glob is still the wrong way to build this list, regardless of which files it currently mismatches.
  *
- *  ⭐ THE SET RELATIONSHIP, ONCE: the `readdirSync` family and this list overlap in FOUR members and
- *  NEITHER CONTAINS THE OTHER — the family adds `emit-compare-soundness-guard.mjs` (deliberately excluded
- *  here, per the criterion above) and this list adds `fixed-wait-witness-guard.mjs` (deliberately included
- *  despite not matching the family's own `readdirSync` discriminator). A reader who assumes one is a
- *  subset of the other will reason wrongly in BOTH directions. Use `pnpm --filter @loom/daemon guards`
- *  (card 245a3708, below) to run exactly this list — never re-derive it from `readdirSync` or any other
+ *  ⭐ THE SET RELATIONSHIP, IN KIND, NOT IN COUNT: the `readdirSync` family and this list overlap
+ *  PARTIALLY and NEITHER CONTAINS THE OTHER, but the overlap size and the specific files on each side are
+ *  NOT stable facts to restate — they drift independently of this array (see above) and a prior version of
+ *  this very paragraph hardcoded a count that went stale. Use `pnpm --filter @loom/daemon guards` (card
+ *  245a3708, below) to run exactly this list — never re-derive it from `readdirSync` or any other
  *  implementation detail that was never the membership criterion.
  *
  *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `GUARD_BASENAMES` (consumed by `emit-compare-
