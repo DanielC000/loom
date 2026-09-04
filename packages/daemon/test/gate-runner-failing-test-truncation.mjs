@@ -206,7 +206,13 @@ const dir = mkdtempManaged("loom-gr-trunc-");
   //        file's full echo consume the budget before a later file's own diagnostic is ever reached.
   //        Hermetic (direct tracker feed, mirrors (A3)'s convention) — createFailureBlockTracker.feed() is
   //        a pure function of the bytes test-daemon.mjs's real epilogue would emit in the same order, so
-  //        this is the actual shared-budget mechanism, not a stand-in for it. ─────────────────────────────
+  //        this is the actual shared-budget mechanism, not a stand-in for it. ⭐ The SAME mechanism bites at
+  //        n=1 failing file too — a single file's own echoed body, uncapped by test-daemon.mjs, can exhaust
+  //        the whole budget on its own with nothing left for anything after it. Op `4f94abde` (card
+  //        `9966c52d`) is the production instance: its captured tail opens with the real `FAILURES:` header
+  //        and `batch-merge`'s own per-file entry, followed by ~130 of that SAME file's own echoed PASS
+  //        lines and CRLF advisories, then truncates mid-word — the header/entry survived, but whatever
+  //        would have printed after that one file's own flood did not. ─────────────────────────────────────
   {
     const SECOND_FILE_MARKER = "vault-push-status (exit 1): assertion for the SECOND failing file";
 
@@ -246,14 +252,18 @@ const dir = mkdtempManaged("loom-gr-trunc-");
   }
 
   // ── (A5) Card 87cdb15f DoD-2 — NO FALLBACK WHEN THE FAILURES: EPILOGUE IS NEVER REACHED, PROVEN: a real
-  //        spawn whose step TIMES OUT before test-daemon.mjs's own end-of-suite FAILURES: echo ever prints
-  //        (the general form of the live specimen card 9966c52d records for kickoff-real-spawn/batch-merge)
-  //        never triggers createFailureBlockTracker at all — result() stays undefined forever, since the
-  //        marker is never seen — so the richer per-file diagnostic recovery path this whole file otherwise
-  //        tests is completely unavailable, and the reader is left with only whatever SINGLE line
+  //        spawn whose step TIMES OUT before test-daemon.mjs's own end-of-suite FAILURES: echo ever PRINTS
+  //        AT ALL never triggers createFailureBlockTracker — result() stays undefined forever, since the
+  //        marker itself is never seen — so the richer per-file diagnostic recovery path this whole file
+  //        otherwise tests is completely unavailable, and the reader is left with only whatever SINGLE line
   //        createFailingTestTracker already scanned live (or nothing, for a shape matching no tier — see
-  //        the commitAll shape's own doc above `failingTest`). allowExtend:false on the timing-out arm so
-  //        the test doesn't wait out the one-time auto-extend window (GATE_EXTEND_IDLE_MS). ───────────────
+  //        the commitAll shape's own doc above `failingTest`). ⚠️ DISTINCT from (A4)'s specimen (card
+  //        `9966c52d`, op `4f94abde`): that run DID reach its own `FAILURES:` header — the marker fired,
+  //        the budget was exhausted by one file's own echoed body (see (A4)'s own doc). This gap is the
+  //        marker never firing in the first place, which is a genuinely different way to lose the same
+  //        diagnostic — real (proven below), but not yet observed live the way (A4)'s has been.
+  //        allowExtend:false on the timing-out arm so the test doesn't wait out the one-time auto-extend
+  //        window (GATE_EXTEND_IDLE_MS). ─────────────────────────────────────────────────────────────────
   {
     const STACK_DETAIL = "    at a deeper stack frame that only the FAILURES: echo ever carries";
     // A PASS-line flood ahead of the failure in both arms, sized well past OUTPUT_TAIL_BYTES (4096) — this
