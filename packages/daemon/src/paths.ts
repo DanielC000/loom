@@ -228,6 +228,12 @@ export const OBSIDIAN_PREFLIGHT_FRAGMENT = path.join(__dirname, "..", "assets", 
  * (`sessions/service.ts`'s `resolveCodescapeBlockText`); a missing/unreadable file (every non-dev,
  * non-self-host build, where this dir was curated out) degrades to no block — never a fallback string
  * embedded in source, which would defeat the whole point of moving it here.
+ *
+ * ⛔ STANDING COMMITMENT ON THE ASSET TEXT: `prompt-block.md` (the file this constant points at) is a
+ * cross-project measurement instrument — its TEXT must not change without recording a change boundary
+ * and disclosing the change to the Codescape peer unasked. This constant/comment may still be edited
+ * freely; only the asset file's own bytes are under the commitment. See project memory
+ * `codescape-prompt-block-is-a-measurement-instrument`.
  */
 export const CODESCAPE_PROMPT_BLOCK_ASSET = path.join(__dirname, "..", "assets", "skills", "codescape", "prompt-block.md");
 

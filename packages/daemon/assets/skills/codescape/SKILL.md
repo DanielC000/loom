@@ -55,3 +55,9 @@ If your repo also has `/graphify` (tree-sitter, forward-only), keep them distinc
 forward-orientation aid that under-reports reverse dependencies (never trust its `affected`). Codescape is
 richer — it does reverse/reachability AND returns coordinates — so its reachability answers are trustworthy
 where graphify's aren't. Don't carry graphify's reverse-dependency caveat over to Codescape.
+
+## Maintainer note (not part of using this skill)
+
+If you are EDITING this directory: `prompt-block.md` in this same directory is a cross-project
+measurement instrument — its text must not change without following the standing commitment recorded in
+project memory `codescape-prompt-block-is-a-measurement-instrument`.
