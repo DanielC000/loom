@@ -3326,6 +3326,7 @@ export async function changedSkillNames(
  *  paths into — see that function's own doc for why only these two, and why everything else fails closed. */
 const EMIT_COMPARE_SRC_PREFIX = "packages/daemon/src/";
 const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
+const EMIT_COMPARE_ASSETS_PREFIX = "packages/daemon/assets/";
 
 /** The static source-TEXT guards (Code Review, `docs/investigations/c4ccae66-.../findings.md`) — these
  *  grep raw file content rather than compiled behavior, so {@link computeEmitCompareGate}'s emit-compare
@@ -3466,6 +3467,89 @@ export const STATIC_GUARD_REPO_PATHS = [
   "packages/daemon/test/failing-test-tier-pairing-guard.mjs",
 ];
 
+/** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
+ *  {@link buildReducedGateCommand} whenever the diff touches that tree (card 3fbd95e0). Distinct from
+ *  {@link STATIC_GUARD_REPO_PATHS} above in ONE way: those always run, on every reduced gate, regardless of
+ *  diff shape; this list only needs to run when `packages/daemon/assets/**` is actually in the diff — same
+ *  conditional-inclusion shape {@link EmitCompareGateResult.changedTestFiles} already has for a changed test
+ *  file, not the unconditional one.
+ *
+ *  MEMBERSHIP CRITERION — a test belongs here only if it reads REAL, checked-in content from THIS repo's own
+ *  `packages/daemon/assets/**` tree such that editing that tree can change what the test observes or asserts.
+ *  That happens through TWO distinct routes, and a deriver must check BOTH, not just the first:
+ *    (1) a DIRECT read — a `__dirname`/`process.cwd()`-derived path into the tree, or an import of a
+ *        `paths.ts` constant that resolves there (e.g. `VAULT_LINT_SCRIPT`);
+ *    (2) an INDIRECT read THROUGH A SEED/STORE FUNCTION — the test calls `seedGlobalSkills()` (or another
+ *        function with the same shape) with `LOOM_ASSET_SKILLS` UNSET, so `skills/seed.ts`'s own
+ *        `process.env.LOOM_ASSET_SKILLS || path.join(__dirname, "..", "..", "assets", "skills")` resolves to
+ *        the real tree — the asset read sits on the FAR SIDE of the seed call, so the test's own source
+ *        carries no path token naming `assets/` anywhere near it (`platform-home.mjs`/
+ *        `skills-store-durability.mjs` are exactly this shape — card 3fbd95e0, Code Review finding: an
+ *        earlier derivation pass, scoped to route (1) alone, missed both). The mechanical question for route
+ *        (2), stated so a future deriver can ASK it rather than grep for a token that may not exist near the
+ *        read: "does this test call a seed/store function that reads the asset dir, with `LOOM_ASSET_SKILLS`
+ *        unset?" — `skills-seed-asset-override.mjs`/`skills-seed-asset-override-default.mjs`'s own
+ *        `LOOM_ASSET_SKILLS` overrides are the control that makes this discriminate at all: a test setting it
+ *        redirects `seedGlobalSkills()` to a SYNTHETIC dir and is excluded by the SAME question, not by a
+ *        separate rule.
+ *  ⛔ NOT a test that merely uses a SYNTHETIC fixture directory also named `assets` or `assets/skills` (a temp
+ *  dir under `os.tmpdir()`, or a throwaway git-fixture worktree built by the test itself) — that shape's
+ *  outcome depends on the `.ts` SOURCE CODE implementing the classification/seeding logic under test, not on
+ *  real asset CONTENT, so a real `assets/**` diff (no `.ts` change) cannot move it. `codescape-privacy-guard.mjs`
+ *  — the one file that DOES read real assets AND already sits in {@link STATIC_GUARD_REPO_PATHS} (it always
+ *  runs) — is deliberately OMITTED here rather than duplicated; see that array's own membership doc for why a
+ *  `.ts`-edit-only invalidator gets no seat on a conditional list. `working-tree-eol-guard.mjs` is the
+ *  identical case (also always-run, also omitted here).
+ *
+ *  ⚠️ THE BUILD-MIRROR INDIRECTION — name it, don't fall into it: `spawn-command-line-preflight.mjs` and
+ *  `kickoff-real-spawn.mjs` read `.claude/skills/worker/SKILL.md`, which `scripts/sync-claude-skills.mjs`
+ *  regenerates from `assets/skills/**` on every `pnpm build` — a THIRD route that looks like it should
+ *  qualify (an asset edit DOES eventually reach `.claude/skills/**`) but doesn't, because that mirror is
+ *  build-time, not diff-time: an assets-only diff with no rebuild in between leaves `.claude/skills/**` still
+ *  showing the OLD content, so neither of those two tests is actually sensitive to the changed diff at
+ *  classification time. NOT a hole today only because `skills-seed-asset-override-default.mjs` (already
+ *  certified, reads the real asset directly) goes red on the same edit FIRST — a future test using
+ *  `.claude/skills/**` as its ONLY oracle, with no certified direct-reader alongside it, WOULD be a genuine
+ *  miss this criterion cannot see. Do not add either file here to "cover" that gap; the fix, if this ever
+ *  stops being covered by a sibling, is a new criterion clause for the build-mirror route itself.
+ *
+ *  DERIVED BY HAND, ONCE (card 3fbd95e0 DoD-3), not by a glob — same posture {@link STATIC_GUARD_REPO_PATHS}
+ *  already documents and for the identical reason: a naive `grep -rl "assets/skills" packages/daemon/test/`
+ *  (the card's own starting point) both UNDER- and OVER-shoots this list. It MISSES real consumers of a
+ *  DIFFERENT `assets/**` subtree spelled differently — `ensure-obsidian.mjs` (`../assets/scripts/…`),
+ *  `skills-conditional.mjs` (`../assets/skill-fragments/…`), and `vault-lint.mjs` (imports `VAULT_LINT_SCRIPT`
+ *  from `paths.ts`, no literal `assets/` string in the test file at all) — plus the two route-(2) indirect
+ *  readers above, none of which contain the literal substring the card's own grep searched for. And it
+ *  WRONGLY INCLUDES `deploy-staleness.mjs` and `merge-gate-inert-diff.mjs`, both of which construct a
+ *  SYNTHETIC git fixture repo/worktree with a path merely SHAPED like `assets/skills/**` to exercise the `.ts`
+ *  classification logic under test — neither reads this repo's own real asset content, so a real
+ *  `assets/**`-only diff cannot move either one (verified by reading each file's own fixture setup, not
+ *  assumed from the grep hit).
+ *
+ *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `ASSET_TEST_BASENAMES` (consumed by the emit-compare
+ *  gate tests to assert each of these actually appears in a reduced gate command built for an assets-only
+ *  diff) is DERIVED from this list at test-load time, not hand-copied — same reuse discipline
+ *  `GUARD_BASENAMES` already established for {@link STATIC_GUARD_REPO_PATHS}, so an addition or removal here
+ *  needs no matching edit there.
+ */
+export const ASSET_READING_TEST_REPO_PATHS = [
+  "packages/daemon/test/codescape-prompt-block.mjs",
+  "packages/daemon/test/dev-server.mjs",
+  "packages/daemon/test/ensure-obsidian.mjs",
+  "packages/daemon/test/manager-context-block.mjs",
+  "packages/daemon/test/merge-orphaned-to-main.mjs",
+  "packages/daemon/test/platform-dev-flag.mjs",
+  "packages/daemon/test/platform-home.mjs",
+  "packages/daemon/test/redirect-discoverability.mjs",
+  "packages/daemon/test/serve-static.mjs",
+  "packages/daemon/test/serve-static-parity-guard.mjs",
+  "packages/daemon/test/skills-codescape-reconcile.mjs",
+  "packages/daemon/test/skills-conditional.mjs",
+  "packages/daemon/test/skills-seed-asset-override-default.mjs",
+  "packages/daemon/test/skills-store-durability.mjs",
+  "packages/daemon/test/vault-lint.mjs",
+];
+
 /** {@link computeEmitCompareGate}'s verdict. */
 export interface EmitCompareGateResult {
   /** `true` ⇒ the caller may run {@link buildReducedGateCommand}'s output in place of the real
@@ -3508,6 +3592,17 @@ export interface EmitCompareGateResult {
    *  never read as a silent, unaccounted-for drop. See {@link buildReducedGateCommand}'s caller in
    *  sessions/service.ts for where this is declared (`emitCompareWarning`). */
   inertPathsSkipped: string[];
+  /** Card 3fbd95e0: repo-relative paths of changed, non-excluded `packages/daemon/assets/**` paths — a
+   *  changed asset path never BLOCKS eligibility on its own; it only ever ADDS itself here AND causes
+   *  {@link buildReducedGateCommand} to fold {@link ASSET_READING_TEST_REPO_PATHS} into the reduced run
+   *  (unconditionally, the same "always run this fixed certified set" posture as the static guards — there
+   *  is no per-file identity proof for a markdown/script asset the way there is for a compiled `.ts` file, so
+   *  ANY change under this prefix, any status, widens to the whole certified set rather than trying to
+   *  predict which of it a given file could affect). Populated only when `eligible`. Diagnostic-only past
+   *  that — surfaced by the caller in its own reduced-gate warning, same discipline
+   *  {@link notHermeticExcluded}/{@link inertPathsSkipped} above already follow, so a reduced gate never
+   *  silently drops accounting for why the certified asset-reading tests ran. */
+  changedAssetPaths: string[];
   /** Count of changed compiled `.ts` files proven transpile-identical — diagnostic only, surfaced by the
    *  caller so a skip is never silent (card 2154b6ad DoD-5). */
   identicalFileCount: number;
@@ -3579,7 +3674,11 @@ export interface EmitCompareGateResult {
  * {@link isInertMergeDiff} above, which proves a diff can skip the gate ENTIRELY: this proves only that the
  * diff's COMPILED BEHAVIOR is unchanged, so `pnpm build` (real typecheck) and the static source-text guards
  * below still run UNCONDITIONALLY — only the runtime test suite itself is ever skipped, and only for
- * `packages/daemon/src/**\/*.ts` and a changed `test/*.mjs` file (handled separately below); a path already
+ * `packages/daemon/src/**\/*.ts`, a changed `test/*.mjs` file, and a changed `packages/daemon/assets/**` path
+ * (card 3fbd95e0 — the last of these carries no proof of unchanged behavior, unlike the compiled-file
+ * comparison above; it only widens the run to include {@link ASSET_READING_TEST_REPO_PATHS}, the certified
+ * set of tests that actually read that tree, same "always run this fixed set, never predict a narrower one"
+ * posture as the static guards); a path already
  * certified inert by {@link INERT_MERGE_PATH_PREFIXES} is SKIPPED from classification entirely rather than
  * gating (card b97f643d — see that skip's own doc, just above the classification loop below, for why this
  * is sound: {@link isInertMergeDiff} must prove nothing anywhere in the gate reads the path at all, while
@@ -3680,8 +3779,8 @@ export async function computeEmitCompareGate(
   // and an unparseable line, none of which are verdicts about reducibility). Two explicitly-named
   // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
-  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], identicalFileCount: 0, reason, notApplicable: false });
-  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], identicalFileCount: 0, reason, notApplicable: true });
+  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: false });
+  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: true });
   const { git, timeoutMs } = boundedGit(repoPath, deps);
 
   let entries: string[];
@@ -3712,6 +3811,9 @@ export async function computeEmitCompareGate(
   // Card 8ee4f11e: paths short-circuited by the `isInertMergePath(p)` skip just below — see
   // EmitCompareGateResult.inertPathsSkipped's own doc for why this must be surfaced, not just dropped.
   const inertPathsSkipped: string[] = [];
+  // Card 3fbd95e0: changed packages/daemon/assets/** paths — see EmitCompareGateResult.changedAssetPaths's
+  // own doc for why ANY status here (not just "M") widens to the whole ASSET_READING_TEST_REPO_PATHS set.
+  const changedAssetPaths: string[] = [];
   // Lazily loaded (only if a test/*.mjs path with a subdirectory actually shows up below) and cached for
   // the rest of this call. `undefined` = not attempted yet; `null` = attempted and failed (fail closed);
   // a `Set` = the real names, loaded straight from THIS diff's own worktree copy of test-daemon.mjs.
@@ -3822,6 +3924,16 @@ export async function computeEmitCompareGate(
       // status "D" (deleted): nothing left to run directly; the guards below still cover its blast radius.
       continue;
     }
+    // Card 3fbd95e0: a changed packages/daemon/assets/** path never blocks eligibility on its own — unlike
+    // the compiled-.ts case above, there is no transpile-identity (or any other) proof available for a
+    // markdown/script asset, so this doesn't try to prove the change is behavior-inert. It only records the
+    // path here; buildReducedGateCommand widens to run the whole certified ASSET_READING_TEST_REPO_PATHS set
+    // whenever this list is non-empty. Every status (A/M/D) is accepted — a deleted or renamed-away asset can
+    // still change what a certified test observes (e.g. skills-seed-asset-override-default.mjs reading the
+    // real assets/skills/worker/SKILL.md), and unlike a test/*.mjs path this string is never interpolated
+    // into a shell command (the reduced command always runs the FIXED certified list by name, never this
+    // path), so none of the shell-safety/excluded-dir checks above apply here.
+    if (p.startsWith(EMIT_COMPARE_ASSETS_PREFIX)) { changedAssetPaths.push(p); continue; }
     // Card 2db8a3dd: THE primary structural case — a repo whose sources don't live under
     // `packages/daemon/src|test/` (i.e. every project that isn't Loom's own daemon package) fails HERE, on
     // the first changed path, every time, before any other classification below is even consulted. Also
@@ -3831,7 +3943,7 @@ export async function computeEmitCompareGate(
     return notApplicableHere(`path outside emit-compare scope: ${p}`);
   }
 
-  if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0) {
+  if (changedTsFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0 && changedAssetPaths.length === 0) {
     // Every remaining changed path was a DELETED test/*.mjs file, or one already certified inert by
     // INERT_MERGE_PATH_PREFIXES and skipped above (card b97f643d) — an excluded-dir (fixtures/, census/)
     // path already returned notEligible above (card 44968963), so it can never reach here. Nothing left
@@ -3884,7 +3996,7 @@ export async function computeEmitCompareGate(
     }
   }
 
-  return { eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, identicalFileCount: changedTsFiles.length, notApplicable: false };
+  return { eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, changedAssetPaths, identicalFileCount: changedTsFiles.length, notApplicable: false };
 }
 
 /**
@@ -4057,11 +4169,21 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  are also enforced by the caller before a path ever reaches `changedTestFiles`. The caller is
  *  responsible for declaring any excluded name by name in the merge result (`emitCompareWarning` in
  *  sessions/service.ts) — a silent drop would gate a branch while quietly verifying nothing for those
- *  files. */
-export function buildReducedGateCommand(changedTestFiles: string[]): string {
+ *  files.
+ *
+ *  `changedAssetPaths` (card 3fbd95e0), when non-empty, folds every name in {@link
+ *  ASSET_READING_TEST_REPO_PATHS} into the SAME `--only=` list (de-duplicated against `changedTestFiles`,
+ *  same harness invocation, no second `test:daemon` step) — unconditionally, regardless of which specific
+ *  asset path(s) changed, same "run the fixed certified set" posture the static guards above already have.
+ *  Defaults to `[]` so every pre-existing call site (none of which know about assets yet) stays
+ *  byte-identical. */
+export function buildReducedGateCommand(changedTestFiles: string[], changedAssetPaths: string[] = []): string {
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
-  if (changedTestFiles.length > 0) {
-    const names = changedTestFiles.map((p) => p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length));
+  const testPaths = changedAssetPaths.length > 0
+    ? [...new Set([...changedTestFiles, ...ASSET_READING_TEST_REPO_PATHS])]
+    : changedTestFiles;
+  if (testPaths.length > 0) {
+    const names = testPaths.map((p) => p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length));
     steps.push(`pnpm --filter @loom/daemon test:daemon --only=${names.join(",")}`);
   }
   return steps.join(" && ");

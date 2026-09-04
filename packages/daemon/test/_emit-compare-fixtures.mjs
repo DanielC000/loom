@@ -30,10 +30,14 @@ export const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
 // dist/git/worktrees.js, exactly like every other test file that needs something from that module (e.g.
 // `await import("../dist/git/worktrees.js")` throughout this test/ dir) — so, like those, this fixture
 // needs `pnpm --filter @loom/daemon build` to have run first; nothing here re-derives that freshness check.
-const { STATIC_GUARD_REPO_PATHS } = await import(
+const { STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS } = await import(
   pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "git", "worktrees.js")).href
 );
 export const GUARD_BASENAMES = STATIC_GUARD_REPO_PATHS.map((p) => path.posix.basename(p));
+// Card 3fbd95e0: DERIVED from the real ASSET_READING_TEST_REPO_PATHS (git/worktrees.ts), same reuse
+// discipline as GUARD_BASENAMES immediately above — never hand-copied, so an addition/removal there needs
+// no matching edit here.
+export const ASSET_TEST_BASENAMES = ASSET_READING_TEST_REPO_PATHS.map((p) => p.slice("packages/daemon/test/".length, -".mjs".length));
 
 // Card 815b4b30: (I)/(J)/(K) (in emit-compare-gate-scope.mjs) need each fixture repo to carry a REAL,
 // importable packages/daemon/scripts/test-daemon.mjs so `loadExcludedTestDirNames` (git/worktrees.ts) can

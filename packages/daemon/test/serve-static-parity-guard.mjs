@@ -29,34 +29,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // collapsing that is a distribution change well beyond what this guard is for. Do not change either file's
 // behavior here — that belongs to whatever card is fixing the actual bug (e.g. `cb1101a0`).
 //
-// ⚠️ STATIC_GUARD_REPO_PATHS MEMBERSHIP (card 36b21c1a DoD-5) — DECIDED: NOT ADDED, and this reverses the
-// card's own framing, verified against the tree rather than inherited from it. `git/worktrees.ts`'s
-// membership criterion (card a1734000): "a guard belongs there only if something OTHER than a behavioural
-// .ts edit can invalidate what it asserts" — because a behavioural .ts edit ALREADY fails the emit-compare
-// reduced path closed to the full gate, where every guard under packages/daemon/test/ runs anyway via the
-// corpus walk (`walkMjsFiles` in scripts/test-daemon.mjs, confirmed to include this file: it excludes only
-// `fixtures/`/`census/` subtrees and `_`-prefixed names, neither of which applies here).
-//   The card assumed an `assets/**` edit — the only thing that can invalidate THIS guard's assertion — does
-//   NOT force a full gate. Read directly against `computeEmitCompareGate` and `isInertMergeDiff`
-//   (git/worktrees.ts), that's backwards: `INERT_MERGE_PATH_PREFIXES` is `["docs/"]` only (an assets/**
-//   path is never inert-skip-eligible), and `computeEmitCompareGate` classifies ONLY
-//   `packages/daemon/src/*.ts` and `packages/daemon/test/*.mjs` paths as eligible for the reduced path,
-//   plus (card b97f643d, added AFTER this note was first written — re-verified still true for `assets/**`,
-//   not silently inherited) a third class of path already certified inert by `INERT_MERGE_PATH_PREFIXES`,
-//   which is SKIPPED from consideration rather than blocking eligibility — any changed path outside all
-//   three (assets/** included, since it's on none of them) still hits `notEligible("path outside
-//   emit-compare scope")` or the function's empty-set guard, either of which `sessions/service.ts` maps
-//   straight to `effectiveGate = gate` (the FULL gate, unreduced).
-//   So an edit to either serve-static.mjs copy ALWAYS takes the full gate, exactly like a behavioural .ts
-//   edit does — it is never reachable-but-unrun on a reduced path, by the criterion's own terms. Adding this
-//   guard to STATIC_GUARD_REPO_PATHS would cost a second hand-maintained list entry (plus the
-//   GUARD_BASENAMES mirror in emit-compare-gate.mjs — see that file's own doc for why the omission direction
-//   fails silently) to protect against a code path that can't happen. Re-derive this if
-//   `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`/`INERT_MERGE_PATH_PREFIXES` ever widen to cover
-//   `assets/**`, OR if a new exempt-path class is ever added to `computeEmitCompareGate`'s classification
-//   loop (the card b97f643d shape: a new SKIPPED-not-blocking category, distinct from widening an existing
-//   allowlist) — either would reopen the question this note just closed, and neither is guaranteed to be
-//   caught by re-reading only the three named constants above.
+// ⚠️ STATIC_GUARD_REPO_PATHS MEMBERSHIP (card 36b21c1a DoD-5) — RE-DECIDED (card 3fbd95e0): the premise
+// this note used to rest on — that `computeEmitCompareGate` has no `assets/**` scope at all, so an edit here
+// ALWAYS forces the full gate regardless of any list — is no longer true. `computeEmitCompareGate`
+// (git/worktrees.ts) now ALSO classifies a changed `packages/daemon/assets/**` path (any status), and an
+// assets-only diff DOES reduce. That reopens exactly the question this note's prior version predicted it
+// would ("re-derive this if EMIT_COMPARE_SRC_PREFIX/EMIT_COMPARE_TEST_PREFIX/INERT_MERGE_PATH_PREFIXES ever
+// widen to cover assets/**") — this file's own assertion CAN now be invalidated by an assets/**-only edit
+// (perturb either tracked `serve-static.mjs` copy, touching nothing else) that takes the reduced path, and
+// this guard is reachable-but-unrun there unless it's on SOME list a reduced gate always consults.
+//   STILL NOT `STATIC_GUARD_REPO_PATHS`, though — that array's own membership criterion ("a guard belongs
+//   there only if something OTHER than a behavioural .ts edit can invalidate what it asserts") describes a
+//   guard that must run on EVERY reduced gate, regardless of diff shape. This guard's ONLY invalidator is an
+//   `assets/**` edit specifically, so it belongs on the NARROWER, conditional list instead:
+//   `ASSET_READING_TEST_REPO_PATHS` (git/worktrees.ts) — added there, run only when the diff actually
+//   touches `packages/daemon/assets/**`, same reasoning that array's own membership doc gives for
+//   `codescape-privacy-guard.mjs`'s DELIBERATE omission from it (that one already sits in the unconditional
+//   `STATIC_GUARD_REPO_PATHS` instead, so it needs no second, conditional seat).
 //
 // ✅ POSITIVE CONTROL (run manually, not part of this file's own execution — pasted in the task report,
 // same convention as clock-path-regression-guard.mjs):

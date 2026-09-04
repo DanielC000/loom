@@ -17,7 +17,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -13728,6 +13728,11 @@ export class SessionService {
     // EmitCompareGateResult.inertPathsSkipped's own doc, git/worktrees.ts). Diagnostic only, surfaced below
     // via emitCompareWarning so a reduced gate never silently drops accounting for these paths either.
     let emitCompareInertPathsSkipped: string[] = [];
+    // Card 3fbd95e0: changed packages/daemon/assets/** paths — see
+    // EmitCompareGateResult.changedAssetPaths's own doc (git/worktrees.ts) for why ANY such path widens the
+    // reduced gate to the whole certified ASSET_READING_TEST_REPO_PATHS set. Diagnostic only, same as its
+    // siblings above — surfaced below via emitCompareWarning.
+    let emitCompareAssetPaths: string[] = [];
     // Card 2db8a3dd: `true` only when `computeEmitCompareGate` itself said the predicate could not have
     // been eligible for THIS repo's layout at all (see `EmitCompareGateResult.notApplicable`'s own doc,
     // git/worktrees.ts) — NOT re-derived here, just carried. Gates the two `emitCompareReduced` record
@@ -14417,6 +14422,7 @@ export class SessionService {
           emitCompareTestFiles = emitCompare.changedTestFiles;
           emitCompareNotHermeticExcluded = emitCompare.notHermeticExcluded;
           emitCompareInertPathsSkipped = emitCompare.inertPathsSkipped;
+          emitCompareAssetPaths = emitCompare.changedAssetPaths;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
           // Card 4def0708: the predicate DID run and decided this diff IS applicable (it's eligible for
           // the reduced gate) — an explicit `false` here, not left to fall through on the new
@@ -14430,7 +14436,7 @@ export class SessionService {
       // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
       // `reunionAtAdmission` below when a branch/main move during the CAP-queue wait invalidates this
       // pre-wait classification — see that function's own doc for the full mechanism.
-      let effectiveGate = emitCompareSkip ? buildReducedGateCommand(emitCompareTestFiles) : gate;
+      let effectiveGate = emitCompareSkip ? buildReducedGateCommand(emitCompareTestFiles, emitCompareAssetPaths) : gate;
 
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
@@ -14654,8 +14660,9 @@ export class SessionService {
               emitCompareTestFiles = reclassified.changedTestFiles;
               emitCompareNotHermeticExcluded = reclassified.notHermeticExcluded;
               emitCompareInertPathsSkipped = reclassified.inertPathsSkipped;
+              emitCompareAssetPaths = reclassified.changedAssetPaths;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
-              effectiveGate = buildReducedGateCommand(emitCompareTestFiles);
+              effectiveGate = buildReducedGateCommand(emitCompareTestFiles, emitCompareAssetPaths);
               // Card 4def0708: mirrors the pre-wait classification's own explicit `false` on its
               // `eligible:true` branch, above — the re-derivation DID run and decided this diff is
               // applicable.
@@ -14673,6 +14680,7 @@ export class SessionService {
               // pre-wait values was harmless today — but it left a reduction that never happened one
               // ungated read away from surfacing. Two lines, no behavior change for any current reader.
               emitCompareTestFiles = [];
+              emitCompareAssetPaths = [];
               emitCompareIdenticalCount = 0;
               // Card 2db8a3dd (DEFAULT CORRECTED, card 4def0708): carry the re-derivation's own
               // applicability verdict when it ran one (`reclassified` defined but not eligible). An
@@ -15654,8 +15662,14 @@ export class SessionService {
     const emitCompareIsolationCaveat = emitCompareTestFiles.length
       ? ` ⚠️ ${emitCompareTestFiles.length === 1 ? "this changed test file was" : `these ${emitCompareTestFiles.length} changed test files were`} run in ISOLATION (\`test:daemon --only=\`); if ${emitCompareTestFiles.length === 1 ? "its" : "their"} defect class is order-dependent (passes standalone, fails only in the full suite), this green is not evidence either way (card cf4aa7d1).`
       : "";
+    // Card 3fbd95e0: a changed packages/daemon/assets/** path never blocks eligibility, but it widens the
+    // run to ASSET_READING_TEST_REPO_PATHS in full (see that array's own doc, git/worktrees.ts) — named
+    // here so a reduced gate never reads as silently having verified nothing for the changed asset(s).
+    const emitCompareAssetClause = emitCompareAssetPaths.length
+      ? `; ${emitCompareAssetPaths.length} asset path(s) changed under packages/daemon/assets/** (${emitCompareAssetPaths.join(", ")}) — ran the ${ASSET_READING_TEST_REPO_PATHS.length} certified asset-reading test(s) too (card 3fbd95e0)`
+      : "";
     const emitCompareWarning = emitCompareSkip
-      ? `merge gate reduced: ${emitCompareCompiledClause} — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}${emitCompareIsolationCaveat}`
+      ? `merge gate reduced: ${emitCompareCompiledClause} — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}${emitCompareAssetClause}${emitCompareIsolationCaveat}`
       : undefined;
     // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the
