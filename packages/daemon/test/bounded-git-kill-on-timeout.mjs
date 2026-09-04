@@ -45,7 +45,10 @@ const { withTimeout, withTimeoutKillingChild, boundedSimpleGit } = await import(
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const GIT_ID = "-c user.email=killtest@loom -c user.name=killtest";
+// ONE identity declaration (argv form), reused both for the shell-string form :149's execSync needs and
+// for the argv-array form attemptCommit's git.raw() calls need below — never hardcode the identity twice.
+const GIT_ID_ARGV = ["-c", "user.email=killtest@loom", "-c", "user.name=killtest"];
+const GIT_ID = GIT_ID_ARGV.join(" ");
 
 const TIMEOUT_MS = 300; // tiny bound under test — our OWN kill-trigger timer.
 const HOOK_TICKS = 50;
@@ -203,11 +206,14 @@ async function attemptCommit({ kill, message, timeoutMs = TIMEOUT_MS, killGraceM
   if (kill) {
     const controller = new AbortController();
     const git = boundedSimpleGit(repo, timeoutMs, undefined, controller.signal);
-    await withTimeoutKillingChild(git.raw(["commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`, controller, killGraceMs)
+    // GIT_ID_ARGV (not ambient identity — see its own doc): identity resolution runs BEFORE git invokes
+    // the pre-commit hook at all, so on a host with no ambient git identity configured this commit would
+    // otherwise fail near-instantly with "unable to auto-detect email address", never reaching the hook.
+    await withTimeoutKillingChild(git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`, controller, killGraceMs)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   } else {
     const git = boundedSimpleGit(repo, timeoutMs);
-    await withTimeout(git.raw(["commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`)
+    await withTimeout(git.raw([...GIT_ID_ARGV, "commit", "--allow-empty", "-m", message]), timeoutMs, `git commit (${message})`)
       .catch((e) => { rejected = true; rejectMessage = e?.message ?? String(e); });
   }
   // Captured BEFORE the hookStarted poll below, deliberately: the [green]/[red] elapsed-based checks
