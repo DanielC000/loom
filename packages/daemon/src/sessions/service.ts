@@ -9642,7 +9642,11 @@ export class SessionService {
         // already null-mapped its `senderId` at ORIGINAL enqueue time (card 6439c51f, `coalesceSenderIdentity`,
         // pty/host.ts) — every entry in `live.pending` carries either a genuine id or `null`, never the raw
         // `"system"` sentinel, so carrying `m.senderId` verbatim here is always already-normalized.
-        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, undefined, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
+        // Card 4d9f7471: also carry `m.questionId` — this loop is the ONLY carry site that omitted it (the
+        // companion-upgrade re-pin/resume carries at 3864/3902 already thread `msg.questionId` through). A
+        // still-queued answered-question nudge that survives to a recycle used to lose its tag here, so
+        // `purgeAnsweredQuestionNudges`/`purgeQueuedByQuestionIds` could never match it on the successor.
+        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, m.questionId, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
       }
     }
     // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival
@@ -9662,7 +9666,21 @@ export class SessionService {
       // successor, so `purgeQueuedByReportEventIds` can never later drop it once `worker_report_get` reads
       // the report it announces. `undefined` for every non-report record, byte-identical to before.
       const reportEventId = typeof rec.detail?.reportEventId === "string" ? rec.detail.reportEventId : undefined;
-      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId });
+      // Card 4d9f7471: also carry `kind`/`rootMsgId`/`chainDepth` back out of `rec.detail` — the SAME fields
+      // the `session_message_gave_up` link event a few lines below already reads off this exact `rec.detail`
+      // for its own audit trail (proof this is an oversight, not a design choice: the read-back expressions
+      // already existed two lines away and simply weren't reused here). Without this, `enqueueDurableMessage`
+      // defaults every re-mint to `kind:"agent"`/self-rooted/depth-0 (service.ts's own defaults), so a still-
+      // unresolved `kind:"warning"` record (settle/watchdog/give-up nudges — plenty live at any time) silently
+      // flips to one-per-turn "agent" delivery on the successor, and the give-up chain's lineage is severed.
+      const kind: QueuedMessageKind | undefined = rec.detail?.kind === "warning" ? "warning" : rec.detail?.kind === "agent" ? "agent" : undefined;
+      const rootMsgId = typeof rec.detail?.rootMsgId === "string" ? rec.detail.rootMsgId : undefined;
+      // chainDepth is carried VERBATIM, deliberately NOT `+1` like handleGiveUpExhausted's own give-up re-mint
+      // (service.ts, `chainDepth: chainDepth + 1`) — chainDepth is a spend-down BUDGET gating further re-mint
+      // attempts (`GIVE_UP_REMINT_LIMIT`), and a recycle is a lifecycle event, not a delivery failure: it
+      // should preserve the remaining give-up budget, not consume a unit of it just for surviving a recycle.
+      const chainDepth = typeof rec.detail?.chainDepth === "number" ? rec.detail.chainDepth : undefined;
+      const reminted = this.enqueueDurableMessage(successorId, carriedText, { sender, taskId: rec.taskId ?? null, reportEventId, kind, rootMsgId, chainDepth });
       // Card af995d1d: LINK the old msgId to the new one (see this method's own doc above) so a sender
       // still holding the OLD msgId can resolve it forward instead of reading "pending" forever.
       const oldMsgId = typeof rec.detail?.msgId === "string" ? rec.detail.msgId : undefined;
