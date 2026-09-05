@@ -59,7 +59,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -1031,9 +1031,24 @@ function deriveDeployGateVerdict(
  * while running, gone forever the moment it settled (see this card's own worker_report for the full
  * mechanism trace). Called directly, once, right after the `runExclusive` `await` resolves (or is
  * cancelled/errors) — mirroring `deriveDeployGateVerdict`'s own call shape exactly. `result` is the plain
- * {@link GateSequentialResult} the batch's shared gate run produced; `gateStartedAt` is the epoch-ms GATE
- * START (post-admission) instant `GateSemaphore.runExclusive` itself stamped for THIS op, the SAME clock
- * the batch's own `build_gate` audit event already reads (never a second, independently-computed one).
+ * {@link GateSequentialResult} the batch's shared gate run produced.
+ *
+ * `attempt1DurationMs` — CORRECTED (Code Review, card 67030bb9 finding [1]): an earlier version of this
+ * function took a raw `gateStartedAt` (the epoch-ms GATE START instant) and computed `durationMs` itself as
+ * `nowMs - gateStartedAt` at the call site's own settle point — AFTER the multi-file retry (this file's own
+ * `mergeBatch`) may already have run its own separate, later `runExclusive` admission. That made a retried
+ * batch's `durationMs` an unbounded, mixed span (attempt 1's admission through the retry's own admission and
+ * run) that corresponded to neither admission the rest of the row describes. This parameter is now the
+ * ALREADY-COMPUTED attempt-1-bounded duration (`batchGateAttempt1DurationMs`, captured at the call site right
+ * after attempt 1's own admission settled and before the retry ever runs) — mirroring `confirmWorkerMerge`'s
+ * own `gateAttempt1DurationMs` fix (card b9e07a4a) exactly, for the identical reason.
+ *
+ * `batchBranchCount` (Code Review, card 67030bb9 finding [5]): the batch's own landed branch count
+ * (`landedCount` at the call site) — stored so a `gate_status(opId)` read of a retry-assisted batch pass can
+ * render the batch-specific `formatWeakerPassWarning` wording (naming HOW MANY branches a retry-assisted
+ * pass actually landed) even when the live `[loom:merge-batch-done]` nudge that already renders it was
+ * missed (a recycle, a restart, a successor reading history later) — see that call site for the full gap
+ * this closes.
  *
  * INCLUDES `settledAt`/`totalDurationMs` — CORRECTED (Code Reviewer `7933b507`, card be260976): an earlier
  * version of this doc argued these should be OMITTED because the tombstone mints "just before `runExclusive`
@@ -1074,8 +1089,8 @@ function deriveDeployGateVerdict(
  * also handed to this payload.
  */
 function deriveBatchGateVerdict(
-  result: GateSequentialResult, gateStartedAt: number, opMintedAtMs: number, nowMs: number,
-  gateCap: number, concurrentGates: number, concurrentGatesMax: number,
+  result: GateSequentialResult, attempt1DurationMs: number, opMintedAtMs: number, nowMs: number,
+  gateCap: number, concurrentGates: number, concurrentGatesMax: number, batchBranchCount: number,
   // Card 67030bb9: the SAME measured-negative retry pair `deriveMergeGateVerdict` writes unconditionally
   // (real value or `null`, never silently `undefined`) — see `PendingGateOpVerdict.retriedFile`'s own doc.
   // Optional purely so every OTHER existing caller of this function stays byte-identical; the one real
@@ -1085,13 +1100,13 @@ function deriveBatchGateVerdict(
   return {
     kind: result.passed ? "pass" : "fail",
     payload: {
-      durationMs: nowMs - gateStartedAt,
+      durationMs: attempt1DurationMs,
       settledAt: new Date(nowMs).toISOString(),
       totalDurationMs: nowMs - opMintedAtMs,
       steps: result.steps,
       outputTail: result.outputTail,
       ...(result.outputFile ? { outputFile: result.outputFile } : {}),
-      gateCap, concurrentGates, concurrentGatesMax,
+      gateCap, concurrentGates, concurrentGatesMax, batchBranchCount,
       ...(retryInfo ? {
         retriedFile: retryInfo.retriedFile ?? null,
         retryPassed: retryInfo.retryPassed ?? null,
@@ -4656,6 +4671,12 @@ export class SessionService {
      *  this before treating any settled "merge" pass as trustworthy on its own. Absent (never an empty
      *  string) whenever `retriedFile` is `null` or `undefined`. */
     retryWarning?: string;
+    /** Code Review, card 67030bb9 finding [5]: present ONLY on a "merge" row produced by `mergeBatch` — the
+     *  batch's own landed branch count, fed into `retryWarning`'s `formatWeakerPassWarning` call above so a
+     *  retry-assisted BATCH pass renders the batch-specific wording ("landed N branches") even when the live
+     *  `[loom:merge-batch-done]` nudge that already renders it was missed. `undefined` on a plain solo merge
+     *  or a row that predates this field. */
+    batchBranchCount?: number;
     /** Card a0d1165c, sibling of `retriedFile`/`retryPassed`/`retryWarning` immediately above — the SAME
      *  durable exposure for the OTHER retry that can produce a `passed:true` settled merge, the
      *  TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a killed/timed-out attempt 1 auto-retries the WHOLE gate
@@ -4763,7 +4784,11 @@ export class SessionService {
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
           // is passed through so the formatter can tell a genuine timeout kill apart from an assertion
           // failure — see `formatWeakerPassWarning`'s own doc.
-          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile, payload?.outputTail) } : {}),
+          // Code Review, card 67030bb9 finding [5]: `payload?.batchBranchCount` is `undefined` on a plain
+          // solo merge (formatWeakerPassWarning renders its solo wording), and a real landed count on a
+          // batch op — see `PendingGateOpVerdict.batchBranchCount`'s own doc for the gap this closes.
+          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) } : {}),
+          ...(payload?.batchBranchCount !== undefined ? { batchBranchCount: payload.batchBranchCount } : {}),
           // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
           // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,
           // not silence) and the same "derive the warning text, gated on truthy, via the ONE shared
@@ -14308,6 +14333,14 @@ export class SessionService {
     // the overwhelming majority of merges (no such retry ever fired).
     let retriedFile: string | undefined;
     let retryPassed: boolean | undefined;
+    // Code Review, card 67030bb9 finding [3]: hoisted alongside `retriedFile`/`retryPassed` for the SAME
+    // reason — records WHY `identifyRetriableTestFiles` declined, when it was actually called, so a
+    // rejection like gate `1af9138e` (a clean, single-file, retriable-SHAPED failure that still recorded
+    // `retriedFile:null`) is explainable after the fact from `gate_history` instead of needing a fresh
+    // live repro. `undefined` whenever the outer `gateRan && !gateResult.passed && classifyGateFailure(...)
+    // === "genuine"` guard itself is false — a different, separately-recorded decline, not one
+    // `identifyRetriableTestFiles` ever saw.
+    let retryDeclineReason: RetryDeclineReason | undefined;
     // Card 39da2570: hoisted to THIS outer scope for the SAME reason as `retriedFile`/`retryPassed` just
     // above — the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block that
     // sets this (see the TRANSIENT-KILL AUTO-RETRY block below), so a `let` declared inside that block
@@ -15522,6 +15555,8 @@ export class SessionService {
           // this absorbs the retry into `gateResult.passed` for the squash decision below but NEVER erases
           // the fact that a retry happened. Never looped: this runs exactly once regardless of outcome.
           if (retryPassed) gateResult = { ...gateResult, passed: true };
+        } else {
+          retryDeclineReason = identification.declineReason;
         }
       }
       // Card 3aec1df6: a `gate_history` row can name the SAME op `gate_status(opId)` would return full
@@ -15557,6 +15592,10 @@ export class SessionService {
         // `gate_history` shows the weaker-pass shape directly, on both a resulting pass and a resulting
         // rejection (a retry that also failed still recorded a retry was attempted).
         ...(retriedFile ? { retriedFile, retryPassed } : {}),
+        // Code Review, card 67030bb9 finding [3]: mutually exclusive with `retriedFile` above (a retry is
+        // either identified, above, or declined, here, never both on the same op) — see
+        // `retryDeclineReason`'s own doc for why this is captured at all.
+        ...(retryDeclineReason ? { retryDeclineReason } : {}),
       });
       if (gateRan) {
         if (gateResult.failedTimedOut) {
@@ -16541,6 +16580,12 @@ export class SessionService {
     const target = resolveRepoByKey(project, chosen[0]!.repoKey);
     const gate = target.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    // Code Review, card 67030bb9 finding [4]: the SAME injectable seam every other merge-gate call site in
+    // this file already uses (confirmWorkerMerge, deployOwnProject, runWorkerGate) — this batch path was
+    // the ONE gate call site bypassing it, calling `runGateSequential` directly, which left the ~70 lines
+    // of retry logic below (this card's own PRIMARY gap) structurally untestable with the existing
+    // `{ runGate: fakeGate }` test-double fixture every other gate path's tests already use.
+    const runGateSeq = this.runGate ?? runGateSequential;
     if (!gate) {
       const fallback = await runFallback([
         ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: "no gateCommand configured for this repo — nothing to share a gate over" })),
@@ -16604,7 +16649,6 @@ export class SessionService {
             // REQUESTED set; the landed count only exists once `runGate` is called back with it, so that half is
             // spread on at the `runExclusive` site below.
             const descriptor: GateDescriptor = { gateType: "merge", projectId: finalProjectId, sessionId: managerSessionId, taskId: null, branch: null, opId, repoPath: finalRepoPath, worktreePath, batchBranches: branchIdentities.map((b) => b.branch) };
-            let holdOnPass = false;
             let r: GateSequentialResult;
             // Card 3d2afb53: the SAME admission-instant/concurrency-neighbourhood capture confirmWorkerMerge's
             // own runExclusive callback does (see its `concurrentAtStart`/`getConcurrentGatesMax` locals) — this
@@ -16645,8 +16689,8 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
-                const gr = await runGateSequential(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
-                if (gr.passed) { holdOnPass = true; holdRepoGuardOnExit(); }
+                const gr = await runGateSeq(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
+                if (gr.passed) holdRepoGuardOnExit();
                 return gr;
               }, "high");
             } catch (err) {
@@ -16665,6 +16709,16 @@ export class SessionService {
               this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } });
               throw err;
             }
+            // DURATIONMS COHERENCE FIX (Code Review, card 67030bb9 — mirrors confirmWorkerMerge's own
+            // `gateAttempt1DurationMs`, this file, above, for the IDENTICAL reason): captured HERE, right
+            // after attempt 1's own admission has settled and BEFORE the multi-file retry below can run its
+            // own separate `runExclusive` admission. Computing this later (`Date.now() - gateStartedAt` at
+            // the point the SETTLE fires, after the retry has already run) would let a retried batch's
+            // `build_gate.durationMs` span attempt 1's admission all the way through the retry's own
+            // (separately queued) admission and run — an unbounded, mixed span that corresponds to neither
+            // admission the rest of that same row describes. Capturing it here bounds it to attempt 1's own
+            // run, unconditionally, whether or not a retry later fires.
+            const batchGateAttempt1DurationMs = Date.now() - gateStartedAt;
             // BOUNDED MULTI-FILE RETRY ON THE BATCH PATH (card 67030bb9 — the PRIMARY gap this card closes:
             // this mechanism existed ONLY on the solo `confirmWorkerMerge` path before this card —
             // `identifyRetriableTestFiles` had exactly one call site, and `batch-merge.ts` referenced none of
@@ -16677,6 +16731,15 @@ export class SessionService {
             // rather than inventing a second design for the identical decision.
             let retriedFile: string | undefined;
             let retryPassed: boolean | undefined;
+            // Code Review, card 67030bb9 finding [3]: mirrors the solo path's own `retryDeclineReason`
+            // capture (this file, above) — records WHY `identifyRetriableTestFiles` declined, when it was
+            // actually called, so a rejection like gate `1af9138e` (a clean, single-file, retriable-SHAPED
+            // failure that still recorded `retriedFile:null`) is explainable after the fact from
+            // `gate_history` instead of needing a fresh live repro. `undefined` whenever the outer
+            // `!r.passed && classifyGateFailure(r) === "genuine"` guard itself is false — that's a
+            // different, separately-recorded decline (the transient-kill retry owns that shape), not one
+            // `identifyRetriableTestFiles` ever saw.
+            let retryDeclineReason: RetryDeclineReason | undefined;
             if (!r.passed && classifyGateFailure(r) === "genuine") {
               const identification = identifyRetriableTestFiles(r.failTierAll, worktreePath, r.failTierTestCount, r.harnessNotExecutedDetected ?? false);
               if (identification.eligible) {
@@ -16694,7 +16757,7 @@ export class SessionService {
                       // — gateSpillPath(opId) is a pure function of opId, so passing it again here appends
                       // to the SAME file in real execution order rather than leaving this retry's own
                       // output unspillable while every sibling gate call for this op already spills.
-                      const rr = await runGateSequential(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
+                      const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
                       if (rr.passed) holdRepoGuardOnExit();
                       return rr;
                     },
@@ -16712,11 +16775,20 @@ export class SessionService {
                   const cancelTotalDurationMs = cancelNowMs - opMintedAtMs;
                   if (err instanceof GateCancelledError) {
                     this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } });
+                    // Code Review, card 67030bb9 finding [2]: `durationMs`/`gateSpawned` are REQUIRED here,
+                    // mirroring the solo path's identical cancelled-while-queued `evt("build_gate", ...)`
+                    // call (this file, above) — without them, `gateRanFromDetail` (db.ts) resolves this row
+                    // to `gateRan:false` (no `gateSpawned`, no `reused`, `cancelled:true`, and
+                    // `typeof detail.durationMs !== "number"`), a well-formed POSITIVE assertion that no gate
+                    // ever ran here — false: attempt 1 genuinely ran a full batch gate across `landedCount`
+                    // branches and failed for real (that's the only way control reaches this retry at all).
+                    // `batchGateAttempt1DurationMs` is attempt 1's own real measured run time, captured right
+                    // after its admission settled, above `identifyRetriableTestFiles` was ever called.
                     evtBatch("build_gate", {
                       passed: r.passed, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
                       batched: true, branchCount: landedCount, gateCap: orchestration.maxConcurrentGates,
                       concurrentGates: concurrentAtStart, concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart,
-                      retriedFile,
+                      retriedFile, durationMs: batchGateAttempt1DurationMs, gateSpawned: true,
                     });
                     return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
                   }
@@ -16732,21 +16804,24 @@ export class SessionService {
                 // is WEAKER evidence than a clean pass. `retriedFile`/`retryPassed` (stamped below and on this
                 // closure's own return) are the only thing keeping that visible.
                 if (retryPassed) r = { ...r, passed: true };
+              } else {
+                retryDeclineReason = identification.declineReason;
               }
             }
             const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-            // ONE captured instant for everything this closure still needs to timestamp — not two independent
-            // `Date.now()` calls — so gate_status's durationMs (via deriveBatchGateVerdict below) and
-            // gate_history's own durationMs (the evtBatch call below) for the SAME op can never disagree by a
-            // few host-scheduling milliseconds (Code Review, card be260976 should-do #3; `gate_queue`'s own tool
-            // description explicitly teaches managers to compare these duration tiers against each other, so an
-            // unexplained delta between them would read as a real mystery rather than measurement noise).
+            // ONE captured instant for everything this closure still needs to timestamp against "now" —
+            // `settledAt`/`totalDurationMs` (via deriveBatchGateVerdict below) and the evtBatch call below's
+            // own settle-time reads all share it, so they can never disagree by a few host-scheduling
+            // milliseconds (Code Review, card be260976 should-do #3). `durationMs` itself is NOT derived
+            // from `nowMs` (see `batchGateAttempt1DurationMs`, captured earlier, right after attempt 1's own
+            // admission settled — Code Review, card 67030bb9 finding [1]): deriving it from `nowMs` here
+            // would span attempt 1's admission all the way through the retry above, an unbounded mixed span.
             const nowMs = Date.now();
             // Settle the tombstone minted above — see that insert's own comment for why this fires
             // unconditionally here (the pass/fail branch), back-to-back with the gate's own settle, mirroring
             // deployOwnProject's identical back-to-back settle (see deriveBatchGateVerdict's own doc for what
             // this payload deliberately includes/omits vs. deriveMergeGateVerdict/deriveDeployGateVerdict).
-            this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, gateStartedAt, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, { retriedFile, retryPassed }));
+            this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed }));
             pruneGateSpills();
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
@@ -16778,7 +16853,7 @@ export class SessionService {
               // value from `deriveBatchGateVerdict`'s own `gateDetail.failingTest` on a "fail" verdict — a
               // genuine, intentional improvement (this is exactly what card eb9348b0's fallback was built for),
               // not an oversight to reconcile away.
-              durationMs: nowMs - gateStartedAt, gateCap: orchestration.maxConcurrentGates,
+              durationMs: batchGateAttempt1DurationMs, gateCap: orchestration.maxConcurrentGates,
               concurrentGates: concurrentAtStart, concurrentGatesMax,
               // Card 6cc803b2 — phase instrumentation (`46ebdf20`'s declined DoD-4): the other four of the
               // five phases this card measures, alongside `durationMs` above (the gate-run phase) on this
@@ -16798,6 +16873,10 @@ export class SessionService {
               ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
               // Card 67030bb9: mirrors confirmWorkerMerge's own `build_gate` retry-observability pair.
               ...(retriedFile ? { retriedFile, retryPassed } : {}),
+              // Code Review, card 67030bb9 finding [3]: mirrors the solo path's own `retryDeclineReason`
+              // stamp (this file, above) — mutually exclusive with `retriedFile` (a retry is either
+              // identified, above, or declined, here, never both on the same op).
+              ...(retryDeclineReason ? { retryDeclineReason } : {}),
             });
             return {
               passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },

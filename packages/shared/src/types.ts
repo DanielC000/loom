@@ -1878,6 +1878,16 @@ export interface GateHistoryRow {
    *  /`"reject"`) — see {@link GateOutcome}'s own doc. Every OTHER non-null `retriedFile` row still pairs it
    *  with a real `true`/`false`. */
   retryPassed: boolean | null;
+  /** Code Review, card 67030bb9: WHY the retry mechanism above declined to identify a retry, when it was
+   *  actually called — one of `identifyRetriableTestFiles`'s own (daemon-internal) decline-reason strings
+   *  (e.g. `"no-fail-tier-match"`, `"count-mismatch"`, `"over-cap"`, `"harness-not-executed"`,
+   *  `"unparseable-name"`, `"file-not-found"`, `"duplicate-name"`), typed loosely as `string` here rather
+   *  than importing that daemon-internal union into this shared package. Mutually exclusive with a non-null
+   *  `retriedFile` on the SAME row, by construction — a retry is either identified (eligible for
+   *  `retriedFile`) or declined (eligible for THIS field), never both. `null` means EITHER the retry
+   *  mechanism was never even invoked (the row's own gate failure wasn't the "genuine" shape that gate would
+   *  ever be called for) OR this row predates this field — never conflate either with "eligible". */
+  retryDeclineReason: string | null;
   /** Card a0d1165c, sibling of `retriedFile`/`retryPassed` above — the SAME durable exposure for the OTHER
    *  retry that can produce a `passed:true` merge row, the TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a
    *  killed/timed-out attempt 1 auto-retries the WHOLE gate once, mutually exclusive with the single-file

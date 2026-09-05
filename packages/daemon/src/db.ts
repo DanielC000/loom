@@ -2152,6 +2152,26 @@ export interface PendingGateOpVerdict {
    *  (a first attempt is classified either "genuine" — eligible for the single-file retry — or
    *  "kill"/"timeout" — eligible for THIS retry — never both; see gate-runner.ts's `classifyGateFailure`). */
   transientRetried?: boolean;
+  /** Code Review, card 67030bb9 finding [5]: the batch's own landed branch count (`landedCount` at
+   *  `deriveBatchGateVerdict`'s call site, `mergeBatch`'s own `runGate` closure) — stored so a
+   *  `gate_status(opId)` read of a retry-assisted batch pass, made after the live `[loom:merge-batch-done]`
+   *  nudge that already renders `formatWeakerPassWarning`'s batch-specific wording was missed (a recycle, a
+   *  restart, a successor reading history later), can render that same wording rather than the solo-shaped
+   *  fallback. Populated for "merge" rows produced by `mergeBatch` only (a plain solo merge or a "gate"
+   *  self-check row has no batch to count); `undefined` for every other row, including one that predates
+   *  this field. */
+  batchBranchCount?: number;
+  /** Code Review, card 67030bb9 finding [3]: WHY {@link gate-runner.ts's `identifyRetriableTestFiles`}
+   *  declined to identify a retry, when it was actually called — one of its own `RetryDeclineReason`
+   *  string values (`"no-fail-tier-match"`, `"count-mismatch"`, `"over-cap"`, `"harness-not-executed"`,
+   *  `"unparseable-name"`, `"file-not-found"`, `"duplicate-name"`), typed loosely as `string` here rather
+   *  than importing that daemon-internal union (this interface is read by both the solo `confirmWorkerMerge`
+   *  and batch `mergeBatch` call sites). Mutually exclusive with `retriedFile` being non-null on the SAME
+   *  row, by construction (a retry is either identified, eligible for `retriedFile`, or declined, eligible
+   *  for THIS field, never both). `undefined` — the overwhelming majority of rows — means EITHER
+   *  `identifyRetriableTestFiles` was never even called (its own caller's outer "genuine failure" guard was
+   *  already false) OR this row predates this field; never conflate the two with "eligible". */
+  retryDeclineReason?: string;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and
@@ -7922,6 +7942,11 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // never-backfilled discipline as `concurrentGatesMax` above.
   const retriedFile = typeof detail.retriedFile === "string" ? detail.retriedFile : null;
   const retryPassed = typeof detail.retryPassed === "boolean" ? detail.retryPassed : null;
+  // Code Review, card 67030bb9 finding [3]: `null` whenever a retry was IDENTIFIED (`retriedFile` non-null)
+  // or `identifyRetriableTestFiles` was never called at all (the outer "genuine failure" guard was already
+  // false) — never fabricated for a row that predates this field either, same never-backfilled discipline
+  // as `concurrentGatesMax`/`retriedFile` above.
+  const retryDeclineReason = typeof detail.retryDeclineReason === "string" ? detail.retryDeclineReason : null;
   // Card a0d1165c: DERIVED from the event's own `kind`, never a detail-field read — a `build_gate_retry`
   // event IS the transient-kill retry's own admission+verdict by construction (see GateHistoryRow
   // .transientRetried's own doc for why this is a SEPARATE row rather than a fold-onto-attempt-1 field like
@@ -8008,6 +8033,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     concurrentGatesMax,
     retriedFile,
     retryPassed,
+    retryDeclineReason,
     transientRetried,
     emitCompareReduced,
     emitCompareIdenticalCount,
