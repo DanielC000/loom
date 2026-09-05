@@ -188,11 +188,20 @@ interface UntilSupersededVerdict {
  * throw-on-retry mutex) into a record whose outcome a client can come back for. Fixes the Auditor
  * b9515beb friction: a client-side MCP timeout on a minutes-long gate run used to leave the manager
  * unable to tell whether the op landed, and a retry bounced off a hard "already in flight" error instead
- * of finding out. One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`;
+ * of finding out. One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`
+ * — card `3a2dac9c`: BOTH the read side (`peekPendingMerge`) and the write side's own key SELECTION
+ * (`confirmWorkerMergeTracked`, before calling `attach()`) walk this worker's `recycledFrom` chain
+ * backward and prefer an ANCESTOR's key when a RUNNING op is found under one — a `worker_recycle` mints a
+ * fresh session id but never rewrites/aliases this key onto it, so without this walk a confirm addressed
+ * to the successor would mint a second, concurrent op for the same worktree, and a peek addressed to the
+ * successor would read blind to the predecessor's still-in-flight op;
  * gate: `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check;
- * merge-batch: `merge-batch:${managerSessionId}:${sorted, comma-joined workerSessionIds of the resolved
- * candidate set}` — card f944d4e4, `SessionService.mergeBatchTracked`'s own doc has the full rationale for
- * why the key is the RESOLVED set, not the raw request, and why `baseMainSha` is deliberately excluded).
+ * merge-batch: `merge-batch:${managerSessionId's LINEAGE ROOT}:${sorted, comma-joined LINEAGE ROOTS of
+ * the resolved candidate set's workerSessionIds}` — card f944d4e4 minted this key from raw ids; card
+ * `3a2dac9c` rebuilt both halves from `lineageRootId` (stable across a manager/candidate recycle,
+ * byte-identical to the raw id for a never-recycled session). `SessionService.mergeBatchTracked`'s own
+ * doc has the full rationale for why the key is the RESOLVED set, not the raw request, why `baseMainSha`
+ * is deliberately excluded, and why lineage-rooting was needed on top).
  * The
  * "gate" kind has no separate owning manager: its `managerSessionId` field holds the CALLING WORKER's own
  * session id (the caller and the beneficiary of the completion nudge are the same session), so it needs

@@ -32,7 +32,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
-import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
+import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageResolvedPendingOp, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
@@ -8135,10 +8135,28 @@ export class SessionService {
     );
   }
 
-  /** Read-only pending-merge lookup for worker_list's `pendingMerge` field (card fb8df559 Part 1) — never
-   *  consumes; only confirmWorkerMergeTracked's own attach() call consumes a settled op. */
-  peekPendingMerge(workerSessionId: string): PendingOpView | undefined {
-    return this.pendingOps.peek(`merge:${workerSessionId}`);
+  /**
+   * Read-only pending-merge lookup for worker_list's `pendingMerge` field (card fb8df559 Part 1) — never
+   * consumes; only confirmWorkerMergeTracked's own attach() call consumes a settled op.
+   *
+   * LINEAGE-RESOLVED (card `3a2dac9c`, out of `eeb26621`'s investigation — "THE HOLE"): a merge op is
+   * minted under whichever worker session id was live when `confirmWorkerMergeTracked` called `attach()`.
+   * `worker_recycle` mints a fresh successor id and carries ZERO op state — the op keeps running under
+   * the PREDECESSOR's key forever (nothing rewrites or aliases it — see that method's own doc for why
+   * not). A bare `peek(merge:${workerSessionId})` against the SUCCESSOR's id therefore went blind to a
+   * real, still-running merge for that exact worktree/branch the instant a recycle landed mid-gate — a
+   * false negative on "is a merge in flight?" for `worker_list`/`worker_status`/`/api/sessions` alike.
+   * `lineageResolvedPendingOp` walks `recycledFrom` backward to find it. SEMANTIC CONSEQUENCE (flagged in
+   * the card, not patched around): this changes what a non-null result on a successor's OWN id MEANS — it
+   * can now be a PREDECESSOR's op, not this session's own. `predecessorSessionId` carries that
+   * attribution (set only when the op's true origin differs from `workerSessionId`), mirroring the
+   * predecessor-attribution `settleNudgeAttribution` already gives the gate nudge — so a reader can tell
+   * "my op" from "my predecessor's op" instead of the two being indistinguishable.
+   */
+  peekPendingMerge(workerSessionId: string): (PendingOpView & { predecessorSessionId?: string }) | undefined {
+    const found = lineageResolvedPendingOp(this.db, "merge", (key) => this.pendingOps.peek(key), workerSessionId);
+    if (!found) return undefined;
+    return found.originSessionId === workerSessionId ? found.view : { ...found.view, predecessorSessionId: found.originSessionId };
   }
 
   /**
@@ -8251,6 +8269,19 @@ export class SessionService {
    * misread the predecessor's result as its own gate passing and report done against pre-handoff code. Also
    * disambiguates the merge side for a manager juggling several concurrent merges across a recycle. Returns
    * `""` (nothing to attribute) when `target === originSessionId`.
+   *
+   * WHY "gate" STAYS PER-ORIGINATING-SESSION WHILE "merge" DIVERGED (card `3a2dac9c`): `peekPendingMerge`/
+   * `confirmWorkerMergeTracked` now also walk `recycledFrom` BACKWARD to find a predecessor's `merge:`
+   * entry (see `lineageResolvedPendingOp`) — a structurally identical per-session key to `gate:` above,
+   * deliberately given DIFFERENT treatment. This is not an inconsistency to "fix" by symmetry: a merge op
+   * has a MANAGER as its caller/beneficiary, so a recycled WORKER's successor has no key of its own to
+   * collide with a predecessor's — lineage-resolving the read (and, for the write, only when the
+   * predecessor's op is still RUNNING) purely ADDS visibility/dedupe with no new ambiguity. A gate op's
+   * caller and beneficiary are the SAME worker session (this method's own doc, elsewhere), so a recycled
+   * worker's fresh successor legitimately owns its OWN, DISTINCT `run_gate` self-check under its OWN key —
+   * lineage-resolving `gate:` reads would make a live, unrelated self-check indistinguishable from a
+   * predecessor's leftover one. This attribution suffix is the gate kind's OWN, already-sufficient
+   * mitigation for that ambiguity — do not "fix" this asymmetry by lineage-walking `gate:` too.
    */
   private settleNudgeAttribution(target: string, originSessionId: string): string {
     return target === originSessionId ? "" : ` (started by your predecessor session ${originSessionId.slice(0, 8)} before you were recycled)`;
@@ -16956,20 +16987,29 @@ export class SessionService {
    * `opId` and cut a whole new batch worktree before the pre-existing per-repo merge-admission guard
    * (`GateSemaphore`'s `activeMergeRepos`) serialized it behind the first call, wasting real work every
    * time (safe, never corrupting, but wasteful — see that card's own measurement). This method is now keyed
-   * through {@link PendingOpRegistry.attach} — kind `"merge"`, key `merge-batch:${managerSessionId}:` plus
-   * the SORTED, comma-joined `workerSessionId`s of the resolved `chosen` batch (computed AFTER ownership/
-   * repo/stranded-work filtering, i.e. the set that will actually be gated together, not the raw request) —
-   * so a re-fire with the SAME resolved candidate set re-attaches to the already-running (or just-settled)
-   * op instead of starting a second one: no second worktree cut, no second `opId` minted, no second gate
-   * run. Two things are DELIBERATELY excluded from the key: `baseMainSha` (main can legitimately advance
-   * between a call and its retry — folding it in would make a genuine retry mint a fresh op, defeating the
-   * point) and the caller's raw, unsorted `workerSessionIds` array (an identical logical set reordered
-   * across a retry must still dedupe-hit). RESIDUAL (intentionally left open, not closed by more
-   * machinery): if the resolved `chosen` set itself changes between attempt 1 and attempt 2 — a candidate
-   * dropping out via ownership/repo/stranded-work in between — the key differs and the retry runs fresh.
-   * This is believed correct (a different resolved set is a genuinely different batch), and stable for the
-   * ordinary client-timeout case (a `done`+`awaitingReview` candidate doesn't change resolution between a
-   * call and its retry) — but it is a real, named gap, not a proven-closed one.
+   * through {@link PendingOpRegistry.attach} — kind `"merge"`, key `merge-batch:${managerSessionId's
+   * LINEAGE ROOT}:` plus the SORTED, comma-joined LINEAGE ROOTS of the resolved `chosen` batch's
+   * `workerSessionId`s (computed AFTER ownership/repo/stranded-work filtering, i.e. the set that will
+   * actually be gated together, not the raw request) — so a re-fire with the SAME resolved candidate set
+   * re-attaches to the already-running (or just-settled) op instead of starting a second one: no second
+   * worktree cut, no second `opId` minted, no second gate run. Two things are DELIBERATELY excluded from
+   * the key: `baseMainSha` (main can legitimately advance between a call and its retry — folding it in
+   * would make a genuine retry mint a fresh op, defeating the point) and the caller's raw, unsorted
+   * `workerSessionIds` array (an identical logical set reordered across a retry must still dedupe-hit).
+   * LINEAGE-ROOTED, not raw ids (card `3a2dac9c`, DoD-3): a raw-id key was SENSITIVE to a mid-batch
+   * `worker_recycle`/manager recycle — card 81d795de's own widened finalize window makes a recycle landing
+   * between the initial call and a client-timeout retry an ORDINARY event, not a corner case, and a
+   * raw-id key change on retry used to mint a genuinely SECOND, concurrent batch op for the same resolved
+   * worktrees. `lineageRootId` never changes across a recycle (a predecessor and every one of its
+   * successors share the same root), so this key is now stable across exactly that window, byte-identical
+   * to the raw-id key for the common never-recycled case (a session's own root is itself).
+   * RESIDUAL (intentionally left open, not closed by more machinery — SCOPE NARROWED by the fix above): if
+   * the resolved `chosen` set itself changes between attempt 1 and attempt 2 — a candidate dropping out
+   * via ownership/repo/stranded-work filtering in between (a mid-batch RECYCLE of the manager or a
+   * candidate no longer does this, see above) — the key differs and the retry runs fresh. This is believed
+   * correct (a different resolved set is a genuinely different batch), and stable for the ordinary
+   * client-timeout case (a `done`+`awaitingReview` candidate doesn't change resolution between a call and
+   * its retry) — but it is a real, named gap, not a proven-closed one.
    *
    * This dedupe now ALSO carries `retainMs`/`retainVerdictUntilSuperseded`/`verdictIdentity`/
    * `classifyOutcome`/`identityOptional` (card cf803152 — see this method's own `attach()` call, further
@@ -17106,12 +17146,27 @@ export class SessionService {
     }
 
     // DEDUPE/ATTACH KEY (card f944d4e4 — see this method's own header doc for the full rationale + the
-    // rejected alternatives): sorted, comma-joined `workerSessionId`s of the RESOLVED `chosen` set — the
-    // batch that will actually be gated together, not the raw request — scoped under the owning manager.
-    // Deliberately excludes `baseMainSha` (a legitimate retry can land after main advances) and any
-    // git-derived identity (no I/O needed to compute this key). Sorted so a client that reorders the same
-    // logical set across a retry still dedupe-hits.
-    const batchKey = `merge-batch:${managerSessionId}:${chosen.map((c) => c.workerSessionId).slice().sort().join(",")}`;
+    // rejected alternatives): sorted, comma-joined LINEAGE-ROOT ids of the RESOLVED `chosen` set — the
+    // batch that will actually be gated together, not the raw request — scoped under the owning manager's
+    // OWN lineage root too. Deliberately excludes `baseMainSha` (a legitimate retry can land after main
+    // advances) and any git-derived identity (no I/O needed to compute this key). Sorted so a client that
+    // reorders the same logical set across a retry still dedupe-hits.
+    //
+    // LINEAGE-ROOTED, NOT RAW session ids (card `3a2dac9c` DoD-3): this key used to embed the raw
+    // `managerSessionId`/`workerSessionId`s verbatim, which made it SENSITIVE to a mid-batch
+    // `worker_recycle`/manager recycle — card 81d795de deliberately widened this batch's finalize window
+    // to comfortably outlive one manager turn, so a recycle of the manager OR of any candidate landing
+    // between the initial call and a client-timeout retry is an ORDINARY event here, not a corner case.
+    // A raw-id key change on retry means a SECOND, genuinely concurrent batch op mints for the same
+    // resolved worktrees — precisely the failure this dedupe exists to prevent (the batch analogue of the
+    // solo path's surface 2 — see `confirmWorkerMergeTracked`'s own `key` doc). `lineageRootId` (this
+    // file's existing forward/backward lineage-walk sibling primitive, already used by the Platform Lead
+    // resume-doc scoping) never changes across a recycle — a predecessor and every one of its successors
+    // share the SAME root — so this key is now stable across exactly the recycle window that used to
+    // fracture it, with zero behavior change for the common (never-recycled) case, where a session's root
+    // is itself.
+    const rootOf = (id: string) => lineageRootId(this.db, this.db.getSession(id) ?? { id, recycledFrom: null });
+    const batchKey = `merge-batch:${rootOf(managerSessionId)}:${chosen.map((c) => rootOf(c.workerSessionId)).slice().sort().join(",")}`;
     // VERDICT IDENTITY (Code Review, card cf803152 — a REPRODUCED regression in this card's first attempt:
     // `retainVerdictUntilSuperseded` with no `verdictIdentity` made a rejected batch's cached verdict
     // IMMORTAL — both workers could commit the actual fix and a re-fire with the same resolved candidate
@@ -17852,7 +17907,32 @@ export class SessionService {
       fallbackOfBatchOpId?: string;
     },
   ): Promise<AttachResult<ConfirmMergeResult>> {
-    const key = `merge:${workerSessionId}`;
+    // LINEAGE-RESOLVED KEY (card `3a2dac9c`, DoD-2 — "resolve at the read, never rewrite at the write"
+    // applied to this write path too): if a predecessor's merge op is STILL RUNNING anywhere backward in
+    // this worker's `recycledFrom` chain, attach to THAT key instead of minting a fresh one under
+    // `workerSessionId`'s own — via the SAME read-only walk `peekPendingMerge` uses. Nothing is mutated:
+    // the op keeps its original tombstone/key forever, this call just picks which EXISTING key to
+    // attach() under. Without this, a confirm addressed to a just-recycled worker's fresh successor id
+    // can never see its predecessor's still-running op (a DIFFERENT registry key) and mints a genuinely
+    // SECOND, concurrent merge op for the SAME worktree — precisely the failure PendingOpRegistry's
+    // dedupe exists to prevent (surface 2 of the card's "THE HOLE"), and — per DoD-1's verified finding —
+    // `mergeMainIntoWorktree` (git/worktrees.ts) runs uncoordinated against that SAME worktree path with
+    // no lock of its own, well before `gateSemaphore.runExclusive` ever serializes anything, so two such
+    // ops really can race real git state.
+    //
+    // RUNNING ONLY — deliberately NOT a merely-retained (already-SETTLED) predecessor view (Code Review
+    // follow-up, card `3a2dac9c`): `peekPendingMerge` (the read side) is fine surfacing either shape — a
+    // display fill has no downstream consequence. This WRITE site is different: adopting a RETAINED
+    // predecessor key means a re-confirm whose `verdictIdentity` has since changed would supersede that
+    // retained verdict and mint a FRESH op under the PREDECESSOR's key — so the successor's own,
+    // genuinely-just-started merge would forever `peekPendingMerge` as "my predecessor's op"
+    // (`predecessorSessionId` set), the exact "is a merge in flight for THIS worker?" confusion this card
+    // exists to remove, in mirror image. Falls back to `merge:${workerSessionId}` whenever the lineage
+    // walk finds nothing RUNNING (nothing at all, or only a retained/settled view) — byte-identical to
+    // before this existed for the common (never-recycled) case, and for a recycle whose predecessor op
+    // has already settled.
+    const lineageOp = lineageResolvedPendingOp(this.db, "merge", (k) => this.pendingOps.peek(k), workerSessionId);
+    const key = lineageOp && lineageOp.view.state === "running" ? lineageOp.key : `merge:${workerSessionId}`;
     // Unconditional and BEFORE everything else below — see supersedeQueuedSelfCheck's own doc for why this
     // fires regardless of what this confirm call itself goes on to decide. PROJECT-SCOPED to the CALLING
     // manager's own project (Code Review finding B2-1) — this does NOT re-derive "is this actually your

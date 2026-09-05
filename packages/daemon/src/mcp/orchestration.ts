@@ -2883,7 +2883,9 @@ export class OrchestrationMcpRouter {
     // can never disagree with either. Only ever attached while state is "running" (a settled row's outcome
     // already answers the question unambiguously — see sessions.gatePhaseForOpId's own doc for the full
     // reading guide, including why `null` here is a normal, non-alarming reading, not an error state.
-    const withGatePhase = (pm: PendingOpView | null): (PendingOpView & { gatePhase?: "queued" | "running" | null }) | null =>
+    const withGatePhase = (
+      pm: (PendingOpView & { predecessorSessionId?: string }) | null,
+    ): (PendingOpView & { predecessorSessionId?: string; gatePhase?: "queued" | "running" | null }) | null =>
       pm && pm.state === "running" ? { ...pm, gatePhase: sessions.gatePhaseForOpId(pm.opId) } : pm;
 
     // Card 31f3d047: a GENERIC, DERIVED view over the three named lastMismatch* pull-surfaces above — the

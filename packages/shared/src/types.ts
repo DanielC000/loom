@@ -663,6 +663,16 @@ export interface PendingMerge {
    *  `state === "running"` — omitted (not merely null) on a settled row, where `outcome` already answers
    *  the question unambiguously. */
   gatePhase?: "queued" | "running" | null;
+  /** Card `3a2dac9c`: set ONLY when this op's true origin differs from the session it's being reported
+   *  on — i.e. this session was `worker_recycle`d and the op actually started under a PREDECESSOR's id
+   *  (a merge op is minted under whichever worker session id was live at `attach()` time; a recycle never
+   *  rewrites or aliases that key onto the fresh successor — see `confirmWorkerMergeTracked`'s own doc).
+   *  The predecessor's session id this op is really keyed under. Absent (not merely null) when this
+   *  session started the op itself — the common, non-recycled case is byte-identical to before this
+   *  field existed. Mirrors the predecessor-attribution the `[loom:merge-*]` settle nudge already gives
+   *  (`settleNudgeAttribution`), so a viewer can tell "my op" from "my predecessor's op" instead of the
+   *  two reading identically. */
+  predecessorSessionId?: string;
 }
 
 /**

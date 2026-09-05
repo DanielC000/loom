@@ -97,8 +97,8 @@ try {
     // own assembly + the two fallback solo confirms can outrun `syncAttachBudgetMs`, so the FIRST call
     // degrades to `{settled:false}` — reliably reproduced locally (6/6) by running several copies of
     // this file concurrently under CPU load. `PendingOpRegistry.attach` dedupes by key
-    // (`merge-batch:<mgrId>:<sorted workerIds>`, sessions/service.ts) — re-calling with the SAME worker
-    // ids re-attaches to the SAME in-flight op (never re-invokes `run()`) and waits again, exactly the
+    // (`merge-batch:<mgrId's lineage root>:<sorted lineage-rooted workerIds>` — card `3a2dac9c` rebuilt
+    // this from raw ids, sessions/service.ts) — re-calling with the SAME worker
     // re-poll a real caller facing this contract already relies on. Bounded overall so a genuine hang
     // still fails this test loudly instead of silently synthesizing a wrong-shaped result (the original
     // defect here: a `{settled:false}` case was papered over into a fabricated `ok:false` value whose

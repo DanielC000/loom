@@ -103,7 +103,7 @@ export class FleetHub {
         // show.
         const gatePhase = pm && pm.state === "running" ? this.sessions.gatePhaseForOpId(pm.opId) : undefined;
         const pendingMerge: PendingMerge | null = pm
-          ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome as PendingMerge["outcome"], gatePhase }
+          ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome as PendingMerge["outcome"], gatePhase, predecessorSessionId: pm.predecessorSessionId }
           : null;
         const session: SessionListItem & { pendingMerge: PendingMerge | null } = { ...row, pendingMerge };
         this.broadcast({ t: "session:upsert", session });
