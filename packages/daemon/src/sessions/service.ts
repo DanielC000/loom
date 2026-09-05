@@ -4954,9 +4954,41 @@ export class SessionService {
        * refused/flagged the rebased tree with `batchBranchCount` still unclassified — the forcing function
        * fired for real, against a genuinely new field from a sibling branch, not just against a synthetic
        * mutation. That refusal is what confirmed this was the ONLY new key needing classification.
+       *
+       * ⚠️ CARD `753b9699` — THE GAP THIS CLASSIFICATION LEFT OPEN: all of the above governs only the
+       * `verdictFields` object (the per-verdict content assembled below into `rawVerdictFields`). The OUTER
+       * return fields — `state`/`gateType`/`elapsedMs`/`idleMs`/`admittedAt`/`ownerSessionAlive`/`outcome`,
+       * assembled below into `rawOuterFields` — used to be spread straight into the return literal, entirely
+       * OUTSIDE this classification, so a future outer field would default to VISIBLE on a cross-project
+       * read by the exact silent-omission shape this whole scheme exists to kill (found by Code Review,
+       * card `213fe600`, reviewing `d5e67146`'s addition of `ownerSessionAlive` — the first new outer field
+       * since this classification landed). FIX: `GateOuterFieldKey` folds into the SAME `GateVerdictFieldKey`
+       * union below, so `rawOuterFields` is filtered by the SAME `GATE_VERDICT_FIELD_CLASSIFICATION` Record,
+       * through the SAME single filter point, rather than a second parallel mechanism that could drift from
+       * this one. Every outer key is classified `"structural"` — see that Record's own per-key comment for
+       * why, and for why this is a PRESERVING change, not a disclosure decision (card `753b9699` DoD-2: this
+       * card adds the forcing function, it does not re-open what anything is set to).
+       *
+       * ⚠️ MANAGER REVIEW, same card — CORRECTING AN OVERCLAIM IN AN EARLIER VERSION OF THIS COMMENT: folding
+       * `GateOuterFieldKey` into this union does NOT by itself give the outer fields the SAME compile-time
+       * guarantee `verdictFields` gets. `GateVerdictFieldKey`'s `keyof PendingGateOpVerdict` half is derived
+       * from a REAL interface — add a member there and the `Record` below demands a matching entry, a true
+       * forcing function. `GateOuterFieldKey` is a HAND-WRITTEN literal union of 7 strings with no interface
+       * to derive from (same reason `gate-verdict-field-classification-exhaustive.mjs`'s `OUTER_KEYS` is
+       * hand-listed, not extracted) — adding an 8th field to `rawOuterFields` without also adding it to this
+       * union type-checks FINE; only the `_outerRawFieldsAreClassified` compile-time assertion just below
+       * `rawOuterFields`'s own declaration is what actually turns that omission into a build error, by
+       * checking `keyof typeof rawOuterFields extends GateVerdictFieldKey` (empirically confirmed to fire
+       * for BOTH an unconditionally-added field and one added inside a conditional spread — TS 5.9 widens a
+       * conditional object-literal spread to an optional property rather than dropping it from `keyof`, so
+       * this is not a narrower guarantee than it looks). Runtime is, and always was, safe either way: an
+       * unclassified key reads `undefined` from the Record, fails `=== "structural"`, and is filtered OUT —
+       * REDACTED, never leaked — so this whole paragraph is about closing a SILENT-BUT-SAFE gap to a LOUD
+       * one, not about a live disclosure bug.
        */
       type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
-      type GateVerdictFieldKey = keyof PendingGateOpVerdict | GateVerdictDerivedKey;
+      type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome";
+      type GateVerdictFieldKey = keyof PendingGateOpVerdict | GateVerdictDerivedKey | GateOuterFieldKey;
       const GATE_VERDICT_FIELD_CLASSIFICATION: Record<GateVerdictFieldKey, "sensitive" | "structural"> = {
         // Content-bearing — another tenant's paths, test names, error text, or landed work.
         reason: "sensitive",
@@ -4995,6 +5027,23 @@ export class SessionService {
         // reasoning — decided consistently with `retryWarning` staying "sensitive" regardless, for its OWN
         // separate content, so this bare count can be judged purely on its own merits.
         batchBranchCount: "structural",
+        // Card 753b9699 — the OUTER return fields (see this Record's own doc, above, for the gap this
+        // closes). All "structural": fleet-operational metadata with no foreign path/test/error content of
+        // its own. `admittedAt` (a mint timestamp) and `outcome` (the 5-value verdict-kind enum) were
+        // ALREADY unconditionally visible cross-project before this card — classifying them "structural"
+        // PRESERVES that, it does not newly decide it (card `753b9699` DoD-2 forbids re-opening disclosure
+        // here). `ownerSessionAlive` is separately, independently gated to never even be a KEY in
+        // `rawOuterFields` when `crossProjectRedacted` is true (see its own construction, just below) —
+        // this entry is inert for that case and exists only so the compiler still refuses an unclassified
+        // outer field even for one that already carries its own gate; it is NOT this classification's job
+        // to re-decide `ownerSessionAlive`'s visibility.
+        state: "structural",
+        gateType: "structural",
+        elapsedMs: "structural",
+        idleMs: "structural",
+        admittedAt: "structural",
+        ownerSessionAlive: "structural",
+        outcome: "structural",
       };
       const settleTimingFields = {
         ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
@@ -5109,11 +5158,38 @@ export class SessionService {
       const ownerSessionAlive = isPending && !scoped && !crossProjectRedacted
         ? liveLineageSuccessor(this.db, t.record.ownerSessionId) != null
         : undefined;
-      return {
+      // Card 753b9699: the OUTER fields, through the SAME `GATE_VERDICT_FIELD_CLASSIFICATION` filter
+      // `verdictFields` above already uses — see that Record's own doc for why these are all "structural"
+      // (a preserving classification, not a new disclosure decision) and why `ownerSessionAlive`'s entry is
+      // inert here (it's already never a key of this object under `crossProjectRedacted`, via its own
+      // ternary just above). Filtering an already-all-structural object changes nothing TODAY; it fails
+      // CLOSED (redacts, never leaks) if a future field is added here without a classification entry — see
+      // `GateVerdictFieldKey`'s own doc, above, for why that runtime safety net alone is NOT the same
+      // compile-time forcing function `verdictFields` gets from `keyof PendingGateOpVerdict`, and why the
+      // assertion immediately below is what actually closes that gap.
+      const rawOuterFields = {
         state: t.record.state, gateType, elapsedMs: pendingElapsedMs, idleMs: null,
         admittedAt: t.record.startedAt,
         ...(ownerSessionAlive !== undefined ? { ownerSessionAlive } : {}),
         ...(t.record.verdict != null ? { outcome: t.record.verdict } : {}),
+      };
+      // Card 753b9699 (manager review): `GateOuterFieldKey` is a hand-written literal union, not derived
+      // from an interface — so adding an 8th field to `rawOuterFields` above WITHOUT also adding it to that
+      // union type-checks fine on its own (it would still be redacted at runtime, safely, but silently).
+      // THIS is the actual forcing function: `keyof typeof rawOuterFields extends GateVerdictFieldKey`
+      // fails (`Type 'true' is not assignable to type 'never'`) the moment `rawOuterFields` gains a key
+      // outside `GateVerdictFieldKey` — empirically confirmed for both an unconditionally-added field and
+      // one added inside a conditional spread (TS 5.9 widens a conditional-spread field to an optional
+      // property rather than dropping it from `keyof`, so this genuinely covers the `ownerSessionAlive`/
+      // `outcome` shape too, not just the unconditional base fields).
+      type _OuterRawFieldsAreClassified = keyof typeof rawOuterFields extends GateVerdictFieldKey ? true : never;
+      const _outerRawFieldsAreClassified: _OuterRawFieldsAreClassified = true;
+      void _outerRawFieldsAreClassified;
+      const outerFields = crossProjectRedacted
+        ? Object.fromEntries(Object.entries(rawOuterFields).filter(([key]) => GATE_VERDICT_FIELD_CLASSIFICATION[key as GateVerdictFieldKey] === "structural")) as typeof rawOuterFields
+        : rawOuterFields;
+      return {
+        ...outerFields,
         ...verdictFields,
       };
     }

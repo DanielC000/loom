@@ -14,6 +14,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // unclassified field into a COMPILE ERROR — mutation-proven directly during development (removing one
 // entry broke `pnpm --filter @loom/daemon build` with "Property '<x>' is missing", restored after).
 //
+// WIDENED (card 753b9699, Code Review finding on `d5e67146`): the classification above covered only the
+// verdict-CONTENT fields — `gateStatus`'s OUTER return fields (`state`/`gateType`/`elapsedMs`/`idleMs`/
+// `admittedAt`/`ownerSessionAlive`/`outcome`) were spread straight into the return literal, entirely
+// outside this classification, so a future outer field would default to VISIBLE on a cross-project read by
+// the exact same silent-omission shape this whole scheme exists to kill. `GateVerdictFieldKey` now also
+// includes those 7 outer keys (see `GateOuterFieldKey`, service.ts) — this file's checks below cover them
+// too, under `OUTER_KEYS`.
+//
 // THIS FILE is the STANDING, repeatable version of that one-off manual proof — the manager's own framing:
 // "extend the tests to cover... a case that would FAIL if a new unclassified field were added. That test
 // is the actual deliverable here — it's what makes the guarantee survive the next person." It parses BOTH
@@ -101,7 +109,14 @@ check("(sanity) GATE_VERDICT_FIELD_CLASSIFICATION found with a non-trivial key l
 // own doc for why these specifically carry no foreign content and are "structural").
 const DERIVED_KEYS = ["passed", "cancelled", "retryWarning", "transientRetryWarning"];
 
-// ── THE GUARANTEE — every PendingGateOpVerdict member, and every derived key, has a classification entry. ──
+// Card 753b9699: the 7 OUTER return fields — spread straight into gateStatus's return literal outside
+// GATE_VERDICT_FIELD_CLASSIFICATION entirely until this card folded them into the SAME `GateVerdictFieldKey`
+// union (see that Record's own doc, service.ts, for the gap this closes). Hand-listed here for the same
+// reason DERIVED_KEYS is: no interface to derive them from.
+const OUTER_KEYS = ["state", "gateType", "elapsedMs", "idleMs", "admittedAt", "ownerSessionAlive", "outcome"];
+
+// ── THE GUARANTEE — every PendingGateOpVerdict member, and every derived/outer key, has a classification ──
+// entry.
 const classificationSet = new Set(classificationKeys ?? []);
 const missingVerdictMembers = (verdictMembers ?? []).filter((m) => !classificationSet.has(m));
 check(`(THE GUARANTEE) every PendingGateOpVerdict member is classified — this is the check that would catch a repeat of "batchBranchCount shipped unclassified" (missing: ${JSON.stringify(missingVerdictMembers)})`,
@@ -109,11 +124,14 @@ check(`(THE GUARANTEE) every PendingGateOpVerdict member is classified — this 
 const missingDerived = DERIVED_KEYS.filter((k) => !classificationSet.has(k));
 check(`(THE GUARANTEE, derived keys) passed/cancelled/retryWarning/transientRetryWarning are all classified (missing: ${JSON.stringify(missingDerived)})`,
   missingDerived.length === 0);
+const missingOuter = OUTER_KEYS.filter((k) => !classificationSet.has(k));
+check(`(THE GUARANTEE, card 753b9699 — outer keys) state/gateType/elapsedMs/idleMs/admittedAt/ownerSessionAlive/outcome are all classified (missing: ${JSON.stringify(missingOuter)})`,
+  missingOuter.length === 0);
 
 // ── EXHAUSTIVE BOTH WAYS — no STALE classification entry either (a field REMOVED from the interface but ──
 // left classified isn't a leak, but it is exactly the kind of drift `Record<K,V>`'s own excess-property
 // check would also catch at compile time — mirror that here too, so this file's guarantee matches tsc's).
-const knownKeys = new Set([...(verdictMembers ?? []), ...DERIVED_KEYS]);
+const knownKeys = new Set([...(verdictMembers ?? []), ...DERIVED_KEYS, ...OUTER_KEYS]);
 const staleClassificationKeys = (classificationKeys ?? []).filter((k) => !knownKeys.has(k));
 check(`(exhaustive, other direction) no classification entry names a field that isn't a real PendingGateOpVerdict member or derived key (stale: ${JSON.stringify(staleClassificationKeys)})`,
   staleClassificationKeys.length === 0);
@@ -153,7 +171,24 @@ check("(RED PROOF, other direction) removing a real classification entry (retrie
   missingAfterRemoval.length === 1 && missingAfterRemoval[0] === "retriedFile",
   () => JSON.stringify(missingAfterRemoval));
 
+// ── RED PROOF, card 753b9699 — an OUTER key specifically, the exact gap this card closes: `admittedAt` ────
+// was visible cross-project via a bare spread with NO classification entry at all until this card. Prove
+// this file's own check (independent of tsc) catches its classification being removed, the same way it
+// already catches `retriedFile`'s removal above — positive-controlled against a key that predates this
+// card entirely, not just the newly-added ones, so this isn't vacuously testing its own fresh work.
+check("(precondition) admittedAt IS one of the card-753b9699 outer keys this corpus can test against",
+  OUTER_KEYS.includes("admittedAt"));
+const mutatedServiceSrcOuter = serviceSrc.replace(/\s*admittedAt:\s*"structural",/, "");
+check("(mutation precondition) the removal actually changed the source text",
+  mutatedServiceSrcOuter !== serviceSrc && !mutatedServiceSrcOuter.includes('admittedAt: "structural",'));
+const mutatedClassificationKeysOuter = extractObjectLiteralKeysForConst(mutatedServiceSrcOuter, serviceSrcPath, "GATE_VERDICT_FIELD_CLASSIFICATION");
+const mutatedClassificationSetOuter = new Set(mutatedClassificationKeysOuter ?? []);
+const missingOuterAfterRemoval = OUTER_KEYS.filter((k) => !mutatedClassificationSetOuter.has(k));
+check("(RED PROOF, card 753b9699) removing an OUTER key's classification entry (admittedAt) IS caught — the exact allowlist-by-omission shape this card exists to close",
+  missingOuterAfterRemoval.length === 1 && missingOuterAfterRemoval[0] === "admittedAt",
+  () => JSON.stringify(missingOuterAfterRemoval));
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every PendingGateOpVerdict member (db.ts) and every gateStatus-derived field has a real classification entry in GATE_VERDICT_FIELD_CLASSIFICATION (sessions/service.ts), with no stale entries the other direction; a field added to the interface with no matching classification (the exact batchBranchCount shape from card 67030bb9) is caught by this file directly, and so is a classification entry removed by hand — both proven by actual source mutation, not by trusting the type signature or tsc alone."
+  ? "\n✅ ALL PASS — every PendingGateOpVerdict member (db.ts), every gateStatus-derived field, and (card 753b9699) every OUTER return field (state/gateType/elapsedMs/idleMs/admittedAt/ownerSessionAlive/outcome) has a real classification entry in GATE_VERDICT_FIELD_CLASSIFICATION (sessions/service.ts), with no stale entries the other direction; a field added to the interface with no matching classification (the exact batchBranchCount shape from card 67030bb9) is caught by this file directly, and so is a classification entry removed by hand — for a verdict-content field (retriedFile) AND, newly, for an outer field (admittedAt) — all proven by actual source mutation, not by trusting the type signature or tsc alone."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
