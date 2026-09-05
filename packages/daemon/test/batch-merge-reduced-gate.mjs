@@ -256,6 +256,79 @@ try {
       console.log("(ASSET) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
     }
   }
+
+  // ── (NA) a batch whose union includes a path OUTSIDE every emit-compare prefix -> the predicate can't
+  //        decide reducibility AT ALL, so the batch stays FULL and the PROJECTED gate_history row reads
+  //        `emitCompareReduced: null` (card 32a8bcca).
+  //
+  //   THE MECHANISM, so `null` here is never re-filed as a bug: `computeEmitCompareGate`'s classification
+  //   loop (git/worktrees.ts) recognizes only `packages/daemon/{src,test,assets,scripts}/` (plus a small
+  //   INERT_MERGE_PATH_PREFIXES/INERT_MERGE_EXACT_PATHS allowlist it skips outright, e.g. docs/, README.md).
+  //   The FIRST changed path that falls outside ALL of those hits that loop's catch-all — `return
+  //   notApplicableHere("path outside emit-compare scope: ...")` — which reports `notApplicable:true`, not
+  //   an informative `false`: the predicate never had this diff's shape in its domain, so "proven not
+  //   reduced" would overclaim. `db.ts`'s `toGateHistoryRow` then has no boolean to recover from either the
+  //   settled verdict payload or the raw event's `detail` (the batch's own `build_gate` event OMITS
+  //   `emitCompareReduced` entirely when `notApplicable` — see service.ts's `emitCompareDecidable` gate),
+  //   so it falls through to `null` — the CORRECT third state, not a missing recording.
+  //
+  //   `null` was previously reachable in PRODUCTION (any project whose diff isn't shaped like this daemon
+  //   package) but UNREACHABLE in this FIXTURE: every prior scenario's changed paths sat entirely under
+  //   `packages/daemon/**`. This scenario extends the fixture minimally — a new `packages/web/src/*.ts` path,
+  //   the exact example that catch-all's own in-code comment names as out of scope — rather than forking a
+  //   second fixture module.
+  {
+    const NA = mk("bmrg-na");
+    makeRepoWithBaseSrcFile(NA, BASE_SRC);
+    writeRealTestDaemonScript(NA.repo);
+    commitAll(NA.repo, "chore: add real test-daemon script", GIT_ID);
+
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seedBatchProject(db, NA);
+
+    const wTest = await createWorktree(NA.repo, NA.projId, `${NA.taskId}-test`);
+    worktrees.push(wTest.worktreePath);
+    fs.writeFileSync(path.join(wTest.worktreePath, "packages", "daemon", "test", "bmrg-na-added.mjs"), "console.log(\"PASS  bmrg-na-added\");\nprocess.exit(0);\n");
+    commitAll(wTest.worktreePath, "test: add bmrg-na-added", GIT_ID);
+    const workerTest = { taskId: `${NA.taskId}-test`, workerId: `${NA.workerId}-test`, branch: wTest.branch, worktreePath: wTest.worktreePath, label: "test-only" };
+    seedWorker(db, NA, workerTest);
+
+    const wOut = await createWorktree(NA.repo, NA.projId, `${NA.taskId}-outofscope`);
+    worktrees.push(wOut.worktreePath);
+    // packages/web/** is never in EMIT_COMPARE_SRC_PREFIX/EMIT_COMPARE_TEST_PREFIX/EMIT_COMPARE_ASSETS_PREFIX/
+    // EMIT_COMPARE_SCRIPTS_PREFIX (all scoped to packages/daemon/**), and it's neither docs/ nor a root
+    // INERT_MERGE_EXACT_PATHS name — so it can only ever hit computeEmitCompareGate's final catch-all.
+    mkdirp(path.join(wOut.worktreePath, "packages", "web", "src"));
+    fs.writeFileSync(path.join(wOut.worktreePath, "packages", "web", "src", "App.ts"), "export const x = 1;\n");
+    commitAll(wOut.worktreePath, "feat(web): add App.ts", GIT_ID);
+    const workerOut = { taskId: `${NA.taskId}-outofscope`, workerId: `${NA.workerId}-outofscope`, branch: wOut.branch, worktreePath: wOut.worktreePath, label: "out-of-scope" };
+    seedWorker(db, NA, workerOut);
+
+    const { opId, value, row } = await runBatch(sessions, db, NA.projId, NA.mgrId, [workerTest.workerId, workerOut.workerId]);
+    check("(NA) the gate command was called exactly once for the whole batch", calls === 1);
+    check("(NA) captured command IS byte-identical to the configured full gate — an out-of-scope path can't be classified, so the batch stays FULL", capturedGate === FULL_GATE);
+
+    const rawEvents = db.findGateOpEventsByOpId(opId);
+    const rawBuildGate = rawEvents.find((e) => e.kind === "build_gate");
+    check("(NA) build_gate event OMITS emitCompareReduced entirely — the predicate never decided, so nothing informative was ever stamped (not even false)", rawBuildGate?.detail?.emitCompareReduced === undefined);
+
+    // Card 32a8bcca DoD-1: assert on the PROJECTED gate_history row (db.ts's toGateHistoryRow via
+    // db.listGateEvents), never an in-memory return — the same surface (POS)/(NEG) already assert on above.
+    check("(NA) PROJECTED gate_history row: emitCompareReduced reads null — the CORRECT third state (notApplicable), never a bug", row?.emitCompareReduced === null);
+    check("(NA) PROJECTED gate_history row: emitCompareIdenticalCount stays null alongside emitCompareReduced:null (pairing invariant)", row?.emitCompareIdenticalCount === null);
+    check("(NA) PROJECTED gate_history row: emitCompareTestFiles stays null alongside emitCompareReduced:null (pairing invariant)", row?.emitCompareTestFiles === null);
+
+    if (value) {
+      check("(NA) both branches still landed (the batch itself passed, just via the full command)", value.ok === true && value.landed.length === 2 && value.fallback.length === 0);
+      check("(NA) no reducedGateWarning on a non-reduced (notApplicable) batch", value.reducedGateWarning === undefined);
+    } else {
+      console.log("(NA) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB-recorded checks above are unconditional and still ran.");
+    }
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
