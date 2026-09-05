@@ -741,8 +741,10 @@ export interface PlatformConfig {
    * delivered as its OWN turn (one-per-turn, so distinct directives are never mashed into one wall of
    * text), or coalesced into a single concatenated turn together with any other queued agent messages
    * (today's legacy full-coalesce behavior)? Loom's own operational nudges (idle/context/busy-stuck
-   * watchdogs, restart/boot continuation notes, rate-limit/usage nudges, memory-recall injection) always
-   * coalesce regardless of this flag — only AGENT-kind entries are gated by it. Default false (= the new
+   * watchdogs, restart/boot continuation notes, memory-recall injection) always
+   * coalesce regardless of this flag — only AGENT-kind entries are gated by it (rate-limit replay bypasses
+   * this queue entirely via a direct `submit()`, so it isn't a producer here — see `pty/host.ts`'s
+   * `QueuedMessageKind` doc). Default false (= the new
    * one-per-turn behavior); set true to restore the pre-2026-07 full-coalesce behavior. Read ONCE by
    * PtyHost's drain path (a pty-host constructor opt, boot-bound like `timeouts.busyStaleMs`), never
    * re-resolved per message. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the rest of

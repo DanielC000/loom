@@ -2747,8 +2747,8 @@ export type EnqueueStdinTail = {
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
- * idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
- * memory-recall injection — see `QueuedMessageKind`). An `"agent"`-kind entry (a worker report, a
+ * idle/context/busy-stuck watchdogs, restart/boot continuation notes, memory-recall injection —
+ * see `QueuedMessageKind`; rate-limit replay is NOT a producer here, same doc). An `"agent"`-kind entry (a worker report, a
  * manager's direction, a human composer turn, a replayed kickoff) is legitimately free-form text, so
  * NEITHER check below is ever applied there — not sanitized, not logged, delivered byte-identical.
  *
@@ -8142,7 +8142,8 @@ export class PtyHost {
    * 2026-07-11 — the human owns the daemon, so both their own and Loom's own queued text are theirs to clear):
    *   • `source:"human"` — the human's OWN composed turns (any kind);
    *   • `kind:"warning"` — Loom's OWN operational injections (idle/context/busy-stuck watchdog nudges like
-   *     `[loom:worker-idle]`, restart/boot continuation notes, rate-limit/usage nudges, memory-recall) —
+   *     `[loom:worker-idle]`, restart/boot continuation notes, memory-recall; rate-limit replay bypasses
+   *     this queue entirely, see `QueuedMessageKind`'s own doc) —
    *     Loom-authored, NOT a message from another agent, so removing/repositioning one harms nobody.
    * The ONE protected class is `source:"system"` + `kind:"agent"` — a message AUTHORED by an agent or a
    * human TO this recipient (worker→manager report, manager→worker direction/redirect, Lead session_message,
@@ -8504,10 +8505,11 @@ export class PtyHost {
       //     at max. Each watcher is independently cooldown/dedup-gated to at most ONE pending nudge per
       //     session at a time (idle escalates-once, context re-nudges on a cadence, busy-worker is
       //     once-per-episode, resume-doc has a 30-min cooldown) — no unbounded same-producer accumulation.
-      //   - "Rate-limit/usage nudges" (named as an example in QueuedMessageKind's own doc above) turned out
-      //     NOT to be a real producer on this branch: resumeAfterRateLimit replays live.lastPrompt via a
-      //     DIRECT this.submit() call, bypassing enqueueStdin/live.pending entirely — it never reaches
-      //     drainPending at all. Left as-is (out of this card's scope) rather than corrected here.
+      //   - "Rate-limit/usage nudges" turned out NOT to be a real producer on this branch:
+      //     resumeAfterRateLimit replays live.lastPrompt via a DIRECT this.submit() call, bypassing
+      //     enqueueStdin/live.pending entirely — it never reaches drainPending at all (card 8f1d7912;
+      //     the false claim it once left uncorrected in QueuedMessageKind's own doc above, CLAUDE.md,
+      //     and shared/src/config.ts was fixed by card ba690cc2).
       //   - Fan-in risk (many small per-worker watchdog nudges landing on one manager's queue at once) is
       //     structurally bounded by orchestration.maxConcurrentWorkers (shared/src/config.ts) — a hard cap
       //     on live workers per manager, default 3 — so even a fleet-wide recovery burst keeps this branch's
