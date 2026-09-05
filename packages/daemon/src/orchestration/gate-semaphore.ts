@@ -136,6 +136,22 @@ export interface GateDescriptor {
    *  gate (solo merge, worker self-check, deploy), which is what keeps those runs byte-identical. */
   batchBranches?: string[] | null;
   batchLandedCount?: number | null;
+  /** Card 19256231 — set ONLY on a per-branch MERGE gate that `mergeBatchTracked`'s own `runFallback`
+   *  spawned (via `confirmWorkerMergeTracked`) after that batch's own shared gate genuinely ran and
+   *  produced an outcome the manager needs individually gated candidates for (a RED gate, a forfeit, or
+   *  a green batch's own dropped/overflow/stranded candidates) — carries that batch's OWN `opId` (the
+   *  same id its `[loom:merge-batch-*]` settle nudge already names). A fallback descriptor otherwise
+   *  looks IDENTICAL to an ordinary solo `worker_merge_confirm` (real `taskId`, real `branch`, a real
+   *  `workerLabel` — never the batch's own `taskId:null`/`branch:null` shape `batchBranches` marks), so
+   *  the documented "look for taskId:null/branch:null/workerLabel:Orchestrator" workaround for finding a
+   *  live batch op is structurally blind to these rows: it was written to find the BATCH's own gate, and
+   *  filters out exactly the rows a rejected batch spawns. This field is what lets a caller reading
+   *  `gate_queue` recognize one of those rows as "spawned by MY batch op X" rather than mistaking it for
+   *  an unrelated, ordinary merge. `undefined`/absent on every batch's OWN gate descriptor (that one
+   *  self-identifies via `batchBranches` instead) and on every genuinely ordinary solo merge — never set
+   *  on the two early-return batch fallback paths (too few eligible candidates, no `gateCommand`
+   *  configured) either, since neither ever mints a batch op to point back to. */
+  fallbackOfBatchOpId?: string | null;
   /** The PendingOpRegistry opId this gate run belongs to (card edc1ec12's `gate_status(opId)` read tool) —
    *  a caller holding the opId a `run_gate`/`worker_merge_confirm` pending response returned can look this
    *  run up in {@link GateSemaphore.snapshot}'s entries without needing the semaphore's own internal `id`.
@@ -218,6 +234,9 @@ export interface GateSnapshotEntry {
    *  their shared doc. Null on every non-batched run. */
   batchBranches: string[] | null;
   batchLandedCount: number | null;
+  /** Echoed from {@link GateDescriptor.fallbackOfBatchOpId} — see its own doc. Null on every run that
+   *  isn't one of a batch's own per-branch fallback confirms (including the batch's OWN gate run). */
+  fallbackOfBatchOpId: string | null;
   /** "running" once it holds a lane; "queued" while it's still waiting for one. */
   phase: "running" | "queued";
   /** Epoch-ms anchor for the UI's live elapsed clock: startedAt (running) or enqueuedAt (queued). */
@@ -1207,6 +1226,7 @@ export class GateSemaphore {
       branch: e.descriptor.branch ?? null,
       batchBranches: e.descriptor.batchBranches ?? null,
       batchLandedCount: e.descriptor.batchLandedCount ?? null,
+      fallbackOfBatchOpId: e.descriptor.fallbackOfBatchOpId ?? null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,

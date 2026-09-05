@@ -163,6 +163,17 @@ export interface GateQueueEntry {
   taskId?: string | null;
   branch?: string | null;
   workerLabel?: string | null;
+  /** Card 19256231 — echoed from {@link GateDescriptor.fallbackOfBatchOpId}: present (and non-null) ONLY
+   *  on a per-branch merge that `merge_batch`'s own automatic fallback spawned, naming the batch op's
+   *  `opId` it fell back FROM. Same cross-project visibility as `taskId`/`branch`/`workerLabel` — an
+   *  own-project entry always carries this key (possibly `null`, for an ordinary non-batch-spawned
+   *  merge); a foreign-project entry omits it entirely, same as those three fields, since it echoes
+   *  which of the CALLER's own batches spawned the row — not this daemon's business to disclose to a
+   *  different project. This is what lets a manager distinguish a batch's per-branch fallback row (real
+   *  `taskId`/`branch`/`workerLabel`, exactly like an ordinary solo merge) from a genuinely unrelated
+   *  merge — the documented `taskId:null`/`branch:null`/`workerLabel:"Orchestrator"` predicate for
+   *  finding a live BATCH op only ever matches the batch's OWN gate row, never these. */
+  fallbackOfBatchOpId?: string | null;
   /** Card 80d54122: present on EVERY entry from a DIFFERENT project (never present, let alone `false`, on
    *  the caller's own — checking `"redacted" in entry` is how a caller tells the two shapes apart without
    *  inferring it from which OTHER keys happen to be missing). A bare boolean by design: it says "this
@@ -5224,6 +5235,7 @@ export class SessionService {
         entry.taskId = e.taskId;
         entry.branch = e.branch;
         entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+        entry.fallbackOfBatchOpId = e.fallbackOfBatchOpId;
       }
       return entry;
     };
@@ -14314,6 +14326,11 @@ export class SessionService {
    */
   async confirmWorkerMerge(
     managerSessionId: string, workerSessionId: string, opId?: string, forceRemoveWorktree?: boolean, opStartedAt?: string,
+    // Card 19256231: threaded from confirmWorkerMergeTracked's own `opts.fallbackOfBatchOpId` — see that
+    // param's doc — ONLY when this specific confirm is one of `mergeBatchTracked`'s own `runFallback`
+    // candidates. Every other caller omits it, so `gateDescriptor.fallbackOfBatchOpId` below is
+    // `undefined` (⇒ `null` once echoed through `GateSnapshotEntry`) for every ordinary solo merge.
+    fallbackOfBatchOpId?: string,
   ): Promise<ConfirmMergeResult> {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
@@ -15410,7 +15427,7 @@ export class SessionService {
       // structural per-repo merge-admission guard refuse to admit a SECOND same-repo merge gate
       // concurrently, queueing it instead of letting both race to squash. See GateDescriptor.repoPath's
       // own doc for the full mechanism and its deliberate limits.
-      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId, worktreePath, repoPath };
+      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId, worktreePath, repoPath, fallbackOfBatchOpId };
       let gateStartedAt = Date.now();
       // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the semaphore's own active-run count at the instant
       // THIS run was admitted (i.e. including itself) — read inside the `fn` callback so it reflects
@@ -16894,9 +16911,18 @@ export class SessionService {
     const chosen = candidates.slice(0, K);
     const overflow = candidates.slice(K);
 
-    const runFallback = async (list: { workerSessionId: string; reason: string }[]): Promise<{ workerSessionId: string; reason: string }[]> => {
+    // Card 19256231: `batchOpId`, when given, is threaded onto every fallback confirm this call spawns
+    // (via confirmWorkerMergeTracked's own `opts.fallbackOfBatchOpId`) so each one's gate_queue row is
+    // traceable back to THIS batch op — see GateDescriptor.fallbackOfBatchOpId's own doc for why that
+    // matters (a fallback confirm otherwise looks identical to an ordinary solo merge). Only ever passed
+    // by the two call sites below that run AFTER this batch's own gate has genuinely produced an opId
+    // (the pendingOps.attach closure's own `opId` param) — the two early-return call sites further below
+    // (`chosen.length < 2`, no `gateCommand`) never reach that closure at all, so they call this with no
+    // second argument and every resulting fallback stays untagged, correctly: no batch op ever ran for
+    // them to point back to.
+    const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string }[]> => {
       for (const f of list) {
-        try { await this.confirmWorkerMergeTracked(managerSessionId, f.workerSessionId); }
+        try { await this.confirmWorkerMergeTracked(managerSessionId, f.workerSessionId, undefined, batchOpId ? { fallbackOfBatchOpId: batchOpId } : undefined); }
         catch { /* best-effort — the manager still sees this worker in `fallback` and can re-confirm by hand */ }
       }
       return list;
@@ -17333,7 +17359,7 @@ export class SessionService {
               ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: result.reason ?? "batch failed" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
-            ]);
+            ], opId);
             return {
               ok: false, landed: [], fallback, reason: result.reason,
               phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
@@ -17368,7 +17394,7 @@ export class SessionService {
             ...droppedFallback,
             ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
             ...strandedFallback,
-          ]);
+          ], opId);
           return {
             ok: true, landed, fallback,
             phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
@@ -17553,6 +17579,11 @@ export class SessionService {
        *  the loop's own FIRST call) omits this — the dead-owner check still runs exactly once per external
        *  call sequence, unchanged from before this option existed. */
       skipDeadOwnerRecovery?: boolean;
+      /** Card 19256231: set ONLY by `mergeBatchTracked`'s own `runFallback` — the batch op's OWN `opId`,
+       *  threaded straight through to `confirmWorkerMerge`'s `fallbackOfBatchOpId` param (see its doc)
+       *  so this confirm's gate descriptor — and therefore its `gate_queue` row — carries it. Every other
+       *  caller (the MCP tool, `confirmWorkerMergeUntilSettled`) omits this. */
+      fallbackOfBatchOpId?: string;
     },
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
@@ -17699,7 +17730,7 @@ export class SessionService {
       // still reports it (as "unknown", not "failed" — see that doc).
       async (opId) => {
         try {
-          return await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt);
+          return await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId);
         } catch (err) {
           const worker = this.db.getSession(workerSessionId);
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
