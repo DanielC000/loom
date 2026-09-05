@@ -20,7 +20,7 @@ import { sweepDeadSessions } from "../sessions/liveness.js";
 import type { Db } from "../db.js";
 import { inTestMode } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
-import { detectDefaultShell } from "../pty/host.js";
+import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { filterRetainedWorktreesByProject } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
@@ -5317,7 +5317,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (mcp/questionTool.ts's resolveQuestionForAgent), which calls getActiveTurnOwnerText directly. And
     // (card 018ce1db) it can no longer reach a Companion session's own ownerText slot at all — see the
     // role-gate immediately above.
-    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text));
+    // senderId:HUMAN_COMPOSER_SENDER_ID (card 4458dd9e) — so consecutive composer entries queued while the
+    // recipient is busy coalesce into one turn, matching CLAUDE.md's claim for "a human composer turn" (see
+    // that constant's own doc, pty/host.ts, for why a fixed sentinel is correct here and why it's safe
+    // w.r.t. the Companion Trust Window — this route already refused role:"assistant" above).
+    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text, undefined, HUMAN_COMPOSER_SENDER_ID));
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
   // the /loom-session-end skill (log progress to the board, leave it resumable) and then call the `end_me`

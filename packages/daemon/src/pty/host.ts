@@ -1138,6 +1138,22 @@ function coalesceSenderIdentity(senderId?: string | null): string | null | undef
 }
 
 /**
+ * Card 4458dd9e: the coalescing/reorder identity for the web UI's human composer
+ * (`POST /api/sessions/:id/input`, gateway/server.ts). There is no per-request session/user id to thread
+ * for that route — Loom is single-user and the route is loopback-trusted wholesale — so a fixed, non-
+ * `"system"` sentinel stands in for "the owner, via the composer" and lets consecutive composer entries
+ * queued while the recipient is busy coalesce into one turn exactly like any other real sender, instead of
+ * silently falling back to cross-sender one-per-turn (the gap `CLAUDE.md`'s "Message drain is
+ * kind-classified" paragraph had asserted was already fixed). Deliberately distinct from the literal
+ * string `"system"` so `coalesceSenderIdentity` above never null-maps it.
+ * SAFE w.r.t. the Companion Trust Window (`Live.activeTurnSenderId`/`getActiveTurnSenderId`): this route
+ * refuses a `role:"assistant"` (Companion) session before ever reaching `enqueueStdin` (card 018ce1db), so
+ * this identity can never land on a companion session's turn and can never be mistaken for a group-route
+ * companion sender by the DM-only capability gates in companion/capabilities.ts.
+ */
+export const HUMAN_COMPOSER_SENDER_ID = "loom-human-composer";
+
+/**
  * A session marked busy with NO engine output for this long is treated as STUCK (a turn that never
  * really started, or a missed Stop hook) and self-healed to idle so its queued messages can drain
  * and the UI stops showing a phantom 'busy'. Conservative — a genuinely long, silent tool call is
