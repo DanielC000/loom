@@ -69,6 +69,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           shape from card 10fd660b's own fixtures (passing, rejected, dropped-branch, legacy, solo) reads
 //           `batchForfeited:false` — the DoD's own positive control that an ordinary batch's rendering
 //           never changes.
+//   (card 55cd3538) card 19256231's `GateDescriptor.fallbackOfBatchOpId` (and its `gate_queue` echo) only
+//           identifies a batch's own per-branch fallback merge while that row is LIVE — the moment it
+//           drains, the attribution is gone. This card stamps the SAME id durably onto the fallback
+//           confirm's own `orchestration_events` row (`confirmWorkerMerge`'s `evt` closure,
+//           sessions/service.ts — the identical "merged in here, not at each call site" pattern `opId`
+//           already uses) and surfaces it as `gate_history[].fallbackOfBatchOpId`, so a post-hoc reader
+//           can still answer "which batch spawned this merge?" long after the live row is gone. The
+//           "(unit, card 55cd3538)" checks below prove the mapper against a fallback-confirm fixture
+//           (positive control: the real batch opId round-trips) alongside the DoD's required negative
+//           controls: the batch's OWN gate row never carries it, an ordinary solo merge with no batch
+//           involvement reads null, every other batch-family shape (rejected/dropped/legacy/forfeited)
+//           reads null, and a pre-existing legacy row predating the field reads null rather than a
+//           fabricated value.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-history.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -823,6 +836,12 @@ function seed(db) {
     // manager, so `listGateEvents`' JOIN resolves `s.branch` to null with nothing synthesized in its place.
     db.insertSession({ id: mgr, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
     db.insertSession({ id: w, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t, worktreePath: `/tmp/${P}-wt`, branch: "loom/solo-control-branch" });
+    // (card 55cd3538) a SECOND worker session, distinct from `w` above, for the fallback-confirm fixture
+    // (7) below — a real per-branch fallback confirm targets its OWN worker/branch, never the plain solo
+    // control's.
+    const w2 = `${P}-wkr2`, t2 = `${P}-task2`;
+    db.insertTask({ id: t2, projectId: P, title: "Fallback-confirm control task", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now });
+    db.insertSession({ id: w2, projectId: P, agentId: a, engineSessionId: null, title: null, cwd: `/tmp/${P}`, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: t2, worktreePath: `/tmp/${P}-wt2`, branch: "loom/fallback-branch-1" });
 
     // `evtBatch` stamps `branches` (the REQUESTED identities) on EVERY batch event and `branchCount`
     // (`landedCount`, the POST-ASSEMBLY count) in the build_gate payload — mirrored verbatim here.
@@ -866,16 +885,31 @@ function seed(db) {
       detail: { opId: forfeitOpId, repoPath: `/tmp/${P}`, baseMainSha: "deadbeef", reason: "main advanced mid-gate", branches: [10, 11].map(branchIdentity) },
     });
 
+    // (7, card 55cd3538) A FALLBACK CONFIRM — one of `mergeBatch`'s own per-branch fallback merges,
+    // mirroring the SHAPE `confirmWorkerMerge`'s real `evt` closure now stamps unconditionally: an
+    // ORDINARY (non-batched) solo `build_gate` row for a real worker/branch, additionally carrying
+    // `fallbackOfBatchOpId` pointing back at the batch op it fell back from (fixture (1)'s own opId,
+    // reused here as the "batch this confirm belongs to" — nothing depends on the two being the SAME
+    // batch's fixtures, only that the id round-trips). `batched` stays `false` — a fallback confirm's OWN
+    // row is a solo per-branch merge, never the batch's own gate run (see this field's own doc,
+    // shared/types.ts, for why `batched`/`fallbackOfBatchOpId` are never both non-null on one row).
+    const batchOpIdThisFellBackFrom = randomUUID();
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 900).toISOString(), managerSessionId: mgr, workerSessionId: w2,
+      taskId: t2, kind: "build_gate",
+      detail: { opId: randomUUID(), passed: true, durationMs: 577000, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 1, fallbackOfBatchOpId: batchOpIdThisFellBackFrom },
+    });
+
     const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
     // The `batch_merge_forfeited` event itself must NEVER surface as its own row — `GATE_HISTORY_KINDS`
     // deliberately excludes that kind (unchanged by this card); it exists here ONLY to annotate fixture
-    // (6)'s `build_gate` row. So the page still holds exactly 6 rows: the 5 original fixtures + fixture (6).
-    check("(unit, card 10fd660b / b480dda9) all 6 fixture rows returned — the sibling batch_merge_forfeited event is NOT a 7th row", page.items.length === 6);
+    // (6)'s `build_gate` row. So the page holds exactly 7 rows: the 6 original fixtures + fixture (7).
+    check("(unit, card 10fd660b / b480dda9 / 55cd3538) all 7 fixture rows returned — the sibling batch_merge_forfeited event is NOT its own row", page.items.length === 7);
     const byDuration = (ms) => page.items.find((r) => r.durationMs === ms);
     const passBatch = byDuration(511000), rejectBatch = byDuration(522000);
     const droppedBatch = byDuration(533000), legacyBatch = byDuration(544000), solo = byDuration(555000);
-    const forfeitedBatch = byDuration(566000);
-    check("(unit, card 10fd660b / b480dda9) precondition: all 6 fixtures resolved to 6 distinct rows", new Set([passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch]).size === 6 && [passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch].every(Boolean));
+    const forfeitedBatch = byDuration(566000), fallbackConfirm = byDuration(577000);
+    check("(unit, card 10fd660b / b480dda9 / 55cd3538) precondition: all 7 fixtures resolved to 7 distinct rows", new Set([passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch, fallbackConfirm]).size === 7 && [passBatch, rejectBatch, droppedBatch, legacyBatch, solo, forfeitedBatch, fallbackConfirm].every(Boolean));
 
     check("(unit, card 10fd660b) (1) a passing batch reads batched:true", passBatch?.batched === true);
     check("(unit, card 10fd660b) (1) a passing batch carries branchCount:3 (the LANDED count)", passBatch?.branchCount === 3);
@@ -900,11 +934,19 @@ function seed(db) {
     check("(unit, card b480dda9) (6) a FORFEITED batch still reads outcome:\"pass\"/passed:true/branchCount:2 UNCHANGED — the gate itself genuinely passed, this card never touches that verdict", forfeitedBatch?.outcome === "pass" && forfeitedBatch?.passed === true && forfeitedBatch?.branchCount === 2);
     check("(unit, card b480dda9 — THE WHOLE POINT) (6) that same row ALSO reads batchForfeited:true, from the sibling batch_merge_forfeited event sharing its opId", forfeitedBatch?.batchForfeited === true);
 
+    check("(unit, card 55cd3538 — THE POSITIVE CONTROL) (7) a per-branch fallback confirm reads fallbackOfBatchOpId as the batch op it fell back FROM", fallbackConfirm?.fallbackOfBatchOpId === batchOpIdThisFellBackFrom);
+    check("(unit, card 55cd3538) (7) that same fallback-confirm row still reads batched:false — it is a SOLO merge, not the batch's own gate run", fallbackConfirm?.batched === false);
+    check("(unit, card 55cd3538) (7) that same row's real branch still resolves through the JOIN, unchanged", fallbackConfirm?.branch === "loom/fallback-branch-1");
+    check("(unit, card 55cd3538 — THE NEGATIVE CONTROL) (1) the batch's OWN gate row (batched:true) must NOT carry fallbackOfBatchOpId — the batch's own run is never itself a fallback of anything", passBatch?.fallbackOfBatchOpId === null);
+    check("(unit, card 55cd3538 — THE NEGATIVE CONTROL) (5) an ordinary SOLO merge with no batch involvement at all reads fallbackOfBatchOpId:null", solo?.fallbackOfBatchOpId === null);
+    check("(unit, card 55cd3538) (2)/(3)/(4)/(6) every other batch-family fixture also reads fallbackOfBatchOpId:null — this field is exclusive to fixture (7)'s own shape", rejectBatch?.fallbackOfBatchOpId === null && droppedBatch?.fallbackOfBatchOpId === null && legacyBatch?.fallbackOfBatchOpId === null && forfeitedBatch?.fallbackOfBatchOpId === null);
+
     // A PRE-EXISTING (seed()) row from before this card shipped must also read the un-batched shape — the
     // legacy case is not special-cased differently from the synthetic solo control just proven above.
     const { P1 } = seed(db);
     const legacyPassed = db.listGateEvents({ projectId: P1, limit: 100, offset: 0 }).items.find((r) => r.durationMs === 61234);
     check("(unit, card 10fd660b) a PRE-EXISTING (seed()) row reads batched:false with both new fields null", legacyPassed?.batched === false && legacyPassed?.branchCount === null && legacyPassed?.batchBranches === null);
+    check("(unit, card 55cd3538) that SAME pre-existing row also reads fallbackOfBatchOpId:null (predates the field, never fabricated)", legacyPassed?.fallbackOfBatchOpId === null);
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   }
@@ -915,5 +957,6 @@ console.log(failures === 0
   + " Since card eb9348b0, a merge row's own failingTest is recovered from that SAME joined verdict payload (gateDetail.failingTest) as a fallback whenever the raw event has none, proven against both a synthetic fixture and a REAL confirmWorkerMergeTracked write — with negative controls proving a pass verdict, a no-tombstone row, and a pre-existing legacy row all still read null, never a fabricated value."
   + " Since card 10fd660b, a BATCHED merge row also carries batched/branchCount/batchBranches, so a batch is no longer indistinguishable from missing data — with branchCount held to the POST-ASSEMBLY LANDED count and batchBranches to the REQUESTED set (a fixture where the two deliberately disagree proves neither is derived from the other), a legacy batch row reading null rather than a fabricated count, and a SOLO positive control proving an ordinary row is unchanged: batched:false, both fields null, its real branch still resolved."
   + " Since card b480dda9, a batch row ALSO carries batchForfeited — an ANNOTATION, not a second row: a batch whose gate genuinely passed (outcome/passed/branchCount all unchanged) but whose sibling batch_merge_forfeited event shares its opId now reads batchForfeited:true, while every OTHER batch shape proven above (passing, rejected, dropped-branch, legacy, solo) reads batchForfeited:false — proving the annotation is additive and never disturbs an ordinary batch's existing rendering."
+  + " Since card 55cd3538, a per-branch fallback confirm's row ALSO carries fallbackOfBatchOpId — the id of the batch op it fell back FROM, stamped DURABLY on the event itself (sessions/service.ts's evt closure) rather than only on the live gate_queue row card 19256231 shipped, so the attribution survives long after that row drains. Proven with the positive control (a fallback-confirm fixture reads the real batch opId back) AND the negative controls the DoD required: the batch's OWN gate row (batched:true) never carries it, an ordinary solo merge with no batch involvement reads null, every other batch-family fixture (rejected/dropped/legacy/forfeited) reads null too, and a pre-existing legacy row predating the field reads null rather than a fabricated value."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

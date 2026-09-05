@@ -4289,7 +4289,16 @@ export class OrchestrationMcpRouter {
           "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName, retriedFile, retryPassed, retryDeclineReason, transientRetried, " +
-          "emitCompareReduced, emitCompareIdenticalCount, emitCompareTestFiles}. " +
+          "emitCompareReduced, emitCompareIdenticalCount, emitCompareTestFiles, fallbackOfBatchOpId}. " +
+          "⭐ CARD 55cd3538 — `fallbackOfBatchOpId` is the DURABLE, post-hoc counterpart to `gate_queue`'s " +
+          "LIVE-ONLY `fallbackOfBatchOpId` (card 19256231): non-null ONLY on a row from one of " +
+          "`merge_batch`'s own automatic per-branch fallback confirms, naming the batch op's `opId` it fell " +
+          "back FROM — the SAME id `gate_queue` shows only while that row is still live, stamped here so it " +
+          "survives long after the row drains. `null` on the batch's OWN gate row (that one self-identifies " +
+          "via `batched`/`batchBranches` instead — the two are never both non-null on one row), `null` on " +
+          "every ordinary solo merge, and `null` on any row recorded before this field shipped (never " +
+          "backfilled). ⛔ Do NOT re-derive this from `gate_queue` — that instrument only ever shows a LIVE " +
+          "op; this field exists precisely to answer the question after that row is gone. " +
           "⚠️ CARD 6ca4b1a0 — `emitCompareReduced`: a duration series built from this table MUST bucket on " +
           "this field before comparing durations — a `\"merge\"` row's gate can run REDUCED (build + static " +
           "guards, ± the changed test files — seconds, not minutes) instead of the full daemon test suite, " +

@@ -14505,9 +14505,16 @@ export class SessionService {
     // op's `pending_gate_ops` tombstone row, so a boot-time reconcile can recover this op's REAL recorded
     // outcome instead of misreporting a genuinely-settled op as `orphaned-by-restart` (see
     // `recoverGateOpVerdict`'s own doc).
+    // Card 55cd3538: `fallbackOfBatchOpId` (this method's own param, above) is stamped the SAME way —
+    // merged in here, not at each call site — so `gate_history` can answer "which batch spawned this
+    // merge?" DURABLY, after the live `gate_queue`/`GateDescriptor` row it mirrors (card 19256231) has
+    // long since drained. `undefined` on every ordinary solo confirm is dropped by JSON.stringify, so
+    // this key is simply absent from `detail_json` there — never stamped `null` — matching
+    // `GateDescriptor.fallbackOfBatchOpId`'s own "undefined/absent on every genuinely ordinary solo
+    // merge" discipline (gate-semaphore.ts).
     const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind,
-      detail: { ...detail, opId: thisOpId },
+      detail: { ...detail, opId: thisOpId, fallbackOfBatchOpId },
     });
     // kind:"agent" — a merge-rejection result names a specific worker/task and requires distinct manager
     // action (recover a commit, re-task, rebase); it must never be mashed with an unrelated turn.

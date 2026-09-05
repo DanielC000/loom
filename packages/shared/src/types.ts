@@ -1998,6 +1998,17 @@ export interface GateHistoryRow {
    *  that count is the real, correct post-assembly figure at the moment the gate settled; the forfeit is
    *  a separate, later fact and belongs in its own field, not a falsified count. */
   batchForfeited: boolean;
+  /** Card 55cd3538 — the POST-HOC counterpart to `gate_queue`'s live-only `fallbackOfBatchOpId` (card
+   *  19256231, {@link GateDescriptor.fallbackOfBatchOpId}): once one of a batch's own per-branch fallback
+   *  merges drains out of `gate_queue`, that live tag is gone for good — this field is the SAME id,
+   *  stamped durably onto the row's own underlying event, so a reader looking minutes (or days) later can
+   *  still answer "which batch spawned this merge?" from `gate_history` alone. Non-null ONLY on a row
+   *  from one of `mergeBatch`'s own automatic per-branch fallback confirms (`runFallback`, sessions/
+   *  service.ts); `null` on every ordinary solo merge AND on the batch's own gate row itself (that one
+   *  self-identifies via `batched`/`batchBranches` above instead — the two fields are never both non-null
+   *  on the same row). `null` also for every row recorded before this field shipped, same never-
+   *  backfilled discipline as `concurrentGatesMax`/`retriedFile` above. */
+  fallbackOfBatchOpId: string | null;
 }
 
 /** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so

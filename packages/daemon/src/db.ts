@@ -8085,6 +8085,14 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // `batchBranches` are: a forfeit event's opId is only ever minted by `mergeBatch`, so it cannot
   // genuinely coincide with a non-batch row, but nothing here relies on that alone.
   const batchForfeited = batched && r.forfeited === 1;
+  // Card 55cd3538: echoed straight from `detail.fallbackOfBatchOpId` (stamped unconditionally onto every
+  // event `confirmWorkerMerge`'s own `evt` closure emits — sessions/service.ts) — deliberately NOT gated
+  // on `batched` the way the four fields above are: a fallback confirm's OWN row is never itself a batch
+  // row (`batched` reads `false` for it — see `GateDescriptor.fallbackOfBatchOpId`'s own doc, this is a
+  // per-BRANCH merge, not the batch's own gate run), so gating on `batched` here would zero this out on
+  // every row it's actually meant to identify. `null` for every ordinary solo merge and for the batch's
+  // own gate row alike — non-null ONLY on one of `mergeBatch`'s own per-branch fallback confirms.
+  const fallbackOfBatchOpId = typeof detail.fallbackOfBatchOpId === "string" ? detail.fallbackOfBatchOpId : null;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
@@ -8115,6 +8123,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     branchCount,
     batchBranches,
     batchForfeited,
+    fallbackOfBatchOpId,
   };
 }
 
