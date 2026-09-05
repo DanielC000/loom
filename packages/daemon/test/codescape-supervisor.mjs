@@ -29,6 +29,29 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card 468df031: bounded-retry a real control-plane round trip until it reports genuine liveness, rather
+// than trusting a single call or a getPort()/getPid() snapshot. Both matter here: `alive`/`port` flip
+// SYNCHRONOUSLY at spawn time (see spawnServeExplicit's own doc), strictly BEFORE the OS-level bind has
+// actually resolved — so they can read "up" during an attempt that is still racing, or has already lost,
+// one of the supervisor's own documented (deliberately-tolerated) port-reuse TOCTOU windows
+// (supervisor.ts's pickLoopbackPort doc at :498-503, and the restart-reuse window at :1050-1069). Measured
+// live (scratch repro, not simulated end-state): holding the reused port with a real external listener
+// immediately after a kill makes the supervisor's own restart genuinely EADDRINUSE and retry with backoff;
+// `registerProject` — an ACTUAL HTTP round trip against the live server — is the only signal that isn't
+// fooled by that window, and it recovers once the hold releases, on the SAME schedule production itself
+// uses. Bounded (never silently hangs) and never weakens what's asserted: a genuinely broken server still
+// exhausts the bound and reports the last (failing) attempt.
+async function waitForRecovery(sup, repoPath, timeoutMs = 12_000, intervalMs = 200) {
+  const deadline = performance.now() + timeoutMs;
+  let last;
+  do {
+    last = await sup.registerProject(repoPath);
+    if (last.ok) return last;
+    await sleep(intervalMs);
+  } while (performance.now() < deadline);
+  return last;
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli.mjs");
 
@@ -612,9 +635,13 @@ await new Promise((resolve) => hungServer.close(resolve));
   // Card 4e0df6ce's own removal-polarity warning, made concrete: without the fallback this exact scenario
   // is a TOTAL OUTAGE (the --port 0 rejection above is real, not simulated-away) — prove serve genuinely
   // RECOVERED, not just that getPort() reads a number, by exercising a real control-plane call against it.
-  const fallbackReg = await oldBinSup.registerProject("/fake/repo/old-bin-direct");
+  // Card 468df031: bounded-retried via waitForRecovery (see its own doc) — this fallback spawn just went
+  // through pickLoopbackPort's own real, narrow, deliberately-tolerated TOCTOU (supervisor.ts:498-503); a
+  // collision there self-heals on the supervisor's own backoff schedule exactly like the restart-reuse
+  // window below, so the test tolerates it the same way instead of asserting on a single racy snapshot.
+  const fallbackReg = await waitForRecovery(oldBinSup, "/fake/repo/old-bin-direct");
   check("(f) serve genuinely recovered — a real control-plane call succeeds against the fallback port",
-    fallbackReg.ok === true);
+    fallbackReg?.ok === true);
 
   // Restart-on-death on the fallback path reuses the SAME explicit port, exactly as it always did before
   // this card (blocker 1: the legacy path's deliberately-tolerated narrow TOCTOU is otherwise unchanged) —
@@ -622,18 +649,31 @@ await new Promise((resolve) => hungServer.close(resolve));
   const oldBinPortBefore = oldBinSup.getPort();
   const oldBinPidBefore = oldBinSup.getPid();
   process.kill(oldBinPidBefore);
-  // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN condition is the conjunction of the two
-  // facts the checks below re-observe (pid changed, and a 3rd serve call is on record); the THIRD check
-  // additionally re-asserts `.length === 3` explicitly rather than indexing `[2]` alone, so a timeout exit
-  // (an under-length array) fails loudly instead of `[2]?.port !== "0"` vacuously reading `undefined`.
-  for (let i = 0; i < 100 && (oldBinSup.getPid() === oldBinPidBefore || readOldBinServeCalls().length < 3); i++) await sleep(50);
+  // Card 468df031: don't assert on getPort()/getPid() the instant a new child appears — both flip
+  // synchronously in spawnServeExplicit BEFORE the OS-level bind has actually resolved (see that method's
+  // own doc), so a snapshot taken right then can read "alive" during an attempt that is still racing — or
+  // has already lost — the restart-reuse window supervisor.ts documents at :1050-1069 ("the port sits
+  // unbound between the dying child's exit and the new child's bind... a KNOWN, ACCEPTED exposure... a
+  // DETECTED failure, never silent"). REPRODUCED FOR REAL (scratch repro, not a simulated end-state):
+  // holding oldBinPortBefore with an external listener immediately after the kill makes the supervisor's
+  // own restart genuinely EADDRINUSE and retry with backoff — confirmed via registerProject never
+  // resolving ok:true until the hold releases, while getPort()/getPid() could each still read "up" mid-
+  // failure. waitForRecovery's real control-plane round trip is the only signal that isn't fooled by this.
+  const restartReg = await waitForRecovery(oldBinSup, "/fake/repo/old-bin-restart-direct");
+  check("(f) restart-on-death on the fallback path genuinely recovers — a real control-plane call succeeds again",
+    restartReg?.ok === true);
   check("(f) restart-on-death on the fallback path reuses the SAME explicit port",
     oldBinSup.getPort() === oldBinPortBefore);
   check("(f) restart-on-death produced a genuinely new pid",
     oldBinSup.getPid() !== oldBinPidBefore && oldBinSup.getPid() !== null);
+  // Card 468df031: don't assert an exact call COUNT — a transient hold on the reused port (the window
+  // above) legitimately produces one or more EXTRA failed-bind retries before the eventual success (measured
+  // live: up to 5 total serve calls on one repro run), and that's expected, tolerated behavior, not a bug.
+  // What must hold regardless of how many retries it took: NONE of them ever fell back to requesting the
+  // now-confirmed-unsupported --port 0.
   const oldBinServeCallsAfterRestart = readOldBinServeCalls();
   check("(f) the restart did NOT re-attempt --port 0 (capability stays confirmed-false, sticky, never re-probed)",
-    oldBinServeCallsAfterRestart.length === 3 && oldBinServeCallsAfterRestart[2]?.port !== "0");
+    oldBinServeCallsAfterRestart.length > 2 && oldBinServeCallsAfterRestart.slice(2).every((c) => c.port !== "0"));
 
   oldBinSup.stop();
   delete process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED;
