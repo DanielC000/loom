@@ -4679,9 +4679,13 @@ export class SessionService {
      *    already knowing the outcome: nobody is left alive to ever observe this op's eventual settle, even if
      *    its `run()` is still nominally executing unreachable in the background — the exact condition
      *    `reconcileDeadOwnerMergeOps`'s boot/dead-owner sweep exists to clean up, just readable HERE, before
-     *    that sweep ever runs. (That eviction path, and its worker-gate sibling, still key on
-     *    `isManagerSessionDead` alone rather than the lineage walk — a real, PRE-EXISTING inconsistency
-     *    between eviction semantics and lineage-routed nudges, tracked separately; not this field's concern.)
+     *    that sweep ever runs. FIXED (card 257d534d): that eviction path, and `confirmWorkerMergeTracked`'s
+     *    own per-call defensive check, now key on this SAME `liveLineageSuccessor` walk too (via
+     *    {@link SessionService.isManagerLineageDead}) rather than a session-only check — so eviction and
+     *    this field can never disagree about the same op again. (The "gate" kind — a worker's own
+     *    `run_gate` self-check — needs no analogous eviction at all: its only possible caller IS the
+     *    session named by its own key, so there is no distinct owner to go dead out from under it; see
+     *    {@link SessionService.runWorkerGate}'s own doc.)
      *  - `true` (a live session exists somewhere in the lineage) does NOT prove the op itself is healthy or
      *    progressing — it only rules OUT the nobody-will-ever-see-it failure mode. A genuinely-healthy long
      *    finalize and a hypothetical hung op whose lineage simply hasn't died both read `true` here,
@@ -8045,14 +8049,32 @@ export class SessionService {
     });
   }
 
-  /** DEAD-OWNER CHECK (card 27ea069e): a manager session is "dead" for pending-merge-op purposes when it
-   *  no longer exists, has exited, or has been archived — none of these can ever come back to observe a
-   *  pending op's outcome through the normal attach()/settle path. Deliberately conservative: a session
-   *  mid-`starting` (e.g. a boot-time resume attempt still in flight) is NOT dead — only a definitively
-   *  gone session is, so a legitimately-resuming manager's own in-flight op is never touched. */
-  private isManagerSessionDead(managerSessionId: string): boolean {
-    const mgr = this.db.getSession(managerSessionId);
-    return !mgr || mgr.processState === "exited" || !!mgr.archivedAt;
+  /** DEAD-OWNER CHECK (card 27ea069e; CORRECTED by card 257d534d — see the incident below): a manager's
+   *  LINEAGE is "dead" for pending-merge-op purposes only when there is no LIVE session anywhere in its
+   *  recycle chain — none of these can ever come back to observe a pending op's outcome through the
+   *  normal attach()/settle path. Deliberately conservative: a session mid-`starting` (e.g. a boot-time
+   *  resume attempt still in flight) reads as `processState === "live"` well before it's usable, so a
+   *  legitimately-resuming manager's own in-flight op is never touched — {@link liveLineageSuccessor}
+   *  (below) already treats that the same way every other liveness read in this file does.
+   *
+   *  ⚠️ CORRECTED (card 257d534d, Code Reviewer `213fe600` finding F1 on card `d5e67146`): the ORIGINAL
+   *  version of this check asked only "has THIS session (the one an op was minted under) exited or been
+   *  archived" — `!mgr || mgr.processState === "exited" || !!mgr.archivedAt`, no lineage walk. A
+   *  manager/worker recycle (`recycleManager`/`recycleWorker`) hard-stops the PREDECESSOR's pty and never
+   *  rewrites a pending op's `managerSessionId` — `carryPendingToSuccessor` moves queued messages and
+   *  durable message records only — so that session-only check read a recycled-but-alive lineage as
+   *  "dead" and evicted its RUNNING op, even though every settle nudge for that same op routes through
+   *  {@link resolveSettleNudgeTarget} → `liveLineageSuccessor` and would have reached the live successor
+   *  just fine. Since card 81d795de made a mid-batch recycle an ORDINARY event (a `mergeBatch` finalize
+   *  can now span tens of minutes, comfortably outliving one manager turn), this was not a corner case —
+   *  eviction and nudge-delivery disagreed about the exact same op. Fixed by reusing the SAME
+   *  `liveLineageSuccessor` primitive `gateStatus`'s `ownerSessionAlive` field and every settle nudge
+   *  already resolve through, so "will eviction fire" and "will anyone actually be told" can never drift
+   *  apart again. Fails toward evicting on doubt, unchanged: `liveLineageSuccessor` returns `null` (dead)
+   *  the instant the WHOLE lineage — every link, not just the originating one — is missing/exited/
+   *  archived, so a genuinely ownerless op is evicted exactly as eagerly as before this fix. */
+  private isManagerLineageDead(managerSessionId: string): boolean {
+    return liveLineageSuccessor(this.db, managerSessionId) == null;
   }
 
   /**
@@ -8170,11 +8192,15 @@ export class SessionService {
    * Boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops (card 27ea069e — a daemon
    * restart mid-merge used to leave `worker_merge_confirm` dedup-attaching to a zombie op forever, keyed
    * `merge:${workerSessionId}`, because nothing ever reconciled/expired an entry whose owning manager
-   * session was gone). Evicts any RUNNING merge op whose `managerSessionId` is {@link isManagerSessionDead}
+   * session was gone). Evicts any RUNNING merge op whose `managerSessionId` is {@link isManagerLineageDead}
    * — never a live/still-resuming owner's op, so the healthy case (a manager legitimately mid-merge, or
-   * one still being resumed at boot) is completely untouched. This registry is in-memory (reset on an
-   * actual process restart), so in production this sweep is usually a no-op the moment it runs — its real
-   * value is BELT-AND-SUSPENDERS for any orphaned-owner shape the per-call defensive check in
+   * one still being resumed at boot) is completely untouched. CORRECTED (card 257d534d): this used to key
+   * on the ORIGINATING session alone (`isManagerSessionDead`, no lineage walk) — see
+   * {@link isManagerLineageDead}'s own doc for the incident that fixed. A manager that RECYCLED mid-op is
+   * never touched here as long as its lineage has a live end; only a lineage with NO live session anywhere
+   * — the genuinely ownerless case this sweep exists for — is evicted. This registry is in-memory (reset
+   * on an actual process restart), so in production this sweep is usually a no-op the moment it runs — its
+   * real value is BELT-AND-SUSPENDERS for any orphaned-owner shape the per-call defensive check in
    * {@link confirmWorkerMergeTracked} doesn't itself observe (e.g. nobody re-calls `worker_merge_confirm`
    * for that worker before some other reconcile pass wants to know). Returns the number evicted, for a
    * boot-log line; never throws.
@@ -8182,7 +8208,7 @@ export class SessionService {
   reconcileDeadOwnerMergeOps(): number {
     let cleared = 0;
     for (const op of this.pendingOps.listAllOfKind("merge")) {
-      if (!this.isManagerSessionDead(op.managerSessionId)) continue;
+      if (!this.isManagerLineageDead(op.managerSessionId)) continue;
       if (this.pendingOps.evictDeadOwner(op.key)) {
         cleared++;
         console.warn(`[orchestration] merge op ${op.opId} (${op.key}) had a dead owner (manager ${op.managerSessionId.slice(0, 8)}) — evicted so a fresh worker_merge_confirm can proceed`);
@@ -17526,15 +17552,16 @@ export class SessionService {
     // the worker's own self-check) and is a no-op when nothing is queued there, so repeating it costs
     // nothing and still supersedes a self-check that gets queued mid-loop.
     this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
-    // DEAD-OWNER RECOVERY (card 27ea069e): an existing RUNNING op for this key whose owning manager
-    // session is gone (exited/archived/missing — see isManagerSessionDead) can never settle for a LIVE
-    // caller again — its original manager, the only session that could ever have been pushed its
-    // outcome, no longer exists. Without this check, attach() below would dedup-attach THIS fresh call to
-    // that zombie op forever ({status:"pending"} on every retry, no gate ever actually running — the
-    // exact incident this card fixes). Evict it so this call starts a genuinely fresh confirm instead.
-    // SCOPED TO A CONFIRMED-DEAD OWNER ONLY: a live (or still-resuming) owner's op is left completely
-    // alone, so the healthy path — two managers/retries racing a genuinely in-flight merge — is
-    // byte-identical to before this card.
+    // DEAD-OWNER RECOVERY (card 27ea069e; CORRECTED by card 257d534d — see isManagerLineageDead's own doc):
+    // an existing RUNNING op for this key whose owning manager's WHOLE LINEAGE is gone (missing/exited/
+    // archived at every link, not just the originating session — see isManagerLineageDead) can never
+    // settle for anyone again — nobody left in that lineage could ever be pushed its outcome. Without this
+    // check, attach() below would dedup-attach THIS fresh call to that zombie op forever ({status:"pending"}
+    // on every retry, no gate ever actually running — the exact incident this card fixes). Evict it so this
+    // call starts a genuinely fresh confirm instead. SCOPED TO A CONFIRMED-DEAD LINEAGE ONLY: a live (or
+    // still-resuming) owner's op — including one whose ORIGINATING manager recycled but has a live
+    // successor — is left completely alone, so the healthy path — two managers/retries racing a genuinely
+    // in-flight merge, or a manager that recycled mid-merge — is byte-identical to before this card.
     //
     // NOTE (card 33172f01): `existing` here can ALSO be a settled RETAINED view (peek() surfaces both
     // shapes — see pending-ops.ts). `evictDeadOwner` only ever removes a RUNNING entry, so it's correctly a
@@ -17555,7 +17582,7 @@ export class SessionService {
     // no-op for it, per the NOTE above.
     if (!opts?.skipDeadOwnerRecovery) {
       const existing = this.pendingOps.peek(key);
-      if (existing && this.isManagerSessionDead(existing.managerSessionId)) {
+      if (existing && this.isManagerLineageDead(existing.managerSessionId)) {
         // MINOR A (CR finding, card 33172f01): `evictDeadOwner` only ever removes a RUNNING entry (a no-op
         // for a settled RETAINED view, per the NOTE above) — so only log the "evicting so this confirm can
         // proceed fresh" claim when it's actually TRUE. Logging it unconditionally used to lie for a

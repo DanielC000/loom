@@ -26,6 +26,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly.
 //   (4) SURGICAL: a RUNNING op owned by a LIVE manager is left completely untouched by both paths — the
 //       healthy case is byte-identical to before this card.
+//   (5) card 257d534d's fix: a RUNNING op whose owning manager has genuinely EXITED but has a LIVE
+//       SUCCESSOR (a recycle mid-op — recycleManager hard-stops the predecessor's pty and never rewrites
+//       the op's managerSessionId) is NOT evicted by either recovery path, matching (4)'s live-owner
+//       result rather than (2)/(3)'s genuinely-dead-owner result — the two polarities together (a
+//       recycled-but-alive lineage survives, a truly ownerless one is still evicted) prove the fix
+//       adopted LINEAGE semantics rather than merely disabling eviction.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-dead-owner-recovery.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -157,6 +163,44 @@ try {
   const clearedHealthy = sessions.reconcileDeadOwnerMergeOps();
   check("(healthy path) the boot-sweep clears NOTHING for a live-owner op", clearedHealthy === 0);
   check("(healthy path) the live-owner op is STILL tracked as running (untouched)", sessions.pendingOps.peek(key3)?.state === "running");
+
+  // ── (5) THE FIX (card 257d534d, Code Reviewer 213fe600 finding F1 on card d5e67146) — a manager that
+  // has GENUINELY EXITED but has a LIVE SUCCESSOR recycled from it (recycleManager hard-stops the
+  // predecessor's pty and never rewrites a pending op's managerSessionId — carryPendingToSuccessor moves
+  // queued/durable messages only) must NOT be treated as a dead owner by EITHER recovery path: every
+  // settle nudge for this same op already routes through resolveSettleNudgeTarget/liveLineageSuccessor to
+  // the live successor, so evicting here would strand work whose lineage is, in fact, still listening.
+  // A dedicated SMALL-BUDGET SessionService (its OWN fresh, empty PendingOpRegistry — syncAttachBudgetMs
+  // is instance-level) lets the confirmWorkerMergeTracked assertion below degrade to `settled:false` in
+  // ~100ms instead of this file's GENEROUS_SYNC_BUDGET_MS (60s) while dedupe-attached to a zombie run()
+  // that never resolves.
+  const recycledPredecessorId = `mdo-recycled-pred-${sfx}`, recycledSuccessorId = `mdo-recycled-succ-${sfx}`, workerId2 = `mdo-wkr2-${sfx}`;
+  db.insertSession({ id: recycledPredecessorId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: recycledSuccessorId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: recycledPredecessorId });
+  db.insertSession({ id: workerId2, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: recycledSuccessorId });
+
+  const sessionsFast = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 100 });
+  const key4 = `merge:${workerId2}`;
+  void sessionsFast.pendingOps.attach(key4, "merge", recycledPredecessorId, 10, () => new Promise(() => {}));
+  await waitUntil(() => sessionsFast.pendingOps.peek(key4)?.state === "running", { label: "recycled-owner op observable as running" });
+  const recycledZombie = sessionsFast.pendingOps.peek(key4);
+  check("(recycled-owner precondition) op is tracked running, owned by the now-EXITED predecessor", recycledZombie?.state === "running" && recycledZombie?.managerSessionId === recycledPredecessorId);
+
+  const clearedRecycled = sessionsFast.reconcileDeadOwnerMergeOps();
+  check("(recycled-owner) THE FIX — the boot-sweep does NOT evict an op whose owner recycled but has a LIVE successor", clearedRecycled === 0);
+  check("(recycled-owner) the op is STILL tracked as running post-sweep — untouched, same as a genuinely live owner (4)", sessionsFast.pendingOps.peek(key4)?.state === "running");
+
+  // Same fix, the OTHER call site: confirmWorkerMergeTracked's own per-call defensive check must agree —
+  // it dedupe-attaches to the still-running zombie (never evicts+re-mints it), so this degrades to
+  // settled:false once its small syncAttachBudgetMs elapses, and logs NO "had a dead owner" eviction.
+  let deadOwnerWarnings = 0;
+  const origWarn2 = console.warn;
+  console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) deadOwnerWarnings++; origWarn2(...args); };
+  const fastResult = await sessionsFast.confirmWorkerMergeTracked(recycledPredecessorId, workerId2);
+  console.warn = origWarn2;
+  check("(recycled-owner) confirmWorkerMergeTracked's OWN per-call check agrees — degrades to settled:false, dedupe-attached to the still-running zombie", fastResult.settled === false);
+  check("(recycled-owner) it never logged a 'had a dead owner' eviction — the lineage check found the live successor", deadOwnerWarnings === 0);
+  check("(recycled-owner) the op is STILL the SAME opId after this call — dedupe-attach happened, never evict-and-remint", sessionsFast.pendingOps.peek(key4)?.opId === recycledZombie.opId);
 } finally {
   db.close();
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -164,6 +208,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, and (card edc1ec12 CR follow-up, restated by e3e40167) an evicted dead-owner op's durable pending_gate_ops row is marked 'evicted-dead-owner' right along with its registry eviction — NEVER deleted (the table is a permanent tombstone), but correctly excluded from reconcileOrphanedGateOps' boot sweep, so it never leaks a false [loom:merge-failed] at the now-live manager."
+  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, (card edc1ec12 CR follow-up, restated by e3e40167) an evicted dead-owner op's durable pending_gate_ops row is marked 'evicted-dead-owner' right along with its registry eviction — NEVER deleted (the table is a permanent tombstone), but correctly excluded from reconcileOrphanedGateOps' boot sweep, so it never leaks a false [loom:merge-failed] at the now-live manager — and (card 257d534d) a manager that RECYCLED mid-op, leaving a LIVE successor behind, is never mistaken for a dead owner by either recovery path, matching a genuinely live owner's untouched result rather than a genuinely dead owner's eviction."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

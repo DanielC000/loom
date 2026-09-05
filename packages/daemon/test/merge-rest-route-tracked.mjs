@@ -64,12 +64,14 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   const config = { orchestration: { gateCommand: "pnpm gate", ...(gateCommandTimeoutMs ? { gateCommandTimeoutMs } : {}) } };
   db.insertProject({ id: projId, name: "MRT", repoPath: repo, vaultPath: repo, config, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `agent-mrt-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
-  // LIVE by default, not "exited": SessionService.isManagerSessionDead treats an "exited" manager as a dead
-  // owner and EVICTS any pre-existing op under this key so a fresh confirm can proceed — correct production
-  // behavior, but wrong for tests (1)-(3), which deliberately race a SECOND call against an op the first
-  // call already minted (a real manager driving a merge is live, never exited, mid-confirm). Test (4) below
-  // is the deliberate exception — it passes mgrProcessState:"exited" to reproduce the REST route's own real
-  // shape (worker.parentSessionId, which a human clicking Merge has no reason to expect is live).
+  // LIVE by default, not "exited": SessionService.isManagerLineageDead treats an "exited" manager with NO
+  // live successor anywhere in its lineage as a dead owner and EVICTS any pre-existing op under this key so
+  // a fresh confirm can proceed — correct production behavior, but wrong for tests (1)-(3), which
+  // deliberately race a SECOND call against an op the first call already minted (a real manager driving a
+  // merge is live, never exited, mid-confirm). Test (4) below is the deliberate exception — it passes
+  // mgrProcessState:"exited" (with no successor) to reproduce the REST route's own real shape
+  // (worker.parentSessionId, which a human clicking Merge has no reason to expect is live). Test (6) is the
+  // sibling shape: "exited" WITH a live successor (a recycle mid-op) — card 257d534d.
   db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-mrt-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: mgrProcessState, resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   db.insertAgent({ id: `agent-mrt-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: taskId, projectId: projId, title: "MRT-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -248,7 +250,7 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
 //        "the live-owner control must stay green too — that is your positive control that the test can tell
 //        the two apart"). Same tiny timings, same held-open gate, same ~100+ poll iterations — proves (4)'s
 //        assertions aren't vacuously true of every shape this harness can construct: a live owner was
-//        already never subject to the dead-owner eviction check (nothing to evict — isManagerSessionDead is
+//        already never subject to the dead-owner eviction check (nothing to evict — isManagerLineageDead is
 //        false), so this must show the identical exactly-one-invocation result as (4), confirming the fix
 //        didn't have to special-case anything to get (4) right.
 {
