@@ -115,11 +115,43 @@ try {
     bogusAsA.state === "never_existed");
   check("(negative control) a bogus opId reads never_existed for the foreign manager too",
     bogusAsB.state === "never_existed");
+
+  // ── 2nd MANAGER-REVIEW CATCH — THE FAIL-SAFE-ON-UNRESOLVED-SESSION CASE ─────────────────────────────────
+  // A first version of this fix passed a bare `string | undefined` for the redaction target, resolved via
+  // `db.getSession(managerSessionId)?.projectId` — collapsing "worker path, no redaction needed" (safe) and
+  // "manager path, but the session lookup itself came back undefined" (NOT safe — no filter sits behind
+  // it) onto the SAME `undefined` value. Reproduced here: build a THIRD manager's server, then delete that
+  // manager's OWN session row before calling gate_status — `registerGateStatus`'s handler re-reads
+  // `db.getSession(managerSessionId)` FRESH on every call (see that router's own "LAZY" doc comment), so
+  // this genuinely exercises a failed lookup at call time, not a stale cached value.
+  db.insertProject({
+    id: "pC", name: "Project C", repoPath: "pC", vaultPath: "pC", config: {}, createdAt: now, archivedAt: null,
+  });
+  db.insertAgent({ id: "aC", projectId: "pC", name: "Mgr C", startupPrompt: "MGR", position: 0 });
+  db.insertSession({
+    id: "mgrC", projectId: "pC", agentId: "aC", engineSessionId: null, title: null,
+    cwd: "pC", processState: "live", resumability: "resumable", busy: false, createdAt: now,
+    lastActivity: now, lastError: null, role: "manager",
+  });
+  const serverC = router.buildServer("mgrC", "manager");
+  check("(precondition) mgrC's OWN session lookup succeeds BEFORE deletion (proves the deletion below is what changes)",
+    db.getSession("mgrC") !== undefined);
+  db.deleteSession("mgrC");
+  check("(precondition) mgrC's session lookup NOW genuinely fails — this is the exact condition the bug needs",
+    db.getSession("mgrC") === undefined);
+  const unresolvedSessionStatus = await callGateStatusAs(serverC, ok.opId);
+  check("(unresolved-session — precondition) the op is still resolvable (gate_status itself doesn't require the caller's OWN session to exist)",
+    unresolvedSessionStatus.state === "settled");
+  check("(unresolved-session — THE 2nd FIX) outputFile is REDACTED even though the caller's own project could not be resolved at all — fails SAFE, not open",
+    unresolvedSessionStatus.outputFile === undefined,
+    () => JSON.stringify(unresolvedSessionStatus.outputFile));
+  check("(unresolved-session) outputTail is still untouched (this fix is outputFile-only, same as every other case)",
+    unresolvedSessionStatus.outputTail === "shipping\n");
 } finally {
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while outputFile — the absolute host path card a16c580b added — is redacted specifically for a cross-project read, mirroring gate_queue's own redaction precedent; the pre-existing outputTail exposure is deliberately left untouched by this narrower fix, and every other field on a foreign read survives intact."
+  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while outputFile — the absolute host path card a16c580b added — is redacted specifically for a cross-project read, mirroring gate_queue's own redaction precedent; the pre-existing outputTail exposure is deliberately left untouched by this narrower fix; every other field on a foreign read survives intact; AND a failed caller-session lookup at call time (db.getSession returning undefined) fails SAFE to redacted rather than silently un-redacting — mutation-proven against the bare-string pre-fix version, which failed exactly this last check."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

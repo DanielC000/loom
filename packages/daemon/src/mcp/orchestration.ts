@@ -208,7 +208,7 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
  * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
  */
-function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactOutputFileForProject?: () => string | undefined): void {
+function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactOutputFileCallerProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
     ? "Read-only status for YOUR OWN gate run, by the `opId` a `run_gate` {status:\"pending\"} " +
@@ -607,7 +607,17 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // fake with no `getSession`; reading it eagerly at registration time crashed those (companion-loop
         // .mjs's role:"worker" server build). Deferring to call time matches how every other db read in
         // this router already works, and costs nothing extra on the real path (a session row read).
-        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), getRedactOutputFileForProject?.());
+        // Card a16c580b, 2nd manager-review catch: construct the wrapper whenever this call site EVER asks
+        // for redaction (`getRedactOutputFileCallerProjectId` provided at all, i.e. the manager surface) —
+        // even when the getter itself resolves to `undefined` (a failed `db.getSession` lookup). Passing
+        // `getRedactOutputFileCallerProjectId?.()` directly as a bare value here would collapse BOTH "never
+        // asked for redaction" (worker) and "asked, but couldn't resolve" (manager, lookup failed) onto the
+        // identical `undefined`, silently un-redacting the failure case — see `SessionService.gateStatus`'s
+        // own `redactOutputFile` doc for the full mechanism this wrapper exists to prevent.
+        const redactOutputFile = getRedactOutputFileCallerProjectId
+          ? { callerProjectId: getRedactOutputFileCallerProjectId() }
+          : undefined;
+        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), redactOutputFile);
         // Card bed91595: `deploy` now writes a real `pending_gate_ops` tombstone (see
         // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
         // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
@@ -4130,10 +4140,12 @@ export class OrchestrationMcpRouter {
     );
     // Card a16c580b: this call site is UNSCOPED (`scopeSessionId`/`getScopeProjectId` both omitted) —
     // a manager can resolve ANY project's settled op by opId (see `gate_status`'s own header doc for why
-    // that's a real, pre-existing gap this card did not create). `getRedactOutputFileForProject` redacts
-    // ONLY the new `outputFile` field for a foreign project's row — see
-    // `SessionService.gateStatus`'s own `redactOutputFileForProject` doc for the full reasoning and why
-    // this is deliberately narrower than fixing the pre-existing `outputTail` cross-project exposure too.
+    // that's a real, pre-existing gap this card did not create). `getRedactOutputFileCallerProjectId`
+    // redacts ONLY the new `outputFile` field for a foreign project's row — see
+    // `SessionService.gateStatus`'s own `redactOutputFile` doc for the full reasoning, including the
+    // wrapper-object mechanism that fails safe if `db.getSession(managerSessionId)` itself ever comes back
+    // undefined, and for why this is deliberately narrower than fixing the pre-existing `outputTail`
+    // cross-project exposure too (that one is its own card, 5ef78900).
     registerGateStatus(server, sessions, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
