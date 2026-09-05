@@ -8223,10 +8223,15 @@ export class SessionService {
    * whose WHERE clause requires `surfaced_pending = 1` — so it can NEVER see a row minted by a
    * single-synchronous-span call site that never flips that flag at all. Two such sites exist today:
    * `mergeBatch`'s own `insertPendingGateOp` call (kind:"merge", key `merge-batch:<managerSessionId>`) and
-   * `deployOwnProject`'s (kind:"deploy") — both mint immediately before their one `runExclusive` call and
-   * settle back-to-back right after it resolves, by design (see each one's own insertPendingGateOp comment
-   * for why `surfacedPending:false` there is deliberate, not an oversight). If the daemon dies anywhere
-   * inside that `runExclusive` span, the row is stranded `state:'pending'` forever: `gate_status(opId)`
+   * `deployOwnProject`'s (kind:"deploy") — both mint immediately before their one `runExclusive` call (see
+   * each one's own insertPendingGateOp comment for why `surfacedPending:false` there is deliberate, not an
+   * oversight). `deployOwnProject` still settles back-to-back right after `runExclusive` resolves, by
+   * design. `mergeBatch` no longer does (card 81d795de): its settle is now deferred to `onSettle`, firing
+   * only once the WHOLE batch — fast-forward and per-branch finalize included, not just the gate run — has
+   * settled, so the exposure window this method exists to close is WIDER for a batch than for a deploy, not
+   * narrower; the mechanism below is unaffected either way; it reconciles ANY row still `pending` at boot,
+   * regardless of how wide that row's own mint-to-settle span is. If the daemon dies anywhere in that span,
+   * the row is stranded `state:'pending'` forever: `gate_status(opId)`
    * reports `pending` with no verdict, indistinguishable from "still running" when nothing is, and no
    * existing sweep ever reconciles it.
    *
@@ -8251,9 +8256,13 @@ export class SessionService {
    * `reconcileOrphanedGateOps`'s own `if (row.kind === "deploy") continue`. That exclusion exists there only
    * because a "deploy" row can never be `surfaced_pending=1` in the first place (so it's a defensive no-op,
    * not a real filter) — it says nothing about whether deploy's OWN unsurfaced-tombstone exposure should be
-   * swept. `deployOwnProject` mints the identical single-synchronous-span shape as `mergeBatch` (see its own
-   * insertPendingGateOp comment) and carries the identical exposure — a daemon death mid-deploy strands its
-   * tombstone `pending` forever with nothing to reconcile it, same as a mid-batch death. Since this method
+   * swept. `deployOwnProject` mints AND settles back-to-back in one synchronous span, by design (see its own
+   * insertPendingGateOp comment) — a daemon death anywhere inside that span strands its tombstone `pending`
+   * forever with nothing to reconcile it. Code Review, card 81d795de: `mergeBatch` no longer shares this
+   * exact shape (its own settle is deferred — see this file's own `batchGateVerdict` doc), but it is exposed
+   * to the IDENTICAL failure mode for the SAME underlying reason — `surfaced_pending` is never flipped for
+   * either mint site — and this method's own `Db.listUnsurfacedPendingGateOps` scan (`surfaced_pending = 0`)
+   * covers both regardless of how wide either one's own mint-to-settle span is. Since this method
    * pushes no nudge regardless of kind, none of `reconcileOrphanedGateOps`'s "wrong re-run advice" reasoning
    * for excluding deploy applies here — there is no advice being given at all. Chosen deliberately, not by
    * omission: narrowing this to "gate"/"merge" only would leave deploy's identical exposure unclosed for no
@@ -16657,10 +16666,13 @@ export class SessionService {
    * ordinary client-timeout case (a `done`+`awaitingReview` candidate doesn't change resolution between a
    * call and its retry) — but it is a real, named gap, not a proven-closed one.
    *
-   * This dedupe is a BARE 5-argument `attach()` call — no `retainVerdictUntilSuperseded`, no
-   * `verdictIdentity`, no `classifyOutcome`, no `onOpMinted`/`onSurfacedPending` (the batch's own
-   * `insertPendingGateOp`/`settlePendingGateOp` tombstone pair, inside the gate closure below, is
-   * unchanged — it now just receives the `opId` `attach()` mints instead of a locally-generated one). Card
+   * This dedupe carries no `retainVerdictUntilSuperseded`, no `verdictIdentity`, no `classifyOutcome`, no
+   * `onOpMinted`/`onSurfacedPending` — the batch's own `insertPendingGateOp` mint, inside the gate closure
+   * below, is unchanged, and still just receives the `opId` `attach()` mints instead of a locally-generated
+   * one. `opts.onSettle` IS now passed (card 81d795de), but ONLY to defer the tombstone's `settlePendingGateOp`
+   * WRITE until this whole `run()` (fast-forward and per-branch finalize included) has settled — the verdict
+   * itself is still computed at the exact same point in `runGate` it always was; see this method's own
+   * `batchGateVerdict` declaration, further down, for the full mechanism. Card
    * `3d2afb53` deliberately kept this batch path out of `confirmWorkerMergeTracked`/`PendingOpRegistry`'s
    * FINALIZE machinery ("no extra finalize logic, no extra gate run") — this does not reverse that: the
    * bare form adds only the dedupe/coalesce primitive (a same-key call already running is awaited, never
@@ -16781,6 +16793,22 @@ export class SessionService {
     // git-derived identity (no I/O needed to compute this key). Sorted so a client that reorders the same
     // logical set across a retry still dedupe-hits.
     const batchKey = `merge-batch:${managerSessionId}:${chosen.map((c) => c.workerSessionId).slice().sort().join(",")}`;
+    // DEFERRED SETTLE (card 81d795de — fixes `gate_status(opId)` reading "settled" while the batch is
+    // still finalizing, confirmed at source: `runGate` below used to call `settlePendingGateOp` itself,
+    // which resolved BEFORE `runBatchedMerge`'s own fast-forward onto canonical main even began, let
+    // alone this method's own post-fast-forward per-branch `finishAlreadyMerged` finalize below). The
+    // SOLO path (`confirmWorkerMergeTracked`) never has this problem: it passes `onOpMinted`/`onSettle`
+    // to `pendingOps.attach` itself, so the durable tombstone settles in lockstep with the WHOLE
+    // operation (via `run()`'s own settle), never with an inner sub-step. This batch path is the one
+    // outlier that mint+settled the tombstone by hand, from inside a nested closure invoked partway
+    // through `run()` — so `gate_status(opId)` could read "settled" the instant the gate itself finished,
+    // while canonical main had not yet moved and no branch had been finalized. Fixed the SAME way the solo
+    // path already works: `runGate` below still computes the verdict at the same point it always did
+    // (mint timing is UNCHANGED — see `insertPendingGateOp`'s own comment for why it must stay late), but
+    // only STORES it here; the actual `settlePendingGateOp` write is deferred to the `onSettle` opts hook
+    // below, which `pendingOps.attach` fires only once `run()` — this whole batch, fast-forward and
+    // finalize included — has genuinely settled.
+    let batchGateVerdict: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined;
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
       async (opId) => {
@@ -16867,13 +16895,18 @@ export class SessionService {
             // cleanly into the batch (`landed.length === 0`); minting at the earlier declaration would leave a
             // permanently-`pending`, never-settled tombstone on that path, since nothing downstream would ever
             // settle it. `runGate` itself is called exactly ONCE per batch (see this closure's own comment
-            // above), so this mint site is reached at most once, always immediately followed by a settle below
+            // above), so this mint site is reached at most once, always followed by a RECORDED verdict below
             // (on the pass/fail path, the cancelled-error path, or the rethrown-error path) — never left
-            // dangling the way an earlier mint could be. `surfacedPending:false` is DELIBERATE and load-bearing,
+            // dangling the way an earlier mint could be. CARD 81d795de: the actual DB `settlePendingGateOp`
+            // WRITE for that verdict is no longer immediate — it's deferred to `onSettle` (this method's own
+            // `pendingOps.attach` opts, below), which fires only once the WHOLE batch (fast-forward and
+            // per-branch finalize included) has settled, closing a window where `gate_status(opId)` could
+            // read "settled" mid-finalize. `surfacedPending:false` is DELIBERATE and load-bearing,
             // not merely the default: `reconcileOrphanedGateOps`' boot sweep only ever selects rows that are
             // BOTH `surfaced_pending=1` AND still `state:'pending'` (see the schema doc), so a crash strictly
-            // between this mint and this closure's own settle below leaves this row invisible to that sweep —
-            // a real, KNOWN trade against the old `never_existed` (a permanently-pending row nobody reconciles),
+            // between this mint and the eventual `onSettle` write leaves this row invisible to that sweep —
+            // a real, KNOWN trade (now spanning a WIDER window than before this card, since settle moved
+            // later) against the old `never_existed` (a permanently-pending row nobody reconciles),
             // carded separately; do not "fix" it by flipping this to `true` — this row is `kind:"merge"`, and a
             // surfaced-pending "merge" row that DOES reach that sweep takes the full merge-orphaned branch,
             // which pushes a `[loom:merge-orphaned]` nudge telling the manager to re-run `worker_merge_confirm`
@@ -16897,19 +16930,21 @@ export class SessionService {
                 return gr;
               }, "high");
             } catch (err) {
-              // Settle the tombstone on EVERY exit from this try, mirroring the pass/fail settle below — a
+              // RECORD the verdict on EVERY exit from this try, mirroring the pass/fail path below — a
               // cancel/error here is exactly as capable of leaving the row permanently "pending" as a missing
-              // settle on the happy path would be. Carries settledAt/totalDurationMs too, same discipline as
+              // record on the happy path would be. Carries settledAt/totalDurationMs too, same discipline as
               // deriveMergeGateVerdict's own cancelled/error branches (both single-clock-read from `nowMs`,
-              // never two independent `Date.now()` calls that could disagree by a millisecond).
+              // never two independent `Date.now()` calls that could disagree by a millisecond). The actual
+              // `settlePendingGateOp` WRITE happens later, from `onSettle` (card 81d795de — see this
+              // method's own `batchGateVerdict` declaration above for why).
               const nowMs = Date.now();
               const settledAt = new Date(nowMs).toISOString();
               const totalDurationMs = nowMs - opMintedAtMs;
               if (err instanceof GateCancelledError) {
-                this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt, totalDurationMs } });
+                batchGateVerdict = { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt, totalDurationMs } };
                 return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
               }
-              this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } });
+              batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } };
               throw err;
             }
             // DURATIONMS COHERENCE FIX (Code Review, card 67030bb9 — mirrors confirmWorkerMerge's own
@@ -16969,15 +17004,17 @@ export class SessionService {
                   retryPassed = retryResult.passed;
                 } catch (err) {
                   // Mirrors the FIRST attempt's own catch immediately above — a brand new admission cycle can
-                  // independently be withdrawn while queued even though attempt 1 already ran; settle the SAME
-                  // tombstone (never settled twice: this `return` exits `runGate` before the normal settle
-                  // further below ever runs) and report a batch failure so the caller falls back to a solo
-                  // re-confirm per candidate — safe (no merge lands), never a crash.
+                  // independently be withdrawn while queued even though attempt 1 already ran; record the SAME
+                  // verdict (never recorded twice: this `return` exits `runGate` before the normal recording
+                  // further below ever runs — the deferred WRITE, from `onSettle`, still only ever fires
+                  // once, since it fires exactly once per `run()` settle) and report a batch failure so the
+                  // caller falls back to a solo re-confirm per candidate — safe (no merge lands), never a
+                  // crash.
                   const cancelNowMs = Date.now();
                   const cancelSettledAt = new Date(cancelNowMs).toISOString();
                   const cancelTotalDurationMs = cancelNowMs - opMintedAtMs;
                   if (err instanceof GateCancelledError) {
-                    this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } });
+                    batchGateVerdict = { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } };
                     // Code Review, card 67030bb9 finding [2]: `durationMs`/`gateSpawned` are REQUIRED here,
                     // mirroring the solo path's identical cancelled-while-queued `evt("build_gate", ...)`
                     // call (this file, above) — without them, `gateRanFromDetail` (db.ts) resolves this row
@@ -16995,7 +17032,7 @@ export class SessionService {
                     });
                     return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
                   }
-                  this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } });
+                  batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } };
                   throw err;
                 }
                 evtBatch("build_gate_single_file_retry", {
@@ -17020,11 +17057,14 @@ export class SessionService {
             // admission settled — Code Review, card 67030bb9 finding [1]): deriving it from `nowMs` here
             // would span attempt 1's admission all the way through the retry above, an unbounded mixed span.
             const nowMs = Date.now();
-            // Settle the tombstone minted above — see that insert's own comment for why this fires
-            // unconditionally here (the pass/fail branch), back-to-back with the gate's own settle, mirroring
-            // deployOwnProject's identical back-to-back settle (see deriveBatchGateVerdict's own doc for what
+            // RECORD the tombstone verdict minted above — see that insert's own comment for why this fires
+            // unconditionally here (the pass/fail branch; see deriveBatchGateVerdict's own doc for what
             // this payload deliberately includes/omits vs. deriveMergeGateVerdict/deriveDeployGateVerdict).
-            this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed }));
+            // The actual `settlePendingGateOp` WRITE, unlike deployOwnProject's genuinely back-to-back one,
+            // does NOT happen here any more (card 81d795de) — it's deferred to `onSettle`, below, so
+            // `gate_status(opId)` can't read "settled" until the WHOLE batch (fast-forward + per-branch
+            // finalize, still to come after this closure returns) is done.
+            batchGateVerdict = deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed });
             pruneGateSpills();
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
@@ -17242,6 +17282,39 @@ export class SessionService {
         try {
           this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId: null, kind: "warning" });
         } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+      },
+      {
+        // DEFERRED TOMBSTONE WRITE (card 81d795de — see this method's own `batchGateVerdict` declaration
+        // above for the full mechanism doc). Fires from inside `PendingOpRegistry.attach`'s own settle
+        // branch — i.e. once `run()` ABOVE (this whole batch: worktree cut, gate, fast-forward, and every
+        // landed branch's `finishAlreadyMerged` finalize) has ACTUALLY resolved or rejected, strictly
+        // AFTER the fast-forward/finalize code that used to run concurrently with an already-"settled"
+        // tombstone. Mirrors confirmWorkerMergeTracked's own `onSettle` (this file, above) — same hook,
+        // same contract: fires for EVERY genuine settle, fast or surfaced-pending, unconditionally on both
+        // the resolve and reject branches (see `PendingOpRegistry.attach`'s own doc). `batchGateVerdict` is
+        // `undefined` on a batch whose gate never even ran (`landed.length === 0` — see runBatchedMerge)
+        // or one that failed before `runGate` was reached at all (e.g. the batch worktree cut itself
+        // threw) — in EITHER case no tombstone row was ever minted for this opId either (mint stays
+        // scoped to `runGate`, unchanged by this card), so this call is a harmless no-op UPDATE against a
+        // non-existent row, exactly as it silently was before this card whenever `runGate` was never
+        // reached. Code Review, card 81d795de finding [5]: `batchGateVerdict` can ALSO be `undefined` on a
+        // row that WAS minted — a genuine throw between the mint and every verdict-recording branch
+        // (`classifyGateFailure`, `identifyRetriableTestFiles`'s own `fs.existsSync`, or the retry's own
+        // `evtBatch("build_gate_single_file_retry", ...)` write, none of which record a verdict
+        // themselves) leaves the row minted with no stored verdict. Pre-fix, that same throw left the row
+        // PERMANENTLY `pending` and invisible to `reconcileOrphanedGateOps` (it requires
+        // `surfaced_pending=1`, which a batch row never sets) — a manager would poll it forever. This is
+        // already strictly better (the row goes terminal the instant `run()` rejects, and the real error
+        // still reaches the manager via `onSettledAfterPending`) — but `outcome` (the raw settle outcome
+        // `PendingOpRegistry.attach` hands every `onSettle` hook) is exactly what makes that terminal row
+        // SELF-DESCRIBING instead of a bare `state:"settled"` with no verdict at all: synthesize a minimal
+        // "error" verdict from the real thrown value whenever no richer one was ever recorded. Confirmed
+        // safe on the `landed.length === 0` / never-reached-`runGate` path too — still a harmless no-op
+        // UPDATE against a never-minted opId, since `outcome.ok` is `true` there and the `?? undefined`
+        // branch is taken.
+        onSettle: (outcome, opId) => {
+          this.db.settlePendingGateOp(opId, batchGateVerdict ?? (outcome.ok ? undefined : { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) } }));
+        },
       },
     );
   }

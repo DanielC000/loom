@@ -572,8 +572,9 @@ CREATE TABLE IF NOT EXISTS wakes (
 -- resurface a false [loom:gate-failed] — and pushes a synthetic terminal nudge to the owning session (a
 -- caller WAS told "pending" for these, so it is owed a real answer). reconcileUnsurfacedPendingGateOps
 -- (card 7239c712) is the COMPLEMENT: rows still "pending" at boot with surfaced_pending=0 — nobody was ever
--- told "pending" for these (mergeBatch/deployOwnProject's own single-synchronous-span mints, which never
--- flip surfaced_pending at all — see their own insertPendingGateOp comments), so it marks them
+-- told "pending" for these (mergeBatch/deployOwnProject's own mint sites, neither of which ever flips
+-- surfaced_pending at all — see their own insertPendingGateOp comments; card 81d795de deferred mergeBatch's
+-- own SETTLE, not this mint-side flag, so this claim is unaffected), so it marks them
 -- "orphaned-by-restart" too but pushes NO nudge; see that method's own doc for why. project_id is the scope
 -- anchor gate_status's tombstone read
 -- filters on (mirroring GateSemaphore.findByOpId's session/project candidate-set filter — a stranger
