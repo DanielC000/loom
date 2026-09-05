@@ -94,7 +94,8 @@ const mkEntry = ([key, textBytes, updatedAt], overrides = {}) => ({
 // "floor tier ≈ N tok" can be checked against an INDEPENDENTLY computed total, not just re-derived from
 // the same source function it's meant to be verifying. Safe to inline here: every fixture entry in this
 // file uses `title: key` with no embedded whitespace, so `sanitizeTitle` is a no-op.
-const blockFor = (entry) => `### ${entry.title} (${entry.key})\n${entry.text.trim()}`;
+// Card 56f989a6 — the real header now also carries a `[v#, date]` stamp; mirrored here too.
+const blockFor = (entry) => `### ${entry.title} (${entry.key}) [v${entry.version}, ${entry.updatedAt.slice(0, 10)}]\n${entry.text.trim()}`;
 
 try {
   // ===================== 1. RED/GREEN discriminating control on the REAL live corpus =====================

@@ -66,13 +66,16 @@ const mkEntry = (key, textBytes, overrides = {}) => ({
 // packing arithmetic INDEPENDENTLY (mirroring the real source's own greedy "continue past oversized" pack
 // and its exact block/header text), used ONLY to compute an expected value the real compiled function is
 // then compared against below — never as a stand-in for testing the real function's own behavior.
+// Card 56f989a6 — the real noteBlock header now carries a `[v#, date]` stamp; mirrored here so this
+// reference stays byte-for-byte faithful to the real source.
+const stampFor = (m) => `v${m.version}, ${m.updatedAt.slice(0, 10)}`;
 function referencePinnedPack(notesInDeliveryOrder, capTokens) {
   const header = "## Pinned project memory (always included)";
   const blocks = [];
   let section = null;
   const droppedKeys = [];
   for (const m of notesInDeliveryOrder) {
-    const block = `### ${m.key} (${m.key})\n${m.text}`;
+    const block = `### ${m.key} (${m.key}) [${stampFor(m)}]\n${m.text}`;
     const candidate = [header, ...blocks, block].join("\n\n");
     if (estimateTokens(candidate) > capTokens) { droppedKeys.push(m.key); continue; }
     blocks.push(block);
@@ -82,7 +85,7 @@ function referencePinnedPack(notesInDeliveryOrder, capTokens) {
 }
 function referenceRelatedBlockTokens(note) {
   const header = "## Related project memory (matched your kickoff)";
-  const block = `### ${note.key} (${note.key})\n${note.text}`;
+  const block = `### ${note.key} (${note.key}) [${stampFor(note)}]\n${note.text}`;
   return estimateTokens([header, block].join("\n\n"));
 }
 // Mirrors sortPinnedByRecency (not exported) — newest updatedAt first, key-ascending tiebreak.
