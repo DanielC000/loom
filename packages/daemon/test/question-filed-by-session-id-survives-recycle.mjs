@@ -27,6 +27,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -82,6 +83,22 @@ try {
   check("(setup) filedBySessionId is set to the FILING session at ask time", db.getQuestion(qid).filedBySessionId === oldMgrId);
   check("(setup) sessionId also starts at the filing session", db.getQuestion(qid).sessionId === oldMgrId);
 
+  // --- (setup, review fix) insertQuestion's `undefined` default must NEVER coerce an EXPLICIT null into
+  // a fabricated filer — only a caller that OMITS the field entirely gets the sessionId default. A future
+  // typed caller that genuinely can't attribute a filer (a webhook, an on-behalf-of ask) must be able to
+  // say so via null without silently manufacturing false provenance. Bypasses buildQuestionAsk (which
+  // always sets it) to call db.insertQuestion directly with an explicit null. ---
+  const explicitNullId = randomUUID();
+  db.insertQuestion({
+    id: explicitNullId, sessionId: oldMgrId, filedBySessionId: null, projectId: projId, type: "decision",
+    title: "On-behalf-of ask", body: "no attributable filer", options: null, recommendation: null, taskId: null,
+    permissionAction: null, permissionScope: null, permissionExpiresAt: null, decidedScope: null, decidedExpiresAt: null,
+    credentialEnvVar: null, provisionTarget: null, provisionConnectionId: null, provisionBindingState: "none",
+    state: "pending", chosenOption: null, note: null, createdAt: now, answeredAt: null, consumedAt: null,
+    cancelledReason: null, cancelledBy: null, cancelledAt: null, escalatedAt: null,
+  });
+  check("(setup, review fix) an EXPLICIT null filedBySessionId is honored, NOT coerced to sessionId", db.getQuestion(explicitNullId).filedBySessionId === null);
+
   // --- (1) recycle the manager: sessionId (the routing target) is reparented onto the successor ---
   const pty = new PtyStub();
   pty.live.add(oldMgrId);
@@ -92,6 +109,9 @@ try {
   const afterFirstRecycle = db.getQuestion(qid);
   check("(1) sessionId (the ROUTING target) WAS reparented onto the successor", afterFirstRecycle.sessionId === fresh.id);
   check("🔴 FAIL-FIRST: filedBySessionId (the FILER) is UNCHANGED — still the original predecessor", afterFirstRecycle.filedBySessionId === oldMgrId);
+  // NOT independently fail-first (on pre-fix code, filedBySessionId is undefined, and undefined !==
+  // fresh.id trivially holds either way) — the check right above already carries the fail-first claim by
+  // pinning the value to oldMgrId exactly; this is a plain corollary of that, kept for readability.
   check("(1) filedBySessionId is NOT the successor's id — the exact bug this card fixes", afterFirstRecycle.filedBySessionId !== fresh.id);
 
   // --- (2) recycle a SECOND time, from the successor onward: sessionId walks forward again;

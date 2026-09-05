@@ -1833,9 +1833,11 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // legacy DB both gain it through this ONE ALTER-TABLE path — see migrateQuestions()'s own doc for why an
   // index referencing a migration-added column must never live in the base unconditional SCHEMA string.
   escalated_at: "TEXT",
-  // Immutable filer provenance (card cb7d6998) — UNLIKE every other entry here, this one is ALSO already
-  // in the base CREATE TABLE `questions` block above (a fresh install gets it with no ALTER needed); it's
-  // listed here too so an EXISTING pre-cb7d6998 DB picks it up via this same ALTER-TABLE path. Nullable,
+  // Immutable filer provenance (card cb7d6998) — LIKE most entries in this map (18 of the 19 here,
+  // `escalated_at` just above being the LONE exception — see its own doc for why it's deliberately
+  // ALTER-only), this one is ALSO already in the base CREATE TABLE `questions` block above (a fresh
+  // install gets it with no ALTER needed); it's listed here too so an EXISTING pre-cb7d6998 DB picks it
+  // up via this same ALTER-TABLE path. Nullable,
   // and — unlike `type`'s backfill-to-'decision' above — there is NO backfill value for a legacy row: the
   // original filer's session_id on that row was already overwritten by `reparentQuestions` on any recycle
   // that ran before this migration, so the true filer is gone, not merely un-migrated. NULL here means
@@ -6861,11 +6863,15 @@ export class Db {
       id: q.id, sessionId: q.sessionId, projectId: q.projectId, type: q.type ?? "decision", title: q.title, body: q.body,
       optionsJson: q.options ? JSON.stringify(q.options) : null, recommendation: q.recommendation ?? null,
       taskId: q.taskId ?? null,
-      // Card cb7d6998 — immutable filer provenance, set ONCE here and never touched again. Defaults to
-      // `q.sessionId` (the asking session, which at INSERT time — before any recycle can have run — IS the
-      // filer) for any caller (a hermetic test, an e2e seed literal) that predates this field and never set
-      // it explicitly, rather than binding `undefined` (better-sqlite3 rejects that) or leaving it unset.
-      filedBySessionId: q.filedBySessionId ?? q.sessionId,
+      // Card cb7d6998 — immutable filer provenance, set ONCE here and never touched again. `undefined`
+      // (never explicitly set) defaults to `q.sessionId` (the asking session, which at INSERT time —
+      // before any recycle can have run — IS the filer) for any caller (a hermetic test, an e2e seed
+      // literal) that predates this field, rather than binding `undefined` itself (better-sqlite3 rejects
+      // that). An EXPLICIT `null` is honored as-is, never coerced to `q.sessionId` — `null` on this field
+      // means "unknown, permanently" (see Question.filedBySessionId's own doc), and a future typed caller
+      // that legitimately can't attribute a filer (a webhook, an event-trigger, a real on-behalf-of ask)
+      // must be able to say so without this default silently manufacturing a false one.
+      filedBySessionId: q.filedBySessionId === undefined ? q.sessionId : q.filedBySessionId,
       permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
       permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
       // provision_connection_id/provision_binding_state are deliberately NOT insertable here — they are
