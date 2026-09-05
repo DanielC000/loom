@@ -122,7 +122,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, changedPath), "# fragment\n");
     commitAll(worktreePath, "docs: add fragment", GIT_ID);
 
-    const direct = await computeEmitCompareGate(R.repo, worktreePath, baseSha, branch);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(R) direct call: eligible:true", direct.eligible === true);
     check("(R) direct call: changedAssetPaths names the changed path", direct.changedAssetPaths.length === 1 && direct.changedAssetPaths[0] === changedPath.split(path.sep).join("/"));
     check("(R) direct call: changedTestFiles is empty — no test/*.mjs path touched", direct.changedTestFiles.length === 0);
@@ -155,7 +155,7 @@ try {
     fs.rmSync(path.join(worktreePath, "packages", "daemon", "assets", "skills", "doomed-skill"), { recursive: true, force: true });
     execSync(`git add -A . && git ${GIT_ID} commit -q -m "chore: retire doomed-skill"`, { cwd: worktreePath });
 
-    const direct = await computeEmitCompareGate(S.repo, worktreePath, baseSha, branch);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(S) direct call: eligible:true for a DELETED-only asset path", direct.eligible === true);
     check("(S) direct call: changedAssetPaths names the deleted path", direct.changedAssetPaths.length === 1 && /doomed-skill\/SKILL\.md$/.test(direct.changedAssetPaths[0]));
   }

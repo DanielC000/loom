@@ -27,7 +27,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // Dummy identifiers — the injected `gitFactory` below answers every `git.raw(...)` call itself, so no real
 // repo/worktree ever needs to exist on disk for any of these four cases.
-const REPO = "unused-repo-path";
 const WORKTREE = "unused-worktree-path";
 const BASE = "base-sha";
 const REF = "branch-ref";
@@ -36,7 +35,7 @@ const fakeGit = (rawImpl) => ({ gitFactory: () => ({ raw: rawImpl }) });
 
 // ── (P1) git error reading the diff -> notApplicable:true ────────────────────────────────────────────
 {
-  const result = await computeEmitCompareGate(REPO, WORKTREE, BASE, REF, fakeGit(async () => { throw new Error("simulated git failure"); }));
+  const result = await computeEmitCompareGate(WORKTREE, BASE, REF, fakeGit(async () => { throw new Error("simulated git failure"); }));
   check("(P1) eligible:false", result.eligible === false);
   check("(P1) reason IS the git-error reason", /git error reading the diff/.test(result.reason ?? ""));
   check("(P1) notApplicable:true — a git error proves nothing about reducibility (card 4def0708 fix)", result.notApplicable === true);
@@ -44,7 +43,7 @@ const fakeGit = (rawImpl) => ({ gitFactory: () => ({ raw: rawImpl }) });
 
 // ── (P2) empty diff -> notApplicable:true ─────────────────────────────────────────────────────────────
 {
-  const result = await computeEmitCompareGate(REPO, WORKTREE, BASE, REF, fakeGit(async () => ""));
+  const result = await computeEmitCompareGate(WORKTREE, BASE, REF, fakeGit(async () => ""));
   check("(P2) eligible:false", result.eligible === false);
   check("(P2) reason IS the empty-diff reason", /empty diff/.test(result.reason ?? ""));
   check("(P2) notApplicable:true — nothing to prove inert from is not a decided verdict (card 4def0708 fix)", result.notApplicable === true);
@@ -52,7 +51,7 @@ const fakeGit = (rawImpl) => ({ gitFactory: () => ({ raw: rawImpl }) });
 
 // ── (P3) unparseable diff line (no tab) -> notApplicable:true ────────────────────────────────────────
 {
-  const result = await computeEmitCompareGate(REPO, WORKTREE, BASE, REF, fakeGit(async () => "this-line-has-no-tab-separator"));
+  const result = await computeEmitCompareGate(WORKTREE, BASE, REF, fakeGit(async () => "this-line-has-no-tab-separator"));
   check("(P3) eligible:false", result.eligible === false);
   check("(P3) reason IS the unparseable-line reason", /unparseable diff line/.test(result.reason ?? ""));
   check("(P3) notApplicable:true — a malformed line is a parse failure, not a verdict (card 4def0708 fix)", result.notApplicable === true);
@@ -60,7 +59,7 @@ const fakeGit = (rawImpl) => ({ gitFactory: () => ({ raw: rawImpl }) });
 
 // ── (P4) PAIRED CONTROL — a real, decided-no verdict must stay notApplicable:false ────────────────────
 {
-  const result = await computeEmitCompareGate(REPO, WORKTREE, BASE, REF, fakeGit(async () => "A\tpackages/daemon/src/example.ts"));
+  const result = await computeEmitCompareGate(WORKTREE, BASE, REF, fakeGit(async () => "A\tpackages/daemon/src/example.ts"));
   check("(P4) eligible:false", result.eligible === false);
   check("(P4) reason IS the non-modify-status reason", /non-modify status/.test(result.reason ?? ""));
   check("(P4) notApplicable:false — a real, reproducible verdict about THIS diff's content, never erased by the fix", result.notApplicable === false);

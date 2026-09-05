@@ -62,6 +62,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (O) card 5149c036 — a repo-root `CLAUDE.md` change alongside an otherwise comment-only .ts edit must
 //       still force the FULL gate — same shape as (F), pinned explicitly for the real specimen this card
 //       investigated. See merge-gate-inert-diff.mjs scenario (M) for the CLAUDE.md-ONLY companion.
+//   (S) card fe848bfc — THE DISCRIMINATING CASE for dropping computeEmitCompareGate's repoPath arg: `ref`
+//       is `"HEAD"`, a PER-WORKTREE ref (unlike the branch NAME every other scenario above passes, which
+//       resolves identically from canonical or the worktree) — resolved against a worktree whose own HEAD
+//       genuinely diverges from canonical's checked-out HEAD. Direct call proves the real behavioral edit
+//       (committed only to the worktree) is seen; a RED-PROOF control shows the pre-fix repoPath/"HEAD"
+//       shape (resolving "HEAD" from canonical instead) would have seen an EMPTY diff — the exact silent
+//       wrong-answer shape card d422e279 fixed and this refactor makes structurally unreachable.
 // See `emit-compare-gate-scope.mjs` for (H)-(L): the shell-metacharacter defence-in-depth case, the two
 // fixtures/-scope cases, and the branch-blind-at-cap-queue-admission case.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate.mjs
@@ -308,7 +315,7 @@ try {
     // path in the same diff. Direct call (mirrors (N2)'s pattern) so the assertion is against the
     // predicate's own verdict, not re-derived from the merge-confirm result. MUST run BEFORE
     // confirmWorkerMerge — see (N2)'s own comment for why (the merge advances/deletes the branch this reads).
-    const direct = await computeEmitCompareGate(F.repo, worktreePath, baseSha, branch);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(F) direct call: not eligible", direct.eligible === false);
     check("(F) direct call: reason IS the out-of-scope catch-all", /path outside emit-compare scope/.test(direct.reason ?? ""));
     check("(F) direct call: notApplicable:true — this is a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
@@ -495,7 +502,7 @@ try {
     // repo state instead of the diff being classified (measured: doing this after the merge silently
     // changes the failure to "git error reading the diff" — a different, unrelated reason that happens to
     // also not match either regex, which would have made this assertion pass for the wrong cause).
-    const direct = await computeEmitCompareGate(N2.repo, worktreePath, baseSha, branch);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(N2) direct call: still not eligible", direct.eligible === false);
     check("(N2) direct call: reason IS the real behavioral-edit reason", /not transpile-identical/.test(direct.reason ?? ""));
     check("(N2) direct call: reason is NOT the pre-fix docs/-out-of-scope reason", !/path outside emit-compare scope/.test(direct.reason ?? ""));
@@ -528,7 +535,7 @@ try {
     fs.writeFileSync(path.join(worktreePath, "CLAUDE.md"), "# Loom\n\nsome repo-root doc content\n");
     commitAll(worktreePath, "docs: comment fix + repo-root CLAUDE.md", GIT_ID);
 
-    const direct = await computeEmitCompareGate(O.repo, worktreePath, baseSha, branch);
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, branch);
     check("(O) direct call: not eligible — CLAUDE.md is outside emit-compare scope", direct.eligible === false);
     check("(O) direct call: reason IS the out-of-scope catch-all, naming CLAUDE.md", /path outside emit-compare scope: CLAUDE\.md/.test(direct.reason ?? ""));
     check("(O) direct call: notApplicable:true — a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
@@ -539,6 +546,45 @@ try {
     check("(O) captured command IS the full gate — CLAUDE.md alongside an otherwise-reducible .ts edit still fails closed", capturedGate === FULL_GATE);
     check("(O) emitCompareReduced OMITTED, not fabricated false", confirm.emitCompareReduced === undefined);
   }
+
+  // ── (S) card fe848bfc — THE DISCRIMINATING CASE FOR THE ARG REMOVAL: `ref="HEAD"` resolved from a
+  //        worktree whose own HEAD genuinely diverges from canonical's checked-out HEAD (a per-worktree ref
+  //        — not a branch NAME, which every other direct-call scenario above passes and which resolves
+  //        identically from either path). Nothing at unit level pinned "a per-worktree HEAD resolves from
+  //        the path actually given" before this — only batch-merge-reduced-gate.mjs's end-to-end (POS)
+  //        scenario did. Committing ONLY to the worktree (never to canonical) after the cut is what
+  //        produces the divergence: `createWorktree` forks a NEW branch off canonical's HEAD at cut time,
+  //        but canonical's OWN checked-out ref never moves on its own — so canonical's `HEAD` stays pinned
+  //        at `baseSha` while the worktree's own `HEAD` advances to the new commit. RED-PROOF included:
+  //        resolving "HEAD" from CANONICAL instead (the pre-fix `repoPath`/`"HEAD"` shape card d422e279
+  //        fixed) sees an EMPTY diff — this is the exact silent-wrong-answer shape this card's refactor
+  //        makes structurally unreachable, reproduced here via a direct `git diff` from canonical since the
+  //        current (single-arg) signature no longer offers a way to pass canonical in by mistake. ─────────
+  {
+    const S = mk("s");
+    makeRepoWithBaseSrcFile(S, BASE_SRC);
+    const baseSha = execSync("git rev-parse HEAD", { cwd: S.repo }).toString().trim();
+    const { worktreePath, branch } = await createWorktree(S.repo, S.projId, S.taskId);
+    S.worktreePath = worktreePath; S.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, "packages", "daemon", "src", "example.ts"), BASE_SRC.replace("x === 0", "x === 1"));
+    commitAll(worktreePath, "fix: correct isReady threshold (worktree-only commit)", GIT_ID);
+
+    const canonicalHead = execSync("git rev-parse HEAD", { cwd: S.repo }).toString().trim();
+    const worktreeHead = execSync("git rev-parse HEAD", { cwd: worktreePath }).toString().trim();
+    check("(S) sanity: canonical repo's own checked-out HEAD did NOT advance (stayed at baseSha) — the discriminating precondition for this scenario", canonicalHead === baseSha);
+    check("(S) sanity: the worktree's own HEAD genuinely diverges from canonical's — a per-worktree ref, exactly the property card d422e279's bug depended on", worktreeHead !== canonicalHead);
+
+    // RED PROOF: what the pre-fix repoPath/"HEAD" shape would have computed — "HEAD" resolved from
+    // CANONICAL never sees the worktree-only commit, so the diff against canonical is EMPTY.
+    const canonicalDiff = execSync(`git diff --name-status ${baseSha}..HEAD`, { cwd: S.repo }).toString().trim();
+    check("(S) RED PROOF: resolving \"HEAD\" from canonical (the pre-fix repoPath shape) sees an EMPTY diff — the real behavioral change committed only to the worktree is invisible from there", canonicalDiff === "");
+
+    const direct = await computeEmitCompareGate(worktreePath, baseSha, "HEAD");
+    check("(S) direct call: not eligible — a real behavioral edit, correctly seen (not the empty-diff mechanism failure)", direct.eligible === false);
+    check("(S) direct call: reason IS the real behavioral-edit reason — proves \"HEAD\" was resolved from the WORKTREE's own tip, not canonical's", /not transpile-identical/.test(direct.reason ?? ""));
+    check("(S) direct call: reason is NOT the empty-diff reason the pre-fix repoPath/\"HEAD\" bug would have produced", !/empty diff/.test(direct.reason ?? ""));
+    check("(S) direct call: notApplicable:false — a real, decided verdict about the worktree's own content, never a git-mechanism failure", direct.notApplicable === false);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -548,5 +594,6 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O); and card 82662e98 — a comment-only packages/daemon/scripts/**/*.mjs edit now reduces too (P), while an added script file (Q) and a real one-token behavioral script edit (R) both still fail closed. See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
+  + " Card fe848bfc (S): a per-worktree ref (\"HEAD\") resolved from a worktree whose HEAD genuinely diverges from canonical's sees the real worktree-only commit, never the empty diff the pre-fix repoPath/\"HEAD\" shape would have silently produced."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

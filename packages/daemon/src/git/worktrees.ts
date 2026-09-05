@@ -4008,9 +4008,47 @@ export interface EmitCompareGateResult {
  * alongside a real test file change that has nothing to do with the fixture (`test/emit-compare-gate-scope.mjs`
  * case (J) — see that test's own updated expectation). That diff shape is not provably safe to reduce
  * without exactly the resolver this decision rejects, so the regression is accepted, not overlooked.
+ *
+ * ARG CONTRACT (card fe848bfc — this function used to also take a separate `repoPath`, dropped here):
+ * `worktreePath` must be a checkout of `ref`, and `baseSha`/`ref` are git revisions resolved from
+ * `worktreePath` itself — that precondition is STILL an unenforced caller obligation, exactly as before
+ * this card. What's now structural is narrower: there is no longer a SECOND path argument that can
+ * disagree with `worktreePath` about which checkout `ref` resolves against. The old two-path signature let
+ * a caller pass a DIFFERENT repo as the git cwd than the one `ref` actually checks out — exactly the shape
+ * that produced card `d422e279`'s bug (`mergeBatch` passed canonical `repoPath` with the literal ref
+ * `"HEAD"`, so `"HEAD"` resolved against canonical's own checked-out branch rather than the batch
+ * worktree, silently diffing a sha against itself).
+ *
+ * WHY DROPPING THE SECOND PATH IS SOUND — a REF-CLASS distinction, NOT "a linked worktree shares its
+ * parent's object database so any ref resolves identically from either path" (that broader claim is
+ * FALSE: shared OBJECTS ≠ shared refs — `HEAD`/`ORIG_HEAD`/`MERGE_HEAD`/`HEAD@{n}`/`@{-1}`/`@{u}` live
+ * under `$GIT_DIR/worktrees/<name>/` and are PER-WORKTREE; `git rev-parse HEAD` from a worktree and from
+ * its canonical repo can and do disagree, and that exact divergence is what card `d422e279`'s bug
+ * depended on). What actually matters is which class each revision THIS FUNCTION resolves falls into:
+ * `baseSha` is always a raw sha (repo-wide, identical from any path); the two solo call sites
+ * (`sessions/service.ts`) pass a branch NAME as `ref` (an ordinary ref, shared and identical repo-wide,
+ * not a per-worktree symref) — both were already behavior-identical from canonical before this card, and
+ * stay so now; the batch call site passes the literal `"HEAD"` — the ONE per-worktree ref in play here —
+ * and is now forced onto the only path that was ever correct for it, `worktreePath` itself.
+ *
+ * THE COUPLING THIS INTRODUCES (named, not hidden): before this card, a wrong `repoPath` could only ever
+ * corrupt the git calls this function makes directly (`diff --name-status`/`git show`, via `boundedGit`).
+ * `loadExcludedTestDirNames`/`loadNotHermeticNames`/`emitCompareSoundnessOk` were already pinned to
+ * `worktreePath` through their OWN separate argument, independent of `repoPath` — a wrong `repoPath` alone
+ * could never reach them. Now ONE argument drives all four (the git reads AND those three filesystem
+ * reads), so a caller passing the wrong single path corrupts everything at once rather than just the git
+ * half. This is a narrower failure surface (one argument left to get wrong, not two that can silently
+ * disagree with each other) but not a smaller one at a given call site. At the two solo sites the mistake
+ * is still CONSTRUCTIBLE — a `repoPath` local is in scope one line above the pre-wait classify call,
+ * same `string` type, compiles clean — and would be near-silent there: `ref` is a branch name, so the
+ * diff itself would stay correct even from the wrong repo, and only the three filesystem reads would
+ * silently answer from the wrong checkout, diverging exactly on a diff touching `scripts/test-daemon.mjs`
+ * or either tsconfig — both already called load-bearing by those helpers' own doc comments.
+ * `emit-compare-branch-capture-order-guard.mjs` pins the first argument at all `computeEmitCompareGate`
+ * call sites as `worktreePath` (never `repoPath`) as a static backstop against exactly this near-miss.
  */
 export async function computeEmitCompareGate(
-  repoPath: string, worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
+  worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
   // Card 4def0708: replaces the old single `notEligible(reason, notApplicable = false)` — a DEFAULTED
   // boolean param let a forgotten call site silently stamp the INFORMATIVE value (12 of 16 original call
@@ -4020,7 +4058,7 @@ export async function computeEmitCompareGate(
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
   const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: false });
   const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: true });
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const { git, timeoutMs } = boundedGit(worktreePath, deps);
 
   let entries: string[];
   try {

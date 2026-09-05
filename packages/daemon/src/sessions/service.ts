@@ -15368,7 +15368,7 @@ export class SessionService {
         // then detectable by simple inequality, no second HEAD read needed.
         emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         emitComparePreWaitMainHead = gateBaseMainHead;
-        const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
         if (emitCompare.eligible) {
           emitCompareSkip = true;
           emitCompareTestFiles = emitCompare.changedTestFiles;
@@ -15606,7 +15606,7 @@ export class SessionService {
             // 66b3112a), not `gateBaseMainHead` — the freshly re-read value is what main's tip actually IS
             // right now, on both producers, uniformly.
             const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead)
-              ? await computeEmitCompareGate(repoPath, worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs })
+              ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs })
               : undefined;
             if (reclassified?.eligible) {
               emitCompareTestFiles = reclassified.changedTestFiles;
@@ -16997,21 +16997,24 @@ export class SessionService {
             // branch that can move during a queue wait, so — unlike the solo path's `reunionAtAdmission` —
             // no admission-time re-derivation is needed here: nothing else writes to this private worktree
             // during the queue wait).
-            // Card d422e279 CORRECTION: the ref this call resolves ("HEAD") must be evaluated FROM the
-            // batch worktree, not canonical `finalRepoPath` — a batch worktree carries no named branch a
-            // caller outside it could resolve "HEAD" as (unlike the solo path's call, which passes an
-            // actual branch NAME as `ref` and can therefore safely evaluate it from canonical: a worktree
-            // branch is an ordinary ref, visible repo-wide). Passing `finalRepoPath` here made "HEAD"
+            // Card d422e279 CORRECTION (structurally closed by card fe848bfc — see below): the ref this
+            // call resolves ("HEAD") must be evaluated FROM the batch worktree, not canonical
+            // `finalRepoPath` — a batch worktree carries no named branch a caller outside it could resolve
+            // "HEAD" as (unlike the solo path's call, which passes an actual branch NAME as `ref` and can
+            // therefore safely evaluate it from canonical: a worktree branch is an ordinary ref, visible
+            // repo-wide). Passing `finalRepoPath` as a SEPARATE git-cwd argument here used to make "HEAD"
             // resolve to CANONICAL's own checked-out ref instead — since canonical main had not yet moved
             // past `gateBaseMainSha` at this point, that read `gateBaseMainSha..gateBaseMainSha`, an empty
             // diff, EVERY time, regardless of what the batch actually changed (this is the real reason
             // every historical batched `gate_history` row read `emitCompareReduced:null`, not merely "a
             // union is unlikely to qualify" as originally diagnosed — confirmed by a real fixture run
-            // before this fix: a two-branch, test-only-added batch still reported "empty diff" here). The
-            // worktree shares canonical's OWN object database (an ordinary git-worktree property), so
-            // `worktreePath` resolves `gateBaseMainSha` (a real, shared ancestor) exactly as well as
-            // `finalRepoPath` did — only the ref resolution changes.
-            const batchEmitCompare = await computeEmitCompareGate(worktreePath, worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
+            // before that fix: a two-branch, test-only-added batch still reported "empty diff" here).
+            // Card fe848bfc then removed the separate git-cwd argument entirely — `computeEmitCompareGate`
+            // now resolves everything from `worktreePath` alone, so this call can no longer be handed a
+            // mismatched pair of paths the way `finalRepoPath` was: the worktree shares canonical's OWN
+            // object database (an ordinary git-worktree property), so `worktreePath` resolves
+            // `gateBaseMainSha` (a real, shared ancestor) exactly as well as `finalRepoPath` ever did.
+            const batchEmitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
             // Card d422e279: substitute the SAME smaller command a solo reduced merge runs
             // (`buildReducedGateCommand`) when the WHOLE assembled batch proves eligible — never a
             // batch-specific predicate or command builder. `batchReduced` gates BOTH this substitution and

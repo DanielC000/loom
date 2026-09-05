@@ -26,13 +26,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //
 // ⚠ SAME REASON THE CLASSIFY-SIDE REGEX ANCHORS ON THE ASSIGNMENT, NOT JUST `computeEmitCompareGate\(`:
 // `91d8e343` also added a SECOND `computeEmitCompareGate(...)` call site — the post-wait reclassification
-// call, `? await computeEmitCompareGate(repoPath, worktreePath, emitCompareAdmissionMainHead, branch,
-// ...)`, assigned to `reclassified`, not `emitCompare`. A bare `computeEmitCompareGate\(` regex returns
-// 2 matches against the real tree TODAY and would trip the duplicate-match fail-closed leg into a false
-// failure. Anchoring on `const\s+emitCompare\s*=\s*await\s+computeEmitCompareGate\(` — the ORIGINAL,
-// pre-wait classification call this guard actually cares about — returns exactly 1 match and excludes the
-// post-wait reclassification call cleanly, since that one is a ternary (`?  await ...`) assigned to a
-// different name.
+// call, `? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, ...)`,
+// assigned to `reclassified`, not `emitCompare`. A bare `computeEmitCompareGate\(` regex returns 2 matches
+// against the real tree TODAY and would trip the duplicate-match fail-closed leg into a false failure.
+// Anchoring on `const\s+emitCompare\s*=\s*await\s+computeEmitCompareGate\(` — the ORIGINAL, pre-wait
+// classification call this guard actually cares about — returns exactly 1 match and excludes the post-wait
+// reclassification call cleanly, since that one is a ternary (`?  await ...`) assigned to a different name.
+//
+// ⭐ CARD fe848bfc: `computeEmitCompareGate` dropped its separate `repoPath` argument (resolving everything
+// from `worktreePath` instead) — CLASSIFY_RE stops at the call's OPENING PAREN and never inspects its
+// argument list, so that signature change needed no regex edit here; the ordering property it pins
+// (capture-before-classify) is about which LINE runs first, not what either call is passed. Only the
+// illustrative literal strings below (the "verbatim" comment + the synthetic fixtures) were updated, to
+// keep them honest about what the real call now looks like — they are not what the guard actually matches.
+// Section (E), further down, adds a SEPARATE check this card's own review asked for: that every real
+// `computeEmitCompareGate` call site passes `worktreePath` (never `repoPath`) as its FIRST argument — the
+// one thing CLASSIFY_RE deliberately does not look at, and exactly the near-miss `repoPath` being in
+// scope one line above the pre-wait classify call makes constructible.
 //
 // ⭐ POSITIVE CONTROL (DoD-3): this guard asserts a property that is CURRENTLY TRUE (this pair was born
 // correctly ordered at `877fc958` — there is no real historical bad commit for it, unlike the inert-skip
@@ -61,9 +71,11 @@ const SERVICE_TS = path.join(repoRoot, "packages", "daemon", "src", "sessions", 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// The two lines this guard pins, verbatim (as of card 7183540f / 877fc958, unmoved by 91d8e343):
+// The two lines this guard pins, verbatim (as of card 7183540f / 877fc958, unmoved by 91d8e343; the
+// classify line's own arg list updated by card fe848bfc, which dropped computeEmitCompareGate's repoPath
+// arg — CLASSIFY_RE below does not depend on this, see the note above):
 //   emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
-//   const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
+//   const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
 const CAPTURE_RE = /emitComparePreWaitBranchHead\s*=\s*await\s+resolveGitRef\(/;
 const CLASSIFY_RE = /const\s+emitCompare\s*=\s*await\s+computeEmitCompareGate\(/;
 
@@ -122,7 +134,7 @@ function checkOrdering(text) {
 //        that has never fired against its own named regression shape proves nothing. ──────────────────────
 {
   const syntheticInverted = [
-    "        const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "        const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "        if (emitCompare.eligible) {",
     "          emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "          emitCompareSkip = true;",
@@ -140,14 +152,14 @@ function checkOrdering(text) {
   const duplicateCapture = [
     "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
     "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(C2) a duplicate emitComparePreWaitBranchHead capture line fails closed (ambiguous target)", !checkOrdering(duplicateCapture).ok);
 
   const duplicateClassify = [
     "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
-    "const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(C3) a duplicate 'const emitCompare = computeEmitCompareGate(...)' line fails closed (ambiguous target)", !checkOrdering(duplicateClassify).ok);
 
@@ -159,9 +171,9 @@ function checkOrdering(text) {
   // NOT be mistaken for a second match of THIS pair's own targets.
   const withRealNearCollisions = [
     "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
     "const emitCompareAdmissionMainHead = await resolveGitRef(repoPath, \"HEAD\", { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead) ? await computeEmitCompareGate(repoPath, worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs }) : undefined;",
+    "const reclassified = (postWaitBranchHead && emitCompareAdmissionMainHead) ? await computeEmitCompareGate(worktreePath, emitCompareAdmissionMainHead, branch, { timeoutMs: this.gitOpMs }) : undefined;",
   ].join("\n");
   check("(C5) the near-collision siblings (emitCompareAdmissionMainHead capture + reclassified call) do not trip the duplicate-match fail-closed leg", checkOrdering(withRealNearCollisions).ok);
 }
@@ -171,12 +183,66 @@ function checkOrdering(text) {
 {
   const postFix = [
     "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
-    "const emitCompare = await computeEmitCompareGate(repoPath, worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
   ].join("\n");
   check("(D) a correctly-ordered fixture passes (sanity: the matcher can distinguish the two arrangements)", checkOrdering(postFix).ok);
 }
 
+// ── (E) card fe848bfc — FIRST-ARGUMENT PIN: every `computeEmitCompareGate(...)` call site in
+//        sessions/service.ts must pass `worktreePath` as its FIRST positional argument, never `repoPath`.
+//        This is a DIFFERENT invariant from (A)-(D) above (which pin ORDERING between two lines, and
+//        deliberately never inspect either call's argument list — see the header note) — added because
+//        card fe848bfc's own review found the mistake this pins is CONSTRUCTIBLE, not hypothetical:
+//        `repoPath` is a local of the same `string` type, in scope one line above the pre-wait classify
+//        call (the `resolveGitRef(repoPath, branch, ...)` capture CAPTURE_RE above already matches), so
+//        swapping it in compiles clean and would be near-silent at a solo site (`ref` is a branch name, so
+//        the diff itself would still be correct — only the function's own worktreePath-only filesystem
+//        reads would silently answer from the wrong checkout). Same static-source-text + RED-proof
+//        technique as (A)-(D), independent of `checkOrdering` (a different function, a different property,
+//        so one's coverage lapsing can never mask the other's — same discipline the header doc already
+//        requires between this file and its sibling). ─────────────────────────────────────────────────────
+const FIRST_ARG_RE = /computeEmitCompareGate\(\s*([A-Za-z0-9_]+)\s*,/g;
+
+function firstArgsOf(text) {
+  const args = [];
+  let m;
+  while ((m = FIRST_ARG_RE.exec(text)) !== null) args.push(m[1]);
+  return args;
+}
+
+{
+  let text = null;
+  try {
+    text = fs.readFileSync(SERVICE_TS, "utf8");
+  } catch (err) {
+    check(`(E) sessions/service.ts is readable at ${SERVICE_TS} (fail-closed: an unreadable target is a FAIL, not a skip) — ${err.message}`, false);
+  }
+  if (text != null) {
+    const args = firstArgsOf(text);
+    // Sanity, not a hardcoded expectation to maintain forever: currently 3 (two solo + one batch). A
+    // fourth call site is fine — the loop below still checks every one found, by name, not by count.
+    check(`(E) sanity: computeEmitCompareGate call sites were actually found in sessions/service.ts (found ${args.length}, expected >0)`, args.length > 0);
+    check(
+      `(E) every computeEmitCompareGate(...) call in sessions/service.ts passes worktreePath as its FIRST argument, never repoPath (found: ${JSON.stringify(args)})`,
+      args.length > 0 && args.every((a) => a === "worktreePath"),
+    );
+  }
+}
+
+// RED PROOF: the exact near-miss named above — a synthetic call passing `repoPath` (in scope, same type,
+// compiles clean) as the first argument instead of `worktreePath` — IS flagged.
+{
+  const syntheticWrongFirstArg = [
+    "const emitCompare = await computeEmitCompareGate(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+  ].join("\n");
+  const args = firstArgsOf(syntheticWrongFirstArg);
+  check(
+    "(E) RED PROOF: a synthetic call passing repoPath as the first argument is flagged, not silently accepted",
+    args.length === 1 && args[0] !== "worktreePath",
+  );
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sessions/service.ts still captures emitComparePreWaitBranchHead before classifying via computeEmitCompareGate, the matcher is proven to go RED against the synthetic re-scoped-inside-if(eligible) inversion, it survives 91d8e343's real near-collision siblings without a false duplicate-match failure, and it fails closed on an unreadable file or an ambiguous (zero/duplicate) match."
+  ? "\n✅ ALL PASS — sessions/service.ts still captures emitComparePreWaitBranchHead before classifying via computeEmitCompareGate, the matcher is proven to go RED against the synthetic re-scoped-inside-if(eligible) inversion, it survives 91d8e343's real near-collision siblings without a false duplicate-match failure, it fails closed on an unreadable file or an ambiguous (zero/duplicate) match, and every real computeEmitCompareGate call site passes worktreePath (never repoPath) as its first argument — proven to actually flag the named near-miss, not just silently pass."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
