@@ -750,7 +750,7 @@ try {
       id: over.id, sessionId: over.sessionId ?? "sess-fixture", projectId: over.projectId,
       type: over.type ?? "decision", title: over.title ?? "Test question", body: over.body ?? "",
       options: over.options ?? null, recommendation: over.recommendation ?? null, taskId: over.taskId ?? null,
-      permissionAction: over.permissionAction ?? null, permissionScope: over.permissionScope ?? null,
+      permissionAction: over.permissionAction ?? null, permissionScopeHint: over.permissionScopeHint ?? null,
       permissionExpiresAt: over.permissionExpiresAt ?? null, credentialEnvVar: over.credentialEnvVar ?? null,
       provisionTarget: over.provisionTarget ?? null,
       state: over.state ?? "pending", chosenOption: over.chosenOption ?? null, note: over.note ?? null,

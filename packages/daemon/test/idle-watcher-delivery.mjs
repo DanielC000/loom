@@ -58,7 +58,7 @@ function seedQuestion(e, sessionId, taskId) {
   e.db.insertQuestion({
     id, sessionId, projectId: e.projId, type: "decision", title: "a decision", body: "",
     options: null, recommendation: null, taskId,
-    permissionAction: null, permissionScope: null, permissionExpiresAt: null, credentialEnvVar: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
     state: "answered", chosenOption: null, note: null, createdAt: minutesAgo(60),
     answeredAt: minutesAgo(30), consumedAt: null,
   });

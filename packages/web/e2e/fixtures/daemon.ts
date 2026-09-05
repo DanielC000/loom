@@ -390,7 +390,7 @@ export interface LoomDaemon {
     // default "decision" shape (byte-identical to before).
     type?: "decision" | "input" | "permission" | "credential";
     options?: string[] | null; recommendation?: string | null; taskId?: string | null;
-    permissionAction?: string | null; permissionScope?: "once" | "standing" | null; permissionExpiresAt?: string | null;
+    permissionAction?: string | null; permissionScopeHint?: "once" | "standing" | null; permissionExpiresAt?: string | null;
     credentialEnvVar?: string | null;
     state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
     createdAt?: string; answeredAt?: string;

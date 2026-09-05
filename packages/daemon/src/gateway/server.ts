@@ -3017,7 +3017,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // shape) for a spec that doesn't care about the newer types.
           type?: QuestionType; title?: string; body?: string;
           options?: string[] | null; recommendation?: string | null; taskId?: string | null;
-          permissionAction?: string | null; permissionScope?: PermissionScope | null; permissionExpiresAt?: string | null;
+          permissionAction?: string | null; permissionScopeHint?: PermissionScope | null; permissionExpiresAt?: string | null;
           credentialEnvVar?: string | null;
           // Ask-time only (card 193de09e) — `insertQuestion` only ever binds `provisionTarget` at insert
           // time; `provisionConnectionId`/`provisionBindingState` are answer-time fields written EXCLUSIVELY
@@ -3296,7 +3296,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           projectId: q.projectId, type: q.type ?? "decision",
           title: q.title ?? "Seeded decision", body: q.body ?? "",
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
-          permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
+          permissionAction: q.permissionAction ?? null, permissionScopeHint: q.permissionScopeHint ?? null,
           permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
           // provisionConnectionId/provisionBindingState and decidedScope/decidedExpiresAt are ALL
           // answer-time-only (see the seed body type's own comment above) — always the pre-answer defaults
@@ -5454,7 +5454,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       });
     } else if (question.type === "permission") {
       // `scope`/`expiresAt` (fix(mcp): persist and surface permission scope/expiry) are the human's ACTUAL
-      // answer-time grant — distinct from question.permissionScope/permissionExpiresAt (the asking
+      // answer-time grant — distinct from question.permissionScopeHint/permissionExpiresAt (the asking
       // manager's unenforced ask-time REQUEST, never touched here). The web UI computes `expiresAt` as an
       // ABSOLUTE ISO timestamp from its relative-duration picker (24h/7d/30d) at submit time — this route
       // never interprets a relative duration itself. Only persisted on `decision:"authorize"`: a "deny"

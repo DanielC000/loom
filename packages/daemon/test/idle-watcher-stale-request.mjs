@@ -61,7 +61,7 @@ function seedQuestion(e, sessionId, { state = "pending", ageMinutes = 0, title =
   e.db.insertQuestion({
     id, sessionId, projectId: e.projId, type: "decision", title, body: "",
     options: null, recommendation: null, taskId: null,
-    permissionAction: null, permissionScope: null, permissionExpiresAt: null, credentialEnvVar: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
     provisionTarget: null, provisionConnectionId: null, provisionBindingState: "none",
     state, chosenOption: null, note: null, createdAt: minutesAgo(ageMinutes),
     answeredAt: state !== "pending" ? NOW.toISOString() : null, consumedAt: null,

@@ -170,7 +170,7 @@ try {
       id: credId, sessionId: mgrId, projectId: projId, type: "credential",
       title: "Need the Stripe key", body: "for billing",
       options: null, recommendation: null, taskId: null,
-      permissionAction: null, permissionScope: null, permissionExpiresAt: null,
+      permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
       credentialEnvVar: null,
       provisionTarget: { connection: { name: "Stripe Prod", host: "api.stripe.com" }, binding: { profileId: "prof-1" } },
       provisionConnectionId: null, provisionBindingState: "none",

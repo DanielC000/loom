@@ -3104,12 +3104,17 @@ export interface Question {
   taskId: string | null;
   /** `type:"permission"` ask-time payload — the action being authorized/denied. Null for every other type. */
   permissionAction: string | null;
-  /** `type:"permission"` ask-time payload — the requested grant lifetime. Null for every other type. */
-  permissionScope: PermissionScope | null;
+  /** `type:"permission"` ask-time payload — what the ASKING AGENT typed as the desired grant lifetime,
+   *  BEFORE the human ever saw or answered it. Evidence about the ask, never about the answer: it can
+   *  disagree with what the request's own `body` prose asks for, and it can disagree with what the human
+   *  actually granted (`decidedScope`, below) — Loom never reconciles the two. A reader wanting "what did
+   *  the human decide" must read `decidedScope`, never this field; this one exists only so the UI can
+   *  pre-fill the scope picker with the asker's suggestion. Null for every other type. */
+  permissionScopeHint: PermissionScope | null;
   /** `type:"permission"` ask-time payload — an optional ISO expiry for the requested grant. Null for every other type. */
   permissionExpiresAt: string | null;
   /** `type:"permission"` ANSWER-time payload (fix(mcp): persist/surface permission scope+expiry) — the
-   *  human's ACTUAL chosen grant lifetime, distinct from `permissionScope` (the asking manager's
+   *  human's ACTUAL chosen grant lifetime, distinct from `permissionScopeHint` (the asking manager's
    *  ask-time REQUEST, unenforced). Set by the human-only answer boundary ONLY when the decision is
    *  `"authorize"` — a `"deny"` grants nothing, so there is no scope to record. Null until answered, null
    *  on a `"deny"`, and null for every non-"permission" type or a row answered before this field existed

@@ -131,7 +131,7 @@ export function buildQuestionAsk(
       recommendation: type === "decision" ? (input.recommendation ?? null) : null,
       taskId,
       permissionAction: type === "permission" ? (input.action as string) : null,
-      permissionScope: type === "permission" ? (input.scope ?? null) : null,
+      permissionScopeHint: type === "permission" ? (input.scope ?? null) : null,
       permissionExpiresAt: type === "permission" ? (input.expiresAt ?? null) : null,
       // decidedScope/decidedExpiresAt (fix(mcp): persist/surface permission scope+expiry) are an
       // ANSWER-time payload only — always null at ask time, written later by answerQuestion.
@@ -194,7 +194,7 @@ function credentialAck(q: Question): string {
 /**
  * Derive a permission answer's structured grant fields (fix(mcp): persist and surface permission
  * scope/expiry) — `{scope, expiresAt, lapsed}` — from the human's ANSWER-TIME `decidedScope`/
- * `decidedExpiresAt`, never the ask-time `permissionScope`/`permissionExpiresAt` hint (a separate,
+ * `decidedExpiresAt`, never the ask-time `permissionScopeHint`/`permissionExpiresAt` hint (a separate,
  * unenforced REQUEST the asking manager made — see both fields' own doc on `Question`). Shared by
  * `questionPullItem` and `questionAnswerByType` so the two read surfaces can never drift.
  *

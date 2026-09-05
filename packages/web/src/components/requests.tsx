@@ -524,7 +524,7 @@ function InputControl({ q }: { q: QuestionInboxItem }) {
 // itself enforce or re-check it — a manager must read the grant and honor it.
 const PERMISSION_EXPIRY_MS: Record<string, number> = { "24h": 24 * 60 * 60 * 1000, "7d": 7 * 24 * 60 * 60 * 1000, "30d": 30 * 24 * 60 * 60 * 1000 };
 function PermissionControl({ q }: { q: QuestionInboxItem }) {
-  const [scope, setScope] = useState<PermissionScope>(q.permissionScope ?? "once");
+  const [scope, setScope] = useState<PermissionScope>(q.permissionScopeHint ?? "once");
   const [expiry, setExpiry] = useState<string>("");
   const [note, setNote] = useState("");
   const expiresAtIso = (): string | undefined => {
@@ -546,7 +546,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <SectionLabel style={{ margin: 0 }}>Action</SectionLabel>
         {kv("Action", q.permissionAction ?? "—")}
-        {kv("Requested", q.permissionScope ?? "once")}
+        {kv("Asker suggested", q.permissionScopeHint ?? "once")}
         {q.permissionExpiresAt && kv("Until", q.permissionExpiresAt)}
       </Panel>
       <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>

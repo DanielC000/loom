@@ -165,7 +165,7 @@ try {
       id: credId, sessionId: mgrId, projectId: projId, type: "credential",
       title: "Need the Stripe key", body: "for the billing integration",
       options: null, recommendation: null, taskId: null,
-      permissionAction: null, permissionScope: null, permissionExpiresAt: null,
+      permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
       credentialEnvVar: "STRIPE_API_KEY",
       state: "pending", chosenOption: null, note: null,
       createdAt: t0, answeredAt: null, consumedAt: null,

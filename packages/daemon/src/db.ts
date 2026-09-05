@@ -1172,7 +1172,10 @@ CREATE TABLE IF NOT EXISTS questions (
   recommendation TEXT,
   task_id TEXT,                            -- soft link to tasks(id) — deliberately no FK, see doc above
   permission_action TEXT,
-  permission_scope TEXT,                   -- 'once' | 'standing', 'permission' type only (ASK-TIME hint)
+  permission_scope TEXT,                   -- 'once' | 'standing', 'permission' type only — maps to
+                                            -- Question.permissionScopeHint (card 6d5a6280): the ASKING
+                                            -- AGENT's typed suggestion, never the human's decision. See
+                                            -- decided_scope below for what was actually granted.
   permission_expires_at TEXT,
   decided_scope TEXT,                      -- 'once' | 'standing', the human's ANSWER-TIME grant; set only
                                             -- on decision='authorize' (fix(mcp): persist/surface scope+expiry)
@@ -6880,7 +6883,7 @@ export class Db {
          cancelled_reason,cancelled_by,cancelled_at)
        VALUES
         (@id,@sessionId,@filedBySessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
-         @permissionAction,@permissionScope,@permissionExpiresAt,@credentialEnvVar,
+         @permissionAction,@permissionScopeHint,@permissionExpiresAt,@credentialEnvVar,
          @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
          @cancelledReason,@cancelledBy,@cancelledAt)`,
     ).run({
@@ -6899,7 +6902,7 @@ export class Db {
       // that legitimately can't attribute a filer (a webhook, an event-trigger, a real on-behalf-of ask)
       // must be able to say so without this default silently manufacturing a false one.
       filedBySessionId: q.filedBySessionId === undefined ? q.sessionId : q.filedBySessionId,
-      permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
+      permissionAction: q.permissionAction ?? null, permissionScopeHint: q.permissionScopeHint ?? null,
       permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
       // provision_connection_id/provision_binding_state are deliberately NOT insertable here — they are
       // written ONLY by answerCredentialQuestion (the human-only answer boundary), never at ask time.
@@ -8427,7 +8430,7 @@ function toQuestion(r0: unknown): Question {
     recommendation: (r.recommendation as string | null) ?? null,
     taskId: (r.task_id as string | null) ?? null,
     permissionAction: (r.permission_action as string | null) ?? null,
-    permissionScope: (r.permission_scope as PermissionScope | null) ?? null,
+    permissionScopeHint: (r.permission_scope as PermissionScope | null) ?? null,
     permissionExpiresAt: (r.permission_expires_at as string | null) ?? null,
     decidedScope: (r.decided_scope as PermissionScope | null) ?? null,
     decidedExpiresAt: (r.decided_expires_at as string | null) ?? null,

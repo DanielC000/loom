@@ -96,7 +96,7 @@ try {
     }, { sessionId: mgrId, projectId: projId });
     check("(C) buildQuestionAsk builds a valid permission ask", "question" in built);
     const q = built.question;
-    check("(C) the ask-time payload persists on the built Question", q.permissionAction === "force-push origin/main" && q.permissionScope === "once" && q.permissionExpiresAt === "2026-08-01T00:00:00.000Z");
+    check("(C) the ask-time payload persists on the built Question", q.permissionAction === "force-push origin/main" && q.permissionScopeHint === "once" && q.permissionExpiresAt === "2026-08-01T00:00:00.000Z");
     check("(C) decidedScope/decidedExpiresAt are null at ask time — an ANSWER-time payload only", q.decidedScope === null && q.decidedExpiresAt === null);
     db.insertQuestion(q);
     // The REST route only ever writes chosenOption ∈ PERMISSION_ANSWERS ("authorize"/"deny") for a

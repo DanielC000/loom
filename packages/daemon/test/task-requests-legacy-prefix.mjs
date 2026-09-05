@@ -71,7 +71,7 @@ function insertLegacyQuestion(db, { sessionId, projectId, taskIdPrefix, title, s
   const id = `lp-q-${++questionCounter}`;
   db.insertQuestion({
     id, sessionId, projectId, type: "decision", title, body: "b", options: ["A", "B"], recommendation: null,
-    taskId: taskIdPrefix, permissionAction: null, permissionScope: null, permissionExpiresAt: null,
+    taskId: taskIdPrefix, permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
     credentialEnvVar: null, state, chosenOption: state === "answered" ? "A" : null, note: null,
     createdAt: now, answeredAt: state === "answered" ? now : null, consumedAt: null,
   });

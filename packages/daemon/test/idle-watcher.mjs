@@ -126,7 +126,7 @@ function seedQuestion(e, sessionId, taskId, state = "pending") {
   e.db.insertQuestion({
     id, sessionId, projectId: e.projId, type: "decision", title: "a decision", body: "",
     options: null, recommendation: null, taskId,
-    permissionAction: null, permissionScope: null, permissionExpiresAt: null, credentialEnvVar: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
     state, chosenOption: null, note: null, createdAt: NOW.toISOString(),
     answeredAt: state !== "pending" ? NOW.toISOString() : null, consumedAt: null,
   });

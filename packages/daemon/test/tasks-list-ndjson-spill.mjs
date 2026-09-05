@@ -176,7 +176,7 @@ try {
     db.insertQuestion({
       id: `tls-q-${String(i).padStart(3, "0")}`, sessionId: SESSION_ID, projectId: projId, type: "decision",
       title: `${REQ_TITLE_PAD}-MARKER-${String(i).padStart(3, "0")}`, body: "b", options: ["A", "B"], recommendation: null,
-      taskId: T, permissionAction: null, permissionScope: null, permissionExpiresAt: null, credentialEnvVar: null,
+      taskId: T, permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
       state: "pending", chosenOption: null, note: null, createdAt: now, answeredAt: null, consumedAt: null,
     });
   }

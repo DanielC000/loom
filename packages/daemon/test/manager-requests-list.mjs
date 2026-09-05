@@ -87,7 +87,7 @@ try {
     db.insertQuestion({
       id, sessionId: over.sessionId, projectId: over.projectId, type: over.type ?? "decision",
       title: over.title, body: over.body ?? "b", options: over.options ?? null, recommendation: over.recommendation ?? null,
-      taskId: over.taskId ?? null, permissionAction: over.permissionAction ?? null, permissionScope: over.permissionScope ?? null,
+      taskId: over.taskId ?? null, permissionAction: over.permissionAction ?? null, permissionScopeHint: over.permissionScopeHint ?? null,
       permissionExpiresAt: over.permissionExpiresAt ?? null, credentialEnvVar: over.credentialEnvVar ?? null,
       state: over.state ?? "pending", chosenOption: over.chosenOption ?? null, note: over.note ?? null,
       createdAt: over.createdAt ?? now, answeredAt: over.answeredAt ?? null, consumedAt: over.consumedAt ?? null,

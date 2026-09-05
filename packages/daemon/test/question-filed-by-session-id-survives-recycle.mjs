@@ -92,7 +92,7 @@ try {
   db.insertQuestion({
     id: explicitNullId, sessionId: oldMgrId, filedBySessionId: null, projectId: projId, type: "decision",
     title: "On-behalf-of ask", body: "no attributable filer", options: null, recommendation: null, taskId: null,
-    permissionAction: null, permissionScope: null, permissionExpiresAt: null, decidedScope: null, decidedExpiresAt: null,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, decidedScope: null, decidedExpiresAt: null,
     credentialEnvVar: null, provisionTarget: null, provisionConnectionId: null, provisionBindingState: "none",
     state: "pending", chosenOption: null, note: null, createdAt: now, answeredAt: null, consumedAt: null,
     cancelledReason: null, cancelledBy: null, cancelledAt: null, escalatedAt: null,

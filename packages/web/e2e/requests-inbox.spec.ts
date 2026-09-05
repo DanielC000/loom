@@ -52,7 +52,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await loomDaemon.seedQuestion({
       sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "permission",
       body: "May I force-push to origin/main to land the release?",
-      permissionAction: "git push --force origin main", permissionScope: "once",
+      permissionAction: "git push --force origin main", permissionScopeHint: "once",
     });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
@@ -82,7 +82,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await loomDaemon.seedQuestion({
       sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "permission",
       body: "May I delete the stale feature branch?",
-      permissionAction: "git branch -D old-feature", permissionScope: "once",
+      permissionAction: "git branch -D old-feature", permissionScopeHint: "once",
     });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
@@ -102,7 +102,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await loomDaemon.seedQuestion({
       sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "permission",
       body: "May I keep auto-merging green dependency bumps?",
-      permissionAction: "gh pr merge --auto", permissionScope: "standing",
+      permissionAction: "gh pr merge --auto", permissionScopeHint: "standing",
     });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
@@ -110,7 +110,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
 
-    // Seeded permissionScope:"standing" ⇒ the expiry select starts ENABLED with no click needed — the
+    // Seeded permissionScopeHint:"standing" ⇒ the expiry select starts ENABLED with no click needed — the
     // mirror image of the "once"-seeded Authorize spec above, which starts disabled.
     const expiry = dialog.getByRole("combobox");
     await expect(expiry).toBeEnabled();
