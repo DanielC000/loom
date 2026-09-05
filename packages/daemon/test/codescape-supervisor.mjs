@@ -168,6 +168,13 @@ check("(gate) isCodescapeSupervisorEnabled() is TRUE once LOOM_DEV=1 AND the fix
   check("(dbPath) restart-on-death respawns using the SAME remembered dbPath (a 3rd 'serve' call recorded, new pid)",
     readDbPathCalls().length === 3 && readDbPathCalls()[2]?.cmd === "serve" && dbPathSup.getPid() !== dbPathPidBefore);
 
+  // Card ec57f968: same reasoning as section (b)'s own restart-on-death fix — the getPid() comparison
+  // above is a recorded/structural fact, not proof this respawned child is genuinely serving. Confirm with
+  // a real control-plane round trip before stopping.
+  const dbPathRestartReg = await waitForRecovery(dbPathSup, "/fake/repo/dbpath-restart-direct");
+  check("(dbPath) restart-on-death genuinely recovers — a real control-plane call succeeds against the respawned child",
+    dbPathRestartReg?.ok === true);
+
   dbPathSup.stop();
   process.env.LOOM_CODESCAPE_BIN = savedBin;
 }
@@ -396,6 +403,16 @@ const calls2 = readCalls();
 check("(b) the 3rd call is another 'serve'", calls2[2]?.cmd === "serve");
 check("(b) restart reused the SAME port", sup.getPort() === portBefore);
 check("(b) restart produced a DIFFERENT pid (a genuinely new process)", sup.getPid() !== pidBefore && sup.getPid() !== null);
+// Card ec57f968: the two checks above are RECORDED/structural facts, not proof of genuine liveness — the
+// calls-file record is written by the fixture BEFORE it ever attempts to bind (see fake-codescape-cli.mjs's
+// `record()` call, which precedes `server.listen()`), and spawnServeExplicit flips `this.alive`/`this.child`
+// synchronously the instant `spawn()` returns a handle, strictly before the OS-level bind resolves (its own
+// doc). So both could read "success" even if THIS specific restart attempt is genuinely losing the
+// restart-reuse TOCTOU (supervisor.ts:1050-1069) and about to die again. Prove genuine recovery the same
+// way section (f) below does for its own restart-on-death: a real control-plane round trip.
+const restartLiveReg = await waitForRecovery(sup, "/fake/repo/one-restart-direct");
+check("(b) restart-on-death genuinely recovers — a real control-plane call succeeds against the restarted child",
+  restartLiveReg?.ok === true);
 check("(b) the restarted serve ran from the SAME shared homeDir", calls2[2]?.cwd === calls2[0]?.cwd);
 
 // ===================== (c) stop() disarms restart + clears state =====================
@@ -612,15 +629,21 @@ await new Promise((resolve) => hungServer.close(resolve));
   process.env.FAKE_CODESCAPE_PORT_ZERO_UNSUPPORTED = "1"; // fixture stands in for a pre-f7a5684 install
   const oldBinSup = new CodescapeSupervisor({ homeDir: oldBinHomeDir, ingestTimeoutMs: 15_000 });
   await oldBinSup.start(["/fake/repo/old-bin"]);
-  // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop waits for `getPort()` to leave `null`, which
-  // only happens once the LEGACY fallback spawn (spawnServeLegacy) succeeds. Source-verified ordering in
-  // supervisor.ts's spawnServeSelfReporting: `onDeathBeforeReport` sets `this.portReportCapable = false`
-  // SYNCHRONOUSLY, strictly BEFORE it calls `scheduleRestart(false)` — and only THAT call, after its own
-  // backoff delay, ever reaches spawnServeLegacy (via spawnServe()'s dispatch, which reads
-  // `portReportCapable` fresh each time). So `portReportCapable` is unconditionally `false` by the time
-  // any later spawn attempt — legacy or not — can possibly set `getPort()` non-null; the negative check
-  // below reads a fact the wait's own precondition already guarantees, not a race against it.
-  for (let i = 0; i < 100 && oldBinSup.getPort() === null; i++) await sleep(50);
+  // TIMING-GUARD-SAFE: poll-observes-prior-step — this loop waits for BOTH `getPort()` to leave `null` AND
+  // the calls-file to actually show the fallback attempt's own record. Card ec57f968: `getPort()` alone is
+  // NOT enough — `spawnServeExplicit` flips `this.alive`/`this.port` SYNCHRONOUSLY the instant `spawn()`
+  // returns a child handle, strictly BEFORE that child's own OS process has even started running, let
+  // alone appended its call record to disk (a real, measured gap: fork/exec + node startup + fs write).
+  // The observed failure: `getPort()` had already left `null` (the in-process flip happens first) while
+  // `readOldBinServeCalls()[1]` was still `undefined` — `undefined?.port !== "0"` reads `true` (vacuously
+  // passing one check), while the SIBLING check comparing `getPort()` against `Number(undefined?.port)`
+  // (`NaN`) correctly FAILED loudly instead. Gating on the calls-log too (the same technique section (b)
+  // below already uses for its own restart detection) closes this: every fallback attempt reuses the SAME
+  // explicit port (spawnServeLegacy picks it ONCE via `pickLoopbackPort`, then every retry — via
+  // `spawnServe()`'s `this.port != null` branch — reuses that identical value, success or failure), so
+  // `oldBinServeCalls[1]` is a stable, meaningful read once it exists, regardless of whether that SPECIFIC
+  // attempt is the one that ultimately binds.
+  for (let i = 0; i < 100 && (oldBinSup.getPort() === null || readOldBinServeCalls().length < 2); i++) await sleep(50);
 
   check("(f) capability detection confirms the installed binary does NOT support --port 0",
     oldBinSup.getPortReportCapable() === false);
@@ -629,7 +652,12 @@ await new Promise((resolve) => hungServer.close(resolve));
     oldBinServeCalls[0]?.port === "0" && oldBinServeCalls[0]?.rejected === "port-zero-unsupported");
   check("(f) the FALLBACK attempt used a real, explicit, non-zero port — never 0",
     oldBinServeCalls[1]?.port !== "0" && Number(oldBinServeCalls[1]?.port) > 0);
-  check("(f) getPort() reflects that explicit fallback port, live and connectable",
+  // Card ec57f968: this is a RECORDED-value consistency check (getPort() vs. the port arg the fixture
+  // recorded), not a liveness claim — every fallback attempt shares the same constant port value by
+  // construction (see the wait loop's own doc above), so this holds regardless of whether the CURRENTLY
+  // live child has genuinely bound. The real "is it live and connectable" proof is the waitForRecovery
+  // call just below, against a genuine control-plane round trip.
+  check("(f) getPort() matches the fallback port recorded in the call log (value consistency)",
     oldBinSup.getPort() === Number(oldBinServeCalls[1]?.port));
 
   // Card 4e0df6ce's own removal-polarity warning, made concrete: without the fallback this exact scenario
@@ -732,21 +760,36 @@ await new Promise((resolve) => hungServer.close(resolve));
   // ONLY — attempt #2 reports instantly — because a later parent-process env mutation could never reach a
   // child that already spawned with the old env baked in (spawn() copies env at call time); this is the
   // fixture's own established idiom (see FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS above), not a new one.
+  //
+  // Card ec57f968: "instantly" above means "no ARTIFICIAL delay" — it is NOT a promise that a real fork/
+  // exec + node-startup + bind + report round trip beats 200ms on a contended host. The gate run this card
+  // is the direct successor to observed exactly that: attempts #2 and #3 (both un-delayed by the fixture)
+  // each still logged "did not report a bound port within 200ms" — real host-driven overhead exceeding the
+  // tight per-attempt bound, unrelated to FAKE_CODESCAPE_PORT_REPORT_DELAY_MS (which the fixture confirms
+  // only ever delays the REPORT line, never the actual bind — see fake-codescape-cli.mjs). This test's
+  // subject is RECOVERY BEHAVIOR (does the supervisor eventually recover, never left permanently stuck),
+  // not the 200ms VALUE itself — raising that would blur this test's deliberate "force attempt #1 to time
+  // out" design and hide the class rather than fix it (see (g3) below for the genuinely-permanent-timeout
+  // negative control that same reasoning demands). Fix: widen the RETRY BUDGET (more short
+  // `restartBackoffMs` entries), not the per-attempt bound, so a multi-attempt burst of ordinary host
+  // jitter can't exhaust the give-up threshold before a report finally lands inside it — still comfortably
+  // within `maxRestartsPerWindow`'s default (10).
   const slowTimeoutHomeDir = path.join(tmpHome, "slow-timeout-home");
   const slowTimeoutCallsFile = path.join(slowTimeoutHomeDir, "fake-codescape-calls.jsonl");
   const readSlowTimeoutServeCalls = () => (fs.existsSync(slowTimeoutCallsFile)
     ? fs.readFileSync(slowTimeoutCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
     : []).filter((c) => c.cmd === "serve");
   process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "5000"; // far past portReportTimeoutMs below
-  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS = "1"; // ONLY attempt #1 is slow
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS = "1"; // ONLY attempt #1 is deliberately slow
   const slowTimeoutSup = new CodescapeSupervisor({
-    homeDir: slowTimeoutHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 200, restartBackoffMs: [100, 200],
+    homeDir: slowTimeoutHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 200,
+    restartBackoffMs: [100, 100, 100, 100, 100, 100], // 6 short attempts of margin against host jitter
   });
   await slowTimeoutSup.start(["/fake/repo/slow-timeout"]);
   // TIMING-GUARD-SAFE: fully-awaited-completion — the loop's OWN condition (getPort() non-null) is the
-  // fact the checks below re-observe; it can only become true via attempt #2's un-delayed report (attempt
-  // #1's 5000ms delay vastly exceeds its own 200ms bound, so attempt #1 alone could never resolve this).
-  for (let i = 0; i < 100 && slowTimeoutSup.getPort() === null; i++) await sleep(50);
+  // fact the checks below re-observe; widened from the original 5s to comfortably cover the widened
+  // backoff schedule's own worst case (7 attempts x (200ms timeout + 100ms backoff) ~= 2.1s) with margin.
+  for (let i = 0; i < 150 && slowTimeoutSup.getPort() === null; i++) await sleep(50);
   check("(g2) a report slower than the bound is abandoned — a second serve attempt was scheduled",
     readSlowTimeoutServeCalls().length >= 2);
   check("(g2) it recovers once a later attempt's report arrives inside the bound — never left permanently stuck",
@@ -754,6 +797,36 @@ await new Promise((resolve) => hungServer.close(resolve));
   slowTimeoutSup.stop();
   delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
   delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS;
+
+  // ===================== (g3) card ec57f968 DoD-4: positive control for (g2)'s "recovers" claim — a report
+  // ===================== that NEVER beats the bound (every attempt, not just the first) must genuinely ====
+  // ===================== give up, never be mistaken for the transient recovery (g2) proves. ================
+  // Same mechanism as (g2) (the timeout/abandon path in spawnServeSelfReporting), but
+  // FAKE_CODESCAPE_PORT_REPORT_DELAY_ATTEMPTS is left UNSET so the fixture delays EVERY invocation, not
+  // just the first — a permanently-slow-to-report install, never a transient one. Proves the give-up
+  // branch this file already exercises via real process death ((bad-bin) above) is reached the SAME way
+  // via repeated timeout-abandon: getPort() stays null once the (short, test-only) backoff schedule is
+  // exhausted, and stays null — never a stray recovery a wider schedule would eventually have found.
+  const stuckTimeoutHomeDir = path.join(tmpHome, "stuck-timeout-home");
+  process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS = "5000"; // far past portReportTimeoutMs below, EVERY attempt
+  const stuckTimeoutSup = new CodescapeSupervisor({
+    homeDir: stuckTimeoutHomeDir, ingestTimeoutMs: 15_000, portReportTimeoutMs: 200, restartBackoffMs: [100, 100],
+  });
+  await stuckTimeoutSup.start(["/fake/repo/stuck-timeout"]);
+  // TIMING-GUARD-SAFE: fully-awaited-completion — this loop's OWN exit condition (`getPort() === null`) IS
+  // the exact fact the check below re-observes, read from the SAME live getter. Two exits are possible:
+  // (1) the (structurally impossible, in this permanently-slow scenario) case of a report landing inside
+  // the bound, leaving `getPort()` non-null and the check below correctly failing loudly; or (2) the loop
+  // exhausts its own 50-iteration bound, which — given 1 initial + 2 restarts each costing ~200ms timeout
+  // + a short backoff exhausts the give-up threshold in well under 1s — only happens well after give-up
+  // has already fired (scheduleRestart's give-up branch nulls `this.port` synchronously, before ever
+  // reaching a `setTimeout`, so there is no pending timer left that could flip this later). Either way the
+  // check re-observes a fact this SAME loop iteration already settled, not a race against it.
+  for (let i = 0; i < 50 && stuckTimeoutSup.getPort() === null; i++) await sleep(50);
+  check("(g3) a report that NEVER beats the bound (every attempt, not just the first) genuinely gives up — getPort() stays null",
+    stuckTimeoutSup.getPort() === null);
+  stuckTimeoutSup.stop();
+  delete process.env.FAKE_CODESCAPE_PORT_REPORT_DELAY_MS;
 }
 
 // ===================== cleanup =====================
