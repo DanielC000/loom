@@ -4486,18 +4486,28 @@ export class SessionService {
    * `never_existed`, unchanged from before this card.
    */
   /**
-   * Card a16c580b, manager-review follow-up: `redactOutputFile` is DISTINCT from `scopeProjectId` above and
-   * never touches its FILTERING behavior — `scopeProjectId` narrows the SQL candidate set itself (the
-   * worker path's hard scope), while this one only decides whether to STRIP `outputFile` from an otherwise-
-   * full settled result. It exists because the UNSCOPED manager call site (registerGateStatus's
-   * `scopeSessionId`/`scopeProjectId` both omitted — see mcp/orchestration.ts) can resolve ANY project's
-   * settled op by opId at all, including its `outputTail` (pre-existing, unaffected by this card) — adding
-   * `outputFile` there would hand a manager on one project a ready absolute host path into ANOTHER
-   * project's full gate output with zero extra effort, the exact cross-project exposure `gate_queue`'s own
-   * `redacted:true` fields exist to prevent for that sibling tool. This param is that same redaction,
-   * scoped to just the ONE field this card adds: when the wrapper is given and its `callerProjectId` doesn't
-   * match the settled row's own `projectId`, `outputFile` is omitted from the response; every other field
-   * (including the pre-existing `outputTail`) is untouched.
+   * Card a16c580b, manager-review follow-up (WIDENED by card 5ef78900 — see below): `redactCrossProject` is
+   * DISTINCT from `scopeProjectId` above and never touches its FILTERING behavior — `scopeProjectId`
+   * narrows the SQL candidate set itself (the worker path's hard scope), while this one only decides
+   * whether to STRIP a handful of otherwise-full settled-result fields. It exists because the UNSCOPED
+   * manager call site (registerGateStatus's `scopeSessionId`/`scopeProjectId` both omitted — see
+   * mcp/orchestration.ts) can resolve ANY project's settled op by opId at all — this param is that same
+   * redaction: when the wrapper is given and its `callerProjectId` doesn't match the settled row's own
+   * `projectId`, the CROSS-PROJECT-SENSITIVE fields below are omitted from the response; every structural
+   * field (`passed`/`outcome`/`gateType`/`durationMs`/`validatedHead`/`gateCap`/etc.) is untouched.
+   *
+   * CARD 5ef78900 — WHAT'S REDACTED, AND WHY IT GREW: originally (card a16c580b) this covered `outputFile`
+   * ONLY — an absolute host path into another project's full gate output — leaving `outputTail` (a bounded
+   * excerpt of the SAME output) and `gateDetail` (whose `failingTest`/`stderrTail` can name another
+   * project's test file/paths verbatim) unredacted on the identical unscoped manager path. That was a real,
+   * unintentional gap, not a second deliberate posture: `outputTail`/`gateDetail` are the SAME field CLASS
+   * as `outputFile` (all three are ways to read another tenant's captured gate output/diagnostics) and get
+   * the SAME treatment now. `steps` (bare `{step,durationMs,status}` timings, no captured output) is lower
+   * risk but redacted too for consistency — a `step` label is a verbatim fragment of the OWNING project's
+   * configured `gateCommand`, itself project-specific text this caller has no legitimate reason to read
+   * cross-project. NOT touched: this is a `redact, don't refuse` fix (mirroring `gate_queue`'s own
+   * `redacted:true` precedent for that sibling tool) — a foreign read still resolves (`state`, `passed`/
+   * `outcome`, timing/concurrency fields all survive), only the payload fields above lose their content.
    *
    * ⚠️ SECOND MANAGER-REVIEW CATCH — WHY THIS IS A WRAPPER OBJECT, NOT A BARE `string | undefined`: a first
    * version used a bare `redactOutputFileForProject?: string`, with `undefined` doing DOUBLE DUTY — "the
@@ -4505,17 +4515,18 @@ export class SessionService {
    * row unreachable) AND "the manager call site, but `db.getSession(managerSessionId)` came back undefined
    * so there was nothing to resolve" (NOT safe — no filter sits behind that path at all). Both collapsed to
    * the identical `undefined` value, so a failed session lookup on the manager path silently inherited the
-   * worker path's "nothing to redact" meaning and returned `outputFile` UNREDACTED — the exact fail-OPEN
+   * worker path's "nothing to redact" meaning and returned these fields UNREDACTED — the exact fail-OPEN
    * shape the sibling `t.record.projectId === null` case below was deliberately built to avoid. The wrapper
-   * removes the ambiguity structurally rather than by convention: `redactOutputFile === undefined` means
+   * removes the ambiguity structurally rather than by convention: `redactCrossProject === undefined` means
    * ONLY "this call site never asked for redaction at all" (the worker path, which omits the argument
-   * entirely — never constructs a wrapper); `redactOutputFile.callerProjectId === undefined` means "redaction
-   * DOES apply here, but the caller's own project could not be resolved" — and since `t.record.projectId`
-   * (below) is typed `string | null`, it can never equal a bare `undefined`, so THAT comparison fails safe
-   * (redacts) automatically, with no sentinel string or extra branch required. The manager call site
-   * (mcp/orchestration.ts) always constructs the wrapper, even when its own getter resolves to `undefined`.
+   * entirely — never constructs a wrapper); `redactCrossProject.callerProjectId === undefined` means
+   * "redaction DOES apply here, but the caller's own project could not be resolved" — and since
+   * `t.record.projectId` (below) is typed `string | null`, it can never equal a bare `undefined`, so THAT
+   * comparison fails safe (redacts) automatically, with no sentinel string or extra branch required. The
+   * manager call site (mcp/orchestration.ts) always constructs the wrapper, even when its own getter
+   * resolves to `undefined`.
    */
-  gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactOutputFile?: { readonly callerProjectId: string | undefined }): {
+  gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null; elapsedMs: number | null;
     /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
@@ -4735,17 +4746,147 @@ export class SessionService {
       // they spread through for "pass"/"fail" today and are simply absent for "cancelled"/"error"/a "gate"
       // row, never fabricated.
       const payload = t.record.verdictPayload;
-      // Card a16c580b, manager-review follow-up (x2): cross-project REDACTION for `outputFile` specifically
-      // — see `redactOutputFile`'s own doc above for why this is a wrapper object, not a bare
-      // `string | undefined`, and separate from `scopeProjectId`'s FILTERING. `redactOutputFile === undefined`
-      // (the worker call site never constructs the wrapper at all) means "nothing to redact" — that path's
-      // hard filter already made a foreign project's row unreachable before this line runs. Whenever the
-      // wrapper IS present (every manager call), `t.record.projectId` (typed `string | null`) is compared
-      // against `redactOutputFile.callerProjectId` (`string | undefined`) — a `string | null` value can
-      // never equal a bare `undefined`, so an UNRESOLVED caller project (a failed `db.getSession` lookup)
-      // fails safe to `true` (redacted) automatically, with no separate branch or sentinel value needed. The
-      // SAME `!==` also correctly redacts the legacy `projectId:null` row for the identical reason.
-      const outputFileRedacted = redactOutputFile !== undefined && t.record.projectId !== redactOutputFile.callerProjectId;
+      // Card a16c580b, widened by card 5ef78900: cross-project REDACTION for the output/diagnostic fields
+      // (`outputFile`, `outputTail`, `steps`, `gateDetail`) — see `redactCrossProject`'s own doc above for
+      // why this is a wrapper object, not a bare `string | undefined`, and separate from `scopeProjectId`'s
+      // FILTERING. `redactCrossProject === undefined` (the worker call site never constructs the wrapper at
+      // all) means "nothing to redact" — that path's hard filter already made a foreign project's row
+      // unreachable before this line runs. Whenever the wrapper IS present (every manager call),
+      // `t.record.projectId` (typed `string | null`) is compared against `redactCrossProject.callerProjectId`
+      // (`string | undefined`) — a `string | null` value can never equal a bare `undefined`, so an
+      // UNRESOLVED caller project (a failed `db.getSession` lookup) fails safe to `true` (redacted)
+      // automatically, with no separate branch or sentinel value needed. The SAME `!==` also correctly
+      // redacts the legacy `projectId:null` row for the identical reason.
+      const crossProjectRedacted = redactCrossProject !== undefined && t.record.projectId !== redactCrossProject.callerProjectId;
+      /**
+       * Code-review round 2 (card 5ef78900): a scattered per-line `&& !crossProjectRedacted` on each
+       * spread — the shape this method used until this round — has two failure modes, both found by
+       * executing a real cross-project read rather than reading the diff: (1) it's an ALLOWLIST-BY-OMISSION
+       * — a field spread with no `&& !crossProjectRedacted` silently defaults to VISIBLE, so adding a new
+       * field (or, historically, widening this fix from `outputFile` alone) requires remembering to gate
+       * EVERY new sensitive spread by hand; `reason`/`commitSubject`/`retriedFile`/`emitCompareTestFiles`/
+       * `emitCompareNotHermeticExcluded` (raw git/install error text with host paths, another tenant's
+       * landed commit subject, a foreign test file path, arrays of foreign test file paths) were missed
+       * exactly this way. (2) it can ONLY gate a field that's spread VERBATIM from `payload` — it cannot
+       * protect a DERIVED field computed from a raw (unredacted) input: `retryWarning` is computed via
+       * `formatWeakerPassWarning(payload.retriedFile, payload?.outputTail)` — reading the RAW payload
+       * directly, not whatever `outputTail`/`retriedFile` this object was about to expose — so gating the
+       * verbatim `outputTail`/`retriedFile` spreads does nothing to stop `retryWarning`'s own text (which
+       * itself regex-classifies the raw tail into one of two different sentences) from leaking a one-bit
+       * read of foreign content the redacted response otherwise withholds.
+       *
+       * FIX, PASS 1: filter the FULLY-ASSEMBLED verdict-fields object BY KEY, after every field — verbatim
+       * or derived — has already been computed. This closed the `retryWarning` bypass: membership in a
+       * `Set` became the one decision point, independent of how a field gets its value.
+       *
+       * ⚠️ FIX, PASS 2 (manager review, same card): a plain deny-`Set` is STILL a deny-list — it does not
+       * close the finding it was named for ("a new field opts OUT of redaction by silence"). A field added
+       * to `PendingGateOpVerdict` (db.ts) tomorrow and not ALSO added to the Set by hand is still visible
+       * cross-project, silently — exactly the failure mode that produced round 2's six leaks in the first
+       * place, just moved one level up (from "gate every spread" to "remember every Set entry"). Neither is
+       * a forcing function; both are a convention someone has to remember.
+       *
+       * REAL FIX: an EXHAUSTIVE, COMPILER-ENFORCED classification, `Record<GateVerdictFieldKey, "sensitive"
+       * | "structural">` over `GateVerdictFieldKey = keyof PendingGateOpVerdict | <the 4 fields gateStatus
+       * computes itself and never stores: "passed"/"cancelled"/"retryWarning"/"transientRetryWarning">`.
+       * TypeScript's excess-property + missing-property checks on an object literal assigned to a `Record`
+       * of a union-of-literal-keys type make this a REAL forcing function, not a comment asking someone to
+       * remember: add a field to `PendingGateOpVerdict` and DON'T classify it here, and this file fails to
+       * COMPILE (`Property '<x>' is missing`) — the next field genuinely cannot "make no choice" the way a
+       * `Set` entry could be forgotten. `validatedHead`/`headWarning` (a bare git sha / freeform text naming
+       * another project's branch or worktree state) are classified `"sensitive"` too — lower severity than a
+       * raw stderr tail, but still another tenant's repo state a foreign caller has no legitimate reason to
+       * read; classified deliberately, not omitted. `retryPassed`/`transientRetried`/`transientRetryWarning`
+       * are `"structural"` — they carry no foreign CONTENT of their own (a bare boolean, or — for
+       * `transientRetryWarning` — a fully generic, non-interpolated sentence with no filename), so leaving
+       * them visible discloses only "a retry happened", never what.
+       *
+       * RUNTIME FAIL-CLOSED TOO, not just compile-time: the filter below keeps a field ONLY when its
+       * classification is EXACTLY `"structural"` — an unrecognized key (should be impossible given the
+       * exhaustive type above, but this is the actual RUNTIME behavior stated in plain terms, per card
+       * `6cf1b174`'s lesson that a comment asserting a failure direction must match the code, not the
+       * intent) reads as `undefined !== "structural"` and is DROPPED, i.e. treated as sensitive. This is a
+       * genuine allowlist at runtime (option (a) the manager raised), layered under the compile-time
+       * exhaustiveness (option (b)) — not a deny-list with a compiler nudge on top.
+       *
+       * ⚠️ LIMITATION, worth writing down where the scheme itself lives: this classification governs FIELDS
+       * — it is structurally blind to a datum RE-EXPRESSED inside another field's own PROSE. Card 67030bb9's
+       * `batchBranchCount` is the concrete case: the same integer N it carries is ALSO interpolated, TWICE,
+       * into `retryWarning`'s own generated text (`formatWeakerPassWarning`) for a batch-merge retry — "this
+       * retry was for a BATCH of N branch(es)...". A key-based scheme (allowlist OR deny-list) cannot see
+       * that the two fields carry the SAME fact under two different names; it can only classify each field
+       * on its own. The fix here is not a smarter key scheme — it's that a DERIVED string field must be
+       * classified by everything it can ever CONTAIN across its own interpolations, not by what it's named:
+       * `retryWarning` is `"sensitive"` as a WHOLE (see its own entry below), which happens to already cover
+       * N as a side effect of covering the retried file name / timeout-kill classification it also encodes
+       * — not because N was separately reasoned about when `retryWarning` was first classified. Don't take
+       * that as evidence the scheme "just works" for a future derived field; the next one needs the SAME
+       * "what can this string ever say" check done deliberately, not assumed from this precedent.
+       *
+       * `batchBranchCount` (card 67030bb9, `service.ts:4791` post-rebase) is classified `"structural"` —
+       * DECIDED CONSISTENTLY with the LIMITATION above, not despite it: N's OTHER carrier, `retryWarning`,
+       * stays `"sensitive"` and fully redacted regardless — but for its OWN separate content (the retried
+       * file name, and the timeout-kill-vs-assertion-failure wording derived from `outputTail`), not because
+       * of N. So the standalone `batchBranchCount` field can be judged purely on ITS OWN merits without that
+       * decision silently doubling as a decision about `retryWarning`'s classification too — a bare COUNT of
+       * branches landed in one batch reveals no path, no test name, no error text, no commit message, no
+       * identifier, the same bucket as `concurrentGates`/`gateCap`/`emitCompareIdenticalCount` (all
+       * `"structural"`), already visible cross-project as ordinary fleet-operational magnitude, not tenant
+       * content. (Independently checked, NOT relied on for this: the OTHER worker's argument that
+       * `batchBranchCount` is already safe because `gate_history` exposes an equivalent count is UNSOUND —
+       * `gate_history` is scoped to the CALLER'S OWN project server-side, no `projectId` argument, no
+       * foreign-project row under any argument shape; `gate_status` is the ONLY cross-project reader of
+       * settled gate data on this daemon, a different trust boundary entirely.)
+       *
+       * ✅ APPLIED AT REBASE (card 67030bb9 landed first, as sequenced): before this line was added, both
+       * `tsc` (`error TS2741: Property 'batchBranchCount' is missing in type '{...}' but required in type
+       * 'Record<GateVerdictFieldKey, "sensitive" | "structural">'.`) and
+       * `gate-verdict-field-classification-exhaustive.mjs` (run directly, no build needed) independently
+       * refused/flagged the rebased tree with `batchBranchCount` still unclassified — the forcing function
+       * fired for real, against a genuinely new field from a sibling branch, not just against a synthetic
+       * mutation. That refusal is what confirmed this was the ONLY new key needing classification.
+       */
+      type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
+      type GateVerdictFieldKey = keyof PendingGateOpVerdict | GateVerdictDerivedKey;
+      const GATE_VERDICT_FIELD_CLASSIFICATION: Record<GateVerdictFieldKey, "sensitive" | "structural"> = {
+        // Content-bearing — another tenant's paths, test names, error text, or landed work.
+        reason: "sensitive",
+        validatedHead: "sensitive",
+        headWarning: "sensitive",
+        steps: "sensitive",
+        outputTail: "sensitive",
+        outputFile: "sensitive",
+        gateDetail: "sensitive",
+        retriedFile: "sensitive",
+        // Classified as a WHOLE for everything it can ever interpolate — the retried file name, the
+        // timeout-kill-vs-assertion-failure wording, AND (card 67030bb9) a batch's branch count — see the
+        // LIMITATION note above this Record for why a derived string needs this "what can it ever say"
+        // check, not a per-datum one.
+        retryWarning: "sensitive",
+        emitCompareTestFiles: "sensitive",
+        emitCompareNotHermeticExcluded: "sensitive",
+        commitSubject: "sensitive",
+        // Structural — classification, timing, and concurrency facts with no foreign content of their own.
+        durationMs: "structural",
+        settledAt: "structural",
+        totalDurationMs: "structural",
+        extended: "structural",
+        proximity: "structural",
+        gateCap: "structural",
+        concurrentGates: "structural",
+        concurrentGatesMax: "structural",
+        emitCompareReduced: "structural",
+        emitCompareIdenticalCount: "structural",
+        retryPassed: "structural",
+        transientRetried: "structural",
+        passed: "structural",
+        cancelled: "structural",
+        transientRetryWarning: "structural",
+        // Card 67030bb9, applied at rebase: see the LIMITATION note above this Record for the full
+        // reasoning — decided consistently with `retryWarning` staying "sensitive" regardless, for its OWN
+        // separate content, so this bare count can be judged purely on its own merits.
+        batchBranchCount: "structural",
+      };
       const settleTimingFields = {
         ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
         ...(payload?.totalDurationMs !== undefined ? { totalDurationMs: payload.totalDurationMs } : {}),
@@ -4760,7 +4901,11 @@ export class SessionService {
       // mean the OUTER `t.record.verdict != null ? { outcome: t.record.verdict } : {}` below was the only
       // thing surfacing anything, and `deriveMergeGateVerdict` never even WROTE `"skipped"` before this
       // card — so this widening and that write land together, not independently).
-      const verdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
+      // Card 5ef78900, round 2 (round 3 widened the mechanism, not this shape): every spread below is now
+      // VERBATIM/unconditional — no more per-line `&& !crossProjectRedacted`. Redaction happens exactly
+      // once, below, by filtering the fully-assembled object against `GATE_VERDICT_FIELD_CLASSIFICATION`
+      // — see that Record's own doc for why (and for why it's an exhaustive classification, not a Set).
+      const rawVerdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
         ? {
           passed: t.record.verdict === "pass",
           ...(payload?.reason !== undefined ? { reason: payload.reason } : {}),
@@ -4769,7 +4914,7 @@ export class SessionService {
           ...(payload?.headWarning !== undefined ? { headWarning: payload.headWarning } : {}),
           ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
-          ...(payload?.outputFile !== undefined && !outputFileRedacted ? { outputFile: payload.outputFile } : {}),
+          ...(payload?.outputFile !== undefined ? { outputFile: payload.outputFile } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
           // Card 6dcb9cd3: `!== undefined` (not truthy) — a `null` here IS the measured negative
@@ -4778,7 +4923,12 @@ export class SessionService {
           // this card" case must stay omitted rather than fabricated as `null`. `retryWarning` is the one
           // exception to this whole block's "spread payload.X verbatim" shape — it's DERIVED (via the same
           // formatter the live nudge uses), not stored, and gated on a TRUTHY retriedFile specifically (a
-          // `null`/`undefined` retriedFile has no warning to render).
+          // `null`/`undefined` retriedFile has no warning to render). Card 5ef78900 round 2: it's computed
+          // from the RAW `payload.retriedFile`/`payload.outputTail` regardless of redaction — this was the
+          // bypass (see `GATE_VERDICT_FIELD_CLASSIFICATION`'s doc) — but that's safe here precisely BECAUSE
+          // the post-hoc filter below keeps a key only when it's classified `"structural"`, so `retryWarning`
+          // (classified `"sensitive"`) is dropped on a cross-project read same as every other sensitive
+          // field in this object; nothing downstream needs the computation itself to be redaction-aware.
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
@@ -4792,7 +4942,8 @@ export class SessionService {
           // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
           // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,
           // not silence) and the same "derive the warning text, gated on truthy, via the ONE shared
-          // formatter" shape `retryWarning` already uses.
+          // formatter" shape `retryWarning` already uses. Classified `"structural"` in
+          // `GATE_VERDICT_FIELD_CLASSIFICATION` (see its own doc) — no foreign content of its own to redact.
           ...(payload?.transientRetried !== undefined ? { transientRetried: payload.transientRetried } : {}),
           ...(payload?.transientRetried ? { transientRetryWarning: formatTransientRetryWarning() } : {}),
           // Card e2b6f900: without this, the triple is written to verdict_payload_json and NEVER read back
@@ -4819,6 +4970,15 @@ export class SessionService {
           : t.record.verdict === "error"
             ? { ...(payload?.reason !== undefined ? { reason: payload.reason } : {}), ...settleTimingFields }
             : {};
+      // The single redaction point (see `GATE_VERDICT_FIELD_CLASSIFICATION`'s doc above): applies
+      // identically to whichever of the three verdict-kind branches above produced `rawVerdictFields`, so
+      // `reason` is redacted on a cross-project "cancelled"/"error" read exactly like it is on "fail" — one
+      // filter, not three parallel gates that could drift apart from each other. KEEPS a field only when
+      // its classification is EXACTLY `"structural"` — an allowlist at runtime, never "redact only what's
+      // named as sensitive" (which would fail OPEN on an unrecognized key).
+      const verdictFields = crossProjectRedacted
+        ? Object.fromEntries(Object.entries(rawVerdictFields).filter(([key]) => GATE_VERDICT_FIELD_CLASSIFICATION[key as GateVerdictFieldKey] === "structural")) as typeof rawVerdictFields
+        : rawVerdictFields;
       return {
         state: t.record.state, gateType, elapsedMs: null, idleMs: null,
         admittedAt: t.record.startedAt,
@@ -4840,6 +5000,30 @@ export class SessionService {
     return scoped
       ? { state: "unknown", gateType: null, elapsedMs: null, idleMs: null }
       : { state: "never_existed", gateType: null, elapsedMs: null, idleMs: null };
+  }
+
+  /**
+   * Card 5ef78900 (code-review round 2): whether `opId`'s settled row belongs to a DIFFERENT project than
+   * `redactCrossProject` declares — the EXACT SAME fail-safe comparison `gateStatus` above uses internally
+   * for its own cross-project redaction (see that method's `crossProjectRedacted`/
+   * `GATE_VERDICT_FIELD_CLASSIFICATION` docs). Exposed standalone because `gate_status`'s `timingBand`
+   * join (mcp/orchestration.ts) is appended to `gateStatus`'s return AFTER that method has already returned
+   * — a service-layer enumeration inside `gateStatus` itself structurally cannot see or gate a field a
+   * CALLER adds later, so that caller needs this same comparison available on its own to gate its own
+   * addition, rather than re-deriving (and risking drifting from) the fail-safe polarity by hand.
+   * `redactCrossProject === undefined` (the worker path, which never constructs the wrapper) returns
+   * `false` — "not asking, nothing to redact" — identical to `gateStatus`'s own discipline. A caller-project
+   * lookup that failed to resolve (`callerProjectId: undefined`) still compares unequal against any real
+   * `string | null` project id and so still redacts — the same fail-SAFE (not fail-open) shape. An opId
+   * that can't be resolved at all here returns `false` (nothing to compare against) rather than throwing —
+   * harmless, since `gateStatus` itself will independently and authoritatively report `never_existed`/
+   * `unknown` for that identical miss; this method is a gating aid for an ALREADY-settled, ALREADY-resolved
+   * op (checked by its own caller via `state === "settled"` first), never a resolution path of its own.
+   */
+  isCrossProjectGateOp(opId: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): boolean {
+    if (redactCrossProject === undefined) return false;
+    const t = this.db.findPendingGateOpByOpId(opId);
+    return t.kind === "found" && t.record.projectId !== redactCrossProject.callerProjectId;
   }
 
   /**

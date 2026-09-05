@@ -1,15 +1,21 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card a16c580b, manager-review follow-up: `gate_status`'s MANAGER call site is UNSCOPED
 // (mcp/orchestration.ts's `registerGateStatus(server, sessions)` — no `scopeSessionId`/`scopeProjectId`)
-// — a manager on ONE project can resolve a settled op minted by ANOTHER project, including its
-// `outputTail` (a real, PRE-EXISTING exposure this card does not touch). Adding `outputFile` — an
+// — a manager on ONE project can resolve a settled op minted by ANOTHER project. Adding `outputFile` — an
 // absolute host path into that op's FULL captured output — to the same unscoped surface would have handed
-// a manager on a foreign project a zero-effort pointer into another project's complete gate output, wider
-// than the pre-existing `outputTail` tail. This proves the fix: `SessionService.gateStatus`'s new
-// `redactOutputFileForProject` param (threaded from the manager call site as
-// `() => db.getSession(managerSessionId)?.projectId`) omits `outputFile` for a foreign-project op while
-// leaving every other field — INCLUDING the pre-existing `outputTail` — untouched, and a same-project read
-// still gets the real path.
+// a manager on a foreign project a zero-effort pointer into another project's complete gate output. This
+// proves that original fix: `SessionService.gateStatus`'s `redactCrossProject` param (threaded from the
+// manager call site as `() => db.getSession(managerSessionId)?.projectId`) omits `outputFile` for a
+// foreign-project op, and a same-project read still gets the real path.
+//
+// ⚠️ UPDATED for card 5ef78900: at the time this file was written, `outputTail` (a bounded excerpt of the
+// SAME captured output `outputFile` points at) was a KNOWN, DELIBERATELY UNTOUCHED pre-existing exposure —
+// this file's checks originally asserted `outputTail` stayed UNREDACTED on a foreign read, to prove this
+// narrower fix didn't silently widen scope. Card 5ef78900 closed that gap (found it was a real, unintended
+// gap, not a deliberate posture) — `redactCrossProject` now ALSO redacts `outputTail`/`steps`/`gateDetail`
+// for a foreign read. The checks below are updated to match; `gate-status-cross-project-redaction.mjs` is
+// the DEDICATED test for the widened fields (including a fail-verdict `gateDetail`/`steps` case this file
+// never exercised, since its `deploy` harness only ever produces a PASS).
 //
 // HERMETIC — a REAL Db + SessionService + OrchestrationMcpRouter, `deploy`'s injected `runGate` seam so no
 // real host exec ever happens (mirrors gate-status-deploy-opid.mjs's own harness convention exactly).
@@ -101,8 +107,9 @@ try {
   check("(foreign — THE FIX) outputFile is REDACTED (absent) for a manager on a DIFFERENT project",
     foreignStatus.outputFile === undefined,
     () => JSON.stringify(foreignStatus.outputFile));
-  check("(foreign) outputTail is UNCHANGED — this fix redacts outputFile ONLY, never widens to the pre-existing outputTail exposure",
-    foreignStatus.outputTail === "shipping\n");
+  check("(foreign) outputTail is ALSO redacted (card 5ef78900 widened this from outputFile-only) — absent, not the real tail",
+    foreignStatus.outputTail === undefined,
+    () => JSON.stringify(foreignStatus.outputTail));
   check("(foreign) every OTHER field survives untouched (passed/outcome/gateType) — this is a targeted redaction, not a degraded response",
     foreignStatus.passed === true && foreignStatus.outcome === "pass" && foreignStatus.gateType === "deploy");
 
@@ -145,13 +152,14 @@ try {
   check("(unresolved-session — THE 2nd FIX) outputFile is REDACTED even though the caller's own project could not be resolved at all — fails SAFE, not open",
     unresolvedSessionStatus.outputFile === undefined,
     () => JSON.stringify(unresolvedSessionStatus.outputFile));
-  check("(unresolved-session) outputTail is still untouched (this fix is outputFile-only, same as every other case)",
-    unresolvedSessionStatus.outputTail === "shipping\n");
+  check("(unresolved-session) outputTail is ALSO redacted (card 5ef78900) — fails safe alongside outputFile, not independently",
+    unresolvedSessionStatus.outputTail === undefined,
+    () => JSON.stringify(unresolvedSessionStatus.outputTail));
 } finally {
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while outputFile — the absolute host path card a16c580b added — is redacted specifically for a cross-project read, mirroring gate_queue's own redaction precedent; the pre-existing outputTail exposure is deliberately left untouched by this narrower fix; every other field on a foreign read survives intact; AND a failed caller-session lookup at call time (db.getSession returning undefined) fails SAFE to redacted rather than silently un-redacting — mutation-proven against the bare-string pre-fix version, which failed exactly this last check."
+  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while outputFile — the absolute host path card a16c580b added — is redacted specifically for a cross-project read, mirroring gate_queue's own redaction precedent; outputTail is ALSO redacted as of card 5ef78900 (widened from this file's original outputFile-only scope — see gate-status-cross-project-redaction.mjs for the dedicated steps/gateDetail coverage); every other field on a foreign read survives intact; AND a failed caller-session lookup at call time (db.getSession returning undefined) fails SAFE to redacted rather than silently un-redacting — mutation-proven against the bare-string pre-fix version, which failed exactly this last check."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

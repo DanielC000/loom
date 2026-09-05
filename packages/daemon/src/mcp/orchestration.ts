@@ -208,7 +208,7 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
  * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
  */
-function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactOutputFileCallerProjectId?: () => string | undefined): void {
+function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
     ? "Read-only status for YOUR OWN gate run, by the `opId` a `run_gate` {status:\"pending\"} " +
@@ -358,9 +358,19 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "this tool is UNSCOPED for a manager — a real opId from ANY project on this daemon resolves here, not " +
-      "just your own. `outputFile` (card a16c580b) is REDACTED (omitted) for an op belonging to a DIFFERENT " +
-      "project than yours, mirroring `gate_queue`'s own cross-project redaction — `outputTail` is NOT " +
-      "redacted (a pre-existing exposure this card did not introduce or close). " +
+      "just your own. For an op belonging to a DIFFERENT project than yours (card a16c580b, widened by card " +
+      "5ef78900), the following are REDACTED (omitted) — every field that can carry that project's own " +
+      "content, paths, or identifiers: `outputFile`, `outputTail`, `steps`, `gateDetail`, `reason`, " +
+      "`commitSubject`, `retriedFile`, `retryWarning`, `emitCompareTestFiles`, " +
+      "`emitCompareNotHermeticExcluded`, `validatedHead`, `headWarning`, and `timingBand` (the last is a " +
+      "lower-severity but still real disclosure — a foreign project's test-file count and gate-duration " +
+      "distribution) — mirroring `gate_queue`'s own " +
+      "cross-project redaction. This is an EXPLICIT, enumerated list, not \"everything sensitive\" by " +
+      "inference — treat any field not named here as VISIBLE on a foreign read, never assume redaction. " +
+      "What stays visible on a foreign read: `state`/`passed`/`cancelled`/`outcome`/`gateType`/`durationMs`/" +
+      "`admittedAt`/`settledAt`/`totalDurationMs`/`extended`/`proximity`/`gateCap`/`concurrentGates`/" +
+      "`concurrentGatesMax`/`emitCompareReduced`/`emitCompareIdenticalCount`/`retryPassed`/`transientRetried`/" +
+      "`transientRetryWarning` — this is a targeted redaction of content-bearing fields, not a refusal. " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
       "retriedFile?, retryPassed?, retryWarning?, transientRetried?, transientRetryWarning?}. `queued`/`running` " +
       "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
@@ -616,17 +626,19 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // fake with no `getSession`; reading it eagerly at registration time crashed those (companion-loop
         // .mjs's role:"worker" server build). Deferring to call time matches how every other db read in
         // this router already works, and costs nothing extra on the real path (a session row read).
-        // Card a16c580b, 2nd manager-review catch: construct the wrapper whenever this call site EVER asks
-        // for redaction (`getRedactOutputFileCallerProjectId` provided at all, i.e. the manager surface) —
+        // Card a16c580b, 2nd manager-review catch (widened by card 5ef78900 to cover outputTail/steps/
+        // gateDetail, not just outputFile): construct the wrapper whenever this call site EVER asks for
+        // redaction (`getRedactCrossProjectCallerProjectId` provided at all, i.e. the manager surface) —
         // even when the getter itself resolves to `undefined` (a failed `db.getSession` lookup). Passing
-        // `getRedactOutputFileCallerProjectId?.()` directly as a bare value here would collapse BOTH "never
-        // asked for redaction" (worker) and "asked, but couldn't resolve" (manager, lookup failed) onto the
-        // identical `undefined`, silently un-redacting the failure case — see `SessionService.gateStatus`'s
-        // own `redactOutputFile` doc for the full mechanism this wrapper exists to prevent.
-        const redactOutputFile = getRedactOutputFileCallerProjectId
-          ? { callerProjectId: getRedactOutputFileCallerProjectId() }
+        // `getRedactCrossProjectCallerProjectId?.()` directly as a bare value here would collapse BOTH
+        // "never asked for redaction" (worker) and "asked, but couldn't resolve" (manager, lookup failed)
+        // onto the identical `undefined`, silently un-redacting the failure case — see
+        // `SessionService.gateStatus`'s own `redactCrossProject` doc for the full mechanism this wrapper
+        // exists to prevent.
+        const redactCrossProject = getRedactCrossProjectCallerProjectId
+          ? { callerProjectId: getRedactCrossProjectCallerProjectId() }
           : undefined;
-        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), redactOutputFile);
+        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), redactCrossProject);
         // Card bed91595: `deploy` now writes a real `pending_gate_ops` tombstone (see
         // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
         // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
@@ -636,7 +648,14 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // able to fail this call): `computeGateTimingBand` itself already returns `undefined` on every
         // "nothing to report" case (no NDJSON, opId outside the read window, a non-Loom gate command), and
         // the outer catch here is belt-and-suspenders against an unexpected read/parse failure.
-        if (result.state === "settled" && result.outcome !== undefined) {
+        // Card 5ef78900: `timingBand` discloses a foreign project's test-file COUNT and gate-duration
+        // DISTRIBUTION — appended here, OUTSIDE `sessions.gateStatus`'s own return, so that method's own
+        // cross-project redaction can never see or gate it; `isCrossProjectGateOp` is the same fail-safe
+        // comparison `gateStatus` uses internally, exposed for exactly this case. A deliberate decision
+        // (not an oversight): lower severity than the content-bearing fields `gateStatus` itself redacts —
+        // aggregate numerics, not another tenant's paths/test names/error text — but still real cross-
+        // tenant telemetry a foreign caller has no need for.
+        if (result.state === "settled" && result.outcome !== undefined && !sessions.isCrossProjectGateOp(opId, redactCrossProject)) {
           try {
             const timingBand = await computeGateTimingBand(opId);
             if (timingBand) return ok({ ...result, timingBand });
@@ -4147,14 +4166,26 @@ export class OrchestrationMcpRouter {
         }
       },
     );
-    // Card a16c580b: this call site is UNSCOPED (`scopeSessionId`/`getScopeProjectId` both omitted) —
-    // a manager can resolve ANY project's settled op by opId (see `gate_status`'s own header doc for why
-    // that's a real, pre-existing gap this card did not create). `getRedactOutputFileCallerProjectId`
-    // redacts ONLY the new `outputFile` field for a foreign project's row — see
-    // `SessionService.gateStatus`'s own `redactOutputFile` doc for the full reasoning, including the
-    // wrapper-object mechanism that fails safe if `db.getSession(managerSessionId)` itself ever comes back
-    // undefined, and for why this is deliberately narrower than fixing the pre-existing `outputTail`
-    // cross-project exposure too (that one is its own card, 5ef78900).
+    // Card a16c580b, widened by card 5ef78900 (round 2, code review): this call site is UNSCOPED
+    // (`scopeSessionId`/`getScopeProjectId` both omitted) — a manager can resolve ANY project's settled op
+    // by opId (see `gate_status`'s own header doc). `getRedactCrossProjectCallerProjectId` redacts every
+    // field `GATE_VERDICT_FIELD_CLASSIFICATION` (sessions/service.ts) classifies `"sensitive"` — see that
+    // Record's own doc for the mechanism (an exhaustive, compiler-enforced classification, not a deny-list)
+    // — for a foreign project's row — widened from `outputFile` alone (card a16c580b) to also cover
+    // `outputTail`/`steps`/`gateDetail` (round 1 of this card) and then `reason`/`commitSubject`/
+    // `retriedFile`/`retryWarning`/`emitCompareTestFiles`/`emitCompareNotHermeticExcluded`/
+    // `validatedHead`/`headWarning` (round 2, after a code-review probe executed a real cross-project read
+    // and found those six still leaking) — see `SessionService.gateStatus`'s own `redactCrossProject` doc
+    // for the full reasoning, including the wrapper-object mechanism that fails safe if
+    // `db.getSession(managerSessionId)` itself ever comes back undefined. Every structural field
+    // (`passed`/`outcome`/`gateType`/timing/concurrency) stays visible — this is a targeted redaction of
+    // captured-output/diagnostic fields, not a refusal.
+    // DELIBERATE (owner-reviewed) scope decision, not an oversight: this SAME call site also serves
+    // `deploy`-kind opIds (a manager on another project polling a `deploy` op it was handed) — the
+    // redaction applies uniformly there too, since `SessionService.gateStatus`'s comparison is keyed on
+    // `t.record.projectId`, not `t.record.kind`. A `deploy` is daemon-global in EFFECT, but that only
+    // entitles another tenant to know it ran and whether it failed (`passed`/`outcome`/`gateType`/timing
+    // all still visible) — never to the deploying tenant's own build output or host paths.
     registerGateStatus(server, sessions, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
