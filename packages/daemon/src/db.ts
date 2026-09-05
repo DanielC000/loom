@@ -1690,6 +1690,11 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // (mirrors held_by/repo_key): every legacy row backfills to NULL, meaning "no named blocker" — the
   // byte-identical-to-today case (see Task.deferredUntilTaskId's own doc for the read-time auto-clear
   // this drives). No base-schema index or constraint references this column.
+  // Card 022659ac (multiple blockers): a single blocker is STILL stored as the bare id string it always
+  // was (see serializeDeferredUntilTaskId/parseDeferredUntilTaskId below) — a pre-existing single-blocker
+  // row (every real row on this board today) needs no migration and no format change. 2+ blockers are
+  // stored as a JSON array in this SAME TEXT column; the read side tells the two apart by whether the
+  // stored text starts with "[" (a real task id never does).
   deferred_until_task_id: "TEXT",
   // Card 93669813 — derived-but-persisted "this deferral's blocker can no longer be shown to
   // resolve" signal; see Task.deferredStuck's own doc. NOT NULL + constant DEFAULT 0 backfills every
@@ -6055,7 +6060,7 @@ export class Db {
     this.db.prepare(
       `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id,deferred_stuck,deferred_at,deferred_reason,deferred_items)
        VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId,@deferredStuck,@deferredAt,@deferredReason,@deferredItems)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null, deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []) }); // defaults when an (untyped) caller omits them
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: serializeDeferredUntilTaskId(t.deferredUntilTaskId), deferredStuck: t.deferredStuck ? 1 : 0, deferredAt: t.deferredAt ?? null, deferredReason: t.deferredReason ?? null, deferredItems: JSON.stringify(t.deferredItems ?? []) }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -6086,7 +6091,13 @@ export class Db {
     const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
     this.db.prepare(
       "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, version=@version WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null, deferredStuck: next.deferredStuck ? 1 : 0, deferredAt: next.deferredAt ?? null, deferredReason: next.deferredReason ?? null });
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
+      // Card 022659ac: `next.deferredUntilTaskId` may carry the CURRENT already-parsed (possibly
+      // array-shaped) value forward from `t = toTask(cur)` even when THIS patch never mentions the field
+      // at all — better-sqlite3 cannot bind a raw array, so this must re-serialize unconditionally, not
+      // only when `patch.deferredUntilTaskId !== undefined`. Without this, a field-only write (e.g. the
+      // deferredStuck-only write-through in mcp/tasks.ts) on any multi-blocker row would throw.
+      deferredUntilTaskId: serializeDeferredUntilTaskId(next.deferredUntilTaskId), deferredStuck: next.deferredStuck ? 1 : 0, deferredAt: next.deferredAt ?? null, deferredReason: next.deferredReason ?? null });
   }
   /**
    * Optimistic-concurrency-guarded wrapper around {@link updateTask} (card d0978321) — mirrors
@@ -8217,6 +8228,55 @@ function toEventForensicsRow(r: GateEventJoinRow): EventForensicsRow {
   };
 }
 
+/**
+ * Card 022659ac — write-side counterpart to {@link parseDeferredUntilTaskId}: collapse whatever shape a
+ * caller/patch carries (a bare id, an array of ids, null/undefined) into the single TEXT value the
+ * `deferred_until_task_id` column actually stores. A single id is passed through UNCHANGED (never
+ * JSON-wrapped) — this is what keeps a single-blocker row byte-identical to every row written before
+ * this card, and is exactly why the read side can tell a legacy/single-id row apart from a multi-id one
+ * by a leading "[" alone. An array collapses to its one element when it has exactly one (mirrors
+ * updateProjectTask's own set-time dedupe, but re-applied here defensively — this function has no way to
+ * know whether ITS caller already collapsed) and to `null` when empty. better-sqlite3 cannot bind a raw
+ * JS array as a parameter, so EVERY write through insertTask/updateTask must route through this — not
+ * only a write that explicitly touches the field, since `updateTask`'s `next` also carries the CURRENT
+ * (already-parsed, possibly array-shaped) value forward on a field-only patch that never mentions it.
+ */
+function serializeDeferredUntilTaskId(v: string | string[] | null | undefined): string | null {
+  if (v == null) return null;
+  if (!Array.isArray(v)) return v;
+  const ids = v.filter((x) => typeof x === "string" && x.length > 0);
+  if (ids.length === 0) return null;
+  return ids.length === 1 ? ids[0]! : JSON.stringify(ids);
+}
+
+/**
+ * Card 022659ac — read-side counterpart to {@link serializeDeferredUntilTaskId}. A `null` column reads
+ * null. Text starting with "[" is treated as the new multi-blocker JSON-array format and parsed; a
+ * 1-element array normalizes to a bare string (mirrors the write side's own collapse, so an array never
+ * survives a round-trip at length 1), a genuine 2+-element array of strings returns as-is, and anything
+ * else (malformed JSON, a non-string-array — should never happen since only serializeDeferredUntilTaskId
+ * ever writes this column, but a read path must never throw on a corrupted blob any more than
+ * deferred_items' own parse does below) degrades to treating the raw text as a single legacy id rather
+ * than throwing or silently dropping the value. Anything NOT starting with "[" is returned unchanged as
+ * a bare id string — this is the legacy/single-blocker path, and it is deliberately NOT run through
+ * JSON.parse at all: every real single-blocker row on this board (all 8 checked, card 022659ac) is a bare
+ * uuid, which is not valid JSON, so parsing it unconditionally would throw on exactly the rows this
+ * tolerance exists to protect.
+ */
+function parseDeferredUntilTaskId(raw: string | null | undefined): string | string[] | null {
+  if (raw == null) return null;
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw) as unknown;
+      if (Array.isArray(arr) && arr.every((x) => typeof x === "string")) {
+        if (arr.length === 0) return null;
+        return arr.length === 1 ? (arr[0] as string) : (arr as string[]);
+      }
+    } catch { /* fall through — treat as a legacy bare id, never throw */ }
+  }
+  return raw;
+}
+
 function toTask(r0: unknown): Task {
   const r = r0 as Row;
   return {
@@ -8225,7 +8285,7 @@ function toTask(r0: unknown): Task {
     priority: (r.priority as Task["priority"]) ?? "p2",
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
-    deferredUntilTaskId: (r.deferred_until_task_id as string | null) ?? null,
+    deferredUntilTaskId: parseDeferredUntilTaskId(r.deferred_until_task_id as string | null),
     deferredStuck: (r.deferred_stuck as number | null) === 1,
     deferredAt: (r.deferred_at as string | null) ?? null,
     deferredReason: (r.deferred_reason as string | null) ?? null,

@@ -2178,15 +2178,31 @@ export interface Task {
    * plain "deferred with no blocker" path (never auto-clears) unless the caller names a NEW blocker. NOTE:
    * an explicit `tasks_update(deferred:false)` — i.e. a MANUAL clear, not an auto-clear — does NOT touch
    * this field; only the auto-clear write-through does.
+   *
+   * Card 022659ac — MULTIPLE blockers: pass an array of task ids/prefixes (each resolved to a full id,
+   * same rules as the single-id form: must exist on this board, self-reference rejected) instead of one
+   * string. `deferred` auto-clears only once ALL named blockers have a non-null `merged` — see
+   * `resolveDeferredEffective`'s own doc for why (a card genuinely blocked on two things is not unblocked
+   * by one of them landing). `deferredStuck` (below) is the OR across all of them: ANY one dangling or
+   * closed-with-no-merge makes the whole deferral stuck, even while the others are still cleanly pending.
+   * Read/write ALWAYS collapses a single resolved id back to a bare string (never a 1-element array) —
+   * this keeps every existing single-blocker caller (and every persisted single-blocker row) byte-
+   * identical; the array shape is reserved for a genuine 2+-blocker deferral. Storage note (db.ts): a
+   * single id is still persisted as the bare TEXT value it always was (this is also why a PRE-existing
+   * legacy row — written before this card, always a bare id string — needs no migration and no format
+   * change); 2+ ids are persisted as a JSON array in the same TEXT column, distinguished on read by
+   * whether the stored text starts with `[` (a real id never does).
    */
-  deferredUntilTaskId?: string | null;
+  deferredUntilTaskId?: string | string[] | null;
   /**
    * Card 93669813 — a DERIVED (but persisted, self-healing) signal that `deferred`'s own release
    * condition ("until `deferredUntilTaskId` MERGES") can no longer be reached: the blocker is gone
    * (deleted, or cross-project — a dangling reference), OR the blocker has already reached the
    * project's `terminal`-role column while its `merged` is still null (the doctrine-sanctioned
    * 0-commit `done` outcome — no squash commit ever lands, so `merged` never resolves). Meaningless
-   * while `deferred` is false.
+   * while `deferred` is false. Card 022659ac (multiple blockers): this is the OR across every named
+   * blocker — ANY one of them being dangling/closed-with-no-merge sets this true, even while the
+   * others are still cleanly, reachably pending; it never waits for all of them to independently go bad.
    *
    * ⚠️ DOES NOT REDEFINE WHEN `deferred` CLEARS — `deferred` stays keyed on `merged` exactly as
    * before (see `deferredUntilTaskId`'s own doc); a 0-commit close is a legitimate outcome and this

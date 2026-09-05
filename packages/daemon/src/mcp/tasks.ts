@@ -143,30 +143,49 @@ export interface ResolvedDeferredState {
  * exactly this — a routine companion board read must never be able to un-stick a stuck card). So the
  * `includeMerged:false` branch PRESERVES whatever `stuck` was already persisted and reports
  * `stuckChanged:false` unconditionally — never writes, whichever way the stored value happens to read.
+ *
+ * Card 022659ac — MULTIPLE blockers: `deferredUntilTaskId` may be a bare id (legacy/single-blocker,
+ * unchanged behavior below) or an array of ids. `deferred` auto-clears only once EVERY named blocker's
+ * `merged` resolves non-null — a card genuinely blocked on two things is not unblocked by one of them
+ * landing. `stuck` is the OR across all of them: any ONE dangling/cross-project/closed-with-no-merge
+ * blocker sets it, even while the others are still cleanly, reachably pending. With exactly one id this
+ * degenerates to precisely the single-blocker logic that existed before this card — same lookups, same
+ * order, same returns — so a single-blocker deferral's behavior is unchanged.
  */
 export async function resolveDeferredEffective(
   db: Db, projectId: string, task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId" | "deferredStuck">, includeMerged: boolean,
 ): Promise<ResolvedDeferredState> {
   const raw = task.deferred === true;
   const rawStuck = task.deferredStuck === true;
+  const ids = Array.isArray(task.deferredUntilTaskId)
+    ? task.deferredUntilTaskId
+    : task.deferredUntilTaskId ? [task.deferredUntilTaskId] : [];
   // Genuine determinations, independent of merged state — deferred:false or a blocker-less deferral
   // (a manual, owner/upstream-gated sequencing marker) are NEVER stuck. Self-heals a stale `deferredStuck`
   // left over from a since-cleared or re-pointed deferral.
-  if (!raw || !task.deferredUntilTaskId) {
+  if (!raw || ids.length === 0) {
     return { deferred: raw, autoCleared: false, stuck: false, stuckChanged: rawStuck !== false };
   }
   // UNMEASURED, not a determination — see this function's own doc. Preserve, never write.
   if (!includeMerged) return { deferred: true, autoCleared: false, stuck: rawStuck, stuckChanged: false };
-  const blocker = db.getTask(task.deferredUntilTaskId);
-  if (!blocker || blocker.projectId !== projectId) {
-    return { deferred: true, autoCleared: false, stuck: true, stuckChanged: rawStuck !== true }; // dangling/cross-project blocker
-  }
-  const { merged } = await resolveMergedInfo(db, projectId, blocker, true);
-  if (merged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false };
   const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
   const terminalKey = columnKeyForRole(cols, "terminal");
-  const stuck = blocker.columnKey === terminalKey; // closed with no proven merge → stuck
-  return { deferred: true, autoCleared: false, stuck, stuckChanged: stuck !== rawStuck };
+  let allMerged = true;
+  let anyStuck = false;
+  for (const blockerId of ids) {
+    const blocker = db.getTask(blockerId);
+    if (!blocker || blocker.projectId !== projectId) {
+      allMerged = false;
+      anyStuck = true; // dangling/cross-project blocker
+      continue;
+    }
+    const { merged } = await resolveMergedInfo(db, projectId, blocker, true);
+    if (merged) continue; // this ONE blocker is satisfied — keep checking the rest
+    allMerged = false;
+    if (blocker.columnKey === terminalKey) anyStuck = true; // closed with no proven merge → stuck
+  }
+  if (allMerged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false };
+  return { deferred: true, autoCleared: false, stuck: anyStuck, stuckChanged: anyStuck !== rawStuck };
 }
 
 /**
@@ -1102,19 +1121,37 @@ export async function updateProjectTask(
     }
     patch = { ...patch, repoKey: check.value };
   }
-  // deferredUntilTaskId guard (card 793ac76d) — set-time validation, whole-patch-reject (same convention
-  // as the column/repoKey guards above): a non-null value must resolve to a REAL task on THIS board (full
-  // id or an unambiguous prefix — resolveProjectTaskId), and a self-reference is rejected (a card can't
-  // un-defer itself). Normalized to the FULL id before it's written: resolveDeferredEffective's read-time
-  // lookup does an exact-id db.getTask, so a stored prefix would silently fail to resolve later. `null`
-  // (explicit clear) or `undefined` (omit) need no validation — omit is byte-identical to today.
+  // deferredUntilTaskId guard (card 793ac76d, extended by 022659ac for multiple blockers) — set-time
+  // validation, whole-patch-reject (same convention as the column/repoKey guards above): each non-null
+  // id must resolve to a REAL task on THIS board (full id or an unambiguous prefix —
+  // resolveProjectTaskId), and a self-reference is rejected (a card can't un-defer itself). Each is
+  // normalized to its FULL id before it's written: resolveDeferredEffective's read-time lookup does an
+  // exact-id db.getTask, so a stored prefix would silently fail to resolve later. `null` (explicit clear)
+  // or `undefined` (omit) need no validation — omit is byte-identical to today.
+  //
+  // Accepts either a bare id/prefix OR an array of them (022659ac) — a caller may pass one id the same
+  // way it always could, or several for a card genuinely blocked on more than one thing (the shape
+  // `4458dd9e` needed and didn't have). Resolved ids are de-duped (preserving first-seen order) and, when
+  // exactly one DISTINCT id survives — whether the caller passed a single string, a 1-element array, or
+  // an array of duplicates of the same id — collapsed back to a bare string. This is deliberate, not
+  // cosmetic: it's what keeps a single-blocker write's stored/returned shape byte-identical to every
+  // single-blocker deferral written before this card, regardless of which input shape a caller uses.
   if (patch.deferredUntilTaskId !== undefined && patch.deferredUntilTaskId !== null) {
-    if (patch.deferredUntilTaskId === owned.id) {
-      return { error: "deferredUntilTaskId cannot reference the task itself" };
+    const rawIds = Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
+    if (rawIds.length === 0) {
+      return { error: "deferredUntilTaskId cannot be an empty array — omit the field, or pass null to clear an existing pairing" };
     }
-    const blocker = resolveProjectTaskId(db, projectId, patch.deferredUntilTaskId);
-    if ("error" in blocker) return { error: `deferredUntilTaskId ${blocker.error}` };
-    patch = { ...patch, deferredUntilTaskId: blocker.id };
+    const resolvedIds: string[] = [];
+    for (const raw of rawIds) {
+      if (raw === owned.id) {
+        return { error: "deferredUntilTaskId cannot reference the task itself" };
+      }
+      const blocker = resolveProjectTaskId(db, projectId, raw);
+      if ("error" in blocker) return { error: `deferredUntilTaskId ${blocker.error}` };
+      resolvedIds.push(blocker.id);
+    }
+    const dedupedIds = [...new Set(resolvedIds)];
+    patch = { ...patch, deferredUntilTaskId: dedupedIds.length === 1 ? dedupedIds[0] : dedupedIds };
   }
   // Manual-deferral self-explaining guard (card c90e9525, delta-scoped by card 57f346e6) —
   // whole-patch-reject, same convention as the guards above: `deferred` is a stored verdict with no
