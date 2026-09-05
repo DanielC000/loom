@@ -543,11 +543,28 @@ type MergeBatchResult = {
    *  discipline `ConfirmMergeResult.retriedFile` already documents for the solo path. */
   retriedFile?: string;
   retryPassed?: boolean;
-  /** Card 67030bb9: present ONLY when `retriedFile` is set and the BATCH ultimately landed (`ok:true`) —
-   *  the SAME "⚠ WEAKER PASS" wording `formatWeakerPassWarning` renders for the solo path, but carrying
-   *  THIS batch's own `landed.length` so a manager reading the async settle nudge can see how many
-   *  branches landed on the strength of one isolated retry, not just which file(s) were retried. A batch
-   *  retry is a STRONGER claim than a solo one for exactly this reason. */
+  /** Card 67030bb9 (CORRECTED, card 4ad6ccfd — the previous version of this doc, "present ONLY when
+   *  `retriedFile` is set and the BATCH ultimately landed (`ok:true`)", was WRONG: this field is present on
+   *  `ok:false` too). Gated on `retriedFile` non-null AND `retryPassed` a strict boolean — a null/undefined
+   *  `retryPassed` (the retry-cancelled-while-queued exception) renders neither wording, since it never
+   *  reached a verdict. Built by one of the SAME two shared formatters `gate_status(opId)` renders this
+   *  exact op from (`formatWeakerPassWarning`/`formatRetryAlsoFailedWarning`, orchestration/gate-runner.ts),
+   *  never a second independently-worded copy. Three real cases:
+   *  - `ok:true` (the retry came back green and the batch landed): the "⚠ WEAKER PASS" wording, with a
+   *    batch clause carrying THIS batch's own `landed.length` — how many branches landed on the strength of
+   *    one isolated retry, not just which file(s) were retried. A batch retry is a STRONGER claim than a
+   *    solo one for exactly this reason.
+   *  - `ok:false` with `retryPassed:true` (the retry itself passed, but a fast-forward/HEAD-read failure
+   *    AFTER the gate — `batch-merge.ts`'s `:806`/`:813` returns — means nothing actually landed): still the
+   *    "⚠ WEAKER PASS" wording (the retry fact is real and worth surfacing), but with NO batch clause — the
+   *    caller passes `batchBranchCount:undefined` here specifically so this never asserts a landing that
+   *    didn't happen (the "ALL N land on the strength of this ONE retry" clause would be false on this
+   *    return, whose own `landed: []` says as much).
+   *  - `ok:false` with `retryPassed:false` (a genuine gate rejection, `batch-merge.ts`'s `:797` return, the
+   *    ONLY reachable case here): the "⚠ RETRY ALSO FAILED" wording, with a batch clause carrying the count
+   *    of branches ASSEMBLED into the batch worktree and gated (never "landed" — nothing lands on a
+   *    rejection; this is the same "assembled", not "landed" wording `BatchGateResult.retriedFile`'s own doc
+   *    (git/batch-merge.ts) already gets right). */
   retryWarning?: string;
   /** Card d422e279: mirrors `BatchGateResult.reducedGateWarning`'s own doc (git/batch-merge.ts) — present
    *  only when this batch's gate actually substituted the reduced command, so a manager reading either the
@@ -17641,6 +17658,35 @@ export class SessionService {
               // Card 67030bb9: a retry that ALSO failed still recorded that one was attempted — mirrors
               // confirmWorkerMerge's own identical rejection-path observability.
               ...(result.gateDetail?.retriedFile ? { retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed } : {}),
+              // Card 4ad6ccfd: `gate_status(opId)` already renders a `retryWarning` for this exact op — this
+              // sync return, read FIRST by the manager, used to carry the two raw fields above and NO prose
+              // at all. Gated exactly like `gate_status`'s own dispatch (service.ts, the `gateStatus` reader):
+              // `retriedFile` non-null AND `retryPassed` a strict boolean — a `null`/`undefined` retryPassed
+              // is the retry-cancelled-while-queued exception, where neither formatter's wording is honest,
+              // so it stays unrendered here too. Dispatches on `retryPassed` rather than assuming "failed" —
+              // `!result.ok` covers a genuine gate rejection (`batch-merge.ts`'s `gatePassed:false` return,
+              // where `retryPassed` can only be `false`/`undefined` by construction: a `true` retryPassed
+              // flips the gate's own `passed` before `runBatchedMerge` ever returns that branch) AND TWO
+              // OTHER `ok:false` returns on an already-PASSED, possibly retry-assisted gate (`gatePassed:true`
+              // — a post-gate HEAD-read failure, or a fast-forward failure/forfeit) — so a passing retry
+              // followed by one of those later failures still renders `formatWeakerPassWarning`, never the
+              // "ALSO FAILED" wording.
+              // CORRECTED (Code Review fold-in, card 4ad6ccfd): an earlier version of this passed
+              // `result.landed.length` to BOTH branches. That count is right for the FAIL branch (`retryPassed:
+              // false`, only reachable via the genuine-rejection return — see above — where the outer
+              // `landed: []` on THIS return and "NONE of them landed" are both true together). It is WRONG for
+              // the PASS branch on the other two `ok:false` returns: `formatWeakerPassWarning`'s batch clause
+              // asserts "ALL N land on the strength of this ONE retry" — false when the gate (and retry)
+              // passed but the fast-forward/HEAD-read afterward did NOT, which is exactly what `ok:false` means
+              // on those two returns (the outer `landed: []` here is the same reality check). Passing `undefined`
+              // there omits the batch clause entirely rather than assert a landing that didn't happen — the
+              // solo wording alone ("passed only after retrying") stays true regardless of what fast-forward
+              // did afterward.
+              ...(result.gateDetail?.retriedFile && typeof result.gateDetail?.retryPassed === "boolean" ? {
+                retryWarning: result.gateDetail.retryPassed
+                  ? formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, undefined)
+                  : formatRetryAlsoFailedWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, result.landed.length),
+              } : {}),
             };
           }
 

@@ -55,7 +55,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { formatRetryAlsoFailedWarning } = await import("../dist/orchestration/gate-runner.js");
+const { formatRetryAlsoFailedWarning, formatWeakerPassWarning } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -208,6 +208,15 @@ try {
     if (outcome.value) {
       check("(iv) ok:false — the whole batch falls back on a retry that ALSO failed", outcome.value.ok === false);
       check("(iv) retriedFile/retryPassed:false surfaced on the returned MergeBatchResult — a retry that also failed is still recorded, never silently dropped", outcome.value.retriedFile === "flaky-batch-fail" && outcome.value.retryPassed === false);
+      // Card 4ad6ccfd THE FIX: before this card, `merge_batch`'s own SYNC return carried ONLY the two raw
+      // fields above and NO `retryWarning` at all — a manager reading this result first (before any
+      // `gate_status(opId)` call) got nothing, while the same op read post-hoc got the full prose. Proves
+      // the sync surface now matches `gate_status`'s own rendering of the SAME op, byte for byte, using the
+      // SHARED formatter (never a second independently-worded copy).
+      check("(iv) THE FIX: retryWarning is now present on the RED batch's SYNC MergeBatchResult, not just gate_status", typeof outcome.value.retryWarning === "string");
+      check("(iv) retryWarning matches the shared formatter's output exactly, with the batch's REAL assembled/gated count (2, not 0 and not chosen/overflow/stranded)", outcome.value.retryWarning === formatRetryAlsoFailedWarning("flaky-batch-fail", "", 2));
+      check("(iv) retryWarning never says \"passed\" on a rejected batch", typeof outcome.value.retryWarning === "string" && !outcome.value.retryWarning.includes("passed"));
+      check("(iv) retryWarning states the correct branch count, never a confidently-worded zero", typeof outcome.value.retryWarning === "string" && outcome.value.retryWarning.includes("2 branch(es)") && !outcome.value.retryWarning.includes("0 branch(es)"));
     } else {
       console.log("(iv) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the 2 return-value assertions above.");
     }
@@ -365,6 +374,59 @@ try {
     check("(vi) a build_gate row exists for the batch op", !!row);
     check("(vi) retriedFile is null — the retry mechanism never engaged", row?.retriedFile === null);
     check("(vi) finding [3] THE FIX, PROVEN: retryDeclineReason records WHY (\"unparseable-name\") — pre-fix this was never persisted anywhere, on either call site", row?.retryDeclineReason === "unparseable-name");
+  }
+
+  // ── (vii) PASS-BUT-FORFEITED (card 4ad6ccfd fold-in) — gate+retry BOTH pass, but canonical main ────────
+  //     advanced while the gate ran, so the fast-forward refuses (forfeit) and NOTHING lands. This is one
+  //     of `batch-merge.ts`'s other two `ok:false` returns (`gatePassed:true`, distinct from (iv)'s genuine
+  //     gate rejection) — the manager's own blocking finding on this card: an earlier version of the fix
+  //     called `formatWeakerPassWarning(..., result.landed.length)` here, which renders "ALL N land on the
+  //     strength of this ONE retry" — false, since the outer `landed:[]` on this exact return proves
+  //     nothing landed. `batchBranchCount` must be `undefined` on THIS branch so no batch clause renders.
+  {
+    const P = setupBatchProject("forfeit", "pnpm gate");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async (gate, worktreePath) => {
+      calls++;
+      if (calls === 1) {
+        plantTestFile(worktreePath, "flaky-batch-forfeit");
+        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-batch-forfeit", failingTestCount: 1, failTierTest: "FAIL  flaky-batch-forfeit", failTierTestCount: 1, failTierAll: ["FAIL  flaky-batch-forfeit"] };
+      }
+      if (calls === 2) {
+        // THE RETRY passes — but simulate canonical main advancing WHILE this gate ran (a real concurrent
+        // landing on main, exactly what `fastForwardCanonicalMain`'s own forfeit check, batch-merge.ts,
+        // exists to catch): commit directly onto the canonical repo's OWN working tree, bypassing the
+        // batch entirely, landed strictly between `baseMainSha`'s capture (before this gate ever ran) and
+        // the fast-forward attempt (right after this retry settles).
+        fs.writeFileSync(path.join(P.repo, "concurrent-main-advance.txt"), "someone else landed\n");
+        commitAll(P.repo, "concurrent main advance while the batch gate ran", GIT_ID);
+        return { passed: true };
+      }
+      // calls 3+: the forfeited batch's own per-candidate fallback (confirmWorkerMergeTracked re-gating
+      // each worker solo) — just pass cleanly; the fallback path itself is already covered by (iv)/(vi).
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, P);
+    worktrees.push(...wts);
+
+    const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
+    if (outcome.value) {
+      check("(vii) precondition: the retry itself passed", outcome.value.retriedFile === "flaky-batch-forfeit" && outcome.value.retryPassed === true);
+      check("(vii) precondition: ok:false anyway — gate+retry passed but fast-forward refused (main advanced mid-gate)", outcome.value.ok === false);
+      check("(vii) precondition: the reason names the forfeit (canonical main advanced)", typeof outcome.value.reason === "string" && outcome.value.reason.includes("canonical main advanced"));
+      check("(vii) precondition: nothing landed (outer landed:[] on this return)", Array.isArray(outcome.value.landed) && outcome.value.landed.length === 0);
+      // THE FOLD-IN FIX itself:
+      check("(vii) THE FIX: retryWarning is still present (the retry fact itself is real and worth surfacing)", typeof outcome.value.retryWarning === "string");
+      check("(vii) THE FIX: retryWarning does NOT claim any branches landed — nothing did", typeof outcome.value.retryWarning === "string" && !outcome.value.retryWarning.includes("land on the strength"));
+      check("(vii) THE FIX: retryWarning omits the batch clause entirely (no \"BATCH of\" wording) rather than assert a false count", typeof outcome.value.retryWarning === "string" && !outcome.value.retryWarning.includes("BATCH of"));
+      check("(vii) retryWarning still states the solo weaker-pass fact (retry fired, passed only after retrying)", typeof outcome.value.retryWarning === "string" && outcome.value.retryWarning.includes("passed only after retrying"));
+      check("(vii) retryWarning matches the shared formatter's output exactly, called with batchBranchCount:undefined", outcome.value.retryWarning === formatWeakerPassWarning("flaky-batch-forfeit", "", undefined));
+    } else {
+      console.log("(vii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the return-value assertions above.");
+    }
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

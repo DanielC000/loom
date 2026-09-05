@@ -546,9 +546,13 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`undefined` means only \"this row predates card 6dcb9cd3\" or \"this op never reached a pass/fail " +
       "verdict at all (cancelled/errored)\", never \"no retry\". `retryPassed` mirrors `retriedFile`'s own " +
       "null-vs-undefined discipline: `null` whenever `retriedFile` is `null`; when `retriedFile` names a " +
-      "real file, USUALLY `true`/`false`, but STAYS `null` for the one exception the retry itself was " +
-      "cancelled while still queued before it ever ran — never assume a non-null `retriedFile` implies " +
-      "`retryPassed:true`. `retryWarning` (card 9bdc8ea5, correcting an earlier claim here that it was " +
+      "real file, `true`/`false` — never assume a non-null `retriedFile` implies `retryPassed:true`. " +
+      "CORRECTED (card 4ad6ccfd): this used to also claim `retryPassed` \"STAYS `null`\" for the retry-" +
+      "cancelled-while-queued exception — false for THIS tool's own return: such an op settles " +
+      "`outcome:\"cancelled\"`, and the whole pass/fail/skipped-gated block described above (including " +
+      "`retriedFile`) is simply ABSENT for that outcome, never `null`. The real `retriedFile`-non-null-" +
+      "plus-`retryPassed:null` shape exists only on a DIFFERENT record — see the `retryWarning` note just " +
+      "below for that same audit-event-vs-payload distinction. `retryWarning` (card 9bdc8ea5, correcting an earlier claim here that it was " +
       "present whenever `retriedFile` was non-null, regardless of outcome — that produced a REJECTED op " +
       "whose warning text asserted \"passed only after retrying\") is present ONLY when `retryPassed` is " +
       "STRICTLY `true` or `false` (never for the `null`/never-verdicted exception just above, where neither " +
