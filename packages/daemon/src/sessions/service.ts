@@ -60,7 +60,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -5112,23 +5112,47 @@ export class SessionService {
           // (`payload.retriedFile` is written unconditionally, as a real name or `null`, by
           // deriveMergeGateVerdict) and must pass through, exactly like the `undefined`-means-"row predates
           // this card" case must stay omitted rather than fabricated as `null`. `retryWarning` is the one
-          // exception to this whole block's "spread payload.X verbatim" shape — it's DERIVED (via the same
-          // formatter the live nudge uses), not stored, and gated on a TRUTHY retriedFile specifically (a
-          // `null`/`undefined` retriedFile has no warning to render). Card 5ef78900 round 2: it's computed
-          // from the RAW `payload.retriedFile`/`payload.outputTail` regardless of redaction — this was the
-          // bypass (see `GATE_VERDICT_FIELD_CLASSIFICATION`'s doc) — but that's safe here precisely BECAUSE
-          // the post-hoc filter below keeps a key only when it's classified `"structural"`, so `retryWarning`
-          // (classified `"sensitive"`) is dropped on a cross-project read same as every other sensitive
-          // field in this object; nothing downstream needs the computation itself to be redaction-aware.
+          // exception to this whole block's "spread payload.X verbatim" shape — it's DERIVED (via one of
+          // TWO formatters the live nudge also renders from, card 9bdc8ea5 — see the dispatch just below),
+          // not stored, and gated on `retriedFile` non-null AND `retryPassed` a strict boolean (a
+          // `null`/`undefined` retriedFile has no warning to render; see the dispatch's own doc for why
+          // `retryPassed` must ALSO be checked, not `retriedFile` alone). Card 5ef78900 round 2: it's
+          // computed from the RAW `payload.retriedFile`/`payload.outputTail` regardless of redaction — this
+          // was the bypass (see `GATE_VERDICT_FIELD_CLASSIFICATION`'s doc) — but that's safe here precisely
+          // BECAUSE the post-hoc filter below keeps a key only when it's classified `"structural"`, so
+          // `retryWarning` (classified `"sensitive"`) is dropped on a cross-project read same as every
+          // other sensitive field in this object; nothing downstream needs the computation itself to be
+          // redaction-aware.
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
-          // is passed through so the formatter can tell a genuine timeout kill apart from an assertion
-          // failure — see `formatWeakerPassWarning`'s own doc.
+          // is passed through so either formatter below can tell a genuine timeout kill apart from an
+          // assertion failure — see `formatWeakerPassWarning`'s/`formatRetryAlsoFailedWarning`'s own doc.
           // Code Review, card 67030bb9 finding [5]: `payload?.batchBranchCount` is `undefined` on a plain
-          // solo merge (formatWeakerPassWarning renders its solo wording), and a real landed count on a
-          // batch op — see `PendingGateOpVerdict.batchBranchCount`'s own doc for the gap this closes.
-          ...(payload?.retriedFile ? { retryWarning: formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) } : {}),
+          // solo merge (both formatters render their solo wording), and a real landed count on a batch op
+          // — see `PendingGateOpVerdict.batchBranchCount`'s own doc for the gap this closes.
+          // Card 9bdc8ea5: presence used to be gated on `payload?.retriedFile` alone, and rendered via ONE
+          // formatter that took no pass/fail argument at all — so a REJECTED op (`outcome:"fail"`,
+          // `retryPassed:false`) still carried a `retryWarning` whose text asserted "passed only after
+          // retrying". Fixed by dispatching to ONE OF TWO formatters based on `payload.retryPassed`:
+          // `formatWeakerPassWarning` on `true` (unchanged from before this card), `formatRetryAlsoFailedWarning`
+          // on `false` (its own distinct wording, never containing "passed" — see that function's own doc
+          // for why this is a separate function rather than a boolean argument on the first one). Presence
+          // itself now requires `retryPassed` to be a STRICT boolean, not merely `retriedFile` truthy —
+          // `retryPassed` can be `null`/`undefined` alongside a non-null `retriedFile` (a retry that was
+          // identified but never reached a verdict — see `ConfirmMergeResult.retriedFile`'s own doc for the
+          // mechanism), and neither formatter's wording is honest for that inconclusive case, so this
+          // suppresses the warning entirely rather than guessing. That mixed shape (`retriedFile` set,
+          // `retryPassed` absent) is NOT currently reachable on THIS payload — it occurs only on the
+          // separate `build_gate` AUDIT EVENT (this file's own cancelled-while-queued `evt("build_gate",
+          // {..., retriedFile})` call, which deliberately omits `retryPassed` — a `gate_history` row, read
+          // through a different tool entirely, never through `gate_status`); the strict-boolean check here
+          // is defensive, not a live gap being closed. `retriedFile` alone is NEVER read as "did it pass" again.
+          ...(payload?.retriedFile && typeof payload?.retryPassed === "boolean"
+            ? { retryWarning: payload.retryPassed
+              ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount)
+              : formatRetryAlsoFailedWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) }
+            : {}),
           ...(payload?.batchBranchCount !== undefined ? { batchBranchCount: payload.batchBranchCount } : {}),
           // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
           // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,

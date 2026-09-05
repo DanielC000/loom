@@ -548,12 +548,25 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "null-vs-undefined discipline: `null` whenever `retriedFile` is `null`; when `retriedFile` names a " +
       "real file, USUALLY `true`/`false`, but STAYS `null` for the one exception the retry itself was " +
       "cancelled while still queued before it ever ran — never assume a non-null `retriedFile` implies " +
-      "`retryPassed:true`. `retryWarning` is present ONLY when `retriedFile` is non-null: the SAME " +
+      "`retryPassed:true`. `retryWarning` (card 9bdc8ea5, correcting an earlier claim here that it was " +
+      "present whenever `retriedFile` was non-null, regardless of outcome — that produced a REJECTED op " +
+      "whose warning text asserted \"passed only after retrying\") is present ONLY when `retryPassed` is " +
+      "STRICTLY `true` or `false` (never for the `null`/never-verdicted exception just above, where neither " +
+      "wording would be honest — that mixed shape is not currently reachable on THIS field anyway; it is " +
+      "the `gate_history` `build_gate` audit event's own cancelled-while-queued row that carries it, a " +
+      "different tool from this one). On `retryPassed:true` it's " +
       "\"⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '<file>' in isolation " +
-      "once...\" wording the `[loom:merge-done]` nudge already renders live for this exact op — one shared " +
-      "formatter feeds both, so a caller who only ever reads `gate_status` (never the nudge) gets the " +
-      "identical warning, not a paraphrase. An order-dependent/cross-test-pollution bug can pass alone in " +
-      "isolation and fail in the full suite — exactly the class this single-file retry can otherwise mask — " +
+      "once...\" — the SAME wording the `[loom:merge-done]` nudge already renders live for this exact op, " +
+      "one shared formatter feeding both, so a caller who only ever reads `gate_status` (never the nudge) " +
+      "gets the identical warning, not a paraphrase. On `retryPassed:false` it's a DIFFERENT formatter's " +
+      "DISTINCT \"⚠ RETRY ALSO FAILED...\" wording (no live-nudge analogue exists for this case — a rejected " +
+      "op never reaches the nudge's own `merged`/`ok`-gated render at all) that never contains the word " +
+      "\"passed\" — for a SINGLE retried file, the retry reproducing the failure in isolation rules out an " +
+      "order-dependent/cross-test-pollution bug; for MULTIPLE retried files it only rules out pollution " +
+      "from the rest of the suite, never pollution among the retried files themselves (they ran " +
+      "concurrently in one pool by default), and the wording is scoped accordingly rather than asserting " +
+      "the stronger single-file claim regardless of N. An order-dependent/cross-test-pollution bug can pass " +
+      "alone in isolation and fail in the full suite — exactly the class this single-file retry can otherwise mask — " +
       "so treat a non-null `retriedFile` pass differently from an ordinary clean one before reporting it up " +
       "as a plain green. Populated for \"merge\" rows only (a \"gate\"/worker-self-check row has no " +
       "this-retry mechanism at all) and, structurally, ONLY EVER non-null on a project whose gate " +

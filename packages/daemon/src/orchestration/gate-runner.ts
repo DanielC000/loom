@@ -1483,6 +1483,18 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
  * retried file's own change), so a manager reading this must be able to see the branch count a retry
  * carried, not just the file(s). Omitted entirely for the solo path, byte-identical to before this card
  * for the N=1/no-batch case — every existing wording is preserved verbatim in that case.
+ *
+ * Card 9bdc8ea5: this function's signature and body are UNCHANGED by that card — see its sibling
+ * {@link formatRetryAlsoFailedWarning} for the FAILED-retry case instead of a `passed` argument here. A
+ * `passed: boolean = true` default was tried and reverted (Code Review): it recreates the exact defect the
+ * card fixes for any FUTURE caller that forgets the 4th arg (silently renders THIS "⚠ WEAKER PASS …
+ * passed only after retrying" text for a genuine rejection, and `tsc` cannot catch a missing defaulted
+ * arg). Making `passed` REQUIRED instead was also rejected: `gate-status.mjs` alone has eight existing call
+ * sites passing 1-2 args (a `.mjs` test file — zero `tsc` coverage), every one of which would start
+ * passing `passed: undefined` at runtime and silently flip into a fail-branch, breaking all eight
+ * assertions. A separate, distinctly-named function touches ZERO existing callers in `src` or `test` and
+ * removes the forgettable-boolean footgun outright — there is no default left to forget, and a caller
+ * choosing the wrong function name is a loud, visible choice, not a silent bit flip.
  */
 export function formatWeakerPassWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1498,6 +1510,51 @@ export function formatWeakerPassWarning(retriedFile: string, outputTail?: string
   }
   const retryClause = single ? `retrying '${names[0]}' in isolation once` : `retrying ${names.length} files together in ONE isolated retry ('${names.join("', '")}')`;
   return `⚠ WEAKER PASS: the first gate attempt failed; passed only after ${retryClause}. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.${batchClause}`;
+}
+
+/**
+ * Card 9bdc8ea5: the SIBLING of {@link formatWeakerPassWarning} for a retry that ALSO failed — see that
+ * function's own doc for why this is a separate, distinctly-named function rather than a `passed` argument
+ * on it (Code Review + manager override of the review's own first-offered remedy). Three defects code
+ * review found in an earlier version that folded this case into `formatWeakerPassWarning` via a boolean —
+ * all three are just this ONE return statement, which is why they're fixed together here rather than as
+ * three separate patches:
+ *
+ *  [1] NO batch "ALL N land" clause: on a rejected batch retry NOTHING lands (`ok:false`, every candidate
+ *      falls back to individual solo gating). `deriveBatchGateVerdict` (sessions/service.ts) stamps
+ *      `batchBranchCount` on BOTH a pass and a fail — it's `landedCount`, branches assembled into the
+ *      batch WORKTREE during assembly, not branches landed on main — so blindly reusing the pass-side
+ *      batch clause here would relocate this very card's own defect class (prose contradicting
+ *      `passed:false` on the same record) into this new branch. States the true fact instead.
+ *  [2] "NOT an order-dependent/cross-test-pollution bug" is UNSOUND for N>1, scoped by `names.length`
+ *      below: `identifyRetriableTestFiles` issues ONE `--only=a,b,c` command, and `test-daemon.mjs`'s
+ *      sequential isolation phase (`ISOLATED_REAL_SPAWN_PHASE_ENABLED`) is opt-in and default OFF
+ *      (`LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1`) — so by default all N retried files run SIMULTANEOUSLY in
+ *      one pool. A failure there rules out pollution from the REST of the suite, never pollution AMONG the
+ *      N retried files themselves. Not hypothetical: both real specimens card 67030bb9 measured were N>1
+ *      (2 and 3 files) — the single-file case (nothing else ran alongside it) keeps the unqualified claim.
+ *  [4] The `allTimeoutKills` caveat (attempt 1's OWN classification, {@link isTimeoutKillEntry}) applies
+ *      here exactly as it does on the pass side — a `"genuine"`-classified attempt 1 can still carry a
+ *      per-file `(exit timeout` entry (card 9966c52d, two measured specimens); a still-failing retry under
+ *      the same host-load conditions may be host contention, not a reproducing assertion bug, and this
+ *      wording said so unconditionally without checking `outputTail` at all.
+ */
+export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
+  const names = retriedFile.split(",");
+  const single = names.length === 1;
+  const allTimeoutKills = names.every((n) => isTimeoutKillEntry(n, outputTail));
+  const batchClause = batchBranchCount !== undefined
+    ? ` This retry was the batch's last chance for ${batchBranchCount} branch(es) — NONE of them landed; all ${batchBranchCount} fall back to individual gating.`
+    : "";
+  if (allTimeoutKills) {
+    const killedClause = single ? `killed '${names[0]}' again` : `killed ${names.length} files (${names.join(", ")}) again`;
+    return `⚠ RETRY ALSO FAILED: both the first gate attempt and the retry ${killedClause} on a timeout, not an assertion failure. This may be host contention under load rather than a reproducing bug — the cause is not established by this signal alone; read the retained gate output before attributing it.${batchClause}`;
+  }
+  const retryClause = single ? `retrying '${names[0]}' in isolation once` : `retrying ${names.length} files together in ONE isolated retry ('${names.join("', '")}')`;
+  const poolClause = single
+    ? "it is NOT an order-dependent/cross-test-pollution bug"
+    : `it rules out pollution from the REST of the suite, but NOT pollution AMONG the ${names.length} retried files themselves — by default they ran concurrently in one pool, not isolated from each other (test-daemon.mjs's sequential isolation phase is opt-in, off unless LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1)`;
+  return `⚠ RETRY ALSO FAILED: the first gate attempt failed, and ${retryClause} failed too. This means the failure reproduces in isolation — ${poolClause}.${batchClause}`;
 }
 
 /**

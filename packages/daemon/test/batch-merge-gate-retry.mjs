@@ -55,6 +55,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { formatRetryAlsoFailedWarning } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -217,6 +218,40 @@ try {
     check("(iv) the row failed", row?.passed === false);
     check("(iv) retriedFile/retryPassed:false recorded on the rejected row", row?.retriedFile === "flaky-batch-fail" && row?.retryPassed === false);
     check("(iv) attempt 1's OWN diagnosis (failingTest) survives the rejection — never overwritten by the retry's own (differently-worded) failure", typeof row?.failingTest === "string" && row.failingTest.includes("flaky-batch-fail"));
+
+    // THE FIX (card 9bdc8ea5): before this card, gate_status(opId)'s retryWarning was gated on `retriedFile`
+    // alone — never on `retryPassed` — so a REJECTED op still carried a warning whose prose asserted "passed
+    // only after retrying", contradicting `outcome:"fail"`/`retryPassed:false` on the SAME record. Read the
+    // settled op back through the exact same production method (`sessions.gateStatus`, service.ts) the daemon's
+    // own `gate_status(opId)` MCP tool calls, on this real rejected-after-retry op.
+    const stFail = row?.opId ? sessions.gateStatus(row.opId) : undefined;
+    // Code Review round 2, finding [8]: assert the FULL expected string (mirroring gate-status.mjs's own
+    // back-compat precedent at line 184), not just substring probes on its head — a substring-only check on
+    // "RETRY ALSO FAILED"/absence-of-"passed" is exactly what let findings [1]/[2]/[4] (a wrongly-appended
+    // "ALL 2 land" batch clause, an unscoped-for-N>1 pollution claim, a missing timeout-kill caveat) ship
+    // green through a test written for this very op — none of those defects touch the STRING'S HEAD.
+    const expectedFailWarning = formatRetryAlsoFailedWarning("flaky-batch-fail", undefined, 2);
+    check("(iv) THE FIX: gate_status's retryWarning on a FAILED batch retry matches the real formatter's output EXACTLY, byte for byte", stFail?.retryWarning === expectedFailWarning);
+    check("(iv) THE FIX: gate_status's retryWarning on a FAILED retry never contains the word \"passed\" — a rejected op must never assert it passed", typeof stFail?.retryWarning === "string" && !stFail.retryWarning.includes("passed"));
+    check("(iv) gate_status's retryWarning instead states plainly, and distinctly, that the retry ALSO failed", typeof stFail?.retryWarning === "string" && stFail.retryWarning.includes("RETRY ALSO FAILED"));
+    // Finding [1]'s own NEGATIVE CONTROL: on a red batch NOTHING lands (asserted above: ok:false, full
+    // per-candidate fallback) — the warning must never claim otherwise. Positively asserts the corrected
+    // wording ("NONE of them landed") rather than merely the absence of the wrong one, so a THIRD, equally
+    // wrong rewording couldn't silently satisfy a bare `!includes("land on the strength")` check.
+    check("(iv) finding [1]: the warning never claims branches LANDED on a rejected batch", !stFail.retryWarning.includes("land on the strength"));
+    check("(iv) finding [1]: the warning instead correctly states none of the batch's branches landed", stFail.retryWarning.includes("NONE of them landed"));
+    // Finding [2]'s own NEGATIVE CONTROL: this batch retried exactly ONE file (`flaky-batch-fail`), so the
+    // single-file (N=1) unqualified claim is the CORRECT wording here — the N>1 qualifier is exercised
+    // directly against the real formatter below, since this fixture only ever names one retriable file.
+    check("(iv) finding [2]: N=1 here, so the SINGLE-file unqualified claim is correct for this specimen", stFail.retryWarning.includes("it is NOT an order-dependent/cross-test-pollution bug"));
+    const n2 = formatRetryAlsoFailedWarning("a,b", undefined, undefined);
+    check("(iv) finding [2], N>1 POSITIVE CONTROL: for TWO retried files the claim is scoped — rules out the rest of the suite, NOT pollution among the retried files themselves", n2.includes("rules out pollution from the REST of the suite") && n2.includes("NOT pollution AMONG the 2 retried files"));
+    check("(iv) finding [2], N>1: the unqualified single-file claim is NOT reused for N>1", !n2.includes("it is NOT an order-dependent/cross-test-pollution bug"));
+    // Finding [4] POSITIVE CONTROL: a timeout-kill-shaped outputTail on the retried file must still produce
+    // the timeout caveat on the FAIL side, exactly like the pass side already does.
+    const timeoutTail = "- flaky-timeout (exit timeout (SIGTERM after 900000ms))\n";
+    const timeoutWarning = formatRetryAlsoFailedWarning("flaky-timeout", timeoutTail, undefined);
+    check("(iv) finding [4] POSITIVE CONTROL: a timeout-kill-shaped outputTail produces the host-contention caveat on the FAIL side too", timeoutWarning.includes("host contention") && !timeoutWarning.includes("order-dependent/cross-test-pollution"));
   }
 
   // ── (v) THE RETRY'S OWN ADMISSION CANCELLED WHILE QUEUED ───────────────────────────────────────────────
