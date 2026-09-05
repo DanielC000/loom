@@ -368,4 +368,95 @@ test.describe("Gates page (card a1c86452)", () => {
     // No percentage is fabricated for it — a null bound yields no measured fraction at all.
     await expect(clock("gate timeout is unknown")).not.toHaveAttribute("title", /%/);
   });
+
+  // Card 4cacc6f9 — batch-FALLBACK attribution. When a `merge_batch` can't land its candidates together
+  // it re-tries each one as an ordinary per-branch merge, and each retry registers with a REAL branch, a
+  // REAL task and that worker's own label — indistinguishable from an unrelated solo merge. So a human
+  // watching a batch fall back saw K unexplained merge rows appear at once. Card 19256231 closed that for
+  // a MANAGER (`gate_queue.fallbackOfBatchOpId`) and stopped at its own DoD; this is the same field
+  // projected onto the human-facing page.
+  //
+  // THE ACCEPTANCE EVIDENCE IS THE CONTRAST, not that any tag drew: the SAME payload carries a non-fallback
+  // solo merge, and the attribution must be absent on it. And TWO different batches are on screen at once,
+  // so the grouping has to key on each row's own opId rather than degrade into one "some fallbacks exist"
+  // banner — a single-group fixture would pass just as happily against that broken implementation.
+  test("a batch's fallback merges are attributed to their parent batch and grouped by it", async ({ page, loomDaemon }) => {
+    const BATCH_A = "07520fa5-1111-4222-8333-444455556666"; // short: 07520fa5
+    const BATCH_B = "9c3d1e88-aaaa-4bbb-8ccc-ddddeeeeffff"; // short: 9c3d1e88
+    const since = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
+    const base = {
+      gateType: "merge" as const, projectId: "p-fallback-fixture", projectName: "Fallback Attribution Fixture",
+      sessionId: "s-fallback-fixture", taskId: null, priority: null, workerLabel: "Dev",
+      batched: false, branchCount: null, batchBranches: null, gateTimeoutMs: 1_800_000,
+    };
+    await page.route("**/api/gates/active", (route) => route.fulfill({
+      json: {
+        cap: 2, activeCount: 2, queuedCount: 3,
+        gates: [
+          // BATCH A's fallback set: one holding a lane, two waiting. Pre-fix these three rows and the
+          // solo control below were mutually indistinguishable.
+          { ...base, id: "g-fb-a", phase: "running", branch: "loom/fb-alpha", since: since(40), queuePosition: null,
+            fallbackOfBatchOpId: BATCH_A },
+          // THE NEGATIVE CONTROL, in a lane, in the SAME payload: an ordinary solo merge. `null` here must
+          // render exactly as before — no chip, no attribution line, no callout of its own.
+          { ...base, id: "g-solo", phase: "running", branch: "loom/solo-control", since: since(25), queuePosition: null,
+            fallbackOfBatchOpId: null },
+          { ...base, id: "g-fb-b", phase: "queued", branch: "loom/fb-bravo", since: since(15), queuePosition: 1,
+            fallbackOfBatchOpId: BATCH_A },
+          { ...base, id: "g-fb-c", phase: "queued", branch: "loom/fb-charlie", since: since(10), queuePosition: 2,
+            fallbackOfBatchOpId: BATCH_A },
+          // A SECOND, unrelated batch's lone fallback — the row that forces real per-opId grouping.
+          { ...base, id: "g-fb-other", phase: "queued", branch: "loom/fb-other", since: since(5), queuePosition: 3,
+            fallbackOfBatchOpId: BATCH_B },
+        ],
+      },
+    }));
+
+    await page.goto(`${loomDaemon.baseURL}/gates`);
+    // Scope EVERYTHING to the active section: the shared daemon carries this file's sibling history rows,
+    // and both halves render the same strings (the trap that cost a red run on card 10fd660b).
+    const activeSection = page.locator("section").filter({ hasText: "Lane occupancy" }).first();
+    // FIXTURE IDENTITY: this payload is on screen, not the real (empty) registry or a sibling spec's rows.
+    await expect(activeSection.getByText("loom/fb-alpha", { exact: true })).toBeVisible();
+    await expect(activeSection.getByText("loom/solo-control", { exact: true })).toBeVisible();
+
+    // (1) PER-ROW ATTRIBUTION — the chip appears on the 4 fallback rows and NOWHERE else. The count IS the
+    // negative control: all 5 rows are on screen (both branch names above are visible), so a chip rendered
+    // unconditionally would read 5 here, and one rendered never would read 0.
+    await expect(activeSection.getByText("fallback", { exact: true })).toHaveCount(4);
+    // It names the RELATIONSHIP in words, not a bare id — and never the full uuid.
+    await expect(activeSection.getByText(/^from batch [0-9a-f]{8}$/)).toHaveCount(4);
+    await expect(activeSection.getByText(BATCH_A, { exact: true })).toHaveCount(0);
+
+    // (2) EACH ROW POINTS AT ITS OWN PARENT — 3 rows carry batch A's short id, 1 carries batch B's.
+    // (Each callout adds one more occurrence of its own id, hence the +1 on both.)
+    await expect(activeSection.getByText("07520fa5", { exact: true })).toHaveCount(3 + 1);
+    await expect(activeSection.getByText("9c3d1e88", { exact: true })).toHaveCount(1 + 1);
+
+    // (3) THE GROUPING — one callout per batch, each counting only ITS OWN rows. The `^` anchor keeps the
+    // match on the callout itself rather than every ancestor that happens to contain it.
+    const callout = (short: string) =>
+      activeSection.locator("div").filter({ hasText: new RegExp(`^Batch fallback\\..*${short}`) });
+    await expect(activeSection.getByText("Batch fallback.", { exact: true })).toHaveCount(2);
+    // Batch A spans BOTH phases, so it names both — the count a reader can check against the lanes above.
+    await expect(callout("07520fa5")).toHaveCount(1);
+    await expect(callout("07520fa5")).toContainText(
+      "3 of the runs shown (1 running · 2 queued) are per-branch retries of batch 07520fa5",
+    );
+    // Batch B is a single QUEUED row: the singular wording, and NO "(0 running)" — the callout must never
+    // assert a phase breakdown it isn't actually reporting.
+    await expect(callout("9c3d1e88")).toHaveCount(1);
+    await expect(callout("9c3d1e88")).toContainText("One run shown is a per-branch retry of batch 9c3d1e88");
+    await expect(callout("9c3d1e88")).not.toContainText("running ·");
+    // Both are honest that the count is a snapshot of a SEQUENTIAL spawn, not the batch's candidate total.
+    await expect(callout("07520fa5")).toContainText("Spawned one at a time");
+
+    // (4) EXERCISE the hover affordance — a render-only check would pass forever on an empty title. The
+    // chip explains the mechanism, which is the half a short id can't carry on its own.
+    const chipA = activeSection.getByText("fallback", { exact: true }).first();
+    await expect(chipA).toHaveAttribute("title", /Spawned automatically by batch 07520fa5/);
+    await expect(chipA).toHaveAttribute("title", /ONE BRANCH AT A TIME/);
+    await chipA.hover();
+    await expect(chipA).toBeVisible();
+  });
 });

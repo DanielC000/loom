@@ -4413,6 +4413,21 @@ export class SessionService {
         // itself is unreadable (deleted mid-run): a genuine unknown the client must not paper over with a
         // default. See GateRun.gateTimeoutMs's own doc for which ceiling this is (the RAW configured one).
         gateTimeoutMs: project ? resolveConfig(project.config, platformConfig).orchestration.gateCommandTimeoutMs : null,
+        // Card 4cacc6f9: the SECOND consumer of GateSnapshotEntry.fallbackOfBatchOpId (card 19256231
+        // plumbed it as far as `gate_queue`, the agent-facing read, and stopped there by its own DoD).
+        // Without it here, a HUMAN watching this page while a batch falls back sees up to K merge rows
+        // appear with no attribution at all — a fallback run is shaped EXACTLY like an ordinary solo
+        // merge (real taskId/branch/workerLabel), so nothing else on the row says where it came from.
+        //
+        // ⛔ DELIBERATELY NOT gated on the caller's project, unlike `gateQueueForManager`'s field of the
+        // same name (card 80d54122). That redaction exists because `gate_queue` is an AGENT MCP surface
+        // bounded by the owner's `project_links` trust boundary — see this method's own header and
+        // `gateQueueForManager`'s. THIS payload is the human-only loopback `/api/gates/active`, which is
+        // unscoped by design and already emits `taskId`/`branch`/`workerLabel` for every project above;
+        // an opId discloses strictly less than the branch name sitting next to it, so scoping it here
+        // would withhold nothing while breaking the one thing it exists to do — tie sibling rows from
+        // one batch together in a cross-project view.
+        fallbackOfBatchOpId: e.fallbackOfBatchOpId,
       };
     });
     return { cap, activeCount: snap.active, queuedCount: snap.queued, gates };

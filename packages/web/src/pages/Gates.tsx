@@ -167,6 +167,87 @@ function ForfeitTag() {
   );
 }
 
+// ── batch FALLBACK merges (card 4cacc6f9) ────────────────────────────────────────
+// When a `merge_batch` can't land its candidates together it re-tries each one AUTOMATICALLY as an
+// ordinary per-branch merge: a red gate or a forfeit sends every chosen candidate down that path, and
+// even a green batch sends its dropped / over-cap / stranded ones. Each spawned run then registers as a
+// perfectly normal solo merge — a real branch, a real task, that worker's own label — so nothing about
+// the row itself said where it came from. A human watching a batch fall back saw up to K merge rows
+// appear at once, unexplained and with no stated relationship to each other: the exact confusion card
+// 19256231 closed for a MANAGER reading `gate_queue`, left in place here for the owner.
+//
+// `GateRun.fallbackOfBatchOpId` carries the PARENT BATCH's opId on every such row (`null` on everything
+// else), so rows sharing one value are one group — that is what the group callout below counts, and it
+// is why the id is rendered as a shared attribution rather than a per-row identifier.
+const FALLBACK_LABEL = "fallback";
+
+// The batch opId shortened to the 8-char prefix Loom displays — and ACCEPTS — everywhere else
+// (`gate_status`, `tasks_get`, the board). Long enough to correlate this row against the batch's own
+// gate row or settle nudge, short enough to sit on a width-constrained lane card. A bare full uuid on
+// screen helps nobody who wasn't already holding it, which is the whole point of the field.
+const shortOpId = (opId: string) => opId.slice(0, 8);
+
+const FALLBACK_NOTE = (opId: string) =>
+  `Spawned automatically by batch ${shortOpId(opId)}.\n\n`
+  + "A batched merge falls back to merging its candidates ONE BRANCH AT A TIME — every candidate when "
+  + "the batch itself was rejected or forfeited, and any dropped / over-cap / stranded candidate even "
+  + "when it passed. Each retry runs as an ordinary solo merge with its own branch and its own gate, "
+  + "which is why it looks like an unrelated merge without this tag.";
+
+// An OUTLINED cyan chip, matching ForfeitTag's shape rather than BatchTag's fill: like the forfeit tag
+// this annotates a run's CIRCUMSTANCE, and cyan is this design system's "info / metadata" tone — a
+// fallback row is provenance to read, never a fault to alarm about.
+function FallbackTag({ opId }: { opId: string }) {
+  return (
+    <span
+      title={FALLBACK_NOTE(opId)}
+      style={{
+        fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase",
+        padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.cyan}`, color: color.cyan, flex: "none",
+      }}
+    >
+      {FALLBACK_LABEL}
+    </span>
+  );
+}
+
+// The per-row attribution line shared by BOTH active sites (the running lane hero and the queued card).
+// It states the RELATIONSHIP in words — "from batch 07520fa5" — never a bare id: the id alone is only
+// legible to a reader who already knew what they were looking at.
+function FallbackIdentity({ opId, style }: { opId: string; style?: CSSProperties }) {
+  return (
+    <div
+      title={FALLBACK_NOTE(opId)}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 11, color: color.cyan, ...style }}
+    >
+      <FallbackTag opId={opId} />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        from batch <span style={{ fontFamily: font.mono }}>{shortOpId(opId)}</span>
+      </span>
+    </div>
+  );
+}
+
+// Group the runs CURRENTLY ON SCREEN by their parent batch. Fed from the same `running`/`queued` arrays
+// the lanes and queue cards render, so the callout's count can never claim a row the reader can't see.
+// ⚠️ Deliberately NOT a claim about the batch's total candidate count: `runFallback` spawns these
+// sequentially, so at any instant some siblings may not exist yet and earlier ones may already have
+// settled. The callout says so rather than implying "N of N".
+function fallbackGroups(running: GateRun[], queued: GateRun[]): { opId: string; running: number; queued: number }[] {
+  const byOp = new Map<string, { opId: string; running: number; queued: number }>();
+  const add = (gates: GateRun[], key: "running" | "queued") => {
+    for (const g of gates) {
+      if (!g.fallbackOfBatchOpId) continue;
+      const e = byOp.get(g.fallbackOfBatchOpId) ?? { opId: g.fallbackOfBatchOpId, running: 0, queued: 0 };
+      e[key] += 1;
+      byOp.set(g.fallbackOfBatchOpId, e);
+    }
+  };
+  add(running, "running");
+  add(queued, "queued");
+  return [...byOp.values()];
+}
+
 // A long-running lane cue mirroring the mockup: the running lane's elapsed clock is amber while healthy
 // and flips to RED once a gate has consumed this FRACTION of its OWN project's resolved
 // `gateCommandTimeoutMs` (surfaced per row as `GateRun.gateTimeoutMs`).
@@ -414,6 +495,10 @@ function LaneHero({
 
   const emptyForFilter = !loading && running.length === 0 && queued.length === 0;
 
+  // Card 4cacc6f9: the per-row tags name each run's parent batch; this ties the SIBLINGS together, which
+  // is the half a reader can't assemble by eye when K rows land across both the lanes and the queue.
+  const fbGroups = fallbackGroups(running, queued);
+
   return (
     <Panel grid style={{ padding: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
@@ -467,6 +552,38 @@ function LaneHero({
           behind a {(holBlocker.priority ?? "").toUpperCase()} {KIND_LABEL[holBlocker.gateType]} gate. Gates serialize; the lane frees when the running gate settles or times out.
         </div>
       )}
+
+      {/* Card 4cacc6f9 — one callout per batch whose fallback runs are on screen. Cyan, not the
+          head-of-line block's red: this explains a pile-up, it does not report a fault. The counts are
+          taken from the SAME running/queued arrays rendered above, so the callout can never claim a row
+          the reader cannot see — and it states plainly that it is a snapshot of a sequential process
+          rather than implying it has counted the batch's whole candidate set. */}
+      {fbGroups.map((g) => {
+        const n = g.running + g.queued;
+        // Both phases are named only when the group actually spans both — the single-phase case reads
+        // "(0 queued)" as an assertion about the batch, which is exactly what this callout must not imply.
+        const phases = g.running > 0 && g.queued > 0 ? ` (${g.running} running · ${g.queued} queued)` : "";
+        const lead = n === 1
+          ? `One run shown${phases} is a per-branch retry of batch `
+          : `${n} of the runs shown${phases} are per-branch retries of batch `;
+        const tail = n === 1
+          ? " — it merges a single branch of that batch on its own gate, not an unrelated merge."
+          : " — each merges a single branch of that batch on its own gate, not unrelated merges.";
+        return (
+          <div
+            key={g.opId}
+            style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.cyan}`, borderLeftWidth: 3, borderRadius: radius.base, background: "rgba(91,200,255,0.05)", fontSize: 12, color: color.text }}
+          >
+            <b style={{ color: color.cyan, fontWeight: 500 }}>Batch fallback.</b>{" "}
+            {lead}
+            <span style={{ fontFamily: font.mono, color: color.cyan }}>{shortOpId(g.opId)}</span>
+            {/* The count is a SNAPSHOT of a sequential spawn, never the batch's candidate total — said in
+                one short clause because two groups on screen repeat it, and repeated boilerplate is read
+                past exactly like no caveat at all. */}
+            {tail} Spawned one at a time: others may not have appeared yet, or may already have settled.
+          </div>
+        );
+      })}
     </Panel>
   );
 }
@@ -532,6 +649,9 @@ function LaneSlot({
         {gate.batched
           ? <BatchIdentity landed={gate.branchCount} branches={gate.batchBranches} />
           : gate.branch && <div style={{ fontSize: 11, color: color.textDim, fontFamily: font.mono }}>{gate.branch}</div>}
+        {/* Card 4cacc6f9 — its own line, directly under the branch it explains: this says why THIS branch
+            is merging alone right now, which is a different question from what the run is. */}
+        {gate.fallbackOfBatchOpId && <FallbackIdentity opId={gate.fallbackOfBatchOpId} style={{ marginTop: 3 }} />}
         <div style={{ fontSize: 11, color: color.textMuted, marginTop: 5 }}>
           {gate.workerLabel ?? "—"}
           {gate.priority ? ` · ${gate.priority.toUpperCase()}` : ""}
@@ -569,6 +689,9 @@ function QueueCard({ gate, position, now, isHol }: { gate: GateRun; position: nu
             ? <BatchIdentity landed={gate.branchCount} branches={gate.batchBranches} style={{ fontSize: 10, color: color.textMuted }} />
             : (gate.branch ?? gate.workerLabel ?? "—")}
         </div>
+        {/* Card 4cacc6f9 — the queue is exactly where an unexplained pile-up is read, so a fallback card
+            carries the same attribution as the running lane rather than deferring to the callout alone. */}
+        {gate.fallbackOfBatchOpId && <FallbackIdentity opId={gate.fallbackOfBatchOpId} style={{ fontSize: 10, marginTop: 2 }} />}
       </div>
       {gate.priority && <PriorityTag priority={gate.priority} />}
       <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12, color: color.textDim, flex: "none" }}>

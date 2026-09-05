@@ -1714,6 +1714,27 @@ export interface GateRun {
    *  actually bites. So an elapsed clock measured against this CAN legitimately pass 100% on a run that
    *  extended, and that is correct rather than a bug. */
   gateTimeoutMs: number | null;
+  /** Card 4cacc6f9 — echoed from the daemon's `GateDescriptor.fallbackOfBatchOpId` (card 19256231) via
+   *  `GateSnapshotEntry`: the `opId` of the `merge_batch` op whose own automatic PER-BRANCH FALLBACK
+   *  spawned this merge. `null` on every run NOT spawned that way — every `worker` and `deploy` gate, and
+   *  every ordinary solo merge a manager requested directly.
+   *
+   *  ⚠️ It names the PARENT BATCH's opId, never this run's own `id`, so several rows legitimately carry
+   *  the SAME value — that shared value IS the grouping key, and reading it as a per-run identifier
+   *  inverts its whole purpose.
+   *
+   *  WHY IT IS ON THIS TYPE AT ALL: a fallback run registers as an ORDINARY solo merge — a real `branch`,
+   *  a real `taskId`, that worker's own `workerLabel` — so nothing else about the run distinguishes it. A
+   *  reader watching a batch fall back therefore sees up to K merge rows appear at once with no stated
+   *  relationship to the batch or to each other. This field is the only thing that ties them together.
+   *
+   *  ⛔ DO NOT mirror the agent-facing `gate_queue`'s same-named field, which is own-project-ONLY (card
+   *  80d54122's redaction contract). That scoping exists because `gate_queue` is an agent MCP surface
+   *  bounded by the owner's `project_links` trust boundary. This payload feeds `/api/gates/active` — a
+   *  HUMAN-only loopback reader that is deliberately unscoped and already discloses `taskId`/`branch`/
+   *  `workerLabel` for EVERY project — so it is populated unconditionally here, and an opId is strictly
+   *  less identifying than the branch name already rendered beside it. See `SessionService.snapshotGates`. */
+  fallbackOfBatchOpId: string | null;
 }
 
 /** The active-gates payload: the semaphore's live occupancy + the per-run detail. `cap` is the resolved
