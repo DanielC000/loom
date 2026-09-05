@@ -91,6 +91,17 @@ registerForCleanup(WORKTREES_DIR);
 // survives it — see this card's worker_report for the numbers; not embedded here as a test since it
 // depends on env mutation this file doesn't otherwise perform).
 const KICKOFF_PRE_DELIVERY_FLOOR_MS = MODE_LOG_MAX_ATTEMPTS * MODE_LOG_POLL_MS;
+// Card 53a818eb DoD-2 correction: the floor above is NOT the whole pre-delivery cost for every role.
+// `scheduleKickoffGuarantee`'s `gateOnMcp` branch (host.ts, `usesOrchestrationMcp`) makes manager/worker/
+// assistant additionally await `waitForMcpSeen` (bounded by `MCP_READY_TIMEOUT_MS`, default 9000ms) before
+// ever calling submit() — platform/setup/auditor skip that wait entirely (they never mount loom-orchestration).
+// This harness never runs the real HTTP gateway, so `markMcpSeen` (only reachable via a genuine `/mcp-orch/
+// :sessionId` hit) can NEVER fire here — meaning every manager/worker/assistant delivery in this file pays
+// the FULL MCP_READY_TIMEOUT_MS deterministically, on every run, independent of host load. This is the
+// actual explanation for the file's own per-role split (fast: platform/setup/auditor; slow: manager/worker/
+// assistant, by roughly one MCP_READY_TIMEOUT_MS) — NOT Enter-confirmation luck, which was this file's
+// original (incorrect) working theory. `role:"worker"` appears 4 times in this file (the sweep entry plus
+// both large-payload sections plus late-ready), so this ~9s tax is paid 4 times just for that role alone.
 // The FIXTURE_READY wait (real child process boot, BEFORE SessionStart/markReady ever runs) is NOT
 // touched by 0050a17e's floor at all — nothing about logLandedMode runs before the child has even booted.
 // It has no analogous code-level floor to derive from, so widening it "because it might be more
