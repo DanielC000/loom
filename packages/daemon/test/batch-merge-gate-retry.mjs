@@ -427,6 +427,87 @@ try {
     } else {
       console.log("(vii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the return-value assertions above.");
     }
+
+    // THE SECOND SURFACE (card 553ea58c): `outcome.value`/the sync return is only ONE of two readers of
+    // this exact op — `gate_status(opId)` is the durable, post-hoc reader (a recycle, a restart, a
+    // successor reading history later) and reads a SEPARATE stored verdict (`batchGateVerdict`, minted
+    // inside `runGate` — BEFORE `runBatchedMerge` could still forfeit the fast-forward — and, pre-fix,
+    // never corrected afterward). This runs regardless of the sync-vs-async split above: the tombstone is
+    // durable either way. `outcome.opId` is NOT populated on the sync-settled path (`AttachResult`'s
+    // `{settled:true, ...}` shape carries no `op` field at all — only the `{settled:false, op}` pending
+    // shape does; `resolveBatch`'s own `opId: r.op?.opId` is therefore always `undefined` here, exactly
+    // like every earlier block in this file) — resolve the opId the SAME way (i)/(iv) already do: off the
+    // batch's own durable `build_gate` row (`branch === null` identifies the batch-level row, never a
+    // per-candidate fallback row).
+    const forfeitPage = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const forfeitRow = forfeitPage.items.find((r) => r.branch === null);
+    check("(vii) a build_gate row exists for the forfeited batch op", !!forfeitRow);
+    const stForfeit = forfeitRow?.opId ? sessions.gateStatus(forfeitRow.opId) : undefined;
+    check("(vii) gate_status(opId) resolves the forfeited batch op", !!stForfeit);
+    check("(vii) THE FIX (card 553ea58c): gate_status's retryWarning does NOT claim any branches landed either", typeof stForfeit?.retryWarning === "string" && !stForfeit.retryWarning.includes("land on the strength"));
+    check("(vii) THE FIX (card 553ea58c): gate_status's retryWarning omits the batch clause entirely (no \"BATCH of\" wording) rather than assert a false count", typeof stForfeit?.retryWarning === "string" && !stForfeit.retryWarning.includes("BATCH of"));
+    // THE CORRECTED DESIGN (Code Review fold-in on card 553ea58c): an EARLIER version of this fix zeroed
+    // `batchBranchCount` outright on `!result.ok`. Review measured that destroys a true, correct-at-settle
+    // datum (the assembled count) on the DOMINANT shape (see the sibling (viii) block below) and makes a
+    // forfeited batch op indistinguishable from a solo merge (`batchBranchCount` is `gate_status`'s ONLY
+    // batch discriminator). THE FIX: keep the count, add a SEPARATE `batchLanded:false` fact instead —
+    // mirroring `GateHistoryRow.batchForfeited`'s own precedent (card b480dda9): "do NOT 'fix' a forfeited
+    // row by zeroing branchCount instead ... the forfeit is a separate, later fact."
+    check("(vii) THE CORRECTED FIX: gate_status's batchBranchCount SURVIVES the forfeit — it's the real, correct assembled count, never falsified", stForfeit?.batchBranchCount === 2);
+    check("(vii) THE CORRECTED FIX: gate_status carries batchLanded:false — the separate, later fact that nothing actually landed", stForfeit?.batchLanded === false);
+    check("(vii) gate_status's retryWarning matches the shared formatter's output exactly, called with batchBranchCount:undefined (the RENDER is corrected, not the stored datum)", stForfeit?.retryWarning === formatWeakerPassWarning("flaky-batch-forfeit", "", undefined));
+  }
+
+  // ── (viii) NO-RETRY FORFEIT (Code Review fold-in, card 553ea58c) — the DOMINANT shape finding [1] ────────
+  //     measured: attempt 1's gate passes CLEANLY (no retry ever fires — `retriedFile` is undefined on "the
+  //     overwhelming majority of batches"), but canonical main still advances mid-gate, so the fast-forward
+  //     forfeits and NOTHING lands. An earlier version of the fix guarded on `!result.ok` alone (no
+  //     `retriedFile` gating at all), so THIS exact shape — the common case, not (vii)'s retry-assisted one
+  //     — was the one the review's instrumented probe caught losing a true `batchBranchCount` for nothing:
+  //       PRE-fix   gate_status → batchBranchCount: 2,         retryWarning: undefined
+  //       POST-fix  gate_status → batchBranchCount: undefined, retryWarning: undefined  (a real datum, gone)
+  {
+    const P = setupBatchProject("noretryforfeit", "pnpm gate");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async (gate, worktreePath) => {
+      calls++;
+      if (calls === 1) {
+        // Attempt 1 passes cleanly — but canonical main advances WHILE this gate ran, exactly like (vii)'s
+        // own concurrent-main-advance simulation, just with no failing first attempt / no retry at all.
+        fs.writeFileSync(path.join(P.repo, "concurrent-main-advance.txt"), "someone else landed\n");
+        commitAll(P.repo, "concurrent main advance while the batch gate ran", GIT_ID);
+        return { passed: true };
+      }
+      // calls 2+: the forfeited batch's own per-candidate fallback — pass cleanly.
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { wA, wB, worktrees: wts } = await seedTwoWorkers(db, P);
+    worktrees.push(...wts);
+
+    const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
+    if (outcome.value) {
+      check("(viii) precondition: no retry ever fired — attempt 1's gate passed cleanly", outcome.value.retriedFile === undefined);
+      check("(viii) precondition: ok:false anyway — the gate passed but the fast-forward forfeited (main advanced mid-gate)", outcome.value.ok === false);
+      check("(viii) precondition: the reason names the forfeit (canonical main advanced)", typeof outcome.value.reason === "string" && outcome.value.reason.includes("canonical main advanced"));
+      check("(viii) precondition: nothing landed (outer landed:[] on this return)", Array.isArray(outcome.value.landed) && outcome.value.landed.length === 0);
+      check("(viii) precondition: no retryWarning at all on the sync return — there was no retry to warn about", outcome.value.retryWarning === undefined);
+    } else {
+      console.log("(viii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the return-value assertions above.");
+    }
+
+    const noRetryPage = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const noRetryRow = noRetryPage.items.find((r) => r.branch === null);
+    check("(viii) a build_gate row exists for the no-retry-forfeit batch op", !!noRetryRow);
+    check("(viii) the row's own branchCount is the real assembled count (2) — gate_history already gets this right", noRetryRow?.branchCount === 2);
+    const stNoRetry = noRetryRow?.opId ? sessions.gateStatus(noRetryRow.opId) : undefined;
+    check("(viii) gate_status(opId) resolves the no-retry-forfeit batch op", !!stNoRetry);
+    // THE DISCRIMINATING ASSERTION for finding [1]: this is the shape the review's probe measured directly.
+    check("(viii) THE FIX: gate_status's batchBranchCount SURVIVES a no-retry forfeit — nothing false was ever asserted here, so nothing should ever have been destroyed", stNoRetry?.batchBranchCount === 2);
+    check("(viii) THE FIX: gate_status carries batchLanded:false on the no-retry-forfeit op too", stNoRetry?.batchLanded === false);
+    check("(viii) gate_status carries no retryWarning at all (no retry ever fired, on either surface)", stNoRetry?.retryWarning === undefined);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

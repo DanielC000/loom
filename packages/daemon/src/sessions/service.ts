@@ -520,6 +520,15 @@ type GateRejectionDetail = {
 type MergeBatchResult = {
   ok: boolean;
   landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[];
+  /** Card 553ea58c (Code Review fold-in): the REAL git-verified landed count (`result.landed.length` from
+   *  `runBatchedMerge`) — present on `ok:true` only, and NOT always equal to `landed.length` immediately
+   *  above: that array is built by skipping any branch whose worker session row no longer resolves (a hard
+   *  row DELETE between batch selection and finalize — `db.getSession` applies no archive filter, so this
+   *  is a narrow, never-repro'd case), so it can under-report vs. this count. `retryWarning`'s own batch
+   *  clause already renders off THIS field (see that call site); this is exposed separately so a reader
+   *  building its own prose from `MergeBatchResult` (e.g. the async settle nudge's "landed N branch(es) on
+   *  main" text) can use the same real total rather than reconstructing a smaller one from `landed.length`. */
+  landedCount?: number;
   fallback: { workerSessionId: string; reason: string }[];
   reason?: string;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
@@ -551,9 +560,12 @@ type MergeBatchResult = {
    *  exact op from (`formatWeakerPassWarning`/`formatRetryAlsoFailedWarning`, orchestration/gate-runner.ts),
    *  never a second independently-worded copy. Three real cases:
    *  - `ok:true` (the retry came back green and the batch landed): the "⚠ WEAKER PASS" wording, with a
-   *    batch clause carrying THIS batch's own `landed.length` — how many branches landed on the strength of
-   *    one isolated retry, not just which file(s) were retried. A batch retry is a STRONGER claim than a
-   *    solo one for exactly this reason.
+   *    batch clause carrying THIS batch's own `result.landed.length` (CORRECTED, card 553ea58c — an earlier
+   *    version used the LOCAL, session-row-filtered `landed` array built a few lines below this return,
+   *    which under-counts if a worker session row no longer resolves between selection and finalize;
+   *    `result.landed.length` is the real git-verified count regardless) — how many branches landed on the
+   *    strength of one isolated retry, not just which file(s) were retried. A batch retry is a STRONGER
+   *    claim than a solo one for exactly this reason.
    *  - `ok:false` with `retryPassed:true` (the retry itself passed, but a fast-forward/HEAD-read failure
    *    AFTER the gate — `batch-merge.ts`'s `:806`/`:813` returns — means nothing actually landed): still the
    *    "⚠ WEAKER PASS" wording (the retry fact is real and worth surfacing), but with NO batch clause — the
@@ -1087,12 +1099,15 @@ function deriveDeployGateVerdict(
  * after attempt 1's own admission settled and before the retry ever runs) — mirroring `confirmWorkerMerge`'s
  * own `gateAttempt1DurationMs` fix (card b9e07a4a) exactly, for the identical reason.
  *
- * `batchBranchCount` (Code Review, card 67030bb9 finding [5]): the batch's own landed branch count
- * (`landedCount` at the call site) — stored so a `gate_status(opId)` read of a retry-assisted batch pass can
- * render the batch-specific `formatWeakerPassWarning` wording (naming HOW MANY branches a retry-assisted
- * pass actually landed) even when the live `[loom:merge-batch-done]` nudge that already renders it was
- * missed (a recycle, a restart, a successor reading history later) — see that call site for the full gap
- * this closes.
+ * `batchBranchCount` (Code Review, card 67030bb9 finding [5]; CORRECTED, card 553ea58c): the count of
+ * branches ASSEMBLED into the batch worktree (`landedCount` at the call site), never necessarily landed on
+ * main — an earlier version of this doc called it "the batch's own landed branch count", which is false
+ * whenever the gate passes but the fast-forward afterward forfeits or its post-gate HEAD read fails; see
+ * `PendingGateOpVerdict.batchLanded`'s own doc (db.ts) for that separate, later fact. Stored so a
+ * `gate_status(opId)` read of a retry-assisted batch pass can render the batch-specific
+ * `formatWeakerPassWarning` wording (naming how many branches were assembled/gated together) even when the
+ * live `[loom:merge-batch-done]` nudge that already renders it was missed (a recycle, a restart, a
+ * successor reading history later) — see that call site for the full gap this closes.
  *
  * INCLUDES `settledAt`/`totalDurationMs` — CORRECTED (Code Reviewer `7933b507`, card be260976): an earlier
  * version of this doc argued these should be OMITTED because the tombstone mints "just before `runExclusive`
@@ -4835,12 +4850,28 @@ export class SessionService {
      *  this before treating any settled "merge" pass as trustworthy on its own. Absent (never an empty
      *  string) whenever `retriedFile` is `null` or `undefined`. */
     retryWarning?: string;
-    /** Code Review, card 67030bb9 finding [5]: present ONLY on a "merge" row produced by `mergeBatch` — the
-     *  batch's own landed branch count, fed into `retryWarning`'s `formatWeakerPassWarning` call above so a
-     *  retry-assisted BATCH pass renders the batch-specific wording ("landed N branches") even when the live
-     *  `[loom:merge-batch-done]` nudge that already renders it was missed. `undefined` on a plain solo merge
-     *  or a row that predates this field. */
+    /** Code Review, card 67030bb9 finding [5]; CORRECTED, card 553ea58c — present ONLY on a "merge" row
+     *  produced by `mergeBatch`: the count of branches ASSEMBLED into the batch worktree during assembly,
+     *  fed into `retryWarning`'s formatter call above so a retry-assisted BATCH pass renders the
+     *  batch-specific wording. An earlier version of this doc called it "the batch's own landed branch
+     *  count" — false whenever the gate (and any retry) passed but the fast-forward afterward forfeited or
+     *  its post-gate HEAD read failed; see `batchLanded` immediately below for that separate, later fact.
+     *  This count stays PRESENT AND ACCURATE regardless of `batchLanded` — never zeroed/omitted on that
+     *  account (card `b480dda9`'s own precedent on the sibling `gate_history` surface: "do NOT 'fix' a
+     *  forfeited row by zeroing branchCount instead ... the forfeit is a separate, later fact"). `undefined`
+     *  on a plain solo merge or a row that predates this field. */
     batchBranchCount?: number;
+    /** Card 553ea58c: the separate, LATER fact `batchBranchCount`'s own doc points to — present ONLY
+     *  alongside a batch "pass" verdict, whether the gate (and any retry) passing actually resulted in the
+     *  assembled branches landing on main. Written UNCONDITIONALLY whenever this verdict is a batch pass —
+     *  a stored `false` is a MEASURED NEGATIVE (mirroring `retryPassed`/`transientRetried`'s own
+     *  present-with-false convention), covering BOTH real `ok:false` shapes reachable on an already-passed
+     *  batch gate: a fast-forward forfeit (canonical main advanced mid-gate) or a post-gate HEAD-read
+     *  failure — see `MergeBatchResult.retryWarning`'s own three-case doc for the identical enumeration.
+     *  `retryWarning` below omits its "ALL N land" batch clause — WITHOUT touching `batchBranchCount`
+     *  itself — exactly when this reads `false`. `undefined` on a non-batch row, a "fail"/"cancelled"/
+     *  "error" verdict kind, or a row that predates this field. */
+    batchLanded?: boolean;
     /** Card a0d1165c, sibling of `retriedFile`/`retryPassed`/`retryWarning` immediately above — the SAME
      *  durable exposure for the OTHER retry that can produce a `passed:true` settled merge, the
      *  TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a killed/timed-out attempt 1 auto-retries the WHOLE gate
@@ -5077,6 +5108,10 @@ export class SessionService {
         // reasoning — decided consistently with `retryWarning` staying "sensitive" regardless, for its OWN
         // separate content, so this bare count can be judged purely on its own merits.
         batchBranchCount: "structural",
+        // Card 553ea58c: a bare boolean fleet-operational fact (did this batch's already-passed gate
+        // actually land on main) — no foreign path/test/error content of its own, same bucket as
+        // `batchBranchCount` immediately above and `retryPassed`/`transientRetried` below.
+        batchLanded: "structural",
         // Card 753b9699 — the OUTER return fields (see this Record's own doc, above, for the gap this
         // closes). All "structural": fleet-operational metadata with no foreign path/test/error content of
         // its own. `admittedAt` (a mint timestamp) and `outcome` (the 5-value verdict-kind enum) were
@@ -5113,6 +5148,16 @@ export class SessionService {
       // VERBATIM/unconditional — no more per-line `&& !crossProjectRedacted`. Redaction happens exactly
       // once, below, by filtering the fully-assembled object against `GATE_VERDICT_FIELD_CLASSIFICATION`
       // — see that Record's own doc for why (and for why it's an exhaustive classification, not a Set).
+      //
+      // Card 553ea58c: the count that actually reaches `formatWeakerPassWarning`'s weaker-PASS batch
+      // clause — `undefined` whenever `payload?.batchLanded === false` (the gate/retry passed but the
+      // batch's fast-forward afterward forfeited or its post-gate HEAD read failed, so "ALL N land" would
+      // be false), else the real `payload?.batchBranchCount` unchanged. Computed ONCE, here, rather than
+      // inline inside the object literal below (a `const` cannot appear mid-object-literal) — see the
+      // `retryWarning` dispatch's own comment, below, for why this affects only that rendered prose and
+      // never the raw `batchBranchCount` field, and why the REJECTED-retry formatter deliberately does not
+      // use this local at all.
+      const batchRenderCount = payload?.batchLanded === false ? undefined : payload?.batchBranchCount;
       const rawVerdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
         ? {
           passed: t.record.verdict === "pass",
@@ -5145,9 +5190,20 @@ export class SessionService {
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
           // is passed through so either formatter below can tell a genuine timeout kill apart from an
           // assertion failure — see `formatWeakerPassWarning`'s/`formatRetryAlsoFailedWarning`'s own doc.
-          // Code Review, card 67030bb9 finding [5]: `payload?.batchBranchCount` is `undefined` on a plain
-          // solo merge (both formatters render their solo wording), and a real landed count on a batch op
-          // — see `PendingGateOpVerdict.batchBranchCount`'s own doc for the gap this closes.
+          // Code Review, card 67030bb9 finding [5]; CORRECTED, card 553ea58c: `payload?.batchBranchCount`
+          // is `undefined` on a plain solo merge (both formatters render their solo wording), and the
+          // assembled-branch count on a batch op — see `PendingGateOpVerdict.batchBranchCount`'s own doc.
+          // `batchRenderCount` below is what actually reaches `formatWeakerPassWarning`'s weaker-PASS
+          // branch: `undefined` whenever `payload?.batchLanded === false` (the gate/retry passed but the
+          // batch's fast-forward afterward forfeited or its post-gate HEAD read failed — nothing landed, so
+          // the "ALL N land" clause would be false), else the real `batchBranchCount` unchanged. This
+          // affects ONLY the rendered PROSE, never the raw `batchBranchCount` field spread below, which
+          // stays visible and accurate either way (card `b480dda9`'s "do NOT fix a forfeited row by zeroing
+          // branchCount instead" precedent — see `batchLanded`'s own doc for the full reasoning). The
+          // REJECTED-retry branch (`formatRetryAlsoFailedWarning`) is deliberately UNAFFECTED — `batchLanded`
+          // is never set on a "fail" verdict kind (only ever minted alongside a batch "pass"), so
+          // `payload?.batchBranchCount` reaches that formatter unchanged, exactly as it always did (Code
+          // Review finding [4]: that count is genuinely WANTED there, not a coincidental no-op).
           // Card 9bdc8ea5: presence used to be gated on `payload?.retriedFile` alone, and rendered via ONE
           // formatter that took no pass/fail argument at all — so a REJECTED op (`outcome:"fail"`,
           // `retryPassed:false`) still carried a `retryWarning` whose text asserted "passed only after
@@ -5167,10 +5223,14 @@ export class SessionService {
           // is defensive, not a live gap being closed. `retriedFile` alone is NEVER read as "did it pass" again.
           ...(payload?.retriedFile && typeof payload?.retryPassed === "boolean"
             ? { retryWarning: payload.retryPassed
-              ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount)
+              ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, batchRenderCount)
               : formatRetryAlsoFailedWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) }
             : {}),
           ...(payload?.batchBranchCount !== undefined ? { batchBranchCount: payload.batchBranchCount } : {}),
+          // Card 553ea58c: `!== undefined` (not truthy) — a stored `false` IS the measured negative (the
+          // batch's gate/retry passed but nothing landed), mirroring `retryPassed`/`transientRetried`'s own
+          // pass-through discipline immediately below. See `PendingGateOpVerdict.batchLanded`'s own doc.
+          ...(payload?.batchLanded !== undefined ? { batchLanded: payload.batchLanded } : {}),
           // Card a0d1165c: mirrors the two lines immediately above, for the sibling TRANSIENT-KILL
           // AUTO-RETRY fact — same `!== undefined` pass-through (a stored `false` IS the measured negative,
           // not silence) and the same "derive the warning text, gated on truthy, via the ONE shared
@@ -17636,6 +17696,33 @@ export class SessionService {
           // noise that degrades the very `[gate:repo-guard]` instrument this card's diagnosis depends on.
           if (batchGateRan) this.gateSemaphore.endSquash(finalRepoPath, opId);
 
+          // ANNOTATE THE TOMBSTONE VERDICT WITH THE REAL LANDING OUTCOME (card 553ea58c). `batchGateVerdict`
+          // (declared above) was minted by `deriveBatchGateVerdict`, INSIDE the `runGate` closure — i.e.
+          // BEFORE `runBatchedMerge` could still forfeit the fast-forward (canonical main advanced mid-gate)
+          // or fail the post-gate HEAD read, both real `ok:false` outcomes on an already-`kind:"pass"`
+          // verdict (see `RunBatchedMergeResult`'s own doc, git/batch-merge.ts, and `MergeBatchResult
+          // .retryWarning`'s own three-case doc above for the exact two `batch-merge.ts` returns this
+          // covers: `:806`'s post-gate HEAD-read failure and `:813`'s forfeit). The tombstone's stored
+          // `batchBranchCount` (== `landedCount`, the count ASSEMBLED into the batch worktree) is CORRECT
+          // and worth keeping regardless of what happens next — Code Review, card 553ea58c, citing card
+          // `b480dda9`'s own `GateHistoryRow.batchForfeited` doc: "do NOT 'fix' a forfeited row by zeroing
+          // branchCount instead — that count is the real, correct post-assembly figure ... the forfeit is a
+          // separate, later fact and belongs in its own field, not a falsified count." An EARLIER version of
+          // this fix zeroed `batchBranchCount` on `!result.ok` instead, which (per that same review) silently
+          // destroyed a true datum on the (dominant — `retriedFile` is undefined on "the overwhelming
+          // majority of batches", see that field's own doc) no-retry case, AND made a forfeited batch op
+          // indistinguishable from a plain solo merge on `gate_status` (its only batch discriminator).
+          // `batchLanded` is the separate, later fact instead — set UNCONDITIONALLY here (never silence: a
+          // stored `false` is a measured negative, mirroring `retryPassed`/`transientRetried`'s own
+          // present-with-false convention on this same payload) whenever this verdict is a batch "pass" —
+          // scoped to `kind === "pass"` because a genuine gate rejection already mints `kind:"fail"`, and
+          // `formatRetryAlsoFailedWarning`'s OWN batch clause is correctly worded off `batchBranchCount`
+          // regardless (Code Review finding [4]: that field is genuinely WANTED, unmodified, on a rejection
+          // — never a harmless-no-op argument to lean on for widening this guard later).
+          if (batchGateVerdict?.kind === "pass" && batchGateVerdict.payload) {
+            batchGateVerdict.payload.batchLanded = result.ok;
+          }
+
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
             // through as-is rather than defaulted to null: appendEvent's JSON.stringify (db.ts) drops an
@@ -17717,15 +17804,24 @@ export class SessionService {
             ...strandedFallback,
           ], opId);
           return {
-            ok: true, landed, fallback,
+            ok: true, landed, landedCount: result.landed.length, fallback,
             phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
             // Card 67030bb9: a retry-assisted batch landing is WEAKER evidence than an ordinary clean batch
-            // pass — see `MergeBatchResult.retryWarning`'s own doc. `landed.length` (not the requested K) is
-            // the count that actually matters here: it's how many branches just landed on the strength of
-            // this one isolated retry.
+            // pass — see `MergeBatchResult.retryWarning`'s own doc. `result.landed.length` (not the
+            // requested K) is the count that actually matters here: it's how many branches just landed on
+            // the strength of this one isolated retry.
+            // CORRECTED (card 553ea58c, DoD item 3): this used to pass the LOCAL `landed` array's length —
+            // built a few lines above by `for (const lb of result.landed) { if (!this.db.getSession(...))
+            // continue; ... }`, which SKIPS a landed branch whose worker session row no longer resolves.
+            // Code Review correction: `db.getSession` applies NO archive filter (an archived session row
+            // still resolves fine here) — only a hard row DELETE between batch selection and this finalize
+            // loop causes the skip, an even narrower case than "archived/deleted" originally suggested.
+            // `result.landed.length` is the real git-verified count — every branch the fast-forward actually
+            // put on main, whether or not its session row still resolves here — so a vanished row can no
+            // longer under-report how many branches this retry-assisted pass landed.
             ...(result.gateDetail?.retriedFile ? {
               retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed,
-              retryWarning: formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, landed.length),
+              retryWarning: formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, result.landed.length),
             } : {}),
             // Card d422e279: mirrors the `retryWarning` threading immediately above — see
             // `BatchGateResult.reducedGateWarning`'s own doc (git/batch-merge.ts) for what this carries and
@@ -17759,10 +17855,19 @@ export class SessionService {
         // fallback path to the manager who hit this live (see the card's own "CORRECTION" section).
         const landedList = (list: MergeBatchResult["landed"]) =>
           list.map((l) => `task ${l.taskId ?? "none"} (branch ${l.branch}, commit ${l.sha.slice(0, 8)})`).join("; ");
+        // Card 553ea58c (Code Review fold-in [6]): the NUMERIC count uses `landedCount` (the real
+        // git-verified total, `result.landed.length`) rather than `landed.length` (the session-row-filtered
+        // array `landedList` below still enumerates) — the same divergence `retryWarning`'s own batch clause
+        // was fixed to avoid (DoD item 3): without this, a vanished session row could make this exact object
+        // read `landed:[1]` alongside a `retryWarning` boasting "ALL 2 land". Falls back to `landed.length`
+        // for a row that predates `landedCount` (never fabricated, and identical to the pre-fix value in
+        // that case). A caller can compare the two counts directly if it ever needs to notice the divergence
+        // itself; this nudge just states the accurate total rather than the possibly-smaller listed one.
+        const landedTotal = (v: MergeBatchResult) => v.landedCount ?? v.landed.length;
         const msg = !outcome.ok
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
-          ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${outcome.value.landed.length} branch(es) on main: ${landedList(outcome.value.landed)}.` +
+          ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
             (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync

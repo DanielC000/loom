@@ -2187,15 +2187,43 @@ export interface PendingGateOpVerdict {
    *  (a first attempt is classified either "genuine" — eligible for the single-file retry — or
    *  "kill"/"timeout" — eligible for THIS retry — never both; see gate-runner.ts's `classifyGateFailure`). */
   transientRetried?: boolean;
-  /** Code Review, card 67030bb9 finding [5]: the batch's own landed branch count (`landedCount` at
-   *  `deriveBatchGateVerdict`'s call site, `mergeBatch`'s own `runGate` closure) — stored so a
-   *  `gate_status(opId)` read of a retry-assisted batch pass, made after the live `[loom:merge-batch-done]`
-   *  nudge that already renders `formatWeakerPassWarning`'s batch-specific wording was missed (a recycle, a
-   *  restart, a successor reading history later), can render that same wording rather than the solo-shaped
-   *  fallback. Populated for "merge" rows produced by `mergeBatch` only (a plain solo merge or a "gate"
-   *  self-check row has no batch to count); `undefined` for every other row, including one that predates
-   *  this field. */
+  /** Code Review, card 67030bb9 finding [5]: the count of branches ASSEMBLED into the batch worktree during
+   *  assembly (`landedCount` at `deriveBatchGateVerdict`'s call site, `mergeBatch`'s own `runGate` closure)
+   *  — CORRECTED (Code Review, card 553ea58c): an earlier version of this doc called it "the batch's own
+   *  landed branch count", which was FALSE on a batch whose gate (and any retry) passed but whose
+   *  fast-forward later forfeited or whose post-gate HEAD read failed — see `batchLanded`, immediately
+   *  below, for that separate, later fact. This count is stored so a `gate_status(opId)` read of a
+   *  retry-assisted batch pass, made after the live `[loom:merge-batch-done]` nudge that already renders
+   *  `formatWeakerPassWarning`'s batch-specific wording was missed (a recycle, a restart, a successor
+   *  reading history later), can render that same wording rather than the solo-shaped fallback. Populated
+   *  for "merge" rows produced by `mergeBatch` only (a plain solo merge or a "gate" self-check row has no
+   *  batch to count); `undefined` for every other row, including one that predates this field. Present
+   *  (and accurate) REGARDLESS of `batchLanded` — an earlier fix zeroed this field instead of adding
+   *  `batchLanded`, which silently destroyed a true datum on the dominant no-retry case and made a
+   *  forfeited batch op indistinguishable from a solo merge; see `batchLanded`'s own doc for why the two
+   *  facts are now kept separate, mirroring `GateHistoryRow.batchForfeited`'s own precedent (card
+   *  `b480dda9`): "do NOT 'fix' a forfeited row by zeroing branchCount instead ... the forfeit is a
+   *  separate, later fact and belongs in its own field, not a falsified count." */
   batchBranchCount?: number;
+  /** Card 553ea58c: the separate, LATER fact `batchBranchCount`'s own doc (above) points to — whether this
+   *  batch's gate (and any single-file retry) passing actually resulted in the assembled branches landing
+   *  on main. Unlike `GateHistoryRow.batchForfeited` (card `b480dda9`, sourced from a correlated subquery
+   *  against a sibling `batch_merge_forfeited` orchestration event, scoped to ONLY the canonical-main-
+   *  advanced forfeit shape), this field is set directly by `mergeBatchTracked` once `runBatchedMerge`
+   *  resolves — so it covers BOTH real `ok:false` shapes reachable on an already-passed batch gate: a
+   *  fast-forward forfeit (`batch-merge.ts`'s `:813` return) AND a post-gate HEAD-read failure (`:806`) —
+   *  see `MergeBatchResult.retryWarning`'s own three-case doc for the identical two-shape enumeration.
+   *  Written UNCONDITIONALLY (never silence) whenever this verdict is a batch "pass" — the SAME
+   *  present-with-`false`-is-a-measured-negative convention `retryPassed`/`transientRetried` already use on
+   *  this payload: a stored `false` positively asserts "the gate passed but nothing landed", not merely
+   *  "nothing to report". `undefined` on a non-batch ("solo") row, on a "fail"/"cancelled"/"error" verdict
+   *  kind (a genuine gate rejection has nothing to land regardless — `formatRetryAlsoFailedWarning`'s own
+   *  batch clause already states this correctly off `batchBranchCount` alone, unaffected by this field), or
+   *  on a row that predates this field. `gate_status`'s own render consults this to omit the "ALL N land on
+   *  the strength of this ONE retry" clause exactly when `batchLanded === false` — WITHOUT touching the
+   *  underlying `batchBranchCount`, which stays visible and accurate either way (see that render's own
+   *  doc, sessions/service.ts, for the dispatch). */
+  batchLanded?: boolean;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

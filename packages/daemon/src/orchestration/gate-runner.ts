@@ -1479,10 +1479,17 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
  * returns the ORIGINAL cross-test-pollution wording — the fail-safe default.
  *
  * Card 67030bb9: `batchBranchCount` is OPTIONAL and additive, passed only by the BATCH gate path — a batch
- * retry is a STRONGER claim than a solo one (a green retry lands EVERY branch in the batch, not just the
- * retried file's own change), so a manager reading this must be able to see the branch count a retry
- * carried, not just the file(s). Omitted entirely for the solo path, byte-identical to before this card
- * for the N=1/no-batch case — every existing wording is preserved verbatim in that case.
+ * retry is a STRONGER claim than a solo one WHEN it lands (a green retry asserts every ASSEMBLED branch
+ * will land together on the strength of this ONE retry, not just the retried file's own change), so a
+ * manager reading this must be able to see the branch count a retry carried, not just the file(s).
+ * CORRECTED (card 553ea58c): an earlier version of this doc claimed "a green retry lands EVERY branch in
+ * the batch" unconditionally — false whenever the retry's own gate passes but the batch's fast-forward
+ * afterward still forfeits or its post-gate HEAD read fails (nothing lands in either case, despite the
+ * green retry). Every call site now passes `batchBranchCount:undefined` for exactly that shape (see
+ * `MergeBatchResult.retryWarning`'s own three-case doc, sessions/service.ts), so this function itself never
+ * has to know WHY the count is absent — it just omits the batch clause whenever the caller has none to
+ * give. Omitted entirely for the solo path, byte-identical to before this card for the N=1/no-batch case —
+ * every existing wording is preserved verbatim in that case.
  *
  * Card 9bdc8ea5: this function's signature and body are UNCHANGED by that card — see its sibling
  * {@link formatRetryAlsoFailedWarning} for the FAILED-retry case instead of a `passed` argument here. A

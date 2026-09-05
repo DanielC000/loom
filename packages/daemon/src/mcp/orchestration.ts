@@ -580,9 +580,21 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "gate failure's decline reason (WHY `identifyRetriableTestFiles` refused to identify a retry) is " +
       "durable ONLY on `gate_history`'s own row (see that tool's own `retriedFile`/`retryDeclineReason` " +
       "doc), never recovered here; `gate_status(opId)`'s settled read has no equivalent field for it. " +
-      "`batchBranchCount` (card 67030bb9) is present ONLY on a `merge_batch`-produced row: the batch's own " +
-      "landed branch count, fed into `retryWarning` so a retry-assisted BATCH pass names how many branches " +
-      "actually landed, not just the solo wording. " +
+      "`batchBranchCount` (card 67030bb9) is present ONLY on a `merge_batch`-produced row: the count of " +
+      "branches ASSEMBLED into the batch worktree during assembly (card 553ea58c correction — an earlier " +
+      "version of this doc wrongly called it \"how many branches actually landed\"). It stays PRESENT AND " +
+      "ACCURATE regardless of whether the batch actually landed — see `batchLanded` below for that separate, " +
+      "later fact; do not read a present `batchBranchCount` as proof of a landing on its own. Fed into " +
+      "`retryWarning` so a retry-assisted BATCH pass names the count, not just the solo wording. " +
+      "🔴 `batchLanded` (card 553ea58c) is present ONLY alongside a `merge_batch`-produced `outcome:\"pass\"` " +
+      "row: whether the gate (and any single-file retry) passing actually resulted in the assembled branches " +
+      "landing on main. A stored `false` is a MEASURED NEGATIVE (the batch's fast-forward forfeited because " +
+      "canonical main advanced mid-gate, or its post-gate HEAD read failed) — `undefined` means only \"not a " +
+      "batch row\" or \"predates this field\", never \"nothing to report\". `retryWarning`'s own batch clause " +
+      "(\"ALL N land on the strength of this ONE retry\") is omitted — never rendered — whenever " +
+      "`batchLanded === false`, WITHOUT touching `batchBranchCount` itself, which stays visible: the count " +
+      "and the landing outcome are two separate facts, never conflated (card `b480dda9`'s own precedent on " +
+      "the sibling `gate_history` surface — \"do NOT 'fix' a forfeited row by zeroing branchCount instead\"). " +
       "⚠️ `transientRetried`/`transientRetryWarning` (card a0d1165c) — the SIBLING gap this closes: a " +
       "settled `outcome:\"pass\"` can ALSO be reached via the TRANSIENT-KILL AUTO-RETRY (card bcba83a1), " +
       "which auto-retries the WHOLE gate once after attempt 1 was killed/timed out — mutually exclusive " +
