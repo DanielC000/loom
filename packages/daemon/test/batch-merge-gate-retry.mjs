@@ -114,14 +114,35 @@ async function seedTwoWorkers(db, P) {
 
 // Resolve a settled MergeBatchResult, tolerating the documented sync-vs-async-degrade split
 // (mergeBatchTracked -> PendingOpRegistry.attach) the same way batch-merge-gate-history.mjs already does.
+//
+// Verification-only escape hatch (card 9167962f's own DoD-3 positive control): when set, forces EVERY
+// resolveBatch() call below down the async-degrade branch regardless of what mergeBatchTracked actually
+// returned, so degradeCoverage's own check (see near EOF) can be shown to fire without depending on real
+// host timing — the genuine async degrade is "a coin flip on real host timing" per the (iii) comment
+// above and not something this file can reliably force end to end. Default off: an ordinary run (this
+// env var unset) is byte-for-byte the same resolveBatch behavior as before this flag existed.
+const FORCE_DEGRADE_ALL = process.env.BMGR_FORCE_DEGRADE_ALL === "1";
 async function resolveBatch(sessions, batchPromise) {
   const r = await batchPromise;
   if (!r.settled) {
     await waitUntil(() => sessions.gateStatus(r.op.opId).state === "settled",
       { timeoutMs: 60_000, label: "batch op to settle asynchronously (missed the sync-wait budget)" });
-    return { settled: true, ok: undefined, value: undefined, opId: r.op.opId };
   }
+  if (FORCE_DEGRADE_ALL) return { settled: true, ok: undefined, value: undefined, opId: r.op?.opId };
+  if (!r.settled) return { settled: true, ok: undefined, value: undefined, opId: r.op.opId };
   return { settled: true, ok: r.ok, value: r.ok ? r.value : undefined, opId: r.op?.opId };
+}
+
+// Card 9167962f DoD-1: every block below that branches on `outcome.value` (skipping its value-dependent
+// assertions with a console.log NOTE when the async-degrade path was taken) records itself here. A
+// PARTIAL skip stays tolerated (the degrade path is real and legitimate) — but if EVERY such block
+// skipped in one run, every retry/warning assertion in this file ran nowhere this pass, and that total
+// blackout must fail loudly rather than exit 0 alongside an "ALL PASS" banner. See the check near EOF.
+let degradeTotal = 0;
+const degradeSkipped = [];
+function recordDegradeOutcome(label, outcome) {
+  degradeTotal++;
+  if (!outcome.value) degradeSkipped.push(label);
 }
 
 const dbs = [];
@@ -153,6 +174,7 @@ try {
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
     check("(i) exactly 2 gate calls (attempt 1 genuine failure, one multi-file retry, never looped)", calls === 2);
     check("(i) the retry call is the real --only= single-file re-invocation", seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=flaky-batch-pass");
+    recordDegradeOutcome("(i)/(ii)", outcome);
     if (outcome.value) {
       check("(ii) ok:true, both branches landed", outcome.value.ok === true && outcome.value.landed.length === 2);
       check("(ii) retriedFile/retryPassed:true on the returned MergeBatchResult", outcome.value.retriedFile === "flaky-batch-pass" && outcome.value.retryPassed === true);
@@ -205,6 +227,7 @@ try {
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
     check("(iv) exactly 2 gate calls to the BATCH gate itself (attempt 1 + the one multi-file retry) before any fallback call", seenGates[0] === "pnpm gate" && seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=flaky-batch-fail");
+    recordDegradeOutcome("(iv)", outcome);
     if (outcome.value) {
       check("(iv) ok:false — the whole batch falls back on a retry that ALSO failed", outcome.value.ok === false);
       check("(iv) retriedFile/retryPassed:false surfaced on the returned MergeBatchResult — a retry that also failed is still recorded, never silently dropped", outcome.value.retriedFile === "flaky-batch-fail" && outcome.value.retryPassed === false);
@@ -413,6 +436,7 @@ try {
     worktrees.push(...wts);
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
+    recordDegradeOutcome("(vii)", outcome);
     if (outcome.value) {
       check("(vii) precondition: the retry itself passed", outcome.value.retriedFile === "flaky-batch-forfeit" && outcome.value.retryPassed === true);
       check("(vii) precondition: ok:false anyway — gate+retry passed but fast-forward refused (main advanced mid-gate)", outcome.value.ok === false);
@@ -488,6 +512,7 @@ try {
     worktrees.push(...wts);
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
+    recordDegradeOutcome("(viii)", outcome);
     if (outcome.value) {
       check("(viii) precondition: no retry ever fired — attempt 1's gate passed cleanly", outcome.value.retriedFile === undefined);
       check("(viii) precondition: ok:false anyway — the gate passed but the fast-forward forfeited (main advanced mid-gate)", outcome.value.ok === false);
@@ -513,6 +538,18 @@ try {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
 }
+
+// Card 9167962f DoD-1: a PARTIAL skip (some blocks degraded, some didn't) stays tolerated — the degrade
+// path is real and legitimate. A TOTAL skip means every value-dependent assertion in this file ran
+// nowhere this pass, yet without this check the run would still print "ALL PASS" with zero FAILs — the
+// exact silent-regression shape this card exists to catch (see [[shipping-a-detector-is-not-someone-
+// reading-it]]). Print an extra unmissable banner on top of the ordinary FAIL line so a total blackout
+// doesn't just blend into the scrollback as one more failed assertion among many.
+const degradeCoverageOk = !(degradeTotal > 0 && degradeSkipped.length === degradeTotal);
+if (!degradeCoverageOk) {
+  console.log(`\n🔴🔴 DEGRADE-COVERAGE BLACKOUT: all ${degradeTotal} value-dependent block(s) [${degradeSkipped.join(", ")}] settled via the async-degrade path this run — every retry/warning assertion in this file skipped, yet every other check still reads PASS. See card 9167962f.\n`);
+}
+check(`degrade-coverage: not every value-dependent block skipped via the async-degrade path this run (${degradeSkipped.length}/${degradeTotal} skipped: [${degradeSkipped.join(", ")}])`, degradeCoverageOk);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — mergeBatchTracked's own bounded multi-file retry (card 67030bb9) fires on a genuine identifiable batch gate failure, lands the WHOLE batch on a retry-assisted pass with the batch-specific weaker-pass wording (both on the sync return and on gate_status, and durationMs stays bounded to attempt 1's own run), records retryPassed:false without erasing attempt 1's own diagnosis when the retry ALSO fails, correctly reports gateRan:true/a real durationMs when the retry's own admission is cancelled while queued, and records WHY when the retry mechanism was never eligible to begin with."
