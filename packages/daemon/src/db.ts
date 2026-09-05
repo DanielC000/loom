@@ -2161,17 +2161,6 @@ export interface PendingGateOpVerdict {
    *  self-check row has no batch to count); `undefined` for every other row, including one that predates
    *  this field. */
   batchBranchCount?: number;
-  /** Code Review, card 67030bb9 finding [3]: WHY {@link gate-runner.ts's `identifyRetriableTestFiles`}
-   *  declined to identify a retry, when it was actually called — one of its own `RetryDeclineReason`
-   *  string values (`"no-fail-tier-match"`, `"count-mismatch"`, `"over-cap"`, `"harness-not-executed"`,
-   *  `"unparseable-name"`, `"file-not-found"`, `"duplicate-name"`), typed loosely as `string` here rather
-   *  than importing that daemon-internal union (this interface is read by both the solo `confirmWorkerMerge`
-   *  and batch `mergeBatch` call sites). Mutually exclusive with `retriedFile` being non-null on the SAME
-   *  row, by construction (a retry is either identified, eligible for `retriedFile`, or declined, eligible
-   *  for THIS field, never both). `undefined` — the overwhelming majority of rows — means EITHER
-   *  `identifyRetriableTestFiles` was never even called (its own caller's outer "genuine failure" guard was
-   *  already false) OR this row predates this field; never conflate the two with "eligible". */
-  retryDeclineReason?: string;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

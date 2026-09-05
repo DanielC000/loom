@@ -690,10 +690,15 @@ export interface BatchGateResult {
    *  green batch retry lands EVERY branch in the batch on the strength of one isolated re-run. */
   retriedFile?: string;
   retryPassed?: boolean;
-  /** Card 67030bb9: the retried run's own output tail, alongside `retriedFile` — lets the caller's weaker-
-   *  pass wording distinguish a timeout-kill retry from a genuine-assertion retry (see
-   *  `formatWeakerPassWarning`'s own `isTimeoutKillEntry` check), the same distinction the solo path
-   *  already makes. `undefined` whenever `retriedFile` is (nothing retried, nothing to tell apart). */
+  /** Card 67030bb9: attempt 1's own output tail — lets the caller's weaker-pass wording distinguish a
+   *  timeout-kill retry from a genuine-assertion retry (see `formatWeakerPassWarning`'s own
+   *  `isTimeoutKillEntry` check), the same distinction the solo path already makes. CORRECTED (Code
+   *  Review round 2, minor #2): an earlier version of this doc claimed `undefined` whenever `retriedFile`
+   *  is — false; the real producer (sessions/service.ts's own `runGate` closure) sets this UNCONDITIONALLY
+   *  from the SAME gate run's own result, outside the `retriedFile`-gated spread, so it is present on
+   *  every genuinely-ran gate regardless of whether a retry fired. Only ever consumed (via
+   *  `isTimeoutKillEntry`) when `retriedFile` is ALSO truthy — a caller reading this alongside a null
+   *  `retriedFile` simply has nothing to do with it, not evidence of a missing value. */
   outputTail?: string;
 }
 

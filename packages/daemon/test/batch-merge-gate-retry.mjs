@@ -297,8 +297,9 @@ try {
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     let calls = 0;
+    const seenGates = [];
     const fakeGate = async (gate, worktreePath) => {
-      calls++;
+      calls++; seenGates.push(gate);
       if (calls === 1) {
         plantTestFile(worktreePath, "flaky-batch-decline"); // never referenced — the FAIL line below is unparseable
         // A Jest-style path-shaped FAIL line — refused by identifyRetriableTestFiles' own bare-identifier
@@ -315,7 +316,14 @@ try {
     worktrees.push(...wts);
 
     await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
-    check("(vi) exactly ONE gate call to the batch gate itself — an unidentifiable failure never fires the retry", calls >= 1);
+    // Code Review round 2, minor #1: the PREVIOUS form of this check (`calls >= 1`) could never fail —
+    // by the time it ran, `calls` was already 3 (the fallback's own per-candidate re-gates), so it proved
+    // nothing about "never fires the retry". THIS asserts the actual claim: the very first call is the
+    // plain batch gate command (never a `--only=` retry re-invocation), and NO recorded call — including
+    // every fallback re-gate — is ever a `--only=` retry command, since the unidentifiable failure never
+    // makes identifyRetriableTestFiles eligible on either call site.
+    check("(vi) the first gate call is the plain batch command, never a --only= retry re-invocation", seenGates[0] === "pnpm gate");
+    check("(vi) no --only= retry invocation EVER fired, across all calls (batch + fallback) — an unidentifiable failure never fires the retry", seenGates.every((g) => !g.includes("--only=")));
 
     const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
     const row = page.items.find((r) => r.branch === null);
