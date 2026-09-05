@@ -3289,7 +3289,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const state = q.state ?? "pending";
         const now = new Date().toISOString();
         deps.db.insertQuestion({
-          id, sessionId: q.sessionId, projectId: q.projectId, type: q.type ?? "decision",
+          id, sessionId: q.sessionId,
+          // Card cb7d6998 — no seed field for this (the seed shape has no notion of "filed by a different
+          // session than it's routed to"); always the seeded sessionId, mirroring the real ask-time default.
+          filedBySessionId: q.sessionId,
+          projectId: q.projectId, type: q.type ?? "decision",
           title: q.title ?? "Seeded decision", body: q.body ?? "",
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
           permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,

@@ -1154,7 +1154,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_project_links_pair ON project_links(projec
 -- (mirrors the human-only-write trust posture of vault/git).
 CREATE TABLE IF NOT EXISTS questions (
   id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id),
+  session_id TEXT NOT NULL REFERENCES sessions(id),  -- CURRENT routing target, NOT provenance: reparentQuestions
+                                            -- (below) unconditionally rewrites this on every manager/Lead recycle,
+                                            -- so a row's session_id reflects whichever seat is LIVE now, not who
+                                            -- filed it. See filed_by_session_id (card cb7d6998) for the filer.
+  filed_by_session_id TEXT,                -- the ORIGINAL filing session id, set ONCE at insert, NEVER touched by
+                                            -- reparentQuestions — deliberately no REFERENCES (a soft, historical
+                                            -- pointer, like task_id below: the filing session may later be
+                                            -- hard-deleted without orphaning this row). NULL on a legacy row
+                                            -- created before this column existed — see QUESTION_ADDED_COLUMNS'
+                                            -- own doc for why that NULL is unrecoverable, not just unset.
   project_id TEXT NOT NULL REFERENCES projects(id),
   type TEXT NOT NULL DEFAULT 'decision',   -- 'decision' | 'input' | 'permission' | 'credential'
   title TEXT NOT NULL,
@@ -1824,6 +1833,16 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // legacy DB both gain it through this ONE ALTER-TABLE path — see migrateQuestions()'s own doc for why an
   // index referencing a migration-added column must never live in the base unconditional SCHEMA string.
   escalated_at: "TEXT",
+  // Immutable filer provenance (card cb7d6998) — UNLIKE every other entry here, this one is ALSO already
+  // in the base CREATE TABLE `questions` block above (a fresh install gets it with no ALTER needed); it's
+  // listed here too so an EXISTING pre-cb7d6998 DB picks it up via this same ALTER-TABLE path. Nullable,
+  // and — unlike `type`'s backfill-to-'decision' above — there is NO backfill value for a legacy row: the
+  // original filer's session_id on that row was already overwritten by `reparentQuestions` on any recycle
+  // that ran before this migration, so the true filer is gone, not merely un-migrated. NULL here means
+  // "unknown," permanently, for every row that predates this column. Boot-tested against a copy of a real
+  // pre-migration `~/.loom/loom.db`, mirroring migrateQuestions()'s own `type` precedent — see
+  // test/question-filed-by-session-id-migration.mjs.
+  filed_by_session_id: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -5499,6 +5518,12 @@ export class Db {
    * `getLiveSessionForAgent` read by agent lineage, so a question is reachable even when this never ran
    * (a manual stop + fresh, non-recycle spawn). Keeping this means the recycle path still gets an
    * immediate, explicit handoff rather than relying solely on the lineage read.
+   *
+   * ⚠️ Card cb7d6998: this is WHY `session_id` is a routing target, not provenance — every recycle walks
+   * it forward again, so a row's `session_id` after N recycles is the Nth successor, not the filer.
+   * Deliberately touches ONLY `session_id` — `filed_by_session_id` (set once at insert) must NEVER be
+   * written here; that immutability is the entire fix. Do not add a second column to this UPDATE without
+   * re-reading that card first.
    */
   reparentQuestions(oldSessionId: string, newSessionId: string): number {
     return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
@@ -6820,12 +6845,12 @@ export class Db {
   insertQuestion(q: Question): void {
     this.db.prepare(
       `INSERT INTO questions
-        (id,session_id,project_id,type,title,body,options_json,recommendation,task_id,
+        (id,session_id,filed_by_session_id,project_id,type,title,body,options_json,recommendation,task_id,
          permission_action,permission_scope,permission_expires_at,credential_env_var,
          provision_target,state,chosen_option,note,created_at,answered_at,consumed_at,
          cancelled_reason,cancelled_by,cancelled_at)
        VALUES
-        (@id,@sessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
+        (@id,@sessionId,@filedBySessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
          @permissionAction,@permissionScope,@permissionExpiresAt,@credentialEnvVar,
          @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
          @cancelledReason,@cancelledBy,@cancelledAt)`,
@@ -6836,6 +6861,11 @@ export class Db {
       id: q.id, sessionId: q.sessionId, projectId: q.projectId, type: q.type ?? "decision", title: q.title, body: q.body,
       optionsJson: q.options ? JSON.stringify(q.options) : null, recommendation: q.recommendation ?? null,
       taskId: q.taskId ?? null,
+      // Card cb7d6998 — immutable filer provenance, set ONCE here and never touched again. Defaults to
+      // `q.sessionId` (the asking session, which at INSERT time — before any recycle can have run — IS the
+      // filer) for any caller (a hermetic test, an e2e seed literal) that predates this field and never set
+      // it explicitly, rather than binding `undefined` (better-sqlite3 rejects that) or leaving it unset.
+      filedBySessionId: q.filedBySessionId ?? q.sessionId,
       permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
       permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
       // provision_connection_id/provision_binding_state are deliberately NOT insertable here — they are
@@ -8382,6 +8412,10 @@ function toQuestion(r0: unknown): Question {
     cancelledBy: (r.cancelled_by as "agent" | "human" | null) ?? null,
     cancelledAt: (r.cancelled_at as string | null) ?? null,
     escalatedAt: (r.escalated_at as string | null) ?? null,
+    // Card cb7d6998 — null on a legacy row (predates this column) means "unknown," permanently; never
+    // fall back to session_id here (that would silently re-introduce the exact bug this column exists to
+    // fix, since session_id is the mutable routing target, not the filer).
+    filedBySessionId: (r.filed_by_session_id as string | null) ?? null,
   };
 }
 // A question row already carrying the joined display columns (agent_name / project_name /

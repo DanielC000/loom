@@ -3064,7 +3064,13 @@ export interface ProvisionTarget {
  */
 export interface Question {
   id: string;
-  /** The asking manager/orchestrator session id — server-derived at ask time, never agent-supplied. */
+  /** The session this Request is currently ROUTED to — server-derived at ask time, never agent-supplied.
+   *  ⚠️ NOT stable provenance: `reparentQuestions` (see `Db`) unconditionally moves this to a manager/
+   *  Platform Lead's successor session id on every recycle, so a row created weeks ago by a long-retired
+   *  predecessor can carry today's successor's id here. That's deliberate — a still-pending question's
+   *  answer must nudge the LIVE successor, not a retired predecessor's dead pty — but it means "which
+   *  seat is this currently routed to" and "which seat originally filed this" are different questions.
+   *  For the latter, see `filedBySessionId` (card cb7d6998). */
   sessionId: string;
   projectId: string;
   /** Defaults to "decision" — an existing caller that never passes `type` is byte-identical to before. */
@@ -3146,6 +3152,15 @@ export interface Question {
    *  audit field (an answered Request that WAS escalated first keeps this value forever, so don't read a
    *  non-null value on an answered row as "still stale"; check `state` too). */
   escalatedAt: string | null;
+  /** Card cb7d6998 — the ORIGINAL filing session's own daemon id, set ONCE at `question_ask` and NEVER
+   *  touched by `reparentQuestions` (unlike `sessionId`, which recycle reparents onto each successor —
+   *  see `sessionId`'s own doc). This is the field a provenance reader actually wants: "which seat filed
+   *  this?" — `sessionId` answers "which seat currently owns this," a different question. `null` for
+   *  every row created before this column existed: the original filer's id on those rows was already
+   *  overwritten by any recycle that ran before this card shipped, so it is UNRECOVERABLE, not merely
+   *  unset — there is no backfill for a legacy row, and `null` here must be read as "unknown," never
+   *  guessed at from `createdAt`/session lifetimes. */
+  filedBySessionId: string | null;
 }
 
 /**

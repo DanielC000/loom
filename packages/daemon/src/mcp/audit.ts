@@ -91,14 +91,17 @@ export class AuditMcpRouter {
           "to surface in a transcript. NON-CONSUMING — reading NEVER drains or flips state, unlike " +
           "question_pull's agent-scoped drain-and-consume (a distinct primitive; mirrors task_requests_list/ " +
           "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
-          "`items` per row is {id, projectId, loomSessionId, agentId, taskId, type, title, state, createdAt, " +
-          "answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for decision|input, " +
-          "approved/note/scope/expiresAt/lapsed for permission (scope/expiresAt are the human's ACTUAL " +
-          "decided grant, distinct from the ask-time requested scope/expiry; lapsed is read-time-derived, " +
-          "true only once expiresAt is set AND past — advisory only, Loom never itself enforces/revokes " +
-          "it), ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
+          "`items` per row is {id, projectId, loomSessionId, filedBySessionId, agentId, taskId, type, title, " +
+          "state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for " +
+          "decision|input, approved/note/scope/expiresAt/lapsed for permission (scope/expiresAt are the " +
+          "human's ACTUAL decided grant, distinct from the ask-time requested scope/expiry; lapsed is " +
+          "read-time-derived, true only once expiresAt is set AND past — advisory only, Loom never itself " +
+          "enforces/revokes it), ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
           "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
-          "value). `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
+          "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
+          "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
+          "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
+          "`total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
           "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
           "projectId (one project), state (pending|answered|consumed|cancelled — \"cancelled\" is a " +
           "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer), type, sinceMinutes (only requests " +

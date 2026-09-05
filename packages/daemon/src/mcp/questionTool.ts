@@ -120,6 +120,9 @@ export function buildQuestionAsk(
     question: {
       id: randomUUID(),
       sessionId: ctx.sessionId,
+      // Card cb7d6998 — immutable filer provenance, identical to sessionId at ask time (before any
+      // recycle can have run) and never touched again — see Question.filedBySessionId's own doc.
+      filedBySessionId: ctx.sessionId,
       projectId: ctx.projectId,
       type,
       title: input.title,
@@ -313,10 +316,17 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * drift between the two read surfaces. `sessionId` → `loomSessionId` (card 7fcb586a — the asking session's
  * own DAEMON id, see `Session`'s session-id naming policy doc in `@loom/shared`): the only consumer asserting the OLD field name,
  * `test/audit-requests-list.mjs`, was updated in lockstep with this rename.
+ *
+ * ⚠️ Card cb7d6998: `loomSessionId` is the CURRENT routing target (`Question.sessionId`), NOT provenance
+ * — `reparentQuestions` walks it onto every manager/Lead recycle successor, so it answers "which seat
+ * currently owns this," not "who filed it." A reader wanting the filer must use `filedBySessionId`
+ * instead, which is set once at ask time and never rewritten (null on a row that predates this field —
+ * that history is genuinely unrecoverable, not just unmigrated).
  */
 export function auditRequestItem(q: Question & { agentId: string | null }): Record<string, unknown> {
   return {
-    id: q.id, projectId: q.projectId, loomSessionId: q.sessionId, agentId: q.agentId, taskId: q.taskId,
+    id: q.id, projectId: q.projectId, loomSessionId: q.sessionId, filedBySessionId: q.filedBySessionId,
+    agentId: q.agentId, taskId: q.taskId,
     type: q.type, title: q.title, state: q.state,
     createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
     ...questionAnswerByType(q),
