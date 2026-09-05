@@ -282,8 +282,67 @@ async function setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs, mgrProc
   check("(live-owner control) still exactly ONE real gate invocation total", gateCalls === 1);
 }
 
+// ── (6) THE FIX (card 257d534d) — the REST route's own real shape (worker.parentSessionId), but the
+//        manager RECYCLED mid-merge (a live successor, recycledFrom mgrId) rather than genuinely ending
+//        with no successor at all. Card 361520a0 Half Four's skipDeadOwnerRecovery flag (proven by (4))
+//        means the dead-owner check runs only ONCE per top-level confirmWorkerMergeUntilSettled call — its
+//        own FIRST internal attempt — and every retry inside that SAME call skips it; (4)'s single-call
+//        shape never actually exercises the check against an op that's ALREADY running, since nothing
+//        exists yet on that call's own first attempt. So this test fires TWO SEQUENTIAL top-level calls:
+//        the FIRST mints the op fresh (nothing to evict — a genuinely fresh dead-owner check trivially
+//        finds nothing), then times out at the ceiling with the gate still held open; the SECOND is a
+//        BRAND-NEW call sequence whose own first internal attempt genuinely evaluates the dead-owner check
+//        against the FIRST call's still-running op — exactly the REST route's "human re-clicks Merge"
+//        shape, and the only place this predicate is actually exercised for real.
+{
+  const sfx = `recycled-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-mrt-recycled-${sfx}`);
+  const { db, mgrId, projId, workerId } = await setupWorkerProject(sfx, reposDir, { gateCommandTimeoutMs: 1000, mgrProcessState: "exited" });
+
+  // The recycle successor: live, recycledFrom the now-exited mgrId — exactly the shape recycleManager
+  // leaves behind (the predecessor's pty hard-stopped, the pending op's managerSessionId never rewritten
+  // to point at the successor — carryPendingToSuccessor moves queued/durable messages only).
+  const successorId = `mrt-mgr-successor-${sfx}`;
+  db.insertSession({ id: successorId, projectId: projId, agentId: `agent-mrt-m-${sfx}`, engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: mgrId });
+
+  let releaseGate;
+  const gateHold = new Promise((res) => { releaseGate = res; });
+  let gateCalls = 0;
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+    runGate: async () => { gateCalls++; await gateHold; return { passed: true }; },
+    syncAttachBudgetMs: 50,
+  });
+
+  const pendingResult1 = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  check("(recycled-owner) FIRST call mints the op and gives up as NOT settled once the ceiling passed", pendingResult1.settled === false);
+  check("(recycled-owner) exactly ONE real gate invocation after the first call", gateCalls === 1);
+
+  // Spy only around the SECOND call — this is the one whose own first internal attempt genuinely
+  // evaluates the dead-owner check against a STILL-RUNNING op owned by the now-exited predecessor.
+  let evictionWarnings = 0;
+  const origWarn = console.warn;
+  console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) evictionWarnings++; origWarn(...args); };
+  const pendingResult2 = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  console.warn = origWarn;
+
+  check("(recycled-owner) SECOND (fresh) call also gives up as NOT settled — the gate is still genuinely running", pendingResult2.settled === false);
+  check("(recycled-owner) THE FIX — the real gate command STILL ran EXACTLY ONCE — the second call's fresh dead-owner check did NOT evict-and-remint the still-running op", gateCalls === 1);
+  check("(recycled-owner) it never logged a 'had a dead owner' eviction on the second call — the live successor was found", evictionWarnings === 0);
+  check("(recycled-owner) both calls report the SAME opId — dedupe-attach happened, never evict-and-remint",
+    typeof pendingResult1.op?.opId === "string" && pendingResult1.op?.opId === pendingResult2.op?.opId);
+  const recycledRows = db.listPendingGateOps().filter((r) => r.key === `merge:${workerId}`);
+  check("(recycled-owner) exactly ONE pending_gate_ops row exists — never re-minted across either call", recycledRows.length === 1);
+  check("(recycled-owner) that one row is still 'pending' (the real op is genuinely still running, never evicted)", recycledRows[0]?.state === "pending");
+
+  releaseGate("go");
+  await sessions.pendingOps.waitBriefly(`merge:${workerId}`, 30_000);
+  const finalResult = await sessions.confirmWorkerMergeUntilSettled(mgrId, workerId);
+  check("(recycled-owner) once released, the SAME in-flight op settles for real and merges", finalResult.settled === true && finalResult.ok === true && finalResult.value?.merged === true);
+  check("(recycled-owner) still exactly ONE real gate invocation total across all three calls", gateCalls === 1);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the REST merge route's confirmWorkerMergeUntilSettled shares the SAME PendingOpRegistry dedupe + durable pending_gate_ops tombstone as the MCP worker_merge_confirm path, a concurrent REST+MCP confirm on one worker never mints a duplicate op, the bounded wait ceiling never synthesizes a false 'not merged' while the real gate is still running, and — Half Four — a dead-owner manager (the REST route's own worker.parentSessionId shape) never re-evicts and re-mints the in-flight op on every internal poll: exactly one real gate invocation runs, matching a live owner's identical shape."
+  ? "\n✅ ALL PASS — the REST merge route's confirmWorkerMergeUntilSettled shares the SAME PendingOpRegistry dedupe + durable pending_gate_ops tombstone as the MCP worker_merge_confirm path, a concurrent REST+MCP confirm on one worker never mints a duplicate op, the bounded wait ceiling never synthesizes a false 'not merged' while the real gate is still running, — Half Four — a dead-owner manager (the REST route's own worker.parentSessionId shape) never re-evicts and re-mints the in-flight op on every internal poll (exactly one real gate invocation runs, matching a live owner's identical shape), and (card 257d534d) a manager that RECYCLED mid-merge, leaving a LIVE successor behind, is never mistaken for a dead owner by a fresh second call against its still-running op either — the same exactly-one-invocation result holds even though the originating manager itself has genuinely exited."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const db of dbs) try { db.close(); } catch { /* ignore */ }

@@ -174,15 +174,22 @@ try {
   // is instance-level) lets the confirmWorkerMergeTracked assertion below degrade to `settled:false` in
   // ~100ms instead of this file's GENEROUS_SYNC_BUDGET_MS (60s) while dedupe-attached to a zombie run()
   // that never resolves.
-  const recycledPredecessorId = `mdo-recycled-pred-${sfx}`, recycledSuccessorId = `mdo-recycled-succ-${sfx}`, workerId2 = `mdo-wkr2-${sfx}`;
+  // Code review (card 257d534d): each call site under test below gets its OWN key/worker (key4/workerId2
+  // for the boot-sweep, key5/workerId2b for the per-call check) rather than sharing one zombie — sharing
+  // meant the boot-sweep's own assertion (run first) already evicted-or-not the SAME entry the per-call
+  // check then observed, so a PARTIAL revert (only one of the two call sites fixed) could still pass both
+  // blocks: whichever call ran second was silently no-op'd by the first one's outcome rather than by its
+  // OWN predicate. Separate keys make each block independently falsifiable under a single full revert.
+  const recycledPredecessorId = `mdo-recycled-pred-${sfx}`, recycledSuccessorId = `mdo-recycled-succ-${sfx}`, workerId2 = `mdo-wkr2-${sfx}`, workerId2b = `mdo-wkr2b-${sfx}`;
   db.insertSession({ id: recycledPredecessorId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   db.insertSession({ id: recycledSuccessorId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: recycledPredecessorId });
   db.insertSession({ id: workerId2, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: recycledSuccessorId });
+  db.insertSession({ id: workerId2b, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: recycledSuccessorId });
 
   const sessionsFast = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 100 });
   const key4 = `merge:${workerId2}`;
   void sessionsFast.pendingOps.attach(key4, "merge", recycledPredecessorId, 10, () => new Promise(() => {}));
-  await waitUntil(() => sessionsFast.pendingOps.peek(key4)?.state === "running", { label: "recycled-owner op observable as running" });
+  await waitUntil(() => sessionsFast.pendingOps.peek(key4)?.state === "running", { label: "recycled-owner op (boot-sweep key) observable as running" });
   const recycledZombie = sessionsFast.pendingOps.peek(key4);
   check("(recycled-owner precondition) op is tracked running, owned by the now-EXITED predecessor", recycledZombie?.state === "running" && recycledZombie?.managerSessionId === recycledPredecessorId);
 
@@ -190,17 +197,25 @@ try {
   check("(recycled-owner) THE FIX — the boot-sweep does NOT evict an op whose owner recycled but has a LIVE successor", clearedRecycled === 0);
   check("(recycled-owner) the op is STILL tracked as running post-sweep — untouched, same as a genuinely live owner (4)", sessionsFast.pendingOps.peek(key4)?.state === "running");
 
-  // Same fix, the OTHER call site: confirmWorkerMergeTracked's own per-call defensive check must agree —
-  // it dedupe-attaches to the still-running zombie (never evicts+re-mints it), so this degrades to
-  // settled:false once its small syncAttachBudgetMs elapses, and logs NO "had a dead owner" eviction.
+  // Same fix, the OTHER call site — its OWN key/worker (workerId2b/key5), so this block's own predicate is
+  // what's under test, not whatever the boot-sweep block above already decided for a shared entry.
+  // confirmWorkerMergeTracked's per-call defensive check must agree: it dedupe-attaches to the still-
+  // running zombie (never evicts+re-mints it), so this degrades to settled:false once its small
+  // syncAttachBudgetMs elapses, and logs NO "had a dead owner" eviction.
+  const key5 = `merge:${workerId2b}`;
+  void sessionsFast.pendingOps.attach(key5, "merge", recycledPredecessorId, 10, () => new Promise(() => {}));
+  await waitUntil(() => sessionsFast.pendingOps.peek(key5)?.state === "running", { label: "recycled-owner op (per-call-check key) observable as running" });
+  const recycledZombie2 = sessionsFast.pendingOps.peek(key5);
+  check("(recycled-owner, per-call key) precondition: op is tracked running, owned by the now-EXITED predecessor", recycledZombie2?.state === "running" && recycledZombie2?.managerSessionId === recycledPredecessorId);
+
   let deadOwnerWarnings = 0;
   const origWarn2 = console.warn;
   console.warn = (...args) => { if (String(args[0]).includes("had a dead owner")) deadOwnerWarnings++; origWarn2(...args); };
-  const fastResult = await sessionsFast.confirmWorkerMergeTracked(recycledPredecessorId, workerId2);
+  const fastResult = await sessionsFast.confirmWorkerMergeTracked(recycledPredecessorId, workerId2b);
   console.warn = origWarn2;
   check("(recycled-owner) confirmWorkerMergeTracked's OWN per-call check agrees — degrades to settled:false, dedupe-attached to the still-running zombie", fastResult.settled === false);
   check("(recycled-owner) it never logged a 'had a dead owner' eviction — the lineage check found the live successor", deadOwnerWarnings === 0);
-  check("(recycled-owner) the op is STILL the SAME opId after this call — dedupe-attach happened, never evict-and-remint", sessionsFast.pendingOps.peek(key4)?.opId === recycledZombie.opId);
+  check("(recycled-owner) the op is STILL the SAME opId after this call — dedupe-attach happened, never evict-and-remint", sessionsFast.pendingOps.peek(key5)?.opId === recycledZombie2.opId);
 } finally {
   db.close();
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }

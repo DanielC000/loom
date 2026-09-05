@@ -4669,10 +4669,13 @@ export class SessionService {
      *  every settle nudge already resolves its own delivery target through (see
      *  {@link SessionService.resolveSettleNudgeTarget}'s doc), so this field and "who will actually be
      *  notified" can never drift apart from each other again. Walks `sessionId` itself (still live? done),
-     *  else its `recycledFrom`/successor chain, for a live end; `null` only when the WHOLE lineage is gone —
-     *  missing, exited, or archived, at every link, not just the originating one. `ownerSessionId` is the
-     *  manager for a "merge"/"merge-batch" row, the worker for its own "gate" self-check row — whichever
-     *  session originally minted this op.
+     *  else its `recycledFrom`/successor chain, for a live end; `null` only when NO link anywhere in the
+     *  WHOLE lineage has `processState === "live"` — that is the only thing it checks (it never reads
+     *  `archivedAt` at all); an archived session's `processState` is already `"exited"` by the time it's
+     *  archived in every current caller, so this reads the same as a lineage-wide dead check in practice
+     *  without needing to consult that field separately. `ownerSessionId` is the manager for a
+     *  "merge"/"merge-batch" row, the worker for its own "gate" self-check row — whichever session
+     *  originally minted this op.
      *
      *  ⭐ WHAT THIS DOES AND DOES NOT PROVE (read before trusting either value):
      *  - `false` (no live session anywhere in the lineage) IS a genuine stranded signal, derivable WITHOUT
@@ -8052,10 +8055,15 @@ export class SessionService {
   /** DEAD-OWNER CHECK (card 27ea069e; CORRECTED by card 257d534d — see the incident below): a manager's
    *  LINEAGE is "dead" for pending-merge-op purposes only when there is no LIVE session anywhere in its
    *  recycle chain — none of these can ever come back to observe a pending op's outcome through the
-   *  normal attach()/settle path. Deliberately conservative: a session mid-`starting` (e.g. a boot-time
-   *  resume attempt still in flight) reads as `processState === "live"` well before it's usable, so a
-   *  legitimately-resuming manager's own in-flight op is never touched — {@link liveLineageSuccessor}
-   *  (below) already treats that the same way every other liveness read in this file does.
+   *  normal attach()/settle path. Deliberately conservative: `"starting"` (every spawn/resume/recycle path
+   *  inserts a session row at `processState:"starting"`) is a genuinely transient window that closes
+   *  SYNCHRONOUSLY, with no intervening `await`, before any pty is even wired up — every call site flips it
+   *  to `"live"` a handful of lines after the insert (see e.g. the M5 comment a few lines above `this.db.
+   *  setProcessState(session.id, "live")` in `spawnWorkerTracked`). An op owner, by construction, has
+   *  already made a real MCP call — it cannot still be inside that pre-pty window — so there is no live
+   *  session this check could ever observe as `"starting"` in practice; {@link liveLineageSuccessor}
+   *  (below) simply reuses the SAME `processState === "live"` liveness test every other reader in this
+   *  file already uses, rather than special-casing a state no real caller can be caught in.
    *
    *  ⚠️ CORRECTED (card 257d534d, Code Reviewer `213fe600` finding F1 on card `d5e67146`): the ORIGINAL
    *  version of this check asked only "has THIS session (the one an op was minted under) exited or been
@@ -8071,8 +8079,11 @@ export class SessionService {
    *  `liveLineageSuccessor` primitive `gateStatus`'s `ownerSessionAlive` field and every settle nudge
    *  already resolve through, so "will eviction fire" and "will anyone actually be told" can never drift
    *  apart again. Fails toward evicting on doubt, unchanged: `liveLineageSuccessor` returns `null` (dead)
-   *  the instant the WHOLE lineage — every link, not just the originating one — is missing/exited/
-   *  archived, so a genuinely ownerless op is evicted exactly as eagerly as before this fix. */
+   *  the instant NO link anywhere in the WHOLE lineage — not just the originating session — has
+   *  `processState === "live"` (it never reads `archivedAt` itself; an archived session's `processState`
+   *  is already `"exited"` by the time it's archived in every current caller, so this is equivalent to a
+   *  lineage-wide dead check in practice), so a genuinely ownerless op is evicted exactly as eagerly as
+   *  before this fix. */
   private isManagerLineageDead(managerSessionId: string): boolean {
     return liveLineageSuccessor(this.db, managerSessionId) == null;
   }
@@ -17553,9 +17564,9 @@ export class SessionService {
     // nothing and still supersedes a self-check that gets queued mid-loop.
     this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
     // DEAD-OWNER RECOVERY (card 27ea069e; CORRECTED by card 257d534d — see isManagerLineageDead's own doc):
-    // an existing RUNNING op for this key whose owning manager's WHOLE LINEAGE is gone (missing/exited/
-    // archived at every link, not just the originating session — see isManagerLineageDead) can never
-    // settle for anyone again — nobody left in that lineage could ever be pushed its outcome. Without this
+    // an existing RUNNING op for this key whose owning manager's WHOLE LINEAGE has no live session
+    // anywhere in it — not just the originating session — can never settle for anyone again — nobody left
+    // in that lineage could ever be pushed its outcome. Without this
     // check, attach() below would dedup-attach THIS fresh call to that zombie op forever ({status:"pending"}
     // on every retry, no gate ever actually running — the exact incident this card fixes). Evict it so this
     // call starts a genuinely fresh confirm instead. SCOPED TO A CONFIRMED-DEAD LINEAGE ONLY: a live (or
