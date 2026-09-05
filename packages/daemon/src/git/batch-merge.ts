@@ -680,6 +680,21 @@ export interface BatchGateResult {
   emitCompareReduced?: boolean;
   reason?: string;
   detail?: Record<string, unknown>;
+  /** Card 67030bb9: whether this batch's gate retried a small set of files in isolation before reaching
+   *  `passed` (a comma-joined name list for N>1, a bare name for N=1 — see gate-runner.ts's
+   *  `identifyRetriableTestFiles`), and whether that retry itself passed. `undefined` on the overwhelming
+   *  majority of batches (no such retry ever fired) — this orchestrator never reads either field itself
+   *  (still gate-mechanism-agnostic, per this interface's own header doc); they exist purely so the
+   *  caller's OWN post-`runBatchedMerge` handling (sessions/service.ts's `mergeBatch`) can render a
+   *  weaker-pass note naming the batch's branch count, which matters more here than on a solo merge: a
+   *  green batch retry lands EVERY branch in the batch on the strength of one isolated re-run. */
+  retriedFile?: string;
+  retryPassed?: boolean;
+  /** Card 67030bb9: the retried run's own output tail, alongside `retriedFile` — lets the caller's weaker-
+   *  pass wording distinguish a timeout-kill retry from a genuine-assertion retry (see
+   *  `formatWeakerPassWarning`'s own `isTimeoutKillEntry` check), the same distinction the solo path
+   *  already makes. `undefined` whenever `retriedFile` is (nothing retried, nothing to tell apart). */
+  outputTail?: string;
 }
 
 export interface RunBatchedMergeResult {

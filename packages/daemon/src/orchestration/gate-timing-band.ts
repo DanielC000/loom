@@ -207,21 +207,23 @@ async function readTailRunSummaryRows(filePath: string, capBytes: number): Promi
 /**
  * Picks WHICH row describes "this op's own run" when more than one `run-summary` row shares `opId`.
  *
- * This is a real case, not a theoretical one: `sessions/service.ts`'s single-file merge retry
- * (`identifyRetriableTestFile`) re-invokes `test-daemon.mjs` with `--only=<file>` under the SAME
+ * This is a real case, not a theoretical one: `sessions/service.ts`'s bounded multi-file merge retry
+ * (`identifyRetriableTestFiles`, card 67030bb9 — up to `MULTI_FILE_RETRY_MAX` files at once, single-file
+ * being the N=1 case) re-invokes `test-daemon.mjs` with `--only=<file>[,<file>...]` under the SAME
  * `LOOM_GATE_OP_ID` as the first (failed, full-suite) attempt — and that first attempt, having failed
  * with a "genuine" (clean non-zero exit, never a kill/timeout) classification, DID reach its own
  * `run-summary` write. So a retried-and-then-passed merge can leave TWO `run-summary` rows under one
- * `opId`: one full-suite (`testCount` in the hundreds, `failedCount>=1`), one single-file
- * (`testCount===1`). The TRANSIENT-KILL retry (OOM/SIGKILL/timeout) does NOT create this problem — a
+ * `opId`: one full-suite (`testCount` in the hundreds, `failedCount>=1`), one small
+ * (`testCount` between 1 and the cap). The TRANSIENT-KILL retry (OOM/SIGKILL/timeout) does NOT create this problem — a
  * killed attempt never reaches its own post-run write at all (that's the entire point of the write-ahead
  * "run-start" row design), so only the retry's own row ever exists for that opId there.
  *
  * DELIBERATE CHOICE: the row with the LARGEST `testCount` wins (ties broken toward the LAST/most-recent
- * one in file order). A single-file retry's `testCount===1` row is never what a caller wants this op's
- * stratum to describe — it would put the band at a near-meaningless "single test file" population instead
- * of the full-suite one every other gate run actually populates. The largest-`testCount` row is, by
- * construction, always the full/real gate invocation for this op, regardless of retry shape.
+ * one in file order). A retry's own small `testCount` row (1 file, or up to `MULTI_FILE_RETRY_MAX`) is
+ * never what a caller wants this op's stratum to describe — it would put the band at a near-meaningless
+ * few-test-file population instead of the full-suite one every other gate run actually populates. The
+ * largest-`testCount` row is, by construction, always the full/real gate invocation for this op, regardless
+ * of retry shape.
  */
 function pickSelfRow(rows: RunSummaryRow[], opId: string): RunSummaryRow | undefined {
   let best: RunSummaryRow | undefined;

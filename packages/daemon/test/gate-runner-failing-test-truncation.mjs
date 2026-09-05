@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, createFailureBlockTracker, identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
+const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker, createFailureBlockTracker, identifyRetriableTestFiles } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 // `diagnostic` is an OPTIONAL third arg: a () => string called ONLY on failure, printed alongside the
@@ -462,14 +462,14 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         twoFailures.matchCount() === 2);
     }
 
-    // (I) THE DECOUPLING, ASSERTED EXPLICITLY (manager review, card 0e5b2045): `identifyRetriableTestFile`
+    // (I) THE DECOUPLING, ASSERTED EXPLICITLY (manager review, card 0e5b2045): `identifyRetriableTestFiles`
     // reads `failTierResult()`/`failTierMatchCount()`, NOT `result()`/`matchCount()` — a run with BOTH a
     // real FAIL <name> line and an UNCAUGHT line must (a) still return the UNCAUGHT line from result() for
     // diagnostics, AND (b) still produce a WORKING retry target via the tier-isolated accessors. Losing (b)
     // as a side effect of fixing (a) would have silently turned kickoff-real-spawn's own self-healing
     // retries into hard merge rejections (~15 extra minutes each, at its measured ~1-in-11 weaker-pass
     // rate) — a policy change to fleet-wide retry behavior this card never asked for. Plants the real
-    // fixture files identifyRetriableTestFile's own `fs.existsSync` checks require, mirroring
+    // fixture files identifyRetriableTestFiles's own `fs.existsSync` checks require, mirroring
     // merge-gate-single-file-retry.mjs's fixture-planting convention.
     {
       const scriptsDir = path.join(dir, "packages", "daemon", "scripts");
@@ -485,18 +485,21 @@ const dir = mkdtempManaged("loom-gr-trunc-");
       check("(I-a) result() still returns the UNCAUGHT line for diagnostics, with the retry-target decoupling in place",
         tracker.result() === UNCAUGHT_LINE);
 
-      const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
-      check("(I-b) failTierResult()/failTierMatchCount() still identify kickoff-real-spawn as a WORKING retry target — the single-file merge retry does NOT silently stop firing for UNCAUGHT-idiom files",
-        candidate !== undefined && candidate.name === "kickoff-real-spawn");
+      const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), false);
+      check("(I-b) failTierAllResults()/failTierMatchCount() still identify kickoff-real-spawn as a WORKING retry target — the single-file merge retry does NOT silently stop firing for UNCAUGHT-idiom files",
+        candidate.eligible === true && candidate.names?.[0] === "kickoff-real-spawn");
       check("(I-b) the retry command is the real --only= single-file re-invocation",
-        candidate?.command === "node packages/daemon/scripts/test-daemon.mjs --only=kickoff-real-spawn");
+        candidate.command === "node packages/daemon/scripts/test-daemon.mjs --only=kickoff-real-spawn");
 
       // NEGATIVE CONTROL: feeding result()/matchCount() (the diagnostic-winning fields, NOT the tier-
-      // isolated ones) into identifyRetriableTestFile must decline — proves (I-b)'s pass isn't vacuous
-      // (i.e. isn't passing because identifyRetriableTestFile accepts anything it's handed).
-      const wrongFieldCandidate = identifyRetriableTestFile(tracker.result(), dir, tracker.matchCount());
+      // isolated ones) into identifyRetriableTestFiles must decline — proves (I-b)'s pass isn't vacuous
+      // (i.e. isn't passing because identifyRetriableTestFiles accepts anything it's handed). `result()`
+      // itself is a bare string (never an array), so it's wrapped in a single-element array here to match
+      // the new plural signature's shape — the point of this control is that the CONTENT is wrong (an
+      // UNCAUGHT line, not a bare FAIL <name>), not that the shape is.
+      const wrongFieldCandidate = identifyRetriableTestFiles(tracker.result() ? [tracker.result()] : undefined, dir, tracker.matchCount(), false);
       check("(I) negative control: passing result()/matchCount() (the UNCAUGHT-winning diagnostic fields) instead of the failTier* accessors correctly declines — the two accessor pairs are not interchangeable",
-        wrongFieldCandidate === undefined);
+        wrongFieldCandidate.eligible === false);
     }
 
     // ── (K) Card 6c84b87b — THE ACTUAL DEFECT, PROVEN END-TO-END THROUGH THE REAL TRACKER (not an
@@ -537,24 +540,43 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         check("(K1) failTierResult() names the real wrapper line itself, never the echoed indented copy",
           tracker.failTierResult() === WRAPPER_LINE);
 
-        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
-        check("(K1) THE ACTUAL FIX: identifyRetriableTestFile now identifies widget-assertion-fail as a working retry target for a plain ASSERTION failure — not just the UNCAUGHT idiom (I-b) already covered (pre-fix: the retry NEVER fired for an assertion failure at all — this is the ~96%-of-the-population case the card names)",
-          candidate !== undefined && candidate.name === "widget-assertion-fail");
+        const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), false);
+        check("(K1) THE ACTUAL FIX: identifyRetriableTestFiles now identifies widget-assertion-fail as a working retry target for a plain ASSERTION failure — not just the UNCAUGHT idiom (I-b) already covered (pre-fix: the retry NEVER fired for an assertion failure at all — this is the ~96%-of-the-population case the card names)",
+          candidate.eligible === true && candidate.names?.[0] === "widget-assertion-fail");
       }
 
-      // (K2) NEGATIVE CONTROL — genuine multi-file ambiguity must still refuse. Two REAL, distinct files
-      // each printing their own real wrapper line must still report failTierMatchCount() === 2 and decline
-      // the retry — proves (K1)'s anchoring didn't accidentally collapse real ambiguity down to 1 along
-      // with fixing the false positive (the unsafe direction this card's own DoD explicitly warns against).
+      // (K2) card 67030bb9 — TWO REAL, distinct failing files, both within the default bounded-multi-file
+      // cap (3), must now be IDENTIFIED TOGETHER, not refused — this is the manager-approved behavior change
+      // this card makes: the OLD design refused ANY count above 1 outright; the NEW one only refuses above
+      // the cap. Named files' own wrapper lines still report failTierMatchCount() === 2 either way — what
+      // changed is what `identifyRetriableTestFiles` DOES with that count.
       {
         fs.writeFileSync(path.join(testDirFixture, "widget-assertion-fail-2.mjs"), "// fixture\n");
         const tracker = createFailingTestTracker();
         tracker.feed(Buffer.from("FAIL  widget-assertion-fail  (exit 1)\nFAIL  widget-assertion-fail-2  (exit 1)\n", "utf-8"));
-        check("(K2) two GENUINELY distinct failing files' own wrapper lines still report failTierMatchCount() === 2 — real ambiguity is not swallowed by the anchoring fix",
+        check("(K2) two GENUINELY distinct failing files' own wrapper lines still report failTierMatchCount() === 2",
           tracker.failTierMatchCount() === 2);
-        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
-        check("(K2) and the retry correctly declines on that real ambiguity",
-          candidate === undefined);
+        const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), false);
+        check("(K2) and — since card 67030bb9 — the retry now IDENTIFIES both together (within the default cap of 3), rather than refusing outright",
+          candidate.eligible === true && candidate.names?.join(",") === "widget-assertion-fail,widget-assertion-fail-2");
+      }
+
+      // (K2b) card 67030bb9 — the OTHER direction: genuine ambiguity ABOVE the cap must still refuse, so
+      // this isn't a blanket "always retry" replacing a blanket "never retry". Four real, distinct files —
+      // one more than the default cap of 3 — must decline.
+      {
+        fs.writeFileSync(path.join(testDirFixture, "widget-assertion-fail-3.mjs"), "// fixture\n");
+        fs.writeFileSync(path.join(testDirFixture, "widget-assertion-fail-4.mjs"), "// fixture\n");
+        const tracker = createFailingTestTracker();
+        tracker.feed(Buffer.from(
+          "FAIL  widget-assertion-fail  (exit 1)\nFAIL  widget-assertion-fail-2  (exit 1)\nFAIL  widget-assertion-fail-3  (exit 1)\nFAIL  widget-assertion-fail-4  (exit 1)\n",
+          "utf-8",
+        ));
+        check("(K2b) four genuinely distinct failing files report failTierMatchCount() === 4",
+          tracker.failTierMatchCount() === 4);
+        const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), false);
+        check("(K2b) and the retry correctly declines — one over the default cap (3) — over-cap, not swallowed by the wider band",
+          candidate.eligible === false && candidate.declineReason === "over-cap");
       }
 
       // (K3) card 2a79a74c finding #4, VERIFIED HERE (not just cited): a REDUCED-PATH static guard runs
@@ -572,11 +594,11 @@ const dir = mkdtempManaged("loom-gr-trunc-");
         tracker.feed(Buffer.from("FAIL  gate-history is still witnessed by the fixed-wait guard\n", "utf-8"));
         check("(K3) card 2a79a74c #4: a bare reduced-path guard's own FAIL <label> line (no runLane wrapper, no exit suffix) is NOT counted by failTierMatchCount()",
           tracker.failTierMatchCount() === 0);
-        check("(K3) and failTierResult() is undefined — nothing for identifyRetriableTestFile to even parse",
+        check("(K3) and failTierResult() is undefined — nothing for identifyRetriableTestFiles to even parse",
           tracker.failTierResult() === undefined);
-        const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
-        check("(K3) so identifyRetriableTestFile never produces a candidate at all — a guard failure can no longer masquerade as a retry into an unrelated file",
-          candidate === undefined);
+        const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), false);
+        check("(K3) so identifyRetriableTestFiles never produces a candidate at all — a guard failure can no longer masquerade as a retry into an unrelated file",
+          candidate.eligible === false);
       }
 
       // (K4) card 2a79a74c finding #5: `test-daemon.mjs`'s own structural `notExecuted` invariant trips
@@ -602,18 +624,18 @@ const dir = mkdtempManaged("loom-gr-trunc-");
           check("(K4a) THE NEW SIGNAL: harnessNotExecutedDetected() is true",
             tracker.harnessNotExecutedDetected() === true);
 
-          // PROVES THE CHECK CAN FAIL (mutation): calling identifyRetriableTestFile the OLD way (3 args,
-          // matching every pre-#5 call site in this repo) still produces a candidate — the bug this card
-          // fixes, reproduced live, not asserted from memory.
-          const oldShapeCandidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount());
-          check("(K4a) OLD 3-ARG CALL SHAPE (pre-#5 fix): still identifies a retry candidate — this is the exact masking risk card 2a79a74c #5 describes, reproduced here as the RED case the fix must close",
-            oldShapeCandidate !== undefined && oldShapeCandidate.name === "real-failure");
+          // PROVES THE CHECK CAN FAIL (mutation): calling identifyRetriableTestFiles the OLD way (omitting
+          // harnessNotExecutedDetected, matching every pre-#5 call site in this repo) still produces a
+          // candidate — the bug this card fixes, reproduced live, not asserted from memory.
+          const oldShapeCandidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), undefined);
+          check("(K4a) OLD CALL SHAPE (pre-#5 fix, harnessNotExecutedDetected omitted/undefined -> falsy): still identifies a retry candidate — this is the exact masking risk card 2a79a74c #5 describes, reproduced here as the RED case the fix must close",
+            oldShapeCandidate.eligible === true && oldShapeCandidate.names?.[0] === "real-failure");
 
           // THE FIX ITSELF: passing harnessNotExecutedDetected() (true) refuses the retry outright, despite
           // failTierMatchCount() === 1 and a real, existing candidate file.
-          const fixedCandidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          const fixedCandidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
           check("(K4a) THE FIX: passing harnessNotExecutedDetected() through refuses the retry — no candidate, despite a real, otherwise-retriable single failure",
-            fixedCandidate === undefined);
+            fixedCandidate.eligible === false && fixedCandidate.declineReason === "harness-not-executed");
         }
 
         // (K4b) NEGATIVE CONTROL — the SAME single genuine failure, with NO notExecuted line anywhere in
@@ -623,14 +645,14 @@ const dir = mkdtempManaged("loom-gr-trunc-");
           tracker.feed(Buffer.from("FAIL  real-failure  (exit 1)\n", "utf-8"));
           check("(K4b) harnessNotExecutedDetected() is false on an ordinary run with no structural invariant tripped",
             tracker.harnessNotExecutedDetected() === false);
-          const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
           check("(K4b) an ordinary single-file genuine failure still identifies a working retry target — the #5 fix does not suppress the normal case",
-            candidate !== undefined && candidate.name === "real-failure");
+            candidate.eligible === true && candidate.names?.[0] === "real-failure");
         }
 
         // (K4c) the notExecuted line ALONE (no genuine test failure at all — e.g. a pure harness/pool bug
-        // with every selected file that DID run passing) must still refuse: failTierResult() is undefined
-        // in that case (nothing for identifyRetriableTestFile to even parse), so this is really a
+        // with every selected file that DID run passing) must still refuse: failTierAllResults() is empty
+        // in that case (nothing for identifyRetriableTestFiles to even parse), so this is really a
         // tracker-level check that the marker is detected independent of whether any FAIL-tier line exists.
         {
           const tracker = createFailingTestTracker();
@@ -639,9 +661,9 @@ const dir = mkdtempManaged("loom-gr-trunc-");
             tracker.harnessNotExecutedDetected() === true);
           check("(K4c) failTierMatchCount() stays 0 — the notExecuted line itself is never mistaken for a FAIL-tier wrapper line",
             tracker.failTierMatchCount() === 0);
-          const candidate = identifyRetriableTestFile(tracker.failTierResult(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
-          check("(K4c) no candidate either way — failTierResult() is undefined, so identifyRetriableTestFile's own first check already refuses",
-            candidate === undefined);
+          const candidate = identifyRetriableTestFiles(tracker.failTierAllResults(), dir, tracker.failTierMatchCount(), tracker.harnessNotExecutedDetected());
+          check("(K4c) no candidate either way — failTierAllResults() is empty, so identifyRetriableTestFiles's own first check already refuses",
+            candidate.eligible === false && candidate.declineReason === "no-fail-tier-match");
         }
       }
     }
@@ -755,7 +777,7 @@ const dir = mkdtempManaged("loom-gr-trunc-");
 
     // (K4) BEHAVIOR PRESERVED — a project whose cwd has no packages/daemon/test/ layout at all (i.e. not
     // this daemon's own repo) must be completely unaffected: the existence check is a no-op there, exactly
-    // like identifyRetriableTestFile's own fail-closed-elsewhere posture.
+    // like identifyRetriableTestFiles's own fail-closed-elsewhere posture.
     {
       const tracker = createFailingTestTracker(noLayoutDir);
       tracker.feed(Buffer.from("FAIL  some_test.mjs\n", "utf-8"));

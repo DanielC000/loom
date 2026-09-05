@@ -956,12 +956,17 @@ export type OrchestrationEventKind =
   // marks that the one auto-retry is about to run (`detail.priorClass`), `build_gate_retry` records its
   // outcome (`detail.passed`). A genuine non-zero exit never fires either — see classifyGateFailure.
   | "build_gate_retry_attempt" | "build_gate_retry"
-  // Card 344ce950: a SINGLE-FILE retry, distinct from the transient-kill retry above — fires on a
-  // "genuine" (clean non-zero exit) test-step failure that names one identifiable, re-runnable file
-  // (see gate-runner.ts's `identifyRetriableTestFile`), rather than re-running the whole gate. Audit-only
-  // (like `build_gate_retry_attempt`, deliberately excluded from GATE_HISTORY_KINDS — the outcome is
-  // folded onto the SAME `build_gate` row via `retriedFile`/`retryPassed`, never a second history row).
-  // `detail` carries { retriedFile, retryPassed, priorFailingTest }.
+  // Card 344ce950 (single-file) / 67030bb9 (bounded multi-file — the KIND NAME itself is unchanged on
+  // purpose: this is a durable, already-persisted event-kind string, and renaming it for the multi-file
+  // widening would split existing history against new rows for zero functional benefit; read `retriedFile`
+  // itself, a comma-joined list of names on a multi-file retry, single bare name on the original N=1 case,
+  // to tell which shape a given row is): distinct from the transient-kill retry above — fires on a
+  // "genuine" (clean non-zero exit) test-step failure that names up to `MULTI_FILE_RETRY_MAX` identifiable,
+  // re-runnable files together (see gate-runner.ts's `identifyRetriableTestFiles`), rather than re-running
+  // the whole gate. Audit-only (like `build_gate_retry_attempt`, deliberately excluded from
+  // GATE_HISTORY_KINDS — the outcome is folded onto the SAME `build_gate` row via
+  // `retriedFile`/`retryPassed`, never a second history row). `detail` carries { retriedFile, retryPassed,
+  // priorFailingTest }.
   | "build_gate_single_file_retry"
   // A scheduled fire FAILED to spawn (startManager/startAuditor threw). The durable mirror of
   // `schedule_fired`: without it a spawn failure ONLY hit stderr, so a cadence could silently never run
@@ -1850,14 +1855,17 @@ export interface GateHistoryRow {
    *  handle the two fields' independent availability separately rather than assuming one's presence
    *  implies the other's. */
   concurrentGatesMax: number | null;
-  /** Card 344ce950: the bare name of a single test file this run retried in isolation before declaring a
-   *  verdict (see gate-runner.ts's `identifyRetriableTestFile`) — `null` when no such retry fired (the
-   *  overwhelming majority of rows, unchanged from before this field existed). Presence alone does NOT
-   *  imply the run passed — see `retryPassed` for that. A `passed:true` row carrying a non-null
-   *  `retriedFile` is WEAKER evidence than an ordinary clean pass (`retriedFile:null`): the first attempt
-   *  failed for real and only the isolated re-run came back green, which is exactly the shape an
-   *  order-dependent/cross-test-pollution bug can produce (real in the suite, absent in isolation) — never
-   *  collapse the two into the same "pass" without checking this field. */
+  /** Card 344ce950 (single-file) / 67030bb9 (bounded multi-file): the bare name of the test file(s) this
+   *  run retried together in isolation before declaring a verdict (see gate-runner.ts's
+   *  `identifyRetriableTestFiles`) — a comma-joined list of names when more than one file was retried
+   *  together (up to `MULTI_FILE_RETRY_MAX`), a bare name for the ordinary N=1 case, byte-identical to
+   *  before card 67030bb9. `null` when no such retry fired (the overwhelming majority of rows, unchanged
+   *  from before this field existed). Presence alone does NOT imply the run passed — see `retryPassed` for
+   *  that. A `passed:true` row carrying a non-null `retriedFile` is WEAKER evidence than an ordinary clean
+   *  pass (`retriedFile:null`): the first attempt failed for real and only the isolated re-run came back
+   *  green, which is exactly the shape an order-dependent/cross-test-pollution bug can produce (real in
+   *  the suite, absent in isolation) — never collapse the two into the same "pass" without checking this
+   *  field. */
   retriedFile: string | null;
   /** Card 344ce950: whether the `retriedFile` retry itself passed — `null` whenever `retriedFile` is
    *  `null` (nothing to report); `true`/`false` alongside a non-null `retriedFile`. A `false` here means

@@ -170,17 +170,17 @@ try {
     const fakeGate = async (gate, cwd, timeoutMs, _runStep, envOverride) => {
       attempt++;
       captured.push(envOverride?.LOOM_GATE_OP_ID);
-      // Card 0e5b2045: identifyRetriableTestFile reads failTierTest/failTierTestCount, NOT
+      // Card 0e5b2045: identifyRetriableTestFiles reads failTierTest/failTierTestCount, NOT
       // failingTest/failingTestCount (the two decoupled — an UNCAUGHT-idiom line can now outrank a bare
       // FAIL <name> summary in failingTest; the retry always targets failTierTest instead). Both are set
       // identically here since this fixture has no UNCAUGHT line at all.
-      if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1 };
+      if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1, failTierAll: ["FAIL  flaky-one"] };
       return { passed: true };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const wt = await createWorktree(D.repo, D.projId, D.taskId);
     D.worktreePath = wt.worktreePath; D.branch = wt.branch; worktrees.push(wt.worktreePath);
-    // Plants the two files identifyRetriableTestFile looks for (mirrors merge-gate-single-file-retry.mjs).
+    // Plants the two files identifyRetriableTestFiles looks for (mirrors merge-gate-single-file-retry.mjs).
     fs.mkdirSync(path.join(wt.worktreePath, "packages", "daemon", "scripts"), { recursive: true });
     fs.writeFileSync(path.join(wt.worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs"), "// stub\n");
     fs.mkdirSync(path.join(wt.worktreePath, "packages", "daemon", "test"), { recursive: true });

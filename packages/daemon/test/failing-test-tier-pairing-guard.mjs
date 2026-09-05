@@ -45,19 +45,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // wider rule would have to re-litigate every file above one by one; this one needs zero of that.
 //
 // THE ONE FILE-LEVEL EXEMPTION THIS NARROWER RULE STILL CAN'T DERIVE STRUCTURALLY:
-// `merge-gate-concurrency-verdict.mjs` sets `failingTestCount: 2` (twice) with NO `failTierTest` at all, and
-// reaches `confirmWorkerMergeTracked` (the SAME merge-retry-eligible path the real bugs lived in) — so by
-// the reasoning above it LOOKS like a violation. It isn't, for a reason no static scan can see: count `2`
-// means `identifyRetriableTestFile`'s own `failTierTestCount !== 1` check refuses retry regardless of
-// whether `failTierTest` is ALSO set — pairing this literal would change no observable behaviour anywhere.
+// `merge-gate-concurrency-verdict.mjs` sets `failingTestCount: 2` (twice) with NO `failTierTest`/
+// `failTierAll` at all, and reaches `confirmWorkerMergeTracked` (the SAME merge-retry-eligible path the
+// real bugs lived in) — so by the reasoning above it LOOKS like a violation. It isn't, for a reason no
+// static scan can see: this fixture never sets `failTierAll` (or `failTierTest`) AT ALL, and
+// `identifyRetriableTestFiles`'s OWN first check (`!failTierAll || failTierAll.length === 0`) refuses
+// outright on that absence alone, before the count is ever consulted — pairing this literal would change
+// no observable behaviour anywhere.
+// 🔴 CORRECTED (card 67030bb9 — the ORIGINAL wording here read "count `2` means `failTierTestCount !== 1`
+// refuses retry regardless of pairing", which was TRUE under the old exactly-one-file design but is FALSE
+// now: a bounded multi-file retry (up to `MULTI_FILE_RETRY_MAX`, currently 3) can identify a count of 2.
+// The exemption's SAFETY never depended on the count being refused, though — it depends on this fixture
+// never setting `failTierTest`/`failTierAll` at all, which `identifyRetriableTestFiles` checks FIRST,
+// before the count. That was always the real reason; the old wording just cited the wrong gate.
 // (Commit a995d7bc's OWN scenario (F), the collapsed-multi-failure case in `merge-gate-single-file-retry.
 // mjs`, started in this exact unpaired `failingTestCount: 2`-no-`failTierTest` shape too — it got paired
 // only because that commit was already rewriting every literal in that file for the OTHER 4, genuinely
-// behavioural, sites, not because (F) itself was broken.) card 3c4a19cb's own DoD-2 enumerates this as a
-// deliberate, already-reviewed exclusion — "if your rule fires on this file, the rule is wrong, not the
-// file" — so it is a named, narrow, commented allowlist entry (EXEMPT_FILES below), not a structural rule.
-// EXTENDING THIS ALLOWLIST: add a new entry ONLY for a file where a human has confirmed the count->refusal
-// reasoning above genuinely applies — never to silence a fresh failure without reading it first.
+// behavioural, sites, not because (F) itself was broken. Card 67030bb9 later rewrote that SAME (F) scenario
+// again, this time to prove the bounded multi-file retry actually fires for N=2 — see that file's own
+// history.) card 3c4a19cb's own DoD-2 enumerates this as a deliberate, already-reviewed exclusion — "if
+// your rule fires on this file, the rule is wrong, not the file" — so it is a named, narrow, commented
+// allowlist entry (EXEMPT_FILES below), not a structural rule. EXTENDING THIS ALLOWLIST: add a new entry
+// ONLY for a file where a human has confirmed the reasoning above genuinely applies — never to silence a
+// fresh failure without reading it first.
 //
 // SCOPE: `packages/daemon/test/*.mjs` only (source text, never `dist/` — no build required to run this).
 // Run: node packages/daemon/test/failing-test-tier-pairing-guard.mjs
@@ -73,8 +83,10 @@ const SELF = path.basename(__filename);
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// card 3c4a19cb DoD-2's own deliberate exclusion — see this file's header for the full reasoning (count > 1
-// means retry is refused regardless of pairing, so pairing this specific literal is a no-op either way).
+// card 3c4a19cb DoD-2's own deliberate exclusion — see this file's header for the full reasoning
+// (CORRECTED by card 67030bb9: safe because this fixture never sets failTierTest/failTierAll at all, which
+// identifyRetriableTestFiles refuses on before the count is ever consulted — NOT because "count > 1 always
+// refuses", which is no longer true under the bounded multi-file retry).
 const EXEMPT_FILES = new Set(["merge-gate-concurrency-verdict.mjs"]);
 
 /**
@@ -266,11 +278,22 @@ function classify(rawText, fileName) {
     }
     const hasFailTierTest = ownKeys.has("failTierTest");
     const hasFailTierTestCount = ownKeys.has("failTierTestCount");
-    if (!hasFailTierTest || !hasFailTierTestCount) {
-      const missing = !hasFailTierTest && !hasFailTierTestCount
-        ? "failTierTest: and failTierTestCount:"
-        : !hasFailTierTest ? "failTierTest:" : "failTierTestCount:";
-      violations.push({ line: lineOf(rawText, idx), reason: `sets failingTestCount: but not ${missing}` });
+    // Card 67030bb9: THE SAME PAIRING BUG, ONE FIELD LATER. `identifyRetriableTestFiles` (gate-runner.ts)
+    // reads `failTierAll` to NAME every retriable file — `failTierTest`/`failTierTestCount` alone are no
+    // longer sufficient to drive a real retry (they still exist as the "last line"/"count" pair, but the
+    // function that actually identifies candidates reads the ARRAY). A double that sets `failingTestCount:`
+    // + `failTierTest:`/`failTierTestCount:` but forgets `failTierAll:` satisfies the OLD two-key check yet
+    // silently produces `identifyRetriableTestFiles(undefined, ...)` → `declineReason:"no-fail-tier-match"`
+    // — the retry never fires, with nothing flagging it, exactly the bug shape this whole guard exists to
+    // catch, just relocated to the new field. Required alongside the original two, same exemption.
+    const hasFailTierAll = ownKeys.has("failTierAll");
+    if (!hasFailTierTest || !hasFailTierTestCount || !hasFailTierAll) {
+      const missingKeys = [
+        !hasFailTierTest ? "failTierTest:" : null,
+        !hasFailTierTestCount ? "failTierTestCount:" : null,
+        !hasFailTierAll ? "failTierAll:" : null,
+      ].filter(Boolean);
+      violations.push({ line: lineOf(rawText, idx), reason: `sets failingTestCount: but not ${missingKeys.join(" and ")}` });
     }
   }
   return { violations, parseError: null };
@@ -292,10 +315,19 @@ function classify(rawText, fileName) {
   const bad = classify(PRE_FIX_OPID_ATTRIBUTION, "merge-gate-opid-attribution.mjs");
   check("(A) RED PROOF: the REAL pre-fix (commit a995d7bc's parent) literal — failingTestCount:1 with no failTierTest — IS flagged", bad.parseError === null && bad.violations.length === 1);
 
-  // THE FIX (same commit, same file, current shape): failTierTest/failTierTestCount added alongside.
-  const POST_FIX_OPID_ATTRIBUTION = 'if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1 };';
+  // THE FIX (same commit, same file, current shape): failTierTest/failTierTestCount/failTierAll added
+  // alongside — the THIRD key (card 67030bb9) was added by this same guard's own extension, matching the
+  // real fixture's own current shape in merge-gate-opid-attribution.mjs verbatim.
+  const POST_FIX_OPID_ATTRIBUTION = 'if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1, failTierAll: ["FAIL  flaky-one"] };';
   const good = classify(POST_FIX_OPID_ATTRIBUTION, "merge-gate-opid-attribution.mjs");
-  check("(A) GREEN: the SAME literal with failTierTest/failTierTestCount added is NOT flagged", good.parseError === null && good.violations.length === 0);
+  check("(A) GREEN: the SAME literal with failTierTest:/failTierTestCount:/failTierAll: all added is NOT flagged", good.parseError === null && good.violations.length === 0);
+  // (A) card 67030bb9's own RED PROOF: the two-key POST-FIX shape (failTierTest/failTierTestCount, but
+  // missing the NEW failTierAll:) must now ALSO be flagged — proves the guard's extension is real, not
+  // decorative (a guard that only ever re-confirms the OLD two-key pairing would silently let a future
+  // failTierAll-less fixture back in).
+  const TWO_KEY_ONLY = 'if (attempt === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1 };';
+  const twoKeyOnly = classify(TWO_KEY_ONLY, "merge-gate-opid-attribution.mjs");
+  check("(A) RED PROOF (card 67030bb9): failTierTest:/failTierTestCount: alone, with NO failTierAll:, IS flagged — the guard's extension actually bites", twoKeyOnly.parseError === null && twoKeyOnly.violations.length === 1 && twoKeyOnly.violations[0].reason.includes("failTierAll:"));
 
   // Legitimate exclusion #1 (DoD-2): a bare `failingTest:` with NO count at all — merge-gate-single-file-
   // retry.mjs's own scenario (D), and gate-history.mjs's richFailGate/richCancelGate stubs — never claims a
@@ -373,7 +405,7 @@ function classify(rawText, fileName) {
     for (const v of violations) console.log(`  UNPAIRED  ${v.file}:${v.line}  — ${v.reason}`);
   }
   check(
-    `every failingTestCount: site in the corpus also sets failTierTest:/failTierTestCount: (found ${violations.length} violation(s) across ${totalCountMatches} failingTestCount: site(s), excluding the ${EXEMPT_FILES.size} named exemption(s))`,
+    `every failingTestCount: site in the corpus also sets failTierTest:/failTierTestCount:/failTierAll: (found ${violations.length} violation(s) across ${totalCountMatches} failingTestCount: site(s), excluding the ${EXEMPT_FILES.size} named exemption(s))`,
     violations.length === 0,
   );
 }

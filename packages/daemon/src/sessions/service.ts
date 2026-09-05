@@ -59,7 +59,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -523,6 +523,20 @@ type MergeBatchResult = {
    *  `gate_history`/`gate_status(opId)` rather than repeated here, since that event already fires before
    *  this method's own return. */
   phaseTimings?: { worktreeCutMs: number; assemblyMs?: number; fastForwardMs?: number };
+  /** Card 67030bb9: this batch's own gate retried a small set of files together in isolation before
+   *  reaching its verdict (see `BatchGateResult.retriedFile`'s own doc, git/batch-merge.ts) — a
+   *  comma-joined name list for N>1, a bare name for N=1. `undefined` on the overwhelming majority of
+   *  batches (no such retry ever fired). Present on BOTH a resulting `ok:true` (the retry came back green
+   *  — see `retryPassed`) and a resulting `ok:false` (the retry ALSO failed) — same asymmetric-scope
+   *  discipline `ConfirmMergeResult.retriedFile` already documents for the solo path. */
+  retriedFile?: string;
+  retryPassed?: boolean;
+  /** Card 67030bb9: present ONLY when `retriedFile` is set and the BATCH ultimately landed (`ok:true`) —
+   *  the SAME "⚠ WEAKER PASS" wording `formatWeakerPassWarning` renders for the solo path, but carrying
+   *  THIS batch's own `landed.length` so a manager reading the async settle nudge can see how many
+   *  branches landed on the strength of one isolated retry, not just which file(s) were retried. A batch
+   *  retry is a STRONGER claim than a solo one for exactly this reason. */
+  retryWarning?: string;
 };
 
 type ConfirmMergeResult = {
@@ -604,11 +618,14 @@ type ConfirmMergeResult = {
    *  for why those two phases deliberately differ). */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
-  /** Card 344ce950: the bare name of a single test file this merge's gate retried in isolation before
-   *  reaching this verdict (see gate-runner.ts's `identifyRetriableTestFile`) — `undefined` when no such
-   *  retry fired (the overwhelming majority of merges). Set on BOTH a resulting pass (the isolated re-run
-   *  came back green — see `retryPassed`) AND a resulting rejection (the re-run ALSO failed) — a reader
-   *  must not assume `retriedFile` alone implies a pass. */
+  /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
+   *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
+   *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
+   *  merges). A comma-joined list when more than one file was retried together (up to
+   *  `MULTI_FILE_RETRY_MAX`); a bare name for the ordinary N=1 case, byte-identical to before card
+   *  67030bb9. Set on BOTH a resulting pass (the isolated re-run came back green — see `retryPassed`) AND
+   *  a resulting rejection (the re-run ALSO failed) — a reader must not assume `retriedFile` alone implies
+   *  a pass. */
   retriedFile?: string;
   /** Card 344ce950: whether the `retriedFile` retry itself passed. `undefined` whenever `retriedFile` is
    *  `undefined`. `true` here means THIS merge's `merged:true` is WEAKER evidence than an ordinary clean
@@ -1059,6 +1076,11 @@ function deriveDeployGateVerdict(
 function deriveBatchGateVerdict(
   result: GateSequentialResult, gateStartedAt: number, opMintedAtMs: number, nowMs: number,
   gateCap: number, concurrentGates: number, concurrentGatesMax: number,
+  // Card 67030bb9: the SAME measured-negative retry pair `deriveMergeGateVerdict` writes unconditionally
+  // (real value or `null`, never silently `undefined`) — see `PendingGateOpVerdict.retriedFile`'s own doc.
+  // Optional purely so every OTHER existing caller of this function stays byte-identical; the one real
+  // caller (mergeBatch's own `runGate` closure) always passes it now.
+  retryInfo?: { retriedFile?: string; retryPassed?: boolean },
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } {
   return {
     kind: result.passed ? "pass" : "fail",
@@ -1070,6 +1092,10 @@ function deriveBatchGateVerdict(
       outputTail: result.outputTail,
       ...(result.outputFile ? { outputFile: result.outputFile } : {}),
       gateCap, concurrentGates, concurrentGatesMax,
+      ...(retryInfo ? {
+        retriedFile: retryInfo.retriedFile ?? null,
+        retryPassed: retryInfo.retryPassed ?? null,
+      } : {}),
       ...(result.passed ? {} : { gateDetail: {
         failedStep: result.failedStep, failingTest: result.failingTest, failingTestCount: result.failingTestCount,
         exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? undefined,
@@ -15343,25 +15369,25 @@ export class SessionService {
       // does not correspond to either admission the REST of that same row describes. Capturing it here
       // bounds it to attempt 1's own run, unconditionally, whether or not a retry later fires.
       const gateAttempt1DurationMs = Date.now() - gateStartedAt;
-      // SINGLE-FILE RETRY (card 344ce950 — a MEASURED source of waste in the merge pipeline: a failure
-      // narrowed to one identifiable, re-runnable test file that then passes in isolation costs a full
-      // second run of the whole suite when the manager just re-fires worker_merge_confirm by hand instead).
-      // Fires ONLY for a "genuine" classification (a clean non-zero exit — never a kill/timeout, which the
-      // TRANSIENT-KILL AUTO-RETRY below already owns, and never twice: this runs exactly once, before that
-      // section, so the two retries can never both fire for the same gate attempt) that names one
-      // identifiable, re-runnable file (see gate-runner.ts's `identifyRetriableTestFile` for the
-      // deliberately narrow, fail-closed match — a project without this exact suite, or a failure that
-      // doesn't name a real file, always returns `undefined` here and this block is a no-op, byte-identical
-      // to before this card). NO CAUSE IS ASSERTED anywhere in this block or its wording. `identifyRetriableTestFile`
-      // ALSO requires `gateResult.failTierTestCount === 1` — this daemon's own test runner has no fail-fast,
-      // so a run can genuinely fail on MULTIPLE files while the live tracker's own "last match per tier"
-      // shape reports only one of them. Passing `failTierTestCount` through is what lets that function
-      // refuse to retry a collapsed multi-failure signal (see its own doc for the full reasoning).
+      // BOUNDED MULTI-FILE RETRY (card 344ce950 single-file; card 67030bb9 bounded multi-file, manager-
+      // approved — a MEASURED source of waste in the merge pipeline: a failure narrowed to a small set of
+      // identifiable, re-runnable test files that then pass together in isolation costs a full second run
+      // of the whole suite when the manager just re-fires worker_merge_confirm by hand instead, and — per
+      // card 67030bb9's own investigation — a multi-file failure used to be refused this retry OUTRIGHT,
+      // regardless of whether every file in it would pass alone). Fires ONLY for a "genuine" classification
+      // (a clean non-zero exit — never a kill/timeout, which the TRANSIENT-KILL AUTO-RETRY below already
+      // owns, and never twice: this runs exactly once, before that section, so the two retries can never
+      // both fire for the same gate attempt) that names UP TO `MULTI_FILE_RETRY_MAX` identifiable,
+      // re-runnable files together (see gate-runner.ts's `identifyRetriableTestFiles` for the deliberately
+      // narrow, fail-closed match, applied to EVERY name in the set — a project without this exact suite,
+      // or a failure that doesn't cleanly name every file, always declines and this block is a no-op for
+      // that project, byte-identical to before either card). NO CAUSE IS ASSERTED anywhere in this block or
+      // its wording.
       //
-      // Card 0e5b2045: reads `failTierTest`/`failTierTestCount`, NOT `failingTest`/`failingTestCount` — the
-      // FAIL/not-ok tier's OWN line, independent of whichever tier `failingTest` was drawn from for
+      // Card 0e5b2045: reads `failTierAll`/`failTierTestCount`, NOT `failingTest`/`failingTestCount` — the
+      // FAIL/not-ok tier's OWN lines, independent of whichever tier `failingTest` was drawn from for
       // diagnostics (an `UNCAUGHT`-idiom line can outrank a bare `FAIL <name>` summary there). This retry
-      // must keep targeting the SAME file it always has, regardless of which tier wins the diagnostic
+      // must keep targeting the SAME file(s) it always has, regardless of which tier wins the diagnostic
       // display — see gate-runner.ts's `FAILING_TEST_PATTERNS` doc for the full reasoning.
       //
       // ROUTED THROUGH runExclusive (Code Review CRITICAL, card b9e07a4a): an earlier version of this
@@ -15380,10 +15406,11 @@ export class SessionService {
         // Card 2a79a74c #5: pass harnessNotExecutedDetected through unconditionally (?? false — a test
         // double/legacy shape that never sets it means "not detected", never a silent skip of the check)
         // so a run that ALSO tripped test-daemon.mjs's own structural notExecuted invariant can never be
-        // retried piecemeal, regardless of failTierTestCount — see identifyRetriableTestFile's own doc.
-        const candidate = identifyRetriableTestFile(gateResult.failTierTest, worktreePath, gateResult.failTierTestCount, gateResult.harnessNotExecutedDetected ?? false);
-        if (candidate) {
-          retriedFile = candidate.name;
+        // retried piecemeal, regardless of failTierTestCount — see identifyRetriableTestFiles's own doc.
+        const identification = identifyRetriableTestFiles(gateResult.failTierAll, worktreePath, gateResult.failTierTestCount, gateResult.harnessNotExecutedDetected ?? false);
+        if (identification.eligible) {
+          const candidate = identification;
+          retriedFile = candidate.names.join(",");
           let singleFileRetryStartedAt = 0;
           try {
             const retryResult = await this.gateSemaphore.runExclusive(
@@ -16638,6 +16665,75 @@ export class SessionService {
               this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt, totalDurationMs } });
               throw err;
             }
+            // BOUNDED MULTI-FILE RETRY ON THE BATCH PATH (card 67030bb9 — the PRIMARY gap this card closes:
+            // this mechanism existed ONLY on the solo `confirmWorkerMerge` path before this card —
+            // `identifyRetriableTestFiles` had exactly one call site, and `batch-merge.ts` referenced none of
+            // this mechanism's fields at all, confirmed by grep before this change). A batch retry is a
+            // STRONGER claim than a solo one: a green retry here lands EVERY branch in the batch, not just
+            // one file's own change — see `formatWeakerPassWarning`'s own `batchBranchCount` param, used
+            // where this batch's pass/weaker-pass note is actually rendered. Mirrors confirmWorkerMerge's OWN
+            // retry shape exactly (same `runExclusive`/`holdRepoGuardOnExit`/`GateCancelledError` handling,
+            // same "never twice" posture, same bounded cap, same fail-closed `identifyRetriableTestFiles`)
+            // rather than inventing a second design for the identical decision.
+            let retriedFile: string | undefined;
+            let retryPassed: boolean | undefined;
+            if (!r.passed && classifyGateFailure(r) === "genuine") {
+              const identification = identifyRetriableTestFiles(r.failTierAll, worktreePath, r.failTierTestCount, r.harnessNotExecutedDetected ?? false);
+              if (identification.eligible) {
+                retriedFile = identification.names.join(",");
+                let batchRetryStartedAt = 0;
+                try {
+                  const retryResult = await this.gateSemaphore.runExclusive(
+                    orchestration.maxConcurrentGates, { ...descriptor, batchLandedCount: landedCount },
+                    async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+                      batchRetryStartedAt = startedAt;
+                      concurrentAtStart = this.gateSemaphore.snapshot().active;
+                      getConcurrentGatesMax = getMaxConcurrentGates;
+                      // Card a16c580b (post-rebase composition, card 67030bb9): ONE spill path for this
+                      // whole batch op, same as the first attempt just above and the solo path's own retry
+                      // — gateSpillPath(opId) is a pure function of opId, so passing it again here appends
+                      // to the SAME file in real execution order rather than leaving this retry's own
+                      // output unspillable while every sibling gate call for this op already spills.
+                      const rr = await runGateSequential(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
+                      if (rr.passed) holdRepoGuardOnExit();
+                      return rr;
+                    },
+                    "high",
+                  );
+                  retryPassed = retryResult.passed;
+                } catch (err) {
+                  // Mirrors the FIRST attempt's own catch immediately above — a brand new admission cycle can
+                  // independently be withdrawn while queued even though attempt 1 already ran; settle the SAME
+                  // tombstone (never settled twice: this `return` exits `runGate` before the normal settle
+                  // further below ever runs) and report a batch failure so the caller falls back to a solo
+                  // re-confirm per candidate — safe (no merge lands), never a crash.
+                  const cancelNowMs = Date.now();
+                  const cancelSettledAt = new Date(cancelNowMs).toISOString();
+                  const cancelTotalDurationMs = cancelNowMs - opMintedAtMs;
+                  if (err instanceof GateCancelledError) {
+                    this.db.settlePendingGateOp(opId, { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } });
+                    evtBatch("build_gate", {
+                      passed: r.passed, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
+                      batched: true, branchCount: landedCount, gateCap: orchestration.maxConcurrentGates,
+                      concurrentGates: concurrentAtStart, concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart,
+                      retriedFile,
+                    });
+                    return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+                  }
+                  this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt: cancelSettledAt, totalDurationMs: cancelTotalDurationMs } });
+                  throw err;
+                }
+                evtBatch("build_gate_single_file_retry", {
+                  retriedFile, retryPassed, priorFailingTest: r.failingTest, batched: true, branchCount: landedCount,
+                  gateCap: orchestration.maxConcurrentGates, concurrentGates: concurrentAtStart,
+                  concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart, durationMs: Date.now() - batchRetryStartedAt,
+                });
+                // Same non-negotiable absorb-but-never-erase discipline as the solo path: a pass-after-retry
+                // is WEAKER evidence than a clean pass. `retriedFile`/`retryPassed` (stamped below and on this
+                // closure's own return) are the only thing keeping that visible.
+                if (retryPassed) r = { ...r, passed: true };
+              }
+            }
             const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
             // ONE captured instant for everything this closure still needs to timestamp — not two independent
             // `Date.now()` calls — so gate_status's durationMs (via deriveBatchGateVerdict below) and
@@ -16650,7 +16746,7 @@ export class SessionService {
             // unconditionally here (the pass/fail branch), back-to-back with the gate's own settle, mirroring
             // deployOwnProject's identical back-to-back settle (see deriveBatchGateVerdict's own doc for what
             // this payload deliberately includes/omits vs. deriveMergeGateVerdict/deriveDeployGateVerdict).
-            this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, gateStartedAt, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax));
+            this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, gateStartedAt, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, { retriedFile, retryPassed }));
             pruneGateSpills();
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
@@ -16700,8 +16796,16 @@ export class SessionService {
               // handling for where that phase is recorded instead.
               worktreeCutMs, assemblyMs, admissionWaitMs: gateStartedAt - opMintedAtMs,
               ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
+              // Card 67030bb9: mirrors confirmWorkerMerge's own `build_gate` retry-observability pair.
+              ...(retriedFile ? { retriedFile, retryPassed } : {}),
             });
-            return { passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps } };
+            return {
+              passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },
+              // Card 67030bb9: threaded through `BatchGateResult` so `runBatchedMerge`'s caller (this batch's
+              // OWN async-settle nudge, below) can render `formatWeakerPassWarning` with the batch's branch
+              // count — see that call site for why this matters more here than on the solo path.
+              ...(retriedFile ? { retriedFile, retryPassed } : {}), outputTail: r.outputTail,
+            };
           };
 
           const batchCandidates: BatchCandidate[] = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
@@ -16735,7 +16839,13 @@ export class SessionService {
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
             ]);
-            return { ok: false, landed: [], fallback, reason: result.reason, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+            return {
+              ok: false, landed: [], fallback, reason: result.reason,
+              phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
+              // Card 67030bb9: a retry that ALSO failed still recorded that one was attempted — mirrors
+              // confirmWorkerMerge's own identical rejection-path observability.
+              ...(result.gateDetail?.retriedFile ? { retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed } : {}),
+            };
           }
 
           const landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[] = [];
@@ -16764,7 +16874,18 @@ export class SessionService {
             ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
             ...strandedFallback,
           ]);
-          return { ok: true, landed, fallback, phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs } };
+          return {
+            ok: true, landed, fallback,
+            phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
+            // Card 67030bb9: a retry-assisted batch landing is WEAKER evidence than an ordinary clean batch
+            // pass — see `MergeBatchResult.retryWarning`'s own doc. `landed.length` (not the requested K) is
+            // the count that actually matters here: it's how many branches just landed on the strength of
+            // this one isolated retry.
+            ...(result.gateDetail?.retriedFile ? {
+              retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed,
+              retryWarning: formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, landed.length),
+            } : {}),
+          };
         } finally {
           if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
         }
@@ -16796,7 +16917,12 @@ export class SessionService {
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${outcome.value.landed.length} branch(es) on main: ${landedList(outcome.value.landed)}.` +
-            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).` : "")
+            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).` : "") +
+            // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
+            // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
+            // return already surfaces via `MergeBatchResult.retryWarning`, or a manager who missed the sync
+            // return (this is exactly the async/pending path) would never see it at all.
+            (outcome.value.retryWarning ? ` ${outcome.value.retryWarning}` : "")
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).`;
         try {
           this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId: null, kind: "warning" });

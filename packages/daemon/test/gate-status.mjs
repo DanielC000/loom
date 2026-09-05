@@ -823,7 +823,7 @@ try {
       // survives onto the final settled "pass" row below — the real shape the DoD-3 check further down
       // needs to mean anything (a synthetic gate that never returns `steps` at all would make that check
       // vacuous, since `status.steps` would just be `undefined`).
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-gst", failingTestCount: 1, failTierTest: "FAIL  flaky-gst", failTierTestCount: 1, steps: [{ step: "pnpm gate", durationMs: 500, status: 1 }] };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-gst", failingTestCount: 1, failTierTest: "FAIL  flaky-gst", failTierTestCount: 1, failTierAll: ["FAIL  flaky-gst"], steps: [{ step: "pnpm gate", durationMs: 500, status: 1 }] };
       return { passed: true };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: retryThenPassGate });

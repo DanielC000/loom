@@ -71,7 +71,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { identifyRetriableTestFile } = await import("../dist/orchestration/gate-runner.js");
+const { identifyRetriableTestFiles } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -127,7 +127,7 @@ try {
     const seenGates = [];
     const fakeGate = async (gate) => {
       calls++; seenGates.push(gate);
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1 };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-one", failingTestCount: 1, failTierTest: "FAIL  flaky-one", failTierTestCount: 1, failTierAll: ["FAIL  flaky-one"] };
       return { passed: true };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
@@ -184,7 +184,7 @@ try {
         // Deliberately DIFFERENT strings — a real UNCAUGHT-idiom run's `failingTest` names no file at all,
         // while `failTierTest` is the SAME `FAIL <name>` line that always won pre-decoupling.
         failingTest: "💥 UNCAUGHT — Error: waitUntil timed out after 8000ms", failingTestCount: 1,
-        failTierTest: "FAIL  flaky-j", failTierTestCount: 1,
+        failTierTest: "FAIL  flaky-j", failTierTestCount: 1, failTierAll: ["FAIL  flaky-j"],
       };
       return { passed: true };
     };
@@ -233,7 +233,7 @@ try {
     let releaseRetry;
     const fakeGate = async () => {
       calls++;
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-g", failingTestCount: 1, failTierTest: "FAIL  flaky-g", failTierTestCount: 1 };
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-g", failingTestCount: 1, failTierTest: "FAIL  flaky-g", failTierTestCount: 1, failTierAll: ["FAIL  flaky-g"] };
       if (calls === 2) {
         // THE single-file retry's own runGateSeq call — held open so we can prove the per-repo guard is
         // held (a same-repo sibling stays queued) while this is still running.
@@ -367,7 +367,7 @@ try {
         await new Promise((res) => { releaseCall1 = res; });
         // The genuine, identifiable failure that would normally trigger the single-file retry — but the
         // retry's OWN admission gets cancelled below before this function is ever called a second time.
-        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1, failTierTest: "FAIL  flaky-h", failTierTestCount: 1 };
+        return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-h", failingTestCount: 1, failTierTest: "FAIL  flaky-h", failTierTestCount: 1, failTierAll: ["FAIL  flaky-h"] };
       }
       // The holder's own gate — held open once admitted (mirrors worker H's own call1 above) so it keeps
       // occupying the cap-1 slot long enough for the retry's own admission to genuinely queue behind it and
@@ -474,21 +474,23 @@ try {
     }
   }
 
-  // ── (F) MULTI-FAILURE — manager review (#128): createFailingTestTracker keeps only the LAST matching ────
-  // line per pattern tier (proven directly against the REAL tracker just below) — a run where TWO files
-  // (alpha, beta) genuinely fail collapses to a single `failingTest` string naming only the LAST one. This
-  // fakeGate hands confirmWorkerMerge EXACTLY that collapsed shape — indistinguishable, from confirmWorkerMerge's
-  // own vantage point, from a real 2-failure run. `beta` passes in isolation; `alpha` is NEVER re-examined.
+  // ── (F) BOUNDED MULTI-FILE RETRY (card 67030bb9 — the OLD test here, "manager review #128", proved the
+  //        OLD design refused ANY multi-file failure outright via `identifyRetriableTestFile`'s `!== 1`
+  //        gate. THIS test proves the NEW, manager-approved design instead: alpha AND beta, two REAL
+  //        distinct failing files, retry TOGETHER via ONE `--only=alpha,beta` call and — when that retry
+  //        passes — the merge proceeds with BOTH names recorded, not silently refused the way the old
+  //        design's blanket `!==1` used to (defensibly against masking a real failure, but at the cost of
+  //        every genuinely-retriable multi-file case too — see card 67030bb9's own investigation). ────────
   {
     const { createFailingTestTracker } = await import("../dist/orchestration/gate-runner.js");
     const proofTracker = createFailingTestTracker();
     proofTracker.feed(Buffer.from("FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)\n"));
-    check("(F proof) the REAL tracker collapses 2 distinct failing files to the LAST one only — root cause confirmed", proofTracker.result() === "FAIL  beta  (exit 1)");
-    check("(F proof, THE FIX) matchCount() correctly reports 2 for the SAME collapsed line", proofTracker.matchCount() === 2);
-    // Card 0e5b2045: identifyRetriableTestFile now reads failTierMatchCount(), not matchCount() — this run
-    // has no UNCAUGHT line, so both tracker accessors agree here (both tiers-of-interest happen to
-    // coincide), but the count that ACTUALLY drives the refusal below is failTierMatchCount() specifically.
-    check("(F proof, THE FIX) failTierMatchCount() ALSO reports 2 — this is what actually lets identifyRetriableTestFile refuse it", proofTracker.failTierMatchCount() === 2);
+    check("(F proof) the DIAGNOSTIC tier (result()/matchCount()) still collapses 2 distinct failing files to the LAST one only — unaffected by card 67030bb9, since this tier was never what the retry reads", proofTracker.result() === "FAIL  beta  (exit 1)" && proofTracker.matchCount() === 2);
+    // Card 67030bb9: failTierAllResults() is what actually lets the retry name BOTH files — matchCount()
+    // (above) only ever reports a COUNT, never WHICH files. This is exactly the gap the old `!== 1`
+    // refusal existed to route around: with no way to name more than one file, any count above 1 had to be
+    // refused wholesale — defensibly, but overbroadly.
+    check("(F proof, THE FIX) failTierAllResults() names BOTH distinct files, in order", JSON.stringify(proofTracker.failTierAllResults()) === JSON.stringify(["FAIL  alpha  (exit 1)", "FAIL  beta  (exit 1)"]));
 
     const F = mk("f", "feature-f.txt");
     makeRepo(F);
@@ -498,26 +500,51 @@ try {
     const seenGates = [];
     const fakeGate = async (gate) => {
       calls++; seenGates.push(gate);
-      // Mirrors the REAL (fixed) tracker's own collapsed output above verbatim — `failingTest` names only
-      // `beta`, but `failingTestCount:2` (the same number `proofTracker.matchCount()` just proved) tells
-      // the retry gate this is NOT a complete account of the failure. `alpha`'s failure is real and
-      // genuinely invisible through `failingTest` alone; `failingTestCount` is what keeps it visible.
-      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)", failingTest: "FAIL  beta  (exit 1)", failingTestCount: 2, failTierTest: "FAIL  beta  (exit 1)", failTierTestCount: 2 };
-      return { passed: true }; // beta passes in isolation — alpha was never re-run
+      if (calls === 1) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL  alpha  (exit 1)\nFAIL  beta  (exit 1)", failingTest: "FAIL  beta  (exit 1)", failingTestCount: 2, failTierTest: "FAIL  beta  (exit 1)", failTierTestCount: 2, failTierAll: ["FAIL  alpha  (exit 1)", "FAIL  beta  (exit 1)"] };
+      return { passed: true }; // alpha AND beta retried TOGETHER via one --only=alpha,beta call, and pass
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
+    plantTestFile(worktreePath, "alpha");
     plantTestFile(worktreePath, "beta");
     fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
     commitAll(worktreePath, `${F.file}`, GIT_ID);
     seed(db, F, "pnpm gate");
 
     const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
-    check(
-      "(F) SAFE OUTCOME REQUIRED: a collapsed multi-failure signal must NOT retry+merge — alpha's failure was never re-examined",
-      confirm.merged === false && calls === 1,
-    );
+    check("(F) N=2 (within the default cap of 3) retries BOTH files together, via ONE combined --only= call", calls === 2 && seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=alpha,beta");
+    check("(F) retry passed -> merged:true", confirm.merged === true);
+    check("(F) retriedFile names BOTH files, comma-joined", confirm.retriedFile === "alpha,beta");
+  }
+
+  // ── (F2) OVER-CAP STILL DECLINES, END-TO-END through the REAL confirmWorkerMerge call site (card
+  //        67030bb9) — proves the bound this card adds is a REAL bound, not merely "N=1 vs N>1" renamed:
+  //        4 distinct, individually-identifiable real files (one MORE than the default cap of 3) must NOT
+  //        retry, exactly like the old design's blanket refusal, so a genuinely large multi-file failure is
+  //        never masked by a bulk isolated re-run. (E3), earlier in this file, already proves this at the
+  //        unit level; this proves it holds through the REAL service.ts call site too. ────────────────────
+  {
+    const F2 = mk("f2", "feature-f2.txt");
+    makeRepo(F2);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { } };
+    let calls = 0;
+    const allFour = ["FAIL  w1  (exit 1)", "FAIL  w2  (exit 1)", "FAIL  w3  (exit 1)", "FAIL  w4  (exit 1)"];
+    const fakeGate = async () => {
+      calls++;
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: allFour.join("\n"), failingTest: allFour[allFour.length - 1], failingTestCount: 4, failTierTest: allFour[allFour.length - 1], failTierTestCount: 4, failTierAll: allFour };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(F2.repo, F2.projId, F2.taskId);
+    F2.worktreePath = worktreePath; F2.branch = branch; worktrees.push(worktreePath);
+    for (const n of ["w1", "w2", "w3", "w4"]) plantTestFile(worktreePath, n);
+    fs.writeFileSync(path.join(worktreePath, F2.file), "work for F2\n");
+    commitAll(worktreePath, `${F2.file}`, GIT_ID);
+    seed(db, F2, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(F2.mgrId, F2.workerId);
+    check("(F2) SAFE OUTCOME REQUIRED: 4 files, one over the default cap (3) -> NOT retried, exactly ONE gate call", confirm.merged === false && calls === 1);
   }
 
   // ── (B) FAILS TWICE — rejects EXACTLY as today, retried EXACTLY ONCE ────────────────────────────────────
@@ -530,7 +557,7 @@ try {
     let calls = 0;
     const fakeGate = async () => {
       calls++;
-      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "AssertionError: expected 1 to equal 2", failingTest: "FAIL  flaky-two", failingTestCount: 1, failTierTest: "FAIL  flaky-two", failTierTestCount: 1 };
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "AssertionError: expected 1 to equal 2", failingTest: "FAIL  flaky-two", failingTestCount: 1, failTierTest: "FAIL  flaky-two", failTierTestCount: 1, failTierAll: ["FAIL  flaky-two"] };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
@@ -620,25 +647,41 @@ try {
     check("(D) NO build_gate_single_file_retry event fired", eventsOfKind(db, D.mgrId, "build_gate_single_file_retry").length === 0);
   }
 
-  // ── (E) identifyRetriableTestFile unit coverage ─────────────────────────────────────────────────────────
+  // ── (E) identifyRetriableTestFiles unit coverage (card 67030bb9: bounded multi-file, renamed/plural) ─────
   {
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "loom-sfr-unit-"));
     try {
-      check("(E) undefined failingTest -> undefined", identifyRetriableTestFile(undefined, scratch, 1) === undefined);
-      check("(E) a non-FAIL line -> undefined", identifyRetriableTestFile("AssertionError: expected 1 to equal 2", scratch, 1) === undefined);
-      check("(E) FAIL <name> but the files don't exist on disk -> undefined (fail-closed)", identifyRetriableTestFile("FAIL  ghost-test", scratch, 1) === undefined);
+      const declined = (r) => r.eligible === false;
+      check("(E) undefined failTierAll -> declined, no-fail-tier-match", declined(identifyRetriableTestFiles(undefined, scratch, undefined, false)) && identifyRetriableTestFiles(undefined, scratch, undefined, false).declineReason === "no-fail-tier-match");
+      check("(E) empty failTierAll array -> declined, no-fail-tier-match", identifyRetriableTestFiles([], scratch, 0, false).declineReason === "no-fail-tier-match");
+      check("(E) FAIL <name> but the files don't exist on disk -> declined, file-not-found (fail-closed)", identifyRetriableTestFiles(["FAIL  ghost-test"], scratch, 1, false).declineReason === "file-not-found");
       plantTestFile(scratch, "real-one");
-      const hit = identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 1);
-      check("(E) FAIL <name> with real files on disk AND count:1 -> identified", hit?.name === "real-one");
-      check("(E) the constructed command is the --only= single-file re-invocation", hit?.command === "node packages/daemon/scripts/test-daemon.mjs --only=real-one");
-      check("(E) a Jest-style path-shaped FAIL line is refused by the bare-identifier guard", identifyRetriableTestFile("FAIL src/foo.test.js", scratch, 1) === undefined);
-      check("(E) manager review — count:2 on an otherwise-identical real match is refused (>1 match, not a single failure)", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 2) === undefined);
-      check("(E) manager review — count:undefined on an otherwise-identical real match is refused (unknown count fails closed)", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, undefined) === undefined);
-      check("(E) manager review — count:0 on an otherwise-identical real match is refused", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 0) === undefined);
+      const hit = identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, 1, false);
+      check("(E) FAIL <name> with real files on disk AND count:1 -> identified", hit.eligible === true && hit.names?.[0] === "real-one");
+      check("(E) the constructed command is the --only= single-file re-invocation", hit.command === "node packages/daemon/scripts/test-daemon.mjs --only=real-one");
+      check("(E) a Jest-style path-shaped FAIL line is refused by the bare-identifier guard", identifyRetriableTestFiles(["FAIL src/foo.test.js"], scratch, 1, false).declineReason === "unparseable-name");
+      check("(E) count:mismatch on an otherwise-identical real match is refused", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, 2, false).declineReason === "count-mismatch");
+      check("(E) count:undefined on an otherwise-identical real match is refused (unknown count fails closed)", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, undefined, false).declineReason === "count-mismatch");
+      check("(E) count:0 on an otherwise-identical real match is refused", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, 0, false).declineReason === "count-mismatch");
       // (E2) card 2a79a74c #5: harnessNotExecutedDetected REFUSES an otherwise-perfectly-identifiable
       // candidate, and its absence/false preserves the existing behavior exactly.
-      check("(E2) harnessNotExecutedDetected:true refuses an otherwise-identical real match", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 1, true) === undefined);
-      check("(E2) harnessNotExecutedDetected:false is byte-identical to the pre-#5 (3-arg) behavior", identifyRetriableTestFile("FAIL  real-one  (exit 1)", scratch, 1, false)?.name === "real-one");
+      check("(E2) harnessNotExecutedDetected:true refuses an otherwise-identical real match", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, 1, true).declineReason === "harness-not-executed");
+      check("(E2) harnessNotExecutedDetected:false is byte-identical to the pre-#5 behavior", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)"], scratch, 1, false).names?.[0] === "real-one");
+      // (E3) card 67030bb9: THE NEW BOUNDED MULTI-FILE BEHAVIOR — proves the check can go both ways at the
+      // actual boundary, not just that it fires once.
+      plantTestFile(scratch, "real-two");
+      plantTestFile(scratch, "real-three");
+      plantTestFile(scratch, "real-four");
+      const twoFiles = identifyRetriableTestFiles(["FAIL  real-one  (exit 1)", "FAIL  real-two  (exit 1)"], scratch, 2, false);
+      check("(E3) N=2, within the default cap (3) -> identified together", twoFiles.eligible === true && twoFiles.names.join(",") === "real-one,real-two");
+      check("(E3) the constructed command is the --only= comma-joined re-invocation", twoFiles.command === "node packages/daemon/scripts/test-daemon.mjs --only=real-one,real-two");
+      const threeFiles = identifyRetriableTestFiles(["FAIL  real-one  (exit 1)", "FAIL  real-two  (exit 1)", "FAIL  real-three  (exit 1)"], scratch, 3, false);
+      check("(E3) N=3, exactly at the default cap -> STILL identified (boundary is inclusive)", threeFiles.eligible === true && threeFiles.names.length === 3);
+      const fourFiles = identifyRetriableTestFiles(["FAIL  real-one  (exit 1)", "FAIL  real-two  (exit 1)", "FAIL  real-three  (exit 1)", "FAIL  real-four  (exit 1)"], scratch, 4, false);
+      check("(E3) N=4, ONE OVER the default cap -> declined, over-cap (proves the cap actually bounds something, not just N=1 vs N>1)", fourFiles.eligible === false && fourFiles.declineReason === "over-cap");
+      const explicitCap = identifyRetriableTestFiles(["FAIL  real-one  (exit 1)", "FAIL  real-two  (exit 1)"], scratch, 2, false, 1);
+      check("(E3) an explicit maxFiles override is honored (N=2 > override cap 1) -> declined, over-cap", explicitCap.eligible === false && explicitCap.declineReason === "over-cap");
+      check("(E3) a duplicate name within one set is refused, fail-closed", identifyRetriableTestFiles(["FAIL  real-one  (exit 1)", "FAIL  real-one  (exit 1)"], scratch, 2, false).declineReason === "duplicate-name");
     } finally {
       fs.rmSync(scratch, { recursive: true, force: true });
     }
@@ -663,7 +706,7 @@ try {
       // identifyRetriableTestFile without this field wired through, `calls` would reach 2 (the retry
       // would fire) and the second call's `passed:true` would merge — this fakeGate NEVER returns
       // passed:true, so a regression here would surface as an unhandled rejection, not a silent pass.
-      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-l", failingTestCount: 1, failTierTest: "FAIL  flaky-l", failTierTestCount: 1, harnessNotExecutedDetected: true };
+      return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "", failingTest: "FAIL  flaky-l", failingTestCount: 1, failTierTest: "FAIL  flaky-l", failTierTestCount: 1, failTierAll: ["FAIL  flaky-l"], harnessNotExecutedDetected: true };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
     const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);

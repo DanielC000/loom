@@ -265,6 +265,7 @@ export function createFailingTestTracker(cwd?: string): {
   matchCount(): number;
   failTierResult(): string | undefined;
   failTierMatchCount(): number;
+  failTierAllResults(): string[];
   harnessNotExecutedDetected(): boolean;
 } {
   const decoder = new TextDecoder("utf-8");
@@ -285,6 +286,13 @@ export function createFailingTestTracker(cwd?: string): {
   // own doc for why the retry needs a narrower, differently-anchored match than the diagnostic tiers do.
   let lastHarnessWrapper: string | undefined;
   let harnessWrapperCount = 0;
+  // Card 67030bb9: EVERY line matching HARNESS_FAIL_WRAPPER_RE, in the order seen — `lastHarnessWrapper`
+  // above can only ever report the LAST one, which is what made a multi-file failure structurally
+  // unidentifiable-by-name (only the count was visible, never which N files). {@link
+  // identifyRetriableTestFiles} reads this array (via `failTierAllResults()` below) to name every
+  // candidate file for a bounded multi-file retry. Length always equals `harnessWrapperCount` by
+  // construction (both incremented at the same call site, below) — never independently drifted.
+  const allHarnessWrapperLines: string[] = [];
   // Card 2a79a74c #5: tracked independently of the harness-wrapper/tier state above — see
   // HARNESS_NOT_EXECUTED_RE's own doc for why this needs its own flag rather than piggybacking on
   // failTierMatchCount (the two conditions are DELIBERATELY independent: a run can trip this, the FAIL
@@ -302,7 +310,7 @@ export function createFailingTestTracker(cwd?: string): {
     // Card 6c84b87b: checked independently of (not instead of) the FAILING_TEST_PATTERNS loop below — a
     // harness wrapper line already also satisfies FAILING_TEST_PATTERNS' own FAIL tier (used for `result()`/
     // `matchCount()` diagnostics), and both trackings must see it.
-    if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; }
+    if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; allHarnessWrapperLines.push(lastHarnessWrapper); }
     if (HARNESS_NOT_EXECUTED_RE.test(line)) notExecutedSeen = true;
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
       const pattern = FAILING_TEST_PATTERNS[i]!;
@@ -370,6 +378,14 @@ export function createFailingTestTracker(cwd?: string): {
     failTierMatchCount(): number {
       flushCarryOnce();
       return harnessWrapperCount;
+    },
+    /** Card 67030bb9: every {@link HARNESS_FAIL_WRAPPER_RE} match, in the order seen — the array
+     *  `failTierMatchCount()`'s count already describes, finally made nameable. `.length` always equals
+     *  `failTierMatchCount()`; this exists only because that count alone can't say WHICH N files failed.
+     *  Feeds {@link identifyRetriableTestFiles}'s bounded multi-file retry. */
+    failTierAllResults(): string[] {
+      flushCarryOnce();
+      return allHarnessWrapperLines;
     },
     /** Card 2a79a74c #5: true iff a line matching {@link HARNESS_NOT_EXECUTED_RE} was seen anywhere in
      *  this step's output — `test-daemon.mjs`'s own structural "some selected file(s) were never
@@ -560,10 +576,16 @@ export interface GateStepResult {
    *  count {@link identifyRetriableTestFile} actually gates its `=== 1` check on. `undefined` iff
    *  `failTierTest` is `undefined`. */
   failTierTestCount?: number;
+  /** Card 67030bb9: see {@link createFailingTestTracker.failTierAllResults} — every {@link
+   *  HARNESS_FAIL_WRAPPER_RE} line seen in this step, in order, `.length === failTierTestCount`.
+   *  {@link identifyRetriableTestFiles} reads THIS (never `failTierTest` alone) to name every candidate
+   *  file for a bounded multi-file retry — `failTierTest` alone can only ever name the LAST one.
+   *  `undefined` iff `failTierTest` is `undefined` (mirrors that field's own own-miss discipline). */
+  failTierAll?: string[];
   /** See {@link createFailingTestTracker.harnessNotExecutedDetected} — forwarded verbatim. `undefined`/
    *  `false` on every ordinary run; `true` only when `test-daemon.mjs`'s own structural `notExecuted`
-   *  invariant line was seen in this step's output. {@link identifyRetriableTestFile} reads this to
-   *  refuse a single-file retry outright — see `HARNESS_NOT_EXECUTED_RE`'s own doc for why. */
+   *  invariant line was seen in this step's output. {@link identifyRetriableTestFiles} reads this to
+   *  refuse the retry outright — see `HARNESS_NOT_EXECUTED_RE`'s own doc for why. */
   harnessNotExecutedDetected?: boolean;
   decidedAt?: number;
   /** Card 8d585277: true ONLY when this step's settle followed a `cancelSignal` abort AND the step's own
@@ -738,7 +760,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // the verification: it can only ever be attached to a genuinely observed close/error, never to the bare
   // act of asking for one.
   let cancelling = false;
-  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "failTierTest" | "failTierTestCount" | "harnessNotExecutedDetected" | "decidedAt">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "failingTestCount" | "failTierTest" | "failTierTestCount" | "failTierAll" | "harnessNotExecutedDetected" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
@@ -757,6 +779,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       ...(spilledAny ? { outputFile: spillFile } : {}),
       failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
       failTierTest, failTierTestCount: failTierTest ? failingTestTracker.failTierMatchCount() : undefined,
+      failTierAll: failTierTest ? failingTestTracker.failTierAllResults() : undefined,
       harnessNotExecutedDetected,
       decidedAt: performance.now(),
     });
@@ -841,6 +864,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         outputTail: cancelling ? tail() : resolveOutputTail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
         ...(spilledAny ? { outputFile: spillFile } : {}),
         failTierTest: timeoutFailTierTest, failTierTestCount: timeoutFailTierTest ? failingTestTracker.failTierMatchCount() : undefined,
+        failTierAll: timeoutFailTierTest ? failingTestTracker.failTierAllResults() : undefined,
         harnessNotExecutedDetected: timeoutHarnessNotExecutedDetected,
         decidedAt,
       });
@@ -928,10 +952,12 @@ export interface GateSequentialResult {
    *  MUST check this is exactly `1` before treating `failingTest` as a complete account of what failed. */
   failingTestCount?: number;
   /** See {@link GateStepResult.failTierTest} — forwarded verbatim from the failing step's own result.
-   *  {@link identifyRetriableTestFile} reads THIS field, never `failingTest` above. */
+   *  {@link identifyRetriableTestFiles} reads {@link failTierAll} below, never `failingTest` above. */
   failTierTest?: string;
   /** See {@link GateStepResult.failTierTestCount} — forwarded verbatim alongside `failTierTest`. */
   failTierTestCount?: number;
+  /** See {@link GateStepResult.failTierAll} — forwarded verbatim alongside `failTierTest`. */
+  failTierAll?: string[];
   /** See {@link GateStepResult.harnessNotExecutedDetected} — forwarded verbatim from the failing step's
    *  own result. */
   harnessNotExecutedDetected?: boolean;
@@ -1178,7 +1204,7 @@ export async function runGateSequential(
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
         failedTimedOut: false, outputTail: res.outputTail, ...(res.outputFile ? { outputFile: res.outputFile } : {}),
         failingTest: res.failingTest, failingTestCount: res.failingTestCount,
-        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, failTierAll: res.failTierAll,
         harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
     }
@@ -1188,7 +1214,7 @@ export async function runGateSequential(
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
         failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, ...(res.outputFile ? { outputFile: res.outputFile } : {}),
         failingTest: res.failingTest, failingTestCount: res.failingTestCount,
-        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
+        failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount, failTierAll: res.failTierAll,
         harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
     }
@@ -1284,101 +1310,128 @@ export function extractFailingTest(outputTail: string): string | undefined {
   return undefined;
 }
 
-/** {@link identifyRetriableTestFile}'s result — `command` is the ready-to-run single-file re-invocation,
- *  `name` is the bare test name (for the `retriedFile` record). */
-export interface RetriableTestFile {
-  name: string;
-  command: string;
-}
+/** Card 67030bb9: the cap on how many distinct failing files {@link identifyRetriableTestFiles} will ever
+ *  bundle into one retry. STATED AS A JUDGEMENT CALL, NOT A DERIVED BOUND (manager review, card 67030bb9)
+ *  — an earlier draft of this card justified 3 as "mirrors `LOOM_GATE_TEST_CONCURRENCY`'s own default pool
+ *  size"; that was DROPPED on manager review because a lane-pool size and a masking-risk bound are
+ *  unrelated quantities, and a borrowed number that reads as derived is worse than an honest arbitrary one.
+ *  3 is picked because both real multi-file specimens this card measured (`07520fa5` 2 files, `cfc2cd56`
+ *  3 files) fit inside it, and because {@link formatWeakerPassWarning}'s own per-file naming needs to stay
+ *  legible to a manager reading a merge-done nudge for a small set — nothing more principled than that. */
+export const MULTI_FILE_RETRY_MAX = 3;
+
+/** {@link identifyRetriableTestFiles}'s why-declined vocabulary (card 67030bb9) — persisted by callers
+ *  alongside `retriedFile`/`retryPassed` so a rejection like gate `1af9138e` (a clean, single-file,
+ *  retriable-SHAPED failure that still recorded `retriedFile:null`) is explainable AFTER THE FACT from
+ *  `gate_history` instead of needing a fresh live repro to diagnose — which is genuinely all the store
+ *  allowed before this card, since neither `failTierTestCount` nor `harnessNotExecutedDetected` was ever
+ *  persisted anywhere. Covers only what happens INSIDE this function — a caller that never even calls it
+ *  (e.g. its OWN `classifyGateFailure(gateResult) === "genuine"` gate already failed) records its own,
+ *  separate reason instead; see confirmWorkerMerge's/the batch `runGate`'s own call sites. */
+export type RetryDeclineReason =
+  | "no-fail-tier-match"
+  | "count-mismatch"
+  | "over-cap"
+  | "harness-not-executed"
+  | "unparseable-name"
+  | "file-not-found"
+  | "duplicate-name";
+
+/** {@link identifyRetriableTestFiles}'s full result — a caller must handle both arms explicitly (never a
+ *  single `undefined` check) so the decline reason can never be silently discarded at the one place it's
+ *  actually known. `command` (on the eligible arm) is the ready-to-run re-invocation — `--only=a,b,c` for
+ *  N>1, `--only=a` for N=1, test-daemon.mjs's own existing `--only=` flag already accepts either shape
+ *  (card 6185fbfc). `names` are in the order their own FAIL lines appeared, for the `retriedFile` record —
+ *  joined with `,`, always losslessly reversible via `.split(",")` since the identifier guard below makes
+ *  a `,`-containing name structurally impossible. */
+export type RetryIdentification =
+  | { eligible: true; names: string[]; command: string }
+  | { eligible: false; declineReason: RetryDeclineReason };
 
 /**
- * Card 344ce950: given a gate run's own {@link GateStepResult.failTierTest}/{@link
- * GateSequentialResult.failTierTest} marker and the gate's `cwd`, identify a SINGLE test file this
- * daemon's own hermetic suite (`packages/daemon/scripts/test-daemon.mjs`) can re-run in ISOLATION via its
- * existing `--only=<name>` selection flag (card 6185fbfc — the same flag `test-daemon-cli-args.mjs`/
- * `test-daemon-gate-timing-sigkill.mjs` already drive directly), so a merge gate can retry ONE failing
- * file instead of the whole ~650-file suite before declaring a rejection.
+ * Card 344ce950 (single-file) / 67030bb9 (bounded multi-file, manager-approved design — REPLACES the old
+ * exactly-one-file `identifyRetriableTestFile`; see git history for that function's own fuller reasoning,
+ * which this one inherits in full and does not repeat here): given a gate run's own {@link
+ * GateStepResult.failTierAll}/{@link GateSequentialResult.failTierAll} — every {@link
+ * HARNESS_FAIL_WRAPPER_RE} line the live scan saw, in order — and the gate's `cwd`, identify UP TO
+ * `maxFiles` distinct test files this daemon's own hermetic suite (`packages/daemon/scripts/
+ * test-daemon.mjs`) can re-run TOGETHER in isolation via its existing `--only=<name>[,<name>...]`
+ * selection flag (card 6185fbfc — the same flag `test-daemon-cli-args.mjs`/
+ * `test-daemon-gate-timing-sigkill.mjs` already drive directly), so a merge gate can retry a small failing
+ * SET instead of the whole ~650-file suite before declaring a rejection.
  *
- * ⚠️ Card 0e5b2045 — TAKES `failTierTest`/`failTierTestCount`, NOT `failingTest`/`failingTestCount`. The
+ * ⚠️ Card 0e5b2045 — TAKES `failTierAll`/`failTierTestCount`, NOT `failingTest`/`failingTestCount`. The
  * two diverge on purpose: `failingTest` is whichever tier's line is most diagnostically useful (as of card
  * 0e5b2045, an `UNCAUGHT`-idiom line outranks a bare `FAIL <name>` summary there), but THIS function can
  * only ever parse the FAIL/not-ok tier's own bare-identifier shape — so it reads the tier-isolated
- * `failTierTest`/`failTierTestCount` accessors ({@link createFailingTestTracker.failTierResult}/
+ * `failTierAll`/`failTierTestCount` accessors ({@link createFailingTestTracker.failTierAllResults}/
  * `.failTierMatchCount`) instead, independent of whichever tier won `result()` for display. Passing
  * `failingTest`/`failingTestCount` here would be silently wrong on any run where a higher-priority
  * diagnostic tier also matched: the retry would appear to "stop firing" for reasons unrelated to whether a
  * retriable FAIL line actually exists.
  *
- * DELIBERATELY NARROW AND FAIL-CLOSED: this recognizes ONLY this daemon's own `FAIL  <name>` convention
- * (a bare identifier — letters/digits/hyphen/underscore, no path, no extension — see test-daemon.mjs's own
- * `runLane`: `console.log(\`${result.ok ? "PASS" : "FAIL"}  ${result.name}...\`)`), never the sibling
- * Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes {@link FAILING_TEST_PATTERNS} also
- * recognizes, and NEVER via a second parser on `failTierTest` beyond this one bare-name regex — the caller
- * must pass the SAME `failTierTest` the live {@link createFailingTestTracker} scan already extracted, not
- * re-derive one. A candidate name is confirmed against the REAL filesystem (`fs.existsSync`) before ever
- * being reported identifiable — never a regex-only guess — so a name that merely LOOKS like one of ours
- * but doesn't correspond to a real file, or a gate run on a project that doesn't have this suite at this
- * path at all, returns `undefined` (the caller's cue to reject exactly as today — no behavior change on
- * that path).
+ * DELIBERATELY NARROW AND FAIL-CLOSED, PER NAME: this recognizes ONLY this daemon's own `FAIL  <name>`
+ * convention (a bare identifier — letters/digits/hyphen/underscore, no path, no extension — see
+ * test-daemon.mjs's own `runLane`: `console.log(\`${result.ok ? "PASS" : "FAIL"}  ${result.name}...\`)`),
+ * never the sibling Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes {@link
+ * FAILING_TEST_PATTERNS} also recognizes, and NEVER via a second parser beyond this one bare-name regex —
+ * the caller must pass the SAME `failTierAll` the live {@link createFailingTestTracker} scan already
+ * extracted, not re-derive it. EVERY name is confirmed against the REAL filesystem (`fs.existsSync`)
+ * before ever being reported identifiable — never a regex-only guess — so a single name in the set that
+ * merely LOOKS like one of ours but doesn't correspond to a real file declines the WHOLE set (never a
+ * partial candidate), same fail-closed posture the old single-file function always had, just applied to
+ * every member instead of the one.
  *
- * ⚠️ MANAGER REVIEW (sibling p0 report on card 344ce950) — REQUIRES `failTierTestCount === 1`: this
+ * ⚠️ THE COUNT CHECK THIS REPLACES (manager review, card 344ce950, inherited unchanged in spirit): this
  * daemon's own test runner has NO fail-fast (`test-daemon.mjs`'s `Promise.all` over lanes; `failed` is an
- * ARRAY) — a single run can genuinely fail on MULTIPLE files. `createFailingTestTracker` keeps only the
- * LAST matching line per tier, so `failTierTest` alone cannot tell "the only failure" apart from "the last
- * of several, with the others never named anywhere in this result". Retrying and passing that ONE file
- * would silently let a merge through while an untouched OTHER failure sits in the same run — exactly the
- * order-dependent/cross-test-pollution class this card's own §4 already warned a single-file retry can
- * mask, now via a second, distinct route (a second FILE instead of a second RUN). `failTierTestCount` is
- * REQUIRED (not optional) specifically so a caller can't forget to pass it — any value other than exactly
- * `1` (including `undefined`, e.g. a test double/legacy shape that never supplies one) fails closed,
- * mirroring this function's existing "ambiguity ⇒ not identifiable" posture.
+ * ARRAY) — a single run can genuinely fail on any number of files. The old function required EXACTLY `1`;
+ * this one requires the count to be within `[1, maxFiles]` — everything ABOVE the cap still refuses
+ * exactly as `!== 1` used to for anything above 1, the identical "ambiguity ⇒ not identifiable" posture,
+ * just with a wider still-identifiable band below it. `failTierTestCount` stays REQUIRED (not optional)
+ * for the identical fail-closed reason it always was.
  *
- * 🔴 CORRECTED (card 6c84b87b — the prior wording here asserted a FALSE PREMISE holding up a correct
- * conclusion; see this repo's own "a comment is a claim" rule): this used to claim over-counting was
- * merely "a test's own output prints an incidental FAIL-shaped line" and that under-counting was
- * "structurally unlikely" thanks to `runLane`'s one-line-per-file convention. That ignored
- * `test-daemon.mjs`'s OWN later `FAILURES:` epilogue, which re-echoes every failing file's FULL captured
- * stdout/stderr — including that file's own `check()`-printed `FAIL <label>` lines — so over-counting was
- * not incidental, it was GUARANTEED for any file that fails by a normal assertion (815-of-848 files use
- * that `check()` convention) rather than by throwing. `failTierTest`/`failTierTestCount` are now sourced
- * from {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount`, which count ONLY
- * {@link HARNESS_FAIL_WRAPPER_RE}'s own line shape — see that constant's doc for exactly what it excludes
- * (the epilogue's own indented echo) and why. Under that anchoring, over-counting (`> 1`) now means what it
- * always should have: genuinely multiple distinct failing files, each producing their own real wrapper
- * line — the correct case to fail closed on — never an assertion failure's own output being counted twice.
- *
- * 🎯 CARD 2a79a74c FINDING #5 — DECISION: this retry REFUSES outright (returns `undefined`) whenever
- * `harnessNotExecutedDetected` is true, REGARDLESS of `failTierTestCount === 1` — see
- * `HARNESS_NOT_EXECUTED_RE`'s own doc for the exact masking mechanism this closes (a co-occurring genuine
- * failure's own wrapper line survives test-daemon.mjs's early `notExecuted` exit untouched, so
- * `failTierTestCount` alone cannot see that OTHER discovered files were structurally never run at all).
- * `harnessNotExecutedDetected` is REQUIRED (not optional), same posture as `failTierTestCount` above and
- * for the identical reason: a caller/test-double that doesn't supply it must fail closed to "not detected"
- * (`false`/`undefined`), never silently skip the check.
- * ⚠️ THE TRADEOFF BEING BOUGHT HERE, STATED (the card's DoD asked for this explicitly — either remedy was
- * acceptable): this is remedy (b), NOT remedy (a). `test-daemon.mjs`'s early `process.exit(1)` on the
- * `notExecuted` invariant still fires BEFORE its own `FAILURES:` echo — a genuine co-occurring test
- * failure's full stdout/stderr detail is still absent from attempt 1's raw output on this rare path, so a
- * human reading that log alone gets a weaker diagnostic than the ordinary failure path. What this DOES
- * buy: the retry can never silently merge a run that both failed a real test AND lost track of whether
- * every selected file even ran — the gate simply stays rejected (exactly like today, pre-single-file-retry)
- * whenever this invariant trips, so the structural defect is never masked by a lucky isolated re-pass.
+ * 🎯 CARD 2a79a74c FINDING #5 — DECISION, unchanged: this retry REFUSES outright whenever
+ * `harnessNotExecutedDetected` is true, REGARDLESS of the count — see `HARNESS_NOT_EXECUTED_RE`'s own doc
+ * for the exact masking mechanism this closes (a co-occurring genuine failure's own wrapper line survives
+ * test-daemon.mjs's early `notExecuted` exit untouched, so the count alone cannot see that OTHER
+ * discovered files were structurally never run at all).
  */
-export function identifyRetriableTestFile(failTierTest: string | undefined, cwd: string, failTierTestCount: number | undefined, harnessNotExecutedDetected: boolean): RetriableTestFile | undefined {
-  if (!failTierTest) return undefined;
-  if (failTierTestCount !== 1) return undefined;
-  if (harnessNotExecutedDetected) return undefined;
-  const m = /^FAIL\s+(\S+)/.exec(failTierTest);
-  if (!m) return undefined;
-  const name = m[1]!;
-  // A bare identifier only — never a path separator or shell metacharacter — before this ever reaches a
-  // shell command string. This daemon's own FAIL line never names anything else; a token shaped
-  // differently can't be one of ours regardless of what the file-existence check below would say.
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) return undefined;
+export function identifyRetriableTestFiles(
+  failTierAll: string[] | undefined,
+  cwd: string,
+  failTierTestCount: number | undefined,
+  harnessNotExecutedDetected: boolean,
+  maxFiles: number = MULTI_FILE_RETRY_MAX,
+): RetryIdentification {
+  if (!failTierAll || failTierAll.length === 0) return { eligible: false, declineReason: "no-fail-tier-match" };
+  // Belt-and-suspenders, not a second source of truth: failTierAll.length and failTierTestCount are
+  // incremented at the SAME call site in createFailingTestTracker and must already agree by construction —
+  // a caller/test-double that passes a mismatched pair has a bug upstream, and this refuses rather than
+  // guessing which of the two values to trust.
+  if (failTierTestCount !== failTierAll.length) return { eligible: false, declineReason: "count-mismatch" };
+  if (failTierAll.length > maxFiles) return { eligible: false, declineReason: "over-cap" };
+  if (harnessNotExecutedDetected) return { eligible: false, declineReason: "harness-not-executed" };
   const scriptFile = path.join(cwd, "packages", "daemon", "scripts", "test-daemon.mjs");
-  const testFile = path.join(cwd, "packages", "daemon", "test", `${name}.mjs`);
-  if (!fs.existsSync(scriptFile) || !fs.existsSync(testFile)) return undefined;
-  return { name, command: `node packages/daemon/scripts/test-daemon.mjs --only=${name}` };
+  if (!fs.existsSync(scriptFile)) return { eligible: false, declineReason: "file-not-found" };
+  const testDir = path.join(cwd, "packages", "daemon", "test");
+  const names: string[] = [];
+  for (const line of failTierAll) {
+    const m = /^FAIL\s+(\S+)/.exec(line);
+    if (!m) return { eligible: false, declineReason: "unparseable-name" };
+    const name = m[1]!;
+    // A bare identifier only — never a path separator or shell metacharacter — before this ever reaches a
+    // shell command string. This daemon's own FAIL line never names anything else; a token shaped
+    // differently can't be one of ours regardless of what the file-existence check below would say.
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return { eligible: false, declineReason: "unparseable-name" };
+    if (!fs.existsSync(path.join(testDir, `${name}.mjs`))) return { eligible: false, declineReason: "file-not-found" };
+    names.push(name);
+  }
+  // Card 67030bb9: a duplicate name would mean the SAME file printed its own wrapper line twice in one
+  // step's output — shouldn't happen under test-daemon.mjs's one-line-per-file convention, but nothing
+  // structurally guarantees it can't (e.g. a future harness change); fail closed rather than silently
+  // retrying fewer distinct files than the count implied.
+  if (new Set(names).size !== names.length) return { eligible: false, declineReason: "duplicate-name" };
+  return { eligible: true, names, command: `node packages/daemon/scripts/test-daemon.mjs --only=${names.join(",")}` };
 }
 
 /**
@@ -1412,21 +1465,39 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
  * surfaces can never drift into two different tellings of the identical fact — exactly the two-hand-
  * maintained-copies drift card `6dcb9cd3`'s own DoD-2 calls out by name.
  *
- * Takes the bare `retriedFile` name (never call this when no retry fired — both call sites gate on a
- * truthy `retriedFile` first, so this never has to branch on "was there a retry"). Returns the warning text
- * WITHOUT a leading space or the `⚠` glyph's own leading space — callers that inline this into a larger
- * nudge string prepend their own separator, mirroring {@link formatGateStepsDiagnostic}'s own convention.
+ * Takes `retriedFile` as callers already store it — a bare name, or (card 67030bb9, bounded multi-file
+ * retry) a comma-joined list of names, never containing a literal comma itself (the identifier guard in
+ * {@link identifyRetriableTestFiles} makes that structurally impossible) — never call this when no retry
+ * fired (every call site gates on a truthy `retriedFile` first, so this never has to branch on "was there
+ * a retry"). Returns the warning text WITHOUT a leading space or the `⚠` glyph's own leading space —
+ * callers that inline this into a larger nudge string prepend their own separator, mirroring
+ * {@link formatGateStepsDiagnostic}'s own convention.
  *
- * Card 9966c52d: `outputTail` is OPTIONAL and additive — both call sites already hold attempt 1's own
+ * Card 9966c52d: `outputTail` is OPTIONAL and additive — call sites already hold attempt 1's own
  * `outputTail` (the failed run's, per {@link isTimeoutKillEntry}'s own doc) alongside `retriedFile`, so
- * passing it through costs nothing new to plumb. Omitted (or not matching), this returns the ORIGINAL
- * cross-test-pollution wording, byte-identical to before this card — the fail-safe default.
+ * passing it through costs nothing new to plumb. Omitted (or not matching for every retried name), this
+ * returns the ORIGINAL cross-test-pollution wording — the fail-safe default.
+ *
+ * Card 67030bb9: `batchBranchCount` is OPTIONAL and additive, passed only by the BATCH gate path — a batch
+ * retry is a STRONGER claim than a solo one (a green retry lands EVERY branch in the batch, not just the
+ * retried file's own change), so a manager reading this must be able to see the branch count a retry
+ * carried, not just the file(s). Omitted entirely for the solo path, byte-identical to before this card
+ * for the N=1/no-batch case — every existing wording is preserved verbatim in that case.
  */
-export function formatWeakerPassWarning(retriedFile: string, outputTail?: string): string {
-  if (isTimeoutKillEntry(retriedFile, outputTail)) {
-    return `⚠ WEAKER PASS: the first gate attempt killed '${retriedFile}' on a timeout, not an assertion failure — passed only after retrying it in isolation once. This is NOT evidence of an order-dependent/cross-test-pollution bug. The cause of the timeout is not established by this signal alone — read the retained gate output before attributing it.`;
+export function formatWeakerPassWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
+  const names = retriedFile.split(",");
+  const single = names.length === 1;
+  const allTimeoutKills = names.every((n) => isTimeoutKillEntry(n, outputTail));
+  const batchClause = batchBranchCount !== undefined
+    ? ` This retry was for a BATCH of ${batchBranchCount} branch(es) — ALL ${batchBranchCount} land on the strength of this ONE retry, not just the retried file(s).`
+    : "";
+  if (allTimeoutKills) {
+    const killedClause = single ? `killed '${names[0]}'` : `killed ${names.length} files (${names.join(", ")})`;
+    const retryClause = single ? "retrying it in isolation once" : "retrying all of them together in ONE isolated retry";
+    return `⚠ WEAKER PASS: the first gate attempt ${killedClause} on a timeout, not an assertion failure — passed only after ${retryClause}. This is NOT evidence of an order-dependent/cross-test-pollution bug. The cause of the timeout is not established by this signal alone — read the retained gate output before attributing it.${batchClause}`;
   }
-  return `⚠ WEAKER PASS: the first gate attempt failed; passed only after retrying '${retriedFile}' in isolation once. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.`;
+  const retryClause = single ? `retrying '${names[0]}' in isolation once` : `retrying ${names.length} files together in ONE isolated retry ('${names.join("', '")}')`;
+  return `⚠ WEAKER PASS: the first gate attempt failed; passed only after ${retryClause}. An order-dependent/cross-test-pollution bug can pass alone and fail in the full suite — treat this differently from an ordinary clean pass.${batchClause}`;
 }
 
 /**
