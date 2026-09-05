@@ -56,7 +56,7 @@ import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
-import { waitUntil } from "./_wait.mjs";
+import { waitUntil, sleepPast } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -124,15 +124,19 @@ try {
     }
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+    // Card cf803152: `syncAttachBudgetMs: 0` is a throwaway TEST-ONLY override (never the production
+    // `SYNC_ATTACH_BUDGET_MS` constant, which stays untouched) that FORCES every attach()-backed call on
+    // this `sessions` instance to degrade to `{settled:false}` deterministically — a real worktree cut +
+    // child-process gate can never resolve faster than the `sleep(0)` this races against. Before this
+    // card, the degrade path here was reached only opportunistically (host contention sometimes crossed
+    // the production 12s budget, sometimes didn't — card bb2b3f29), so the assertions below were only
+    // EVER exercised by chance. Forcing it makes this test prove the recovery path on every run, not just
+    // the runs where the host happened to be slow.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 0 });
 
-    // Card f944d4e4: mergeBatch is now mergeBatchTracked, keyed through PendingOpRegistry.attach — a fast
-    // gate command (node -e "process.exit(0)") USUALLY settles well within the sync-wait budget, but the
-    // real worktree-cut + gate-run + per-branch-finalize pipeline behind it is genuine wall time that can
-    // miss the 12s SYNC_ATTACH_BUDGET_MS budget under host contention (card bb2b3f29 — merge gate b2f5c2cc
-    // showed 3 of this file's 4 identical sync-wait sites cross it in one run). Tolerate `{settled:false}`
-    // as the documented, supported async-degrade path (see card fc82083b's CANCELLED site below, the first
-    // of these four sites fixed) rather than requiring the sync fast path.
+    // Card f944d4e4: mergeBatch is now mergeBatchTracked, keyed through PendingOpRegistry.attach.
+    // Card cf803152: with `syncAttachBudgetMs: 0` above, this call is now DETERMINISTICALLY forced onto
+    // the `{settled:false}` async-degrade path — never the sync fast path — so the wait below always runs.
     const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
     if (!r.settled) {
       await waitUntil(() => sessions.gateStatus(r.op.opId).state === "settled",
@@ -140,26 +144,53 @@ try {
     }
     check("(e2e) card f944d4e4/bb2b3f29: settles — synchronously, or (if slow) via the documented async degrade — never left permanently pending",
       r.settled || sessions.gateStatus(r.op.opId).state === "settled");
-    // `r.value` (the real MergeBatchResult — landed/strippedTrailerCount/phaseTimings) is ONLY available on
-    // the sync fast path (see AttachResult's own doc): mergeBatchTracked's attach() call passes neither
-    // `retainMs` nor `retainVerdictUntilSuperseded` for the merge-batch key, so unlike a cancelled/red/
-    // forfeited batch there is no cache this test can poll to recover the settled value once degraded — the
-    // 4 assertions below are genuinely unrecoverable that way, not merely inconvenient to reach. Gate them
-    // on actually having the value rather than fabricating a placeholder that would pass vacuously.
-    const result = r.settled && r.ok ? r.value : undefined;
-    if (result) {
-      check("(e2e) ok:true", result.ok === true);
-      check("(e2e) both branches landed, none fell back", result.landed.length === 2 && result.fallback.length === 0);
-      // THE DISCRIMINATING ASSERTION for the service-layer plumbing fix: reverting sessions/service.ts's
-      // `landed.push` back to omitting the field makes this FAIL while every git/batch-merge.ts-level test
-      // (test/batch-merge.mjs) stays green, since that layer computes the field correctly either way.
-      const landedA = result.landed.find((l) => l.branch === a.branch);
-      const landedB = result.landed.find((l) => l.branch === b.branch);
-      check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:0 for the clean branch", landedA?.strippedTrailerCount === 0);
-      check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:1 for the trailer-carrying branch", landedB?.strippedTrailerCount === 1);
-    } else {
-      console.log("(e2e) NOTE: settled via the async degrade path — result.ok/landed/strippedTrailerCount are not recoverable that way (see comment above); skipping those 4 assertions. Every DB/tombstone-derived check below is unconditional and still runs.");
+    // Card cf803152: `r.value` (the real MergeBatchResult — landed/strippedTrailerCount/phaseTimings) is
+    // ONLY available on the sync fast path (see AttachResult's own doc) — this call was just forced onto
+    // the async-degrade path above, so `r` itself never carries it. Before this card there was NO cache to
+    // recover it from at all; `mergeBatchTracked`'s `attach()` call now passes `retainMs`/
+    // `retainVerdictUntilSuperseded` for the merge-batch key (this method's own opts, sessions/service.ts),
+    // so a RE-CALL with the SAME manager + resolved worker set (the batchKey's own scope) hits that cache
+    // instead of re-running the whole batch. Assert the cache hit itself, not just that a value came back —
+    // `cacheHit` is populated ONLY by attach()'s cache-read branches, never by a fresh `run()` invocation
+    // (see PendingOpRegistry's own CacheHitInfo doc), so this is a real proof no second gate/worktree/
+    // fast-forward ran, not an assumption.
+    const recovered = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    // Code Review, card cf803152 ("test gap"): guard the re-call — on a genuine cache MISS this silently
+    // re-runs a SECOND real batch (worktree cut + gate + fast-forward). Letting that happen would corrupt
+    // every assertion below with data from an accidental extra run instead of a clean recovery, and the
+    // real defect (a broken cache) would read as a pile of unrelated-looking failures rather than one clear
+    // one. Fail loudly and stop here instead.
+    if (!recovered.settled || recovered.cacheHit == null) {
+      console.error(`(e2e) FATAL: the re-call after degrade+settle did NOT hit the retention cache (settled=${recovered.settled}, cacheHit=${JSON.stringify(recovered.cacheHit)}) — refusing to continue past this point rather than risk a silent second real batch run corrupting the checks below.`);
+      failures++;
+      console.log(`\n${failures} check(s) FAILED.`);
+      process.exit(1);
     }
+    check("(e2e) card cf803152: a re-call after degrade+settle recovers the real verdict from the retention cache (cacheHit), not a fresh re-run", true);
+    const result = recovered.ok ? recovered.value : undefined;
+    // Card cf803152 DoD-3: these 4 assertions used to be SKIPPED under degrade (no cache existed to recover
+    // `result` from) — now unconditional: a broken recovery leaves `result` undefined and these FAIL loudly
+    // instead of silently not running.
+    check("(e2e) ok:true", result?.ok === true);
+    check("(e2e) both branches landed, none fell back", result?.landed.length === 2 && result?.fallback.length === 0);
+    // THE DISCRIMINATING ASSERTION for the service-layer plumbing fix: reverting sessions/service.ts's
+    // `landed.push` back to omitting the field makes this FAIL while every git/batch-merge.ts-level test
+    // (test/batch-merge.mjs) stays green, since that layer computes the field correctly either way.
+    const landedA = result?.landed.find((l) => l.branch === a.branch);
+    const landedB = result?.landed.find((l) => l.branch === b.branch);
+    check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:0 for the clean branch", landedA?.strippedTrailerCount === 0);
+    check("(e2e) SessionService.mergeBatch's returned `landed` row surfaces strippedTrailerCount:1 for the trailer-carrying branch", landedB?.strippedTrailerCount === 1);
+
+    // Code Review, card cf803152 ("test gap"): the re-call above lands well INSIDE MERGE_OP_RETAIN_MS
+    // (5_000ms as of this writing — not exported, so this waits a deliberately generous 7s to absorb host
+    // scheduling slop), so it would pass identically even with `retainVerdictUntilSuperseded` absent
+    // (attach()'s own short-lived TTL'd `retained` map alone would serve it) — the opt this comment calls
+    // load-bearing was the one thing left unexercised. Wait PAST that window and re-call again: only
+    // `retainVerdictUntilSuperseded` (no clock of its own, superseded only by an identity mismatch or a
+    // daemon restart — see mergeBatchTracked's own opts doc) can still serve this.
+    await sleepPast(7_000, 5_000, "past MERGE_OP_RETAIN_MS");
+    const recoveredLate = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    check("(e2e) card cf803152: recovery still works PAST MERGE_OP_RETAIN_MS (5s) — proves retainVerdictUntilSuperseded (not merely the short-lived retainMs display window) is what's actually recoverable", recoveredLate.settled === true && recoveredLate.cacheHit != null);
 
     const page = db.listGateEvents({ projectId: projId, limit: 50, offset: 0 });
     const row = page.items.find((r) => r.opId != null && page.items.filter((x) => x.opId === r.opId).length === 1) ?? page.items[0];
@@ -186,16 +217,12 @@ try {
     check("(e2e) negative control: a plain object with no worktreeCutMs key reads back undefined, not 0/null", ({}).worktreeCutMs === undefined);
     // `mergeBatch`'s OWN return value also surfaces the two phases only knowable in that method's scope
     // (worktree cut + fast-forward — see its own `phaseTimings` doc for why the other three live on the
-    // build_gate event instead). Same availability caveat as the 4 assertions above — only checkable when
-    // the sync fast path handed back the real value.
-    if (result) {
-      check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.worktreeCutMs", typeof result.phaseTimings?.worktreeCutMs === "number" && result.phaseTimings.worktreeCutMs >= 0);
-      check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.assemblyMs (matches the build_gate event's own) — asserted as a REAL number on both sides first, so this can't vacuously pass on two undefineds",
-        typeof result.phaseTimings?.assemblyMs === "number" && typeof rawBuildGate?.detail?.assemblyMs === "number" && result.phaseTimings.assemblyMs === rawBuildGate.detail.assemblyMs);
-      check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.fastForwardMs for a real, non-forfeited fast-forward", typeof result.phaseTimings?.fastForwardMs === "number" && result.phaseTimings.fastForwardMs >= 0);
-    } else {
-      console.log("(e2e) NOTE: settled via the async degrade path — result.phaseTimings.* is not recoverable that way; skipping these 3 assertions.");
-    }
+    // build_gate event instead). Card cf803152: recovered from the retention cache above (see `result`'s
+    // own comment) — unconditional now, same reasoning as DoD-3's 4 assertions above.
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.worktreeCutMs", typeof result?.phaseTimings?.worktreeCutMs === "number" && result.phaseTimings.worktreeCutMs >= 0);
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.assemblyMs (matches the build_gate event's own) — asserted as a REAL number on both sides first, so this can't vacuously pass on two undefineds",
+      typeof result?.phaseTimings?.assemblyMs === "number" && typeof rawBuildGate?.detail?.assemblyMs === "number" && result.phaseTimings.assemblyMs === rawBuildGate.detail.assemblyMs);
+    check("(e2e) card 6cc803b2: mergeBatch's own return value carries phaseTimings.fastForwardMs for a real, non-forfeited fast-forward", typeof result?.phaseTimings?.fastForwardMs === "number" && result.phaseTimings.fastForwardMs >= 0);
 
     // ── card be260976 DoD-4: the SAME settled batch opId now resolves via gate_status, never never_existed ──
     const st = row?.opId ? sessions.gateStatus(row.opId) : undefined;
@@ -297,6 +324,29 @@ try {
     // was ALWAYS null (no tombstone to fall back to at all); it now recovers the real value.
     check("(e2e, FAIL) DoD (blocking #2): gate_history.failingTest recovers a real value for the rejected batch row, via the tombstone's own gateDetail — previously ALWAYS null for a batch row",
       typeof batchRow?.failingTest === "string" && batchRow.failingTest.includes("bmgh-red-fixture-test"));
+
+    // Code Review, card cf803152 finding [1] — the REPRODUCED regression this card's first attempt
+    // shipped: `retainVerdictUntilSuperseded` with no `verdictIdentity` made a rejected batch's cached
+    // verdict IMMORTAL — a re-fire with the SAME workerSessionIds after a candidate branch genuinely
+    // changed still replayed the stale rejection forever (both workers could commit the actual fix and
+    // main would still never move). Prove the fix directly: move wA's branch (a real new commit), then
+    // re-fire with the SAME workerSessionIds. If this were served from the retention cache instead of
+    // re-derived for real, `cacheHit` would be present — assert its ABSENCE. (A `{settled:false}` pending
+    // result also proves this on its own: a cache hit is ALWAYS synchronous, per AttachResult's own doc —
+    // "a still-running op is always either a genuinely fresh mint or an attach to one, never a cache
+    // replay".) This gate command always fails regardless of content, so the re-fire is expected to be
+    // rejected again too — the point is that it genuinely RE-RAN, not that it now passes. Deliberately
+    // LAST in this block: this mints a SECOND batch-level build_gate row (branch:null), which would
+    // otherwise collide with `batchRow`'s own `.find()` above (both checks above already ran against the
+    // FIRST, ORIGINAL rejected row).
+    fs.writeFileSync(path.join(a.worktreePath, "red-feature-a-fix.txt"), "fix\n");
+    commitAll(a.worktreePath, "fix", GIT_ID);
+    const afterFix = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    if (!afterFix.settled) {
+      await waitUntil(() => sessions.gateStatus(afterFix.op.opId).state === "settled",
+        { timeoutMs: 60_000, label: "post-branch-change re-fire to settle (proving it re-derived, not replayed)" });
+    }
+    check("(e2e, FAIL) card cf803152: a re-fire after a candidate branch genuinely moves is NEVER served the stale cached verdict (no cacheHit — verdictIdentity mismatch forced a fresh re-derive)", !afterFix.settled || afterFix.cacheHit == null);
   }
 
   // ── (e2e, CANCELLED) Code Review, card be260976 should-do #1 — a QUEUED batch gate is genuinely ──

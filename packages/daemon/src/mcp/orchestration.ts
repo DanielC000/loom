@@ -4214,8 +4214,19 @@ export class OrchestrationMcpRouter {
               note: "batch still running — poll gate_status(opId) (read-only, never starts a new run) or gate_queue for a merge row with taskId:null/branch:null (this finds the BATCH's OWN gate row only — card 19256231: a fallback candidate this batch spawns gates as an ordinary real-taskId/real-branch merge instead, tagged with gate_queue's fallbackOfBatchOpId===opId). state:\"settled\" genuinely means nothing about THIS op's own work — the gate run, the fast-forward onto canonical main, per-branch finalize — is still running, not just that the shared gate command finished (card 81d795de). ⚠️ card 19256231 correction: settled does NOT mean every fallback candidate's own worker_merge_confirm has itself finished — this call only awaits SPAWNING each one (a bounded, quickly-returning attach() call), so a fallback candidate's real gate/squash can still be genuinely running after this op reports settled; poll gate_queue's fallbackOfBatchOpId or that candidate's own worker_merge_confirm/gate_status for its real completion. Re-calling merge_batch with the SAME workerSessionIds is also safe at any delay: as long as the resolved candidate set is unchanged, it re-attaches to this SAME in-flight (or just-settled) op instead of starting a second one.",
             });
           }
-          if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
-          return ok(r.value);
+          // Code Review, card cf803152 finding [3]: `r.cacheHit` (now real for this call — see
+          // mergeBatchTracked's own `retainVerdictUntilSuperseded` opt) used to be silently dropped here,
+          // the exact incident card 4aedde84 already fixed for the solo `worker_merge_confirm` handler —
+          // mirror that fix rather than reintroducing the same silent-cache-hit gap on this call.
+          const cacheHitFields = cacheHitResponseFields(r.cacheHit);
+          if (!r.ok) {
+            return ok({
+              error: r.error instanceof Error ? r.error.message : String(r.error), ...cacheHitFields,
+              ...(r.cacheHit ? { note: cacheHitNote(r.cacheHit, undefined) } : {}),
+            });
+          }
+          const note = r.cacheHit ? cacheHitNote(r.cacheHit, undefined) : undefined;
+          return ok({ ...r.value, ...cacheHitFields, ...(note ? { note } : {}) });
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

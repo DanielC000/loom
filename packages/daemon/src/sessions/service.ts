@@ -16925,10 +16925,15 @@ export class SessionService {
    * ordinary client-timeout case (a `done`+`awaitingReview` candidate doesn't change resolution between a
    * call and its retry) — but it is a real, named gap, not a proven-closed one.
    *
-   * This dedupe carries no `retainVerdictUntilSuperseded`, no `verdictIdentity`, no `classifyOutcome`, no
-   * `onOpMinted`/`onSurfacedPending` — the batch's own `insertPendingGateOp` mint, inside the gate closure
-   * below, is unchanged, and still just receives the `opId` `attach()` mints instead of a locally-generated
-   * one. `opts.onSettle` IS now passed (card 81d795de), but ONLY to defer the tombstone's `settlePendingGateOp`
+   * This dedupe now ALSO carries `retainMs`/`retainVerdictUntilSuperseded`/`verdictIdentity`/
+   * `classifyOutcome`/`identityOptional` (card cf803152 — see this method's own `attach()` call, further
+   * down, for the exact opts and why, including two Code Review corrections: the first added
+   * `verdictIdentity`/`classifyOutcome` after the initial version shipped without them; the second added
+   * `identityOptional` after this card's OWN new test caught the initial "no mirror of the solo path's
+   * `alreadyFinished`" draft breaking recovery for the single most common real case, a batch that landed).
+   * It still carries no `onOpMinted`/`onSurfacedPending` — the batch's own `insertPendingGateOp` mint,
+   * inside the gate closure below, is unchanged, and still just receives the `opId` `attach()` mints
+   * instead of a locally-generated one. `opts.onSettle` IS now passed (card 81d795de), but ONLY to defer the tombstone's `settlePendingGateOp`
    * WRITE until this whole `run()` (fast-forward and per-branch finalize included) has settled — the verdict
    * itself is still computed at the exact same point in `runGate` it always was; see this method's own
    * `batchGateVerdict` declaration, further down, for the full mechanism. Card
@@ -17061,6 +17066,56 @@ export class SessionService {
     // git-derived identity (no I/O needed to compute this key). Sorted so a client that reorders the same
     // logical set across a retry still dedupe-hits.
     const batchKey = `merge-batch:${managerSessionId}:${chosen.map((c) => c.workerSessionId).slice().sort().join(",")}`;
+    // VERDICT IDENTITY (Code Review, card cf803152 — a REPRODUCED regression in this card's first attempt:
+    // `retainVerdictUntilSuperseded` with no `verdictIdentity` made a rejected batch's cached verdict
+    // IMMORTAL — both workers could commit the actual fix and a re-fire with the same resolved candidate
+    // set still replayed the stale rejection forever, because `batchKey` is manager+workerSessionIds only,
+    // never branch content, and `verdictIdentity` mismatch is the ONLY non-`bypassRetained` route to a
+    // fresh mint under an existing key. Mirrors confirmWorkerMergeTracked's own `verdictIdentity` exactly
+    // (this file, below, on the solo merge key) — resolved BEFORE the dedupe decision, from EVERY chosen
+    // candidate's CURRENT branch HEAD (sorted so identical content in a different `chosen` order still
+    // matches), so a re-fire after ANY of them moves (a worker pushes the actual fix; a candidate's branch
+    // is later deleted post-landing) is gated FOR REAL instead of replayed. Fail-safe to `undefined` on ANY
+    // resolution issue (a candidate's branch gone, a git error/timeout) — `undefined` never dedupe-hits
+    // against a cached entry that itself carries a real identity (see attach()'s exact-match rule), so an
+    // unresolvable identity here means "don't trust the cache," never "trust it anyway," same fail-safe
+    // direction the solo path's own doc states.
+    // ALREADY-FINISHED SHORT-CIRCUIT FOR THE WHOLE BATCH (Code Review, card cf803152 — the PRACTICAL gap
+    // an initial "no `identityOptional` mirror" draft of this comment got wrong, caught by this card's own
+    // added test: a successful batch landing deletes EVERY landed candidate's branch, via the SAME
+    // `finishAlreadyMerged`/`finalizeMerge` the solo path already has to handle — so a recovery re-call
+    // made right after a batch actually LANDS would, absent this check, resolve every branch as gone,
+    // compute `verdictIdentity: undefined`, mismatch the cached (real) identity, and re-mint — defeating
+    // this whole card's recoverability goal for the single most common real-world case, a batch that
+    // landed. Mirrors the solo path's OWN two-part `alreadyFinished` formula EXACTLY (worktree gone OR task
+    // already terminal — see that method's own doc for why either alone is insufficient), generalized from
+    // one worker to the WHOLE `chosen` set: true only when EVERY candidate independently satisfies it — a
+    // MIXED batch (one candidate finished, another still genuinely live) still requires a real identity
+    // match, since only a WHOLLY finished batch is safe to assume "this exact question was already
+    // answered."
+    const batchAlreadyFinished = chosen.every((c) => {
+      const worker = this.db.getSession(c.workerSessionId);
+      const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
+      const taskAlreadyTerminal = c.taskId != null && (() => {
+        const task = this.db.getTask(c.taskId!);
+        const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
+        return !!task && !!terminalKey && task.columnKey === terminalKey;
+      })();
+      return worktreeGone || taskAlreadyTerminal;
+    });
+    let verdictIdentity: string | undefined;
+    if (!batchAlreadyFinished) {
+      try {
+        const heads: string[] = [];
+        let allResolved = true;
+        for (const c of chosen) {
+          const head = await resolveGitRef(finalRepoPath, c.branch, { timeoutMs: this.gitOpMs });
+          if (!head) { allResolved = false; break; }
+          heads.push(head);
+        }
+        if (allResolved) verdictIdentity = heads.slice().sort().join(",");
+      } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
+    }
     // DEFERRED SETTLE (card 81d795de — fixes `gate_status(opId)` reading "settled" while the batch is
     // still finalizing, confirmed at source: `runGate` below used to call `settlePendingGateOp` itself,
     // which resolved BEFORE `runBatchedMerge`'s own fast-forward onto canonical main even began, let
@@ -17555,6 +17610,66 @@ export class SessionService {
         } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
       },
       {
+        // RECOVERABLE-VERDICT RETENTION (card cf803152 — the finding: this key used to pass NEITHER
+        // `retainMs` NOR `retainVerdictUntilSuperseded`, so once a batch degraded past
+        // `this.syncAttachBudgetMs` the real `MergeBatchResult` was structurally unrecoverable — nothing
+        // held it, and the degraded caller could never learn what actually landed).
+        // Code Review CORRECTION (same card): the first version of this fix passed `retainMs` +
+        // `retainVerdictUntilSuperseded` alone, with neither `verdictIdentity` nor `classifyOutcome` — a
+        // REPRODUCED regression, not a theoretical one: red-gate a batch (rejected+cached), have BOTH
+        // workers commit the actual fix, re-fire with the SAME workerSessionIds ⇒ still `ok:false`,
+        // `cacheHit` present, canonical main never moved — the cache, not the tree, produced the refusal,
+        // and it never expires (`verdictIdentity` mismatch and `bypassRetained` are the ONLY two routes to
+        // a fresh mint under an existing key; this key had neither). A SEPARATE gap in the same shape: with
+        // no `classifyOutcome`, `fresh.outcome` is always `undefined`, so the until-superseded write's
+        // "never cache a cancellation" veto (`fresh.outcome !== "cancelled"`) can never fire — a cancelled
+        // batch (a real, resolved `{ok:false, reason:"gate cancelled (...)"}) value, not a throw — see
+        // `GateCancelledError`'s catch just above) got written to the never-expiring map and would replay
+        // "gate cancelled by manager…" forever, reopening card `171297dc`. Both are now fixed below by
+        // adding the two solo-path opts this omitted, mirroring `confirmWorkerMergeTracked`'s own analogous
+        // merge key (this file, above). A SECOND correction, caught the same way (this card's own new
+        // test, not review-by-reading): the first fix for the above also omitted an `identityOptional`
+        // mirror, reasoned as "efficiency only, never safety" — false in practice, for the single most
+        // common real case (see `batchAlreadyFinished`'s own doc, just above this call).
+        // `retainMs` is the honest, narrow claim: a caller that degrades and re-fires `merge_batch` with the
+        // SAME resolved candidate set (this key's own scope, unchanged by this card — see this method's
+        // header doc's "RESIDUAL" note) within `MERGE_OP_RETAIN_MS` (5s) of settle gets the real verdict
+        // back instead of nothing.
+        // `retainVerdictUntilSuperseded` is what actually CLOSES the gap this card exists for (production
+        // batch gates commonly run for MINUTES, far past a 5s window): it has no clock of its own
+        // (PROCESS-LOCAL, NOT PERSISTED — a daemon restart clears it, same boundary `MERGE_OP_RETAIN_MS`'s
+        // own doc already states for the solo path). Its REAL lifetime, stated plainly (an earlier version
+        // of this comment wrongly claimed a changed candidate set supersedes this entry — false: a changed
+        // set is a DIFFERENT `batchKey`, so it can never supersede THIS one; that key's own entry, if any,
+        // just never gets minted at all): this entry is superseded ONLY by (a) a genuine re-fire under this
+        // SAME key whose freshly-resolved `verdictIdentity` no longer matches — some chosen candidate's
+        // branch moved (fixed, or deleted post-landing) — which mints a fresh op whose own settle
+        // OVERWRITES this map's entry for this key, never merely adds a second one; or (b) a daemon
+        // restart, which clears the whole map. Absent either, it is a genuine, permanent, in-memory entry
+        // for the process lifetime — the SAME bounded-by-usage shape (one entry per key that has ever been
+        // gated, never evicted on its own clock) the solo path's OWN merge key already accepts; this card
+        // does not introduce a new leak class, it gives the batch key the identical property.
+        // This also makes the `merge_batch` MCP tool's own polling doc true rather than aspirational: it
+        // already promises a re-fire with the same workerSessionIds "re-attaches to the already-running (or
+        // just-settled) op" — before this card, "or just-settled" was false the instant `retainMs` elapsed,
+        // since nothing survived a settle at all.
+        retainMs: MERGE_OP_RETAIN_MS,
+        retainVerdictUntilSuperseded: true,
+        verdictIdentity,
+        // Card cf803152 — see `batchAlreadyFinished`'s own doc, just above this call, for why this exists
+        // and what it does and does not cover (a MIXED batch still requires a real identity match).
+        identityOptional: batchAlreadyFinished,
+        // CANCELLED-VETO CLASSIFICATION (Code Review, card cf803152 finding [2]): mirrors
+        // `confirmWorkerMergeTracked`'s own three-way `classifyOutcome` shape (cancelled/merged-or-
+        // equivalent/rejected), but `MergeBatchResult` carries no boolean `cancelled` field the way
+        // `ConfirmMergeResult` does — a cancellation surfaces here only as a NORMAL, resolved value
+        // (`{ok:false, reason:"gate cancelled (<kind>): <detail>"}`, never a throw — see the
+        // `GateCancelledError` catches just above and in `runBatchedMerge`'s own `!gate.passed` branch,
+        // `git/batch-merge.ts`, which passes `gate.reason` straight through unrewritten). Detected via that
+        // EXACT literal prefix, written by Loom's own code in exactly those two symmetric catch blocks
+        // (attempt 1 and the single-file retry) and nowhere else — never user/test-output-controlled
+        // content, so this is a safe, narrow classifier, not a fragile string-sniff of arbitrary text.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : /^gate cancelled \(/.test(outcome.value.reason ?? "") ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
         // DEFERRED TOMBSTONE WRITE (card 81d795de — see this method's own `batchGateVerdict` declaration
         // above for the full mechanism doc). Fires from inside `PendingOpRegistry.attach`'s own settle
         // branch — i.e. once `run()` ABOVE (this whole batch: worktree cut, gate, fast-forward, and every
