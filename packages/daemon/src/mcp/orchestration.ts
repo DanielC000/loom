@@ -223,7 +223,13 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
       "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, note?, admittedAt?, passed?, cancelled?, reason?, " +
-      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?, proximity?}. `note` (card " +
+      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, outputFile?, gateDetail?, proximity?}. " +
+      "`outputFile` (card a16c580b), present whenever `outputTail` is, is an absolute path to this op's " +
+      "FULL captured gate output — `outputTail` above is a bounded ~4KB (or content-selected ~16KB on a " +
+      "failure) tail that can cut a diagnostic mid-line; the file is never truncated on that account (only " +
+      "a much larger, disk-usage-only ceiling can still cap it on a pathological run). Retained on a " +
+      "rolling, count-bounded window across the whole daemon — an old op's file may already be gone by the " +
+      "time you read this back; treat a missing file at this path as \"aged out\", not a bug. `note` (card " +
       "45390f74) is present ONLY while `state` is `queued`/`running` and carries the SAME \"Do NOT poll\" " +
       "guidance `run_gate`'s own not-settled reply already gives: stop calling this tool on a timer, " +
       "`worker_report progress` with `awaiting:\"background\"`, and END your turn — the `[loom:gate-done]`/" +
@@ -350,7 +356,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
       "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
-      "outputTail?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
+      "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
       "retriedFile?, retryPassed?, retryWarning?, transientRetried?, transientRetryWarning?}. `queued`/`running` " +
       "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
@@ -2180,7 +2186,7 @@ export class OrchestrationMcpRouter {
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_GATE_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
-            "outputTail?, gateDetail?} — " +
+            "outputTail?, outputFile?, gateDetail?} — " +
             "`validatedHead` is stamped when this run was ISSUED, before it's even admitted past the queue — " +
             "NOT when the build/test command actually starts. Read `headCurrent` on EVERY settled result, pass " +
             "or fail, not just on a failure: `true` means `validatedHead` is still your branch HEAD as of " +
@@ -2202,7 +2208,10 @@ export class OrchestrationMcpRouter {
             "path, where no gate actually ran. `steps` (per-step {step, durationMs, status}, diagnostic only — " +
             "never compare these against a threshold or each other) and a bounded `outputTail` are set on " +
             "EVERY `ran:true` result, PASS INCLUDED — a passing run used to retain neither at all, leaving a " +
-            "green self-check with nothing durable behind a bare pass/fail bit. On a failure, gateDetail " +
+            "green self-check with nothing durable behind a bare pass/fail bit. `outputFile` (card a16c580b), " +
+            "present alongside `outputTail` whenever anything was captured, is an absolute path to the FULL " +
+            "captured output — read it (or re-read it later via `gate_status(opId)`) when `outputTail`'s own " +
+            "~4KB/~16KB bound has cut the diagnostic you need mid-line. On a failure, gateDetail " +
             "ADDITIONALLY " +
             "carries {phase, failedStep, failingTest, failingTestCount, " +
             "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +

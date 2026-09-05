@@ -60,6 +60,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTAR
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFile, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity } from "../orchestration/gate-runner.js";
+import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -557,6 +558,10 @@ type ConfirmMergeResult = {
    *  (see the card for why: minimal diff, real-world coverage). A FAIL still also carries its own richer
    *  `gateDetail.stderrTail` (identical bytes) — this field exists so the PASS side has an equivalent. */
   outputTail?: string;
+  /** Card a16c580b: sibling of `outputTail` immediately above — the FULL-output spill path, same
+   *  population scope (set alongside `outputTail` on the identical two dominant paths, `undefined` under
+   *  the identical "nothing to report" conditions). See `orchestration/gate-spill.ts`'s own doc. */
+  outputFile?: string;
   /** Card 9f6598dd: whether ANY step of whichever gate run(s) actually spawned for THIS merge ever
    *  consumed its one-time auto-extend — see the `gateExtended`/`anyExtended` locals in confirmWorkerMerge
    *  for how this is derived. `undefined` when no gate actually spawned (gateless project, or a REUSED
@@ -759,6 +764,9 @@ type WorkerGateResult = {
   ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
   validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
   steps?: GateStepDuration[]; outputTail?: string;
+  /** Card a16c580b: sibling of `outputTail` immediately above — same population scope (see
+   *  `orchestration/gate-spill.ts`'s own doc for the mechanism). */
+  outputFile?: string;
   /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` — see {@link GateProximity}'s
    *  own doc. `undefined` on a `ran:false` outcome (no gateCommand configured — nothing spawned, nothing
    *  to report); set on every `ran:true` outcome, PASS included (this is a warn-before-breach signal, not
@@ -808,6 +816,7 @@ function deriveWorkerGateVerdict(
       steps: v.steps,
       proximity: v.gateProximity,
       outputTail: v.outputTail,
+      ...(v.outputFile !== undefined ? { outputFile: v.outputFile } : {}),
       ...(v.passed ? {} : { gateDetail: v.gateDetail && {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestCount: v.gateDetail.failingTestCount,
@@ -899,6 +908,8 @@ function deriveMergeGateVerdict(
       // MERGE-kind row's verdict never carried ANY output at all, on either outcome — this is the fix for
       // the card's own measured gap (a passing MERGE gate's output was persisted NOWHERE).
       ...(v.outputTail !== undefined ? { outputTail: v.outputTail } : {}),
+      // Card a16c580b: sibling of `outputTail` immediately above — same population scope.
+      ...(v.outputFile !== undefined ? { outputFile: v.outputFile } : {}),
       // Card 720bb7ad DoD-1/2: the TOP-LEVEL `steps` field — the SAME one a "gate" (worker self-check) row
       // already populates on both outcomes — widened to "merge" rows too, mirroring `outputTail`'s own
       // a1a8c5c4 precedent exactly. BEFORE this card a PASSING merge carried NO step breakdown anywhere
@@ -983,6 +994,7 @@ function deriveDeployGateVerdict(
       durationMs: Date.now() - deployStartedAt,
       steps: result.steps,
       outputTail: result.outputTail,
+      ...(result.outputFile ? { outputFile: result.outputFile } : {}),
       ...(result.passed ? {} : { gateDetail: {
         failedStep: result.failedStep, failingTest: result.failingTest, failingTestCount: result.failingTestCount,
         exitCode: result.failedStatus ?? null, signal: result.failedSignal ?? undefined,
@@ -1056,6 +1068,7 @@ function deriveBatchGateVerdict(
       totalDurationMs: nowMs - opMintedAtMs,
       steps: result.steps,
       outputTail: result.outputTail,
+      ...(result.outputFile ? { outputFile: result.outputFile } : {}),
       gateCap, concurrentGates, concurrentGatesMax,
       ...(result.passed ? {} : { gateDetail: {
         failedStep: result.failedStep, failingTest: result.failingTest, failingTestCount: result.failingTestCount,
@@ -2390,7 +2403,7 @@ export class SessionService {
    * real spawn on every OS this daemon runs on).
    */
   private readonly runGate:
-    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks) => Promise<GateSequentialResult>)
+    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks, spillFile?: string) => Promise<GateSequentialResult>)
     | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
@@ -4263,7 +4276,7 @@ export class SessionService {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
         getDeployConcurrentGatesMax = getMaxConcurrentGates;
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0), undefined, undefined, hooks);
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0), undefined, undefined, hooks, gateSpillPath(opId));
       },
       "high",
     );
@@ -4271,6 +4284,7 @@ export class SessionService {
     // Settle the tombstone minted above — see that insert's own comment for why this fires unconditionally,
     // back-to-back with the mint, rather than via a separate onSettle callback the way merge/worker do.
     this.db.settlePendingGateOp(opId, deriveDeployGateVerdict(result, deployStartedAt));
+    pruneGateSpills();
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
@@ -4470,6 +4484,12 @@ export class SessionService {
      *  the full fix. */
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
+    /** Card a16c580b: absolute path to this op's FULL captured gate output — the recovery path for
+     *  exactly what `outputTail` above truncates (see `orchestration/gate-spill.ts`'s own doc). Same
+     *  population scope as `outputTail`: `undefined` under the identical "nothing to report" conditions.
+     *  Retained on a rolling, count-bounded window — a caller reading this back long after the op settled
+     *  should treat a missing file at this path as "aged out of retention", not as a bug. */
+    outputFile?: string;
     gateDetail?: PendingGateOpVerdict["gateDetail"];
     /** Card 3407caad: the worst step's proximity to `gateCommandTimeoutMs` — a WARN-BEFORE-BREACH signal
      *  (see {@link GateProximity}'s own doc), distinct from `extended` above (which only ever fires AFTER
@@ -4661,6 +4681,7 @@ export class SessionService {
           ...(payload?.headWarning !== undefined ? { headWarning: payload.headWarning } : {}),
           ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
+          ...(payload?.outputFile !== undefined ? { outputFile: payload.outputFile } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
           // Card 6dcb9cd3: `!== undefined` (not truthy) — a `null` here IS the measured negative
@@ -13868,6 +13889,10 @@ export class SessionService {
     // confirmWorkerMergeUntilSettled/confirmWorkerMergeTracked too, so NO current caller takes this branch
     // — kept as a defensive fallback for a direct `confirmWorkerMerge` call, not a live path today.
     const thisOpId = opId ?? randomUUID();
+    // Card a16c580b: ONE spill path for this whole op — every gate attempt below (the initial run, the
+    // single-file retry, the transient-kill retry) shares `thisOpId`, so they all append to the SAME file
+    // in real execution order rather than each attempt clobbering the last.
+    const gateSpillFile = gateSpillPath(thisOpId);
     // OP-START CAPTURE (card 9d521792): mirrors `thisOpId` above — threaded from confirmWorkerMergeTracked's
     // own pre-attach() capture (the ONLY place this op's start instant is known unconditionally; see its
     // doc). A caller OUTSIDE that registry passes none — `autoCancelSettleWakes` treats `undefined` as
@@ -14189,6 +14214,9 @@ export class SessionService {
     // sits OUTSIDE the `if (gate)` block below, where the value is actually computed. `undefined` for a
     // gateless project, a REUSED gate, or a pre-gate rejection (nothing spawned).
     let gateOutputTailForRecord: string | undefined;
+    // Card a16c580b: sibling of `gateOutputTailForRecord` immediately above — same "set once, read from
+    // either branch" pattern.
+    let gateOutputFileForRecord: string | undefined;
     // Card e2b6f900: the gate concurrency triple this merge's gate ran under — declared at THIS outer
     // scope for the SAME reason `gateOutputTailForRecord`/`gateExtended` are: the plain GREEN return at
     // the bottom of this method sits OUTSIDE the `if (gate)` block below, where `gateCap`/`concurrentAtStart`/
@@ -15216,7 +15244,7 @@ export class SessionService {
           // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
           // event, not a second independently-computed signal.
           const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks);
+          const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, mirroredHooks, gateSpillFile);
           // CARD c24dd48a: a passing gate is about to hand off to this method's own squash phase
           // (`mergeBranch`, below, outside this call) — keep the per-repo admission guard held so a queued
           // same-repo sibling isn't admitted into the gap between this gate settling and that squash
@@ -15349,7 +15377,7 @@ export class SessionService {
                 // cancelSignal; only the WORKER-gate call site forwards a live one. Wiring merge-gate
                 // cancellation through `runGateSequential` itself, if ever wanted, is a separate change —
                 // out of this card's scope, and not needed to fix the liveness-visibility gap this closes.
-                const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks);
+                const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
                 // CARD c24dd48a / b9e07a4a: same "about to hand off to squash" hold as the first attempt —
                 // THIS is the fix: a pass here now keeps the per-repo guard held all the way to
                 // `mergeBranch`, instead of leaving the window this retry runs in unguarded.
@@ -15528,7 +15556,7 @@ export class SessionService {
               // OWN separate admission cycle (see the shared helper's own doc, above), so it needs the same
               // check independently rather than trusting whatever `gateBaseMainHead` the first attempt set.
               await reunionAtAdmission();
-              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks);
+              const r = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
               // CARD c24dd48a: same "about to hand off to squash" hold as the first attempt above — see
               // that call site's identical comment.
               if (r.passed) holdRepoGuardOnExit();
@@ -15614,6 +15642,7 @@ export class SessionService {
       // at all. `undefined` for a REUSED result (`gateRan:false` — nothing actually spawned), mirroring
       // `gateStepsResult`'s own "nothing to report" discipline just above.
       gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+      gateOutputFileForRecord = gateRan ? gateResult.outputFile : undefined;
       // Card e2b6f900: capture the SAME concurrency triple the CONCURRENCY NEIGHBOURHOOD comment above
       // (and every `evt()` call in this block) already computes, onto the outer-scope fields BOTH the
       // rejection branch below AND the plain-green return further down can read — mirrors
@@ -15790,6 +15819,7 @@ export class SessionService {
           gateExtended,
           gateProximity,
           outputTail: gateOutputTailForRecord,
+          ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}),
           // Card e2b6f900: mirrors the plain-GREEN return's own `gateCap`/`concurrentGates`/
           // `concurrentGatesMax` — see `ConfirmMergeResult`'s own doc for why this rejection used to carry
           // the triple as TEXT ONLY (baked into `detailBits` above), never structured.
@@ -16204,8 +16234,8 @@ export class SessionService {
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       : {};
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
@@ -16547,7 +16577,7 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
-                const gr = await runGateSequential(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks);
+                const gr = await runGateSequential(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) { holdOnPass = true; holdRepoGuardOnExit(); }
                 return gr;
               }, "high");
@@ -16580,6 +16610,7 @@ export class SessionService {
             // deployOwnProject's identical back-to-back settle (see deriveBatchGateVerdict's own doc for what
             // this payload deliberately includes/omits vs. deriveMergeGateVerdict/deriveDeployGateVerdict).
             this.db.settlePendingGateOp(opId, deriveBatchGateVerdict(r, gateStartedAt, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax));
+            pruneGateSpills();
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
             // so `emitCompareReduced` is DECIDABLE here whenever `computeEmitCompareGate`'s predicate applies at
@@ -17232,6 +17263,7 @@ export class SessionService {
         // Finding 1 (a settled "merge" tombstone row carrying no extended/duration/outcome at all).
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
+          pruneGateSpills();
         },
       },
     );
@@ -17599,7 +17631,7 @@ export class SessionService {
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
                 // keep reading the SAME live signal they always have.
                 const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { workerGateExtended = true; hooks.onExtend?.(); } };
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks);
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, 0, WORKER_GATE_ENV_OVERRIDE), undefined, cancelSignal, mirroredHooks, gateSpillPath(opId));
               },
               "low",
             );
@@ -17708,7 +17740,7 @@ export class SessionService {
             const passOutputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
             return {
               ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency,
-              steps: gateResult.steps, outputTail: passOutputTail,
+              steps: gateResult.steps, outputTail: passOutputTail, outputFile: gateResult.outputFile,
               // Card 3407caad: warn-before-breach signal, set on the PASSING path too — see
               // GateProximity's own doc.
               gateProximity: describeGateProximity(gateResult.steps, gateTimeoutMs),
@@ -17756,7 +17788,7 @@ export class SessionService {
             // Card 4c5bf820: mirrors the pass path's own top-level `steps`/`outputTail` — a caller reading
             // the RESULT no longer has to reach into `gateDetail` for the tail on a failure while getting
             // nothing at all on a pass; both branches now populate the same two top-level fields.
-            steps: gateResult.steps, outputTail,
+            steps: gateResult.steps, outputTail, outputFile: gateResult.outputFile,
             // Card 3407caad: same warn-before-breach signal as the pass path above.
             gateProximity: describeGateProximity(gateResult.steps, gateTimeoutMs),
             gateDetail: {
@@ -17969,6 +18001,7 @@ export class SessionService {
         // `deriveWorkerGateVerdict`'s own doc for the four outcome shapes and what each one records.
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, deriveWorkerGateVerdict(outcome));
+          pruneGateSpills();
         },
       },
     );

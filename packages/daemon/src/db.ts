@@ -1965,6 +1965,14 @@ export interface PendingGateOpVerdict {
   headWarning?: string;
   steps?: { step: string; durationMs: number | null; status: number | null }[];
   outputTail?: string;
+  /** Card a16c580b: absolute path to this op's FULL captured gate output (see
+   *  `orchestration/gate-spill.ts`'s own doc) — the recovery path for exactly what `outputTail` above
+   *  truncates. Same population scope as `outputTail` (set whenever `GateSequentialResult.outputFile` was,
+   *  `undefined` under the identical "nothing to report" conditions — no gate spawned, a REUSED self-check,
+   *  or a step that genuinely produced zero output). Retained on a rolling, count-bounded window (see
+   *  `GATE_SPILL_RETAIN_COUNT`) — an old op's file may already be pruned by the time this field is read
+   *  back; a caller should treat a missing file at this path as "aged out of retention", not as a bug. */
+  outputFile?: string;
   gateDetail?: {
     phase?: string;
     failedStep?: string;

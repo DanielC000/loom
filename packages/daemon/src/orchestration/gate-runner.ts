@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import path from "node:path";
+import { GATE_SPILL_MAX_BYTES } from "./gate-spill.js";
 
 /**
  * Split a `gateCommand` on its TOP-LEVEL `&&` joins (outside single/double quotes) into independent
@@ -506,6 +507,12 @@ export interface GateStepResult {
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
   outputTail?: string;
+  /** Card a16c580b: absolute path to this step's FULL captured stdout+stderr, when a caller passed
+   *  `spillFile` to {@link runGateStep} AND at least one byte was actually captured — `undefined` when no
+   *  `spillFile` was given, or the step produced no output at all (nothing to spill). Unlike `outputTail`,
+   *  this is never truncated on its own account — see `GATE_SPILL_MAX_BYTES`'s own doc for the (much
+   *  larger, disk-usage-only) ceiling it can still hit on a pathological run. */
+  outputFile?: string;
   /** Best-effort failing-test/assertion line, scanned LIVE across the full stream (see
    *  {@link createFailingTestTracker}) — unlike `outputTail`, never truncated to the last
    *  {@link OUTPUT_TAIL_BYTES}. `undefined` when nothing recognizable was found (an honest miss, never a
@@ -575,7 +582,7 @@ export interface GateStepResult {
  *  bounded ring so a rejection can surface the REAL failure instead of an opaque "gate failed". Injectable
  *  so a hermetic test can prove step-by-step + short-circuit behavior without spawning real processes. */
 export interface GateStepRunner {
-  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks): Promise<GateStepResult>;
+  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks, spillFile?: string): Promise<GateStepResult>;
 }
 
 /**
@@ -588,7 +595,37 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true, cancelSignal, hooks) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true, cancelSignal, hooks, spillFile) => new Promise((resolve) => {
+  // Card a16c580b: FULL-OUTPUT spill, independent of the bounded ring below — appended to synchronously as
+  // each chunk arrives (never buffered — see GATE_SPILL_MAX_BYTES's own doc for why this can't just widen
+  // the ring instead), so a settled op's complete stdout+stderr is recoverable by opId even once
+  // `outputTail` has truncated it. `undefined` `spillFile` (the common case for a caller that never opted
+  // in) makes every line below a no-op — byte-identical to pre-card behavior.
+  let spilledBytes = 0;
+  let spillCapped = false;
+  let spilledAny = false;
+  const spill = (b: Buffer): void => {
+    if (!spillFile || spillCapped) return;
+    try {
+      if (spilledBytes === 0) fs.mkdirSync(path.dirname(spillFile), { recursive: true });
+      if (spilledBytes + b.length > GATE_SPILL_MAX_BYTES) {
+        const room = GATE_SPILL_MAX_BYTES - spilledBytes;
+        if (room > 0) fs.appendFileSync(spillFile, b.subarray(0, room));
+        fs.appendFileSync(spillFile, `\n... [gate-output spill capped at ${GATE_SPILL_MAX_BYTES} bytes — output continues beyond this point] ...\n`);
+        spillCapped = true;
+        spilledAny = true;
+        return;
+      }
+      fs.appendFileSync(spillFile, b);
+      spilledBytes += b.length;
+      spilledAny = true;
+    } catch (err) {
+      // Best-effort: a disk-write failure here must never break gate execution — the bounded ring/tail
+      // stays the fallback diagnostic exactly as before this card.
+      console.warn(`[gate-runner] full-output spill write failed (continuing): ${(err as Error).message}`);
+      spillCapped = true; // stop retrying a broken sink on every subsequent chunk
+    }
+  };
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
@@ -626,6 +663,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
     failingTestTracker.feed(b);
     failureBlockTracker.feed(b);
+    spill(b);
   };
   const tail = (): string => {
     const s = Buffer.concat(chunks).toString("utf-8").trim();
@@ -716,6 +754,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     resolve({
       ...result, ...(cancelling ? { cancelled: true } : {}),
       outputTail: isGenuineFailure ? resolveOutputTail() : tail(),
+      ...(spilledAny ? { outputFile: spillFile } : {}),
       failingTest, failingTestCount: failingTest ? failingTestTracker.matchCount() : undefined,
       failTierTest, failTierTestCount: failTierTest ? failingTestTracker.failTierMatchCount() : undefined,
       harnessNotExecutedDetected,
@@ -800,6 +839,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
         // content for either way — it was deliberately terminated, not naturally failing — so it keeps the
         // plain positional tail here too, matching `done()` exactly.
         outputTail: cancelling ? tail() : resolveOutputTail(), failingTest: timeoutFailingTest, failingTestCount: timeoutFailingTest ? failingTestTracker.matchCount() : undefined,
+        ...(spilledAny ? { outputFile: spillFile } : {}),
         failTierTest: timeoutFailTierTest, failTierTestCount: timeoutFailTierTest ? failingTestTracker.failTierMatchCount() : undefined,
         harnessNotExecutedDetected: timeoutHarnessNotExecutedDetected,
         decidedAt,
@@ -875,6 +915,12 @@ export interface GateSequentialResult {
   failedSignal?: NodeJS.Signals | null;
   failedTimedOut?: boolean;
   outputTail?: string;
+  /** Card a16c580b: see {@link GateStepResult.outputFile} — forwarded from whichever step actually wrote
+   *  one (every step of one `runGateSequential` call shares the SAME `spillFile`, appended to in execution
+   *  order, so this is simply "was anything ever spilled for this run" regardless of which step did it).
+   *  `undefined` under the identical "nothing to report" conditions as `outputFile` itself (no `spillFile`
+   *  given, or zero bytes captured across every step that ran). */
+  outputFile?: string;
   /** See {@link GateStepResult.failingTest} — forwarded verbatim from the failing step's own result, so a
    *  caller no longer has to re-derive it (truncation-prone) from `outputTail` itself. */
   failingTest?: string;
@@ -1104,7 +1150,7 @@ export function describeGateProximity(steps: GateStepDuration[] | undefined, gat
  */
 export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
-  allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks,
+  allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks, spillFile?: string,
 ): Promise<GateSequentialResult> {
   // Card a2873f7e: per-step {step, durationMs, status} accumulated as each step settles — forwarded
   // verbatim on EVERY return below (green or rejected), same shape either way.
@@ -1113,20 +1159,25 @@ export async function runGateSequential(
   // it too — every rejection return already forwards `res.outputTail` from the step that failed; a passing
   // run has no "failed step" to hang it off, so the last step actually run is the honest equivalent.
   let lastOutputTail: string | undefined;
+  // Card a16c580b: mirrors `lastOutputTail` immediately above — every step shares the SAME `spillFile`
+  // (appended to in execution order), so this is just "did any step ever actually spill".
+  let lastOutputFile: string | undefined;
   for (const step of splitGateSteps(gate)) {
     // Card 8d585277: checked BEFORE spawning each step too — a cancel arriving in the gap BETWEEN two
     // steps (this run has already settled one step and hasn't started the next) must not spawn a step
     // that was never going to be waited for.
     if (cancelSignal?.aborted) return { passed: false, cancelled: true, failedStep: step, steps };
     const startedAt = performance.now();
-    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal, hooks);
+    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal, hooks, spillFile);
     const durationMs = res.decidedAt != null ? res.decidedAt - startedAt : null;
     steps.push({ step, durationMs, status: res.status });
     lastOutputTail = res.outputTail;
+    if (res.outputFile) lastOutputFile = res.outputFile;
     if (res.cancelled) {
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
+        failedTimedOut: false, outputTail: res.outputTail, ...(res.outputFile ? { outputFile: res.outputFile } : {}),
+        failingTest: res.failingTest, failingTestCount: res.failingTestCount,
         failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
         harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
@@ -1135,13 +1186,14 @@ export async function runGateSequential(
     if (!passed) {
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, failingTestCount: res.failingTestCount,
+        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, ...(res.outputFile ? { outputFile: res.outputFile } : {}),
+        failingTest: res.failingTest, failingTestCount: res.failingTestCount,
         failTierTest: res.failTierTest, failTierTestCount: res.failTierTestCount,
         harnessNotExecutedDetected: res.harnessNotExecutedDetected, steps,
       };
     }
   }
-  return { passed: true, steps, outputTail: lastOutputTail };
+  return { passed: true, steps, outputTail: lastOutputTail, ...(lastOutputFile ? { outputFile: lastOutputFile } : {}) };
 }
 
 /**
