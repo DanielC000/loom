@@ -175,17 +175,25 @@ try {
   check("(3j-could-not-measure) also does not render byte-identically to the NOT-APPLICABLE case (the two-class split is real, not a relabeling)", couldNotMeasureComposed !== unavailableComposed);
 
   // ===================== (3k) card 548a0c7e: the "Orchestration config" block — a manager used to have
-  // no way to learn maxConcurrentWorkers/maxConcurrentGates/gateCommandTimeoutMs except provoking a
-  // worker_spawn cap-reject error, and the recorded incident was an agent reasoning from the DOCUMENTED
-  // DEFAULT (3) while a project OVERRIDE (4) was actually in force. `orchestration` is OPTIONAL — omitted
-  // (every call above this point) composes byte-identically, proving the field is purely additive. =====
+  // no way to learn maxConcurrentWorkers/gateCommandTimeoutMs except provoking a worker_spawn cap-reject
+  // error, and the recorded incident was an agent reasoning from the DOCUMENTED DEFAULT (3) while a
+  // project OVERRIDE (4) was actually in force. `orchestration` is OPTIONAL — omitted (every call above
+  // this point) composes byte-identically, proving the field is purely additive. =====
+  //
+  // Card a3b17d55, RED-PROVEN: `orchestration` no longer carries a `maxConcurrentGates` field at all —
+  // every real call site resolved this whole object via a project-scoped `resolveConfig(project.config)`
+  // (no platform-override arg), which silently returned the hardcoded PLATFORM DEFAULT (1) for that
+  // daemon-global-only field instead of the owner's actual override (2), disagreeing with `gate_queue`'s
+  // live `cap`. Fix: stop printing a number that can drift, and point at the live instrument instead —
+  // same pattern this block already used for worker capacity below.
   const noOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
   check("(3k) orchestration OMITTED ⇒ no 'Orchestration config' block at all", !noOrch.includes("Orchestration config"));
   check("(3k) orchestration OMITTED ⇒ byte-identical to the pre-548a0c7e composition", noOrch === composed);
-  const withOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", orchestration: { maxConcurrentWorkers: 4, maxConcurrentGates: 2, gateCommandTimeoutMs: 900000 } });
+  const withOrch = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", orchestration: { maxConcurrentWorkers: 4, gateCommandTimeoutMs: 900000 } });
   check("(3k) orchestration PASSED ⇒ the 'Orchestration config' block renders", withOrch.includes("## Orchestration config"));
   check("(3k) THE BUG THIS CARD FIXES, RED-PROVEN: names the OVERRIDE value (4), not the platform's documented default (3)", withOrch.includes("`4`") && /Max concurrent workers.*`4`/.test(withOrch));
-  check("(3k) also names maxConcurrentGates and the gate command timeout", withOrch.includes("`2`") && withOrch.includes("`900000`"));
+  check("(3k) also names the gate command timeout", withOrch.includes("`900000`"));
+  check("(3k) card a3b17d55: does NOT print a maxConcurrentGates number, and points the reader at gate_queue's live cap instead", !/Max concurrent gates.*`\d+`/.test(withOrch) && /gate_queue/i.test(withOrch));
   check("(3k) points the reader at worker_spawn/worker_list's LIVE capacity instead of this snapshot", /worker_spawn.*success response|worker_list/i.test(withOrch) && /LIVE/.test(withOrch));
   check("(3k) still carries the 'Where things live' header + the agent's own doctrine", withOrch.includes("## Where things live") && withOrch.includes("DOCTRINE_BODY"));
 

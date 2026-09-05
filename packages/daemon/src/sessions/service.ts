@@ -3013,7 +3013,7 @@ export class SessionService {
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
       ? appendMemoryRecallToStartupPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
           codescapeStatus!.text,
         )
       : startupPrompt;
@@ -3154,7 +3154,7 @@ export class SessionService {
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
           appendMemoryRecallToStartupPrompt(
-            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
             codescapeStatus.text,
           ),
           prompt,
@@ -13004,7 +13004,7 @@ export class SessionService {
           `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
           `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
           `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, maxConcurrentGates: config.orchestration.maxConcurrentGates, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
+        { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } },
       ),
       codescapeStatus.text,
     );

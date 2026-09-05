@@ -45,8 +45,15 @@ export function composeManagerStartupPrompt(
      *  ("concurrency cap reached (N)") into its own resume doc, which then went stale the moment the
      *  project's config changed. Optional so every existing caller/test that omits it composes
      *  byte-identically to before (see multi-repo-prompt.mjs's own byte-identity pins on this same
-     *  param). */
-    orchestration?: { maxConcurrentWorkers: number; maxConcurrentGates: number; gateCommandTimeoutMs: number };
+     *  param). Card a3b17d55: deliberately carries no `maxConcurrentGates` field — every call site
+     *  resolves this whole object via a project-scoped `resolveConfig(project.config)` (no platform
+     *  override arg), which is correct for `maxConcurrentWorkers`/`gateCommandTimeoutMs` (per-project,
+     *  no daemon-global layer) but silently returned the hardcoded PLATFORM DEFAULT for
+     *  `maxConcurrentGates` (a daemon-global-only field resolved via `platformOverride?.maxConcurrentGates
+     *  ?? d.orchestration.maxConcurrentGates` in `resolveConfig`) instead of the owner's actual override —
+     *  the printed number silently disagreed with `gate_queue`'s live `cap`. See `orchBlock` below for the
+     *  fix (point at the live instrument instead of re-resolving/re-syncing a second mirrored copy). */
+    orchestration?: { maxConcurrentWorkers: number; gateCommandTimeoutMs: number };
   },
   // Test seam ONLY (card 5e30c4bd) — a real spawn always omits this and gets the live
   // `computeDeployStaleness()` read; a hermetic test injects a fixed result so it can assert BOTH the
@@ -186,12 +193,14 @@ export function composeManagerStartupPrompt(
   const orchBlock = loc.orchestration
     ? "\n\n## Orchestration config (this project's RESOLVED values — may differ from Loom's documented defaults)\n" +
       `- **Max concurrent workers (per manager):** \`${loc.orchestration.maxConcurrentWorkers}\`\n` +
-      `- **Max concurrent gates (daemon-global):** \`${loc.orchestration.maxConcurrentGates}\`\n` +
       `- **Gate command timeout:** \`${loc.orchestration.gateCommandTimeoutMs}\` ms\n\n` +
       "These are a snapshot taken at spawn — don't hand-transcribe them into a resume doc, and don't " +
       "reason from Loom's documented defaults instead of this. For LIVE free-slot capacity (which moves " +
       "on every spawn/retirement), read the `{cap, live, inFlight, free}` capacity `worker_spawn`'s " +
-      "success response and `worker_list` both carry, not this snapshot."
+      "success response and `worker_list` both carry, not this snapshot. **Max concurrent gates " +
+      "(daemon-global) is deliberately NOT printed here** — it's a daemon-wide value the owner can " +
+      "change live with no restart, so a spawn-time snapshot of it would go stale the moment it's " +
+      "touched; read `gate_queue`'s `cap` field for the current value instead."
     : "";
   const full = blockWithNote + refBlock + repoBlock + orchBlock;
   const own = startupPrompt?.trim();
