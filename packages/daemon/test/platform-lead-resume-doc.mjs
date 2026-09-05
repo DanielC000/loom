@@ -63,11 +63,12 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const {
-  lineageRootId, resolvePlatformLeadResumeDocPath,
+  resolvePlatformLeadResumeDocPath,
   platformLeadBaseResumeDocPath, platformLeadLineageResumeDocPath,
   PRIMARY_LINEAGE_META_KEY,
   findFreshestSiblingResumeDoc, composeResumeDocOperationalNotes,
 } = await import("../dist/sessions/platform-lead-prompt.js");
+const { lineageRootId } = await import("../dist/sessions/lineage.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude); it also
 // stands in for the reserved platform project's "home" (repoPath === vaultPath, per platform/seed.ts). ---

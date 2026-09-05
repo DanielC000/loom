@@ -95,7 +95,7 @@ export class FleetHub {
           this.broadcast({ t: "session:remove", id });
           continue;
         }
-        const pm = this.sessions.peekPendingMerge(id);
+        const pm = this.sessions.peekPendingMerge(row);
         // pm.outcome is PendingOpOutcome (a bare `string`) — narrower-cast to PendingMerge's outcome union,
         // same as the REST /api/sessions handler this mirrors (server.ts's peekPendingMerge projection).
         // gatePhase (card 53ad9ed3) is reused the SAME way — see server.ts's own doc for the full reading

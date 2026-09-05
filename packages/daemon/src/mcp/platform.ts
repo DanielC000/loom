@@ -54,7 +54,8 @@ const EVENT_SEARCH_VALID_KINDS_SET = new Set<string>(ALL_ORCHESTRATION_EVENT_KIN
 const EVENT_SEARCH_VALID_KINDS_LIST = [...ALL_ORCHESTRATION_EVENT_KINDS].sort().join(", ");
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
-import { resolvePlatformLeadResumeDocPath, lineageRootId } from "../sessions/platform-lead-prompt.js";
+import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prompt.js";
+import { lineageRootId } from "../sessions/lineage.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, spillableTaskUpdateResult, type TaskWithMerged, type TaskCounts } from "./tasks.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";

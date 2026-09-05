@@ -16,7 +16,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      — git/worktrees.ts — runs against the shared worktree path with no lock of its own, well before
 //      `gateSemaphore.runExclusive` ever serializes anything, so two such ops can race real git state.)
 //
-// THE FIX: `lineageResolvedPendingOp` (sessions/platform-lead-prompt.ts) walks a session's `recycledFrom`
+// THE FIX: `lineageResolvedPendingOp` (sessions/lineage.ts) walks a session's `recycledFrom`
 // chain BACKWARD — the read-side complement of the existing forward-walking `liveLineageSuccessor` — to
 // find a per-session-keyed pending op minted under any ancestor. `peekPendingMerge` uses it to surface a
 // predecessor's op (with `predecessorSessionId` attribution, since the successor's OWN id now not

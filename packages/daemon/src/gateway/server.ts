@@ -3923,7 +3923,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // otherwise, byte-identical to before this field existed.
   app.get("/api/sessions", async () =>
     deps.db.listAllSessions().map((s) => {
-      const pm = deps.sessions.peekPendingMerge(s.id);
+      const pm = deps.sessions.peekPendingMerge(s);
       const gatePhase = pm && pm.state === "running" ? deps.sessions.gatePhaseForOpId(pm.opId) : undefined;
       return { ...s, pendingMerge: pm ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt, outcome: pm.outcome, gatePhase, predecessorSessionId: pm.predecessorSessionId } : null };
     }));

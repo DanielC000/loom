@@ -27,7 +27,7 @@ import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/re
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { buildServedStatus } from "../served-status.js";
-import { lineageRootId } from "../sessions/platform-lead-prompt.js";
+import { lineageRootId } from "../sessions/lineage.js";
 import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import {
@@ -1397,7 +1397,7 @@ function peerMessageStatusByMsgId(
 
 /**
  * Card 35c96aa6 — walk `sessionId`'s OWN `recycledFrom` ancestor chain, self included, bounded/cycle-
- * guarded. Same shape as `lineageRootId` (sessions/platform-lead-prompt.ts), but returns the FULL chain
+ * guarded. Same shape as `lineageRootId` (sessions/lineage.ts), but returns the FULL chain
  * instead of just the root: `directiveDeliveriesForCaller` needs every ancestor's own event history, not
  * just an identity comparison. This IS the capability-widening argument for `directive_status` made
  * concrete — a caller can only ever reach rows keyed to itself or its own direct predecessors, never a
@@ -3028,7 +3028,7 @@ export class OrchestrationMcpRouter {
 
     const fleetView = async () => {
       const workers = db.listWorkers(managerSessionId).map((w) => {
-        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w.id) ?? null);
+        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w) ?? null);
         const mismatch = deriveLastMismatch(w.id);
         const directiveProjection = staleDirectiveProjection(w.id, w.turnSeq ?? 0);
         return {
@@ -3269,7 +3269,7 @@ export class OrchestrationMcpRouter {
         if (!workerSessionId) return ok(await fleetView());
         const w = selfHealWorkerLink(workerSessionId, "worker_status");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
-        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w.id) ?? null);
+        const pendingMerge = withGatePhase(sessions.peekPendingMerge(w) ?? null);
         const mismatch = deriveLastMismatch(w.id);
         const directiveProjection = staleDirectiveProjection(w.id, w.turnSeq ?? 0);
         return ok({

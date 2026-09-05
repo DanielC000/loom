@@ -67,7 +67,10 @@ const PENDING_MERGE_VIEWS = {
 const GATE_PHASES = { "op-merge-1": "running", "op-merge-queued": "queued" };
 
 const sessionsStub = {
-  peekPendingMerge(workerSessionId) { return PENDING_MERGE_VIEWS[workerSessionId]; },
+  // real SessionService.peekPendingMerge accepts either a bare id or a { id, recycledFrom } seed (card
+  // 1c51de69 DoD-3) — mcp/orchestration.ts now passes the whole session row, so this stub must resolve
+  // an id from either shape, matching the real contract this hermetic router double stands in for.
+  peekPendingMerge(worker) { const id = typeof worker === "string" ? worker : worker.id; return PENDING_MERGE_VIEWS[id]; },
   gatePhaseForOpId(opId) { return GATE_PHASES[opId] ?? null; },
   listPendingSpawns(managerSessionId) { return managerSessionId === "mgr" ? [PENDING_SPAWN] : []; },
   listCapQueuedSpawns() { return []; }, // no cap-queued markers in this stub's scenario — exercised for real in worker-spawn-cap-queue.mjs

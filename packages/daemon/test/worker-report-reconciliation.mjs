@@ -346,7 +346,10 @@ for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force:
   const gatePhaseByOpId = { "op-running": "running", "op-queued": "queued", "op-prep": null };
 
   const router3 = new OrchestrationMcpRouter(db3, /** @type {any} */ ({
-    peekPendingMerge(workerSessionId) { return pendingMergeByWorker[workerSessionId]; },
+    // real SessionService.peekPendingMerge accepts either a bare id or a { id, recycledFrom } seed (card
+    // 1c51de69 DoD-3) — mcp/orchestration.ts now passes the whole session row, so this stub must resolve
+    // an id from either shape, matching the real contract this hermetic router double stands in for.
+    peekPendingMerge(worker) { const id = typeof worker === "string" ? worker : worker.id; return pendingMergeByWorker[id]; },
     gatePhaseForOpId(opId) { return gatePhaseByOpId[opId] ?? null; },
     listPendingSpawns() { return []; },
     listCapQueuedSpawns() { return []; },

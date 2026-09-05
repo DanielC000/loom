@@ -110,7 +110,7 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
-const { liveLineageSuccessor } = await import("../dist/sessions/platform-lead-prompt.js");
+const { liveLineageSuccessor } = await import("../dist/sessions/lineage.js");
 
 const GIT_ID = "-c user.email=posl@loom -c user.name=posl";
 const now = new Date().toISOString();

@@ -73,7 +73,10 @@ db.insertAgent({ id: "a1", projectId: "p1", name: "Agent", startupPrompt: "x", p
 const pendingMergeById = new Map();
 const gatePhaseByOpId = new Map();
 const sessions = {
-  peekPendingMerge: (id) => pendingMergeById.get(id),
+  // real SessionService.peekPendingMerge accepts either a bare id or a { id, recycledFrom } seed (card
+  // 1c51de69 DoD-3) — fleet-hub.ts now passes the whole row it already read, so this stub must resolve
+  // an id from either shape, matching the real contract this hermetic stand-in mocks.
+  peekPendingMerge: (worker) => pendingMergeById.get(typeof worker === "string" ? worker : worker.id),
   gatePhaseForOpId: (opId) => gatePhaseByOpId.get(opId) ?? null,
 };
 

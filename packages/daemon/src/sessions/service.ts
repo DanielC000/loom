@@ -32,7 +32,8 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
-import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageResolvedPendingOp, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
+import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
+import { lineageResolvedPendingOp, lineageRootId, liveLineageSuccessor } from "./lineage.js";
 import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
@@ -8152,9 +8153,16 @@ export class SessionService {
    * attribution (set only when the op's true origin differs from `workerSessionId`), mirroring the
    * predecessor-attribution `settleNudgeAttribution` already gives the gate nudge — so a reader can tell
    * "my op" from "my predecessor's op" instead of the two being indistinguishable.
+   *
+   * `worker` accepts either a bare workerSessionId (re-fetches its `recycledFrom`) or a `{ id,
+   * recycledFrom }` seed (card `1c51de69` DoD-3) — every current caller (the `/api/sessions` REST route,
+   * the fleet-hub WS push, `worker_list`/`worker_status`) already holds the full session row it was
+   * called with, so passing that row through here saves the redundant `getSession` point-read this
+   * function used to make on every single call.
    */
-  peekPendingMerge(workerSessionId: string): (PendingOpView & { predecessorSessionId?: string }) | undefined {
-    const found = lineageResolvedPendingOp(this.db, "merge", (key) => this.pendingOps.peek(key), workerSessionId);
+  peekPendingMerge(worker: string | { id: string; recycledFrom?: string | null }): (PendingOpView & { predecessorSessionId?: string }) | undefined {
+    const workerSessionId = typeof worker === "string" ? worker : worker.id;
+    const found = lineageResolvedPendingOp(this.db, "merge", (key) => this.pendingOps.peek(key), worker);
     if (!found) return undefined;
     return found.originSessionId === workerSessionId ? found.view : { ...found.view, predecessorSessionId: found.originSessionId };
   }
@@ -17145,28 +17153,10 @@ export class SessionService {
       return { settled: true, ok: true, value: { ok: false, landed: [], fallback, reason: "no gateCommand configured" } };
     }
 
-    // DEDUPE/ATTACH KEY (card f944d4e4 — see this method's own header doc for the full rationale + the
-    // rejected alternatives): sorted, comma-joined LINEAGE-ROOT ids of the RESOLVED `chosen` set — the
-    // batch that will actually be gated together, not the raw request — scoped under the owning manager's
-    // OWN lineage root too. Deliberately excludes `baseMainSha` (a legitimate retry can land after main
-    // advances) and any git-derived identity (no I/O needed to compute this key). Sorted so a client that
-    // reorders the same logical set across a retry still dedupe-hits.
-    //
-    // LINEAGE-ROOTED, NOT RAW session ids (card `3a2dac9c` DoD-3): this key used to embed the raw
-    // `managerSessionId`/`workerSessionId`s verbatim, which made it SENSITIVE to a mid-batch
-    // `worker_recycle`/manager recycle — card 81d795de deliberately widened this batch's finalize window
-    // to comfortably outlive one manager turn, so a recycle of the manager OR of any candidate landing
-    // between the initial call and a client-timeout retry is an ORDINARY event here, not a corner case.
-    // A raw-id key change on retry means a SECOND, genuinely concurrent batch op mints for the same
-    // resolved worktrees — precisely the failure this dedupe exists to prevent (the batch analogue of the
-    // solo path's surface 2 — see `confirmWorkerMergeTracked`'s own `key` doc). `lineageRootId` (this
-    // file's existing forward/backward lineage-walk sibling primitive, already used by the Platform Lead
-    // resume-doc scoping) never changes across a recycle — a predecessor and every one of its successors
-    // share the SAME root — so this key is now stable across exactly the recycle window that used to
-    // fracture it, with zero behavior change for the common (never-recycled) case, where a session's root
-    // is itself.
-    const rootOf = (id: string) => lineageRootId(this.db, this.db.getSession(id) ?? { id, recycledFrom: null });
-    const batchKey = `merge-batch:${rootOf(managerSessionId)}:${chosen.map((c) => rootOf(c.workerSessionId)).slice().sort().join(",")}`;
+    // DEDUPE/ATTACH KEY (card f944d4e4 — rejected alternatives in this method's own header doc; card
+    // `1c51de69` extracted the expression to `buildBatchDedupeKey`, below — see ITS doc for the full
+    // rationale, not duplicated here).
+    const batchKey = buildBatchDedupeKey(this.db, managerSessionId, chosen);
     // VERDICT IDENTITY (Code Review, card cf803152 — a REPRODUCED regression in this card's first attempt:
     // `retainVerdictUntilSuperseded` with no `verdictIdentity` made a rejected batch's cached verdict
     // IMMORTAL — both workers could commit the actual fix and a re-fire with the same resolved candidate
@@ -20457,4 +20447,34 @@ export function filterRetainedWorktreesByProject(
   if (!projectId) return result;
   const entries = result.entries.filter((e) => e.projectId === projectId);
   return { count: entries.length, entries };
+}
+
+/**
+ * The DEDUPE/ATTACH key for `mergeBatchTracked` (card f944d4e4; lineage-rooted by card `3a2dac9c` DoD-3)
+ * — extracted to a standalone function (card `1c51de69`, out of Code Review `f96c209a` on `3a2dac9c`) so
+ * it's unit-testable without driving the whole batch method. Sorted, comma-joined LINEAGE-ROOT ids of
+ * the RESOLVED `chosen` set — the batch that will actually be gated together, not the raw request —
+ * scoped under the owning manager's OWN lineage root too. Deliberately excludes `baseMainSha` (a
+ * legitimate retry can land after main advances) and any git-derived identity (no I/O needed to compute
+ * this key). Sorted so a client that reorders the same logical set across a retry still dedupe-hits.
+ *
+ * LINEAGE-ROOTED, NOT RAW session ids: this key used to embed the raw `managerSessionId`/
+ * `workerSessionId`s verbatim, which made it SENSITIVE to a mid-batch `worker_recycle`/manager recycle —
+ * card 81d795de deliberately widened this batch's finalize window to comfortably outlive one manager
+ * turn, so a recycle of the manager OR of any candidate landing between the initial call and a
+ * client-timeout retry is an ORDINARY event here, not a corner case. A raw-id key change on retry means
+ * a SECOND, genuinely concurrent batch op mints for the same resolved worktrees — precisely the failure
+ * this dedupe exists to prevent (the batch analogue of the solo path's surface 2 — see
+ * `confirmWorkerMergeTracked`'s own `key` doc). `lineageRootId` never changes across a recycle — a
+ * predecessor and every one of its successors share the SAME root — so this key is stable across exactly
+ * the recycle window that used to fracture it, with zero behavior change for the common (never-recycled)
+ * case, where a session's root is itself.
+ */
+export function buildBatchDedupeKey(
+  db: Db,
+  managerSessionId: string,
+  chosen: { workerSessionId: string }[],
+): string {
+  const rootOf = (id: string) => lineageRootId(db, db.getSession(id) ?? { id, recycledFrom: null });
+  return `merge-batch:${rootOf(managerSessionId)}:${chosen.map((c) => rootOf(c.workerSessionId)).slice().sort().join(",")}`;
 }

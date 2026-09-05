@@ -1,10 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
-import type { Session } from "@loom/shared";
-import type { PendingOpView } from "../orchestration/pending-ops.js";
 import { resumeDocSizeWarning } from "./resume-doc-notes.js";
 import { readCodescapeToolDriftNote, readCodescapeBuildDriftNote } from "../codescape/drift-notice.js";
+
+// Recycle-lineage helpers (`lineageRootId`/`liveLineageSuccessor`/`lineageResolvedPendingOp`) moved to
+// `./lineage.js` (card `1c51de69`) — a general session-lineage module, not specific to this file's own
+// Platform Lead resume-doc scoping (card `2fed1663`). Import from there directly; this file no longer
+// re-exports them (Code Review, `f96c209a`-follow-up — a re-export with no consumer just adds a hop for
+// a reader debugging `peekPendingMerge`, the exact reader DoD-2 was written for).
 
 /**
  * Card 2fed1663 — lineage-scope the Platform Lead resume doc so concurrent Leads never contend on one
@@ -34,81 +38,6 @@ export function platformLeadBaseResumeDocPath(homePath: string): string {
 /** Absolute path of ONE lineage's own resume doc (never the base file). */
 export function platformLeadLineageResumeDocPath(homePath: string, lineageId: string): string {
   return path.join(homePath, `PLATFORM-LEAD-RESUME-${lineageId}.md`);
-}
-
-/**
- * Walk a session's `recycledFrom` chain back to its LINEAGE ROOT — the original session with no
- * predecessor. Every successor in a recycle chain shares its root's id as the stable `lineageId`. A
- * fresh (non-recycled) session is its own root. Cycle-guarded (defensive; a real chain never cycles).
- */
-export function lineageRootId(db: Db, session: { id: string; recycledFrom?: string | null }): string {
-  let current: { id: string; recycledFrom?: string | null } = session;
-  const seen = new Set<string>([current.id]);
-  while (current.recycledFrom && !seen.has(current.recycledFrom)) {
-    const prev = db.getSession(current.recycledFrom);
-    if (!prev) break;
-    seen.add(prev.id);
-    current = prev;
-  }
-  return current.id;
-}
-
-/**
- * Walk a session's recycle-successor chain FORWARD, starting from `sessionId`, to find the LIVE end
- * of its lineage — the complement to {@link lineageRootId} (which walks BACKWARD to the root). At each
- * step it follows `db.getSuccessor` (the session, if any, whose `recycledFrom` points at the current
- * one) until it finds a live session or the chain runs out. Cycle-guarded (defensive; a real chain
- * never cycles). Returns null if `sessionId` doesn't exist or no live session exists anywhere forward
- * in its lineage.
- */
-export function liveLineageSuccessor(db: Db, sessionId: string): Session | null {
-  let current: Session | undefined = db.getSession(sessionId);
-  const seen = new Set<string>();
-  while (current) {
-    if (current.processState === "live") return current;
-    if (seen.has(current.id)) return null;
-    seen.add(current.id);
-    current = db.getSuccessor(current.id);
-  }
-  return null;
-}
-
-/**
- * Walk a session's `recycledFrom` chain BACKWARD, from `sessionId` itself out to its lineage root,
- * looking for a per-session-keyed pending op (`${kindPrefix}:${id}`) minted under one of the ancestor
- * ids — the read-side complement to {@link liveLineageSuccessor}'s forward walk (card `3a2dac9c`, out of
- * `eeb26621`'s investigation). A `merge`/`gate` op is minted under whichever session id was live at
- * `attach()` time; `recycleWorker`/`recycleManager` mint a fresh successor id but never rewrite or alias
- * that key onto it (see `confirmWorkerMergeTracked`'s own doc for why not — the tombstone's
- * `ownerSessionId` for a merge op is the MANAGER, not the worker, so there is nothing on the durable row
- * to rewrite anyway). Without this walk, an op started before a recycle is invisible to any reader that
- * only ever peeks the CURRENT (successor) id's own key.
- *
- * `peek` is caller-supplied (a bound `PendingOpRegistry.peek`, or any lookalike) rather than this module
- * taking a `PendingOpRegistry` directly, so this stays a plain `Db`-only lineage helper — matching
- * `lineageRootId`/`liveLineageSuccessor`'s own shape — with no new cross-module dependency.
- *
- * Returns the first hit — an op that's still running, or a not-yet-expired retained view (`peek()`
- * surfaces both, see pending-ops.ts) — together with the exact key it was found under and which ancestor
- * id owns it, so a caller can tell "my own op" (`originSessionId === sessionId`) from "my predecessor's"
- * by comparing that id. Returns `undefined` when the walk finds nothing anywhere in the lineage. Bounded
- * + cycle-guarded like `lineageRootId`; a real chain never cycles.
- */
-export function lineageResolvedPendingOp(
-  db: Db, kindPrefix: string, peek: (key: string) => PendingOpView | undefined, sessionId: string,
-): { key: string; view: PendingOpView; originSessionId: string } | undefined {
-  let current: { id: string; recycledFrom?: string | null } | undefined = db.getSession(sessionId) ?? { id: sessionId, recycledFrom: null };
-  const seen = new Set<string>();
-  while (current) {
-    if (seen.has(current.id)) return undefined;
-    seen.add(current.id);
-    const key = `${kindPrefix}:${current.id}`;
-    const view = peek(key);
-    if (view) return { key, view, originSessionId: current.id };
-    if (!current.recycledFrom) return undefined;
-    current = db.getSession(current.recycledFrom);
-  }
-  return undefined;
 }
 
 /**
