@@ -4429,11 +4429,16 @@ export class SessionService {
    * — it falls through to `Db.findPendingGateOpByOpId`, the SAME scoped id-or-prefix resolution over the
    * PERMANENT `pending_gate_ops` tombstone table (never pruned — see its schema doc), and returns that
    * row's OWN terminal state: `"settled"`, `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the
-   * schema doc for what each means). `"pending"` covers the narrow, genuinely-real window where a row was
-   * minted but is not yet visible in the live GateSemaphore (either about to register, or — after a real
-   * daemon restart — awaiting the next boot's `reconcileOrphanedGateOps`/`reconcileUnsurfacedPendingGateOps`
-   * sweep, card 7239c712): the op demonstrably
-   * EXISTS, so this must never collapse to `never_existed`. An AMBIGUOUS prefix at EITHER layer is a
+   * schema doc for what each means). `"pending"` covers the genuinely-real window where a row was minted but
+   * is not yet visible in the live GateSemaphore (either about to register, or — after a real daemon restart
+   * — awaiting the next boot's `reconcileOrphanedGateOps`/`reconcileUnsurfacedPendingGateOps` sweep, card
+   * 7239c712): the op demonstrably EXISTS, so this must never collapse to `never_existed`. ⚠️ CORRECTED
+   * (card d5e67146 — this window used to be described as "narrow" here; it stopped being narrow the moment
+   * card 81d795de deferred `mergeBatch`'s own tombstone settle to full completion, so a healthy in-flight
+   * batch can now sit `"pending"` for tens of minutes, spanning its shared gate run plus every fallback
+   * candidate's own sequential solo merge): see `elapsedMs`'s/`ownerSessionAlive`'s own doc on the return
+   * type below for the real liveness signal this state now carries, so a caller no longer has to treat a
+   * long-lived `"pending"` batch row as indistinguishable from a genuinely stranded one. An AMBIGUOUS prefix at EITHER layer is a
    * DISTINCT outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must never
    * collapse into `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a
    * miss that means "gone" or "not visible to you", and none of the three may impersonate another.
@@ -4534,7 +4539,29 @@ export class SessionService {
    */
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
-    gateType: GateType | null; elapsedMs: number | null;
+    gateType: GateType | null;
+    /** Card d5e67146: for the LIVE (`queued`/`running`) states this is `Date.now() - entry.since` — see the
+     *  MCP tool description's own doc for its phase-scoped, re-basing-on-admission semantics; unchanged by
+     *  this card. For the tombstone `state === "pending"` case ONLY — a batch/merge op that has already
+     *  released its live `GateSemaphore` entry (see `mergeBatch`'s own `onSettle` deferral, card 81d795de)
+     *  but hasn't settled yet — this is now `Date.now() - Date.parse(startedAt)`, i.e. time since MINT,
+     *  never fabricated: the live queue/admission clock this field reads for `queued`/`running` no longer
+     *  exists once the op has fallen out of the semaphore, so there is no admission-scoped figure left to
+     *  report; mint time is the only clock the durable tombstone still carries (the SAME value `admittedAt`
+     *  below already exposes for every tombstone state — this is that same instant, just also surfaced
+     *  under the name every OTHER state already uses it under). ⚠️ CORRECTED (code review, same card): this
+     *  does NOT mean a reader can skip branching on `state` — `elapsedMs` STAYS phase-scoped to `state`,
+     *  exactly as the MCP tool description already says for `queued` vs `running`; tombstone-`pending` is
+     *  simply a THIRD origin for this same field (mint time), not an exemption from reading `state` first.
+     *  ⚠️ SAME TRAP `admittedAt`'s own doc names: this can silently include real queue wait from BEFORE the
+     *  op was ever admitted, so a large value here is not by itself evidence of a long RUNNING time — see
+     *  `ownerSessionAlive` below for the actual "is anyone still going to see the result" signal this field
+     *  cannot answer. A corrupt/legacy `startedAt` that fails to parse degrades to `null` here too — never a
+     *  fabricated `NaN` (which would otherwise round-trip through JSON as the literal string `"NaN"` or
+     *  silently vanish, either way a worse failure than an honest `null`). `null` for every settled/evicted/
+     *  orphaned tombstone state (unchanged — nothing "elapsed" is meaningful once the row carries its own
+     *  terminal disposition) and for the "unknown"/"never_existed"/"ambiguous" no-row cases (unchanged). */
+    elapsedMs: number | null;
     /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
      *  stdout/stderr byte) — see {@link GateQueueEntry.idleMs}'s doc for why this (not `elapsedMs`) is the
      *  actual "is it wedged?" signal, and why it must be the SAME `lastOutputAt` clock `gate-runner.ts`
@@ -4608,6 +4635,64 @@ export class SessionService {
      *  if you need queue wait specifically, read it from `gate_queue`/`gate_status` WHILE the op is still
      *  live, before it settles. */
     admittedAt?: string;
+    /** Card d5e67146 — THE LIVENESS SIGNAL for the tombstone `state === "pending"` case (Code Reviewer
+     *  `23ed6cda`'s follow-up on card 81d795de: once `mergeBatch` defers its tombstone settle to full
+     *  completion — worktree prep + gate + fast-forward + every fallback candidate's own solo merge, up to
+     *  tens of minutes — a healthy in-flight batch and a genuinely stranded row become BYTE-IDENTICAL under
+     *  the OLD `{state:"pending",elapsedMs:null,idleMs:null}` shape). Present ONLY while `state ===
+     *  "pending"` — `undefined` for every other state, where the question is either already answered by the
+     *  state name itself (`evicted-dead-owner` already says the owner is gone; a settled row already carries
+     *  a real verdict) or moot (no row at all). ALSO omitted on the SCOPED (worker) surface (code review
+     *  finding M1): a worker's own `opId` lookup only ever resolves ops IT owns (the scoping filter can't
+     *  see anyone else's), so its own lineage is trivially live for the entire duration of the call — `true`
+     *  there would be an unreachable-`false`, teach-nothing tautology, not a real discriminator; only the
+     *  UNSCOPED manager surface can actually observe `false`, so only it gets the field. Also omitted on a
+     *  CROSS-PROJECT read (same `crossProjectRedacted` this method already computes for the verdict fields
+     *  below) — see the MCP tool description's own cross-project section for why this one field, unlike
+     *  `admittedAt`/`gateCap`, is scoped that way despite carrying no path/test/error content of its own.
+     *
+     *  ⚠️ CORRECTED (code review, same card): the first shipped version derived this from
+     *  `!isManagerSessionDead(record.ownerSessionId)` — a WEAKER claim ("the MINTING session specifically
+     *  hasn't exited/archived") wearing a STRONGER doc ("nobody is left alive to ever see the result"). A
+     *  manager/worker recycle (`recycleManager`/`recycleWorker`) hard-stops the PREDECESSOR's pty and never
+     *  rewrites `pending_gate_ops.owner_session_id` — `carryPendingToSuccessor` moves queued messages and
+     *  durable message records only — so the tombstone keeps the retired predecessor's id forever. Every
+     *  settle-nudge push, though, resolves its target through `resolveSettleNudgeTarget` →
+     *  `liveLineageSuccessor`, which walks PAST a dead predecessor to whichever live successor actually
+     *  recycled it — so `isManagerSessionDead` alone said "dead" for a case where someone genuinely IS still
+     *  going to be told. Since card 81d795de made a mid-batch recycle an ORDINARY event (a tens-of-minutes
+     *  finalize routinely outlives one manager turn), this was not a corner case: it read a healthy,
+     *  successor-owned finalize as `false` — a FALSE STRANDED signal, the exact failure DoD-4 exists to rule
+     *  out, arriving by a route neither the card nor its first implementation anticipated.
+     *
+     *  DERIVATION (fixed): `liveLineageSuccessor(db, record.ownerSessionId) != null` — the SAME primitive
+     *  every settle nudge already resolves its own delivery target through (see
+     *  {@link SessionService.resolveSettleNudgeTarget}'s doc), so this field and "who will actually be
+     *  notified" can never drift apart from each other again. Walks `sessionId` itself (still live? done),
+     *  else its `recycledFrom`/successor chain, for a live end; `null` only when the WHOLE lineage is gone —
+     *  missing, exited, or archived, at every link, not just the originating one. `ownerSessionId` is the
+     *  manager for a "merge"/"merge-batch" row, the worker for its own "gate" self-check row — whichever
+     *  session originally minted this op.
+     *
+     *  ⭐ WHAT THIS DOES AND DOES NOT PROVE (read before trusting either value):
+     *  - `false` (no live session anywhere in the lineage) IS a genuine stranded signal, derivable WITHOUT
+     *    already knowing the outcome: nobody is left alive to ever observe this op's eventual settle, even if
+     *    its `run()` is still nominally executing unreachable in the background — the exact condition
+     *    `reconcileDeadOwnerMergeOps`'s boot/dead-owner sweep exists to clean up, just readable HERE, before
+     *    that sweep ever runs. (That eviction path, and its worker-gate sibling, still key on
+     *    `isManagerSessionDead` alone rather than the lineage walk — a real, PRE-EXISTING inconsistency
+     *    between eviction semantics and lineage-routed nudges, tracked separately; not this field's concern.)
+     *  - `true` (a live session exists somewhere in the lineage) does NOT prove the op itself is healthy or
+     *    progressing — it only rules OUT the nobody-will-ever-see-it failure mode. A genuinely-healthy long
+     *    finalize and a hypothetical hung op whose lineage simply hasn't died both read `true` here,
+     *    indistinguishably. Never read `true` as "confirmed still working" — read it as "not yet proven
+     *    stranded".
+     *  - This is DELIBERATELY NOT a fabricated proxy for "the op is making progress" — no such signal is
+     *    honestly derivable from the tombstone alone once its live semaphore entry is gone (see DoD-3: that
+     *    entry is legitimately released the moment `runExclusive` returns, not a bug to work around). Where
+     *    this can't answer the question, it says so by being `undefined`/`true` rather than inventing a
+     *    positive. */
+    ownerSessionAlive?: boolean;
     /** Card 9f6598dd — closes Finding 1 (a settled "merge" op used to report NEITHER of these three
      *  fields at all: `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}`, nothing else).
      *  `settledAt` (ISO) / `totalDurationMs` (`settledAt - admittedAt`) are the REAL total op wall time —
@@ -4985,9 +5070,31 @@ export class SessionService {
       const verdictFields = crossProjectRedacted
         ? Object.fromEntries(Object.entries(rawVerdictFields).filter(([key]) => GATE_VERDICT_FIELD_CLASSIFICATION[key as GateVerdictFieldKey] === "structural")) as typeof rawVerdictFields
         : rawVerdictFields;
+      // Card d5e67146: real liveness for the tombstone `state === "pending"` case ONLY — see
+      // `elapsedMs`'s/`ownerSessionAlive`'s own doc on the return type above for the full reasoning. Both
+      // stay exactly as before (`elapsedMs: null`, `ownerSessionAlive` omitted) for every OTHER state
+      // (settled/evicted-dead-owner/orphaned-by-restart), where a verdict or the state name itself already
+      // answers what these two would otherwise be trying to say.
+      const isPending = t.record.state === "pending";
+      // N1 (code review): a corrupt/legacy `startedAt` makes Date.parse return NaN — Number.isFinite keeps
+      // that an honest `null` rather than a fabricated NaN (which `typeof x === "number"` would wrongly
+      // treat as "a real number" downstream).
+      const startedAtMs = Date.parse(t.record.startedAt);
+      const pendingElapsedMs = isPending && Number.isFinite(startedAtMs) ? Date.now() - startedAtMs : null;
+      // MAJOR (code review): derive from the SAME lineage-successor walk every settle nudge already resolves
+      // its delivery target through (see `resolveSettleNudgeTarget`), never `isManagerSessionDead` alone —
+      // that check only asks "is the MINTING session itself gone", which reads `false` (falsely stranded)
+      // for a perfectly healthy batch whose manager recycled mid-finalize, since nothing rewrites this row's
+      // `ownerSessionId` on recycle. See `ownerSessionAlive`'s own doc on the return type above for the full
+      // incident. M1/M2 (code review): omitted entirely on a SCOPED (worker) or cross-project read — see
+      // that same doc for why.
+      const ownerSessionAlive = isPending && !scoped && !crossProjectRedacted
+        ? liveLineageSuccessor(this.db, t.record.ownerSessionId) != null
+        : undefined;
       return {
-        state: t.record.state, gateType, elapsedMs: null, idleMs: null,
+        state: t.record.state, gateType, elapsedMs: pendingElapsedMs, idleMs: null,
         admittedAt: t.record.startedAt,
+        ...(ownerSessionAlive !== undefined ? { ownerSessionAlive } : {}),
         ...(t.record.verdict != null ? { outcome: t.record.verdict } : {}),
         ...verdictFields,
       };

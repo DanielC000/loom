@@ -1174,11 +1174,18 @@ try {
     db.evictPendingGateOpDeadOwner("evicted-op-1");
     const evictedStatus = sessions.gateStatus("evicted-op-1");
     check("(e2e terminal states) an evicted-dead-owner tombstone reads back \"evicted-dead-owner\"", evictedStatus.state === "evicted-dead-owner" && evictedStatus.gateType === "merge");
+    // Card d5e67146: `ownerSessionAlive`/the mint-based `elapsedMs` are ONLY meaningful (and only computed)
+    // while `state==="pending"` — a terminal tombstone state already answers the "is anyone still around"
+    // question by its own name, so fabricating either here would be exactly the "invent a value where the
+    // tombstone can't honestly answer" trap the card's own DoD warns against.
+    check("(e2e terminal states — d5e67146) a terminal evicted-dead-owner row carries NO fabricated ownerSessionAlive", evictedStatus.ownerSessionAlive === undefined);
+    check("(e2e terminal states — d5e67146) a terminal evicted-dead-owner row's elapsedMs stays null (unchanged)", evictedStatus.elapsedMs === null);
 
     db.insertPendingGateOp({ opId: "orphaned-op-1", kind: "gate", key: `gate:${mgrId}`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
     db.markPendingGateOpOrphaned("orphaned-op-1");
     const orphanedStatus = sessions.gateStatus("orphaned-op-1");
     check("(e2e terminal states) an orphaned-by-restart tombstone reads back \"orphaned-by-restart\"", orphanedStatus.state === "orphaned-by-restart" && orphanedStatus.gateType === "worker");
+    check("(e2e terminal states — d5e67146) a terminal orphaned-by-restart row carries NO fabricated ownerSessionAlive", orphanedStatus.ownerSessionAlive === undefined);
 
     // A row a caller can genuinely observe mid-flight: minted, not yet surfaced/settled (the narrow window
     // before it registers with the live GateSemaphore, or immediately post-restart before the next boot's
@@ -1187,6 +1194,45 @@ try {
     db.insertPendingGateOp({ opId: "still-pending-op-1", kind: "gate", key: `gate:${mgrId}-p`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
     const stillPendingStatus = sessions.gateStatus("still-pending-op-1");
     check("(e2e terminal states) a minted-but-not-yet-live row reads back \"pending\" — never \"never_existed\"", stillPendingStatus.state === "pending");
+
+    // ── (e2e, d5e67146 — POSITIVE CONTROL, healthy arm) a "pending" row owned by a LIVE session (mgrId is
+    // processState:"live" above — the ordinary resting state of a manager parked awaiting this exact op's
+    // own completion nudge, e.g. a merge_batch tombstone mid-finalize) must read ownerSessionAlive:true —
+    // never falsely flagged as stranded — and a real, non-null, mint-based elapsedMs. ────────────────────
+    check("(e2e d5e67146 healthy arm) a pending row with a LIVE owner reads ownerSessionAlive:true", stillPendingStatus.ownerSessionAlive === true);
+    check("(e2e d5e67146 healthy arm) a pending row's elapsedMs is a real non-null number (time since mint), not the old hardcoded null", typeof stillPendingStatus.elapsedMs === "number" && stillPendingStatus.elapsedMs >= 0);
+
+    // ── (e2e, d5e67146 — NEGATIVE CONTROL, stranded arm) the SAME "pending" shape, but owned by a session
+    // that is CONFIRMED gone (processState:"exited") — the exact dead-owner criterion
+    // reconcileDeadOwnerMergeOps/confirmWorkerMergeTracked's own eviction path already trusts elsewhere, and
+    // a faithful stand-in for "the boot-sweep population" this card's DoD-4 calls out: nobody is left alive
+    // to ever consume this op's outcome. Must read ownerSessionAlive:false — proving the field actually
+    // discriminates rather than reading "alive" unconditionally (which would be strictly worse than today:
+    // it would disarm the stranded signal instead of sharpening it, exactly what DoD-4 forbids). ──────────
+    const deadMgrId = `${P}-mgr-dead`;
+    db.insertSession({ id: deadMgrId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    db.insertPendingGateOp({ opId: "stranded-owner-op-1", kind: "merge", key: `merge-batch:${deadMgrId}`, ownerSessionId: deadMgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+    const strandedStatus = sessions.gateStatus("stranded-owner-op-1");
+    check("(e2e d5e67146 stranded arm) a pending row with a DEAD (exited) owner still reads state:\"pending\" (not yet reconciled by the boot sweep)", strandedStatus.state === "pending");
+    check("(e2e d5e67146 stranded arm) a pending row with a DEAD owner reads ownerSessionAlive:false — a real, non-fabricated stranded signal", strandedStatus.ownerSessionAlive === false);
+
+    // ── (e2e, d5e67146 — THE MAJOR FIX'S OWN REGRESSION TEST) code review caught the first shipped version
+    // deriving ownerSessionAlive from `!isManagerSessionDead(ownerSessionId)` alone — which reads FALSE
+    // (falsely stranded) the moment a manager RECYCLES mid-batch, since nothing rewrites the tombstone's
+    // ownerSessionId on recycle and the ORIGINATING session really has exited. But every settle nudge
+    // resolves its delivery target through `resolveSettleNudgeTarget`/`liveLineageSuccessor`, which walks
+    // PAST a dead predecessor to a live successor — so a healthy, recycled-mid-finalize batch WILL still
+    // reach someone. This proves the fixed derivation (liveLineageSuccessor) agrees with that real delivery
+    // mechanism: a pending row minted under a now-exited predecessor, with a LIVE successor recycled from
+    // it, must read ownerSessionAlive:true — never the false-stranded signal the first version would have
+    // produced here. ──────────────────────────────────────────────────────────────────────────────────────
+    const recycledPredecessorId = `${P}-mgr-predecessor`;
+    db.insertSession({ id: recycledPredecessorId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+    const recycledSuccessorId = `${P}-mgr-successor`;
+    db.insertSession({ id: recycledSuccessorId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: recycledPredecessorId });
+    db.insertPendingGateOp({ opId: "stranded-owner-op-2", kind: "merge", key: `merge-batch:${recycledPredecessorId}`, ownerSessionId: recycledPredecessorId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+    const recycledStatus = sessions.gateStatus("stranded-owner-op-2");
+    check("(e2e d5e67146 MAJOR FIX) a pending row minted under a since-recycled (now-exited) manager reads ownerSessionAlive:true when a LIVE successor exists — never the false-stranded signal isManagerSessionDead alone would produce", recycledStatus.ownerSessionAlive === true);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

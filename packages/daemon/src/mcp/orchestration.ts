@@ -183,8 +183,21 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * deeply-queued entry's large `elapsedMs` as "this has been running a long time" when it hasn't started —
  * the exact wrong-direction misread that invites cancelling a healthy gate. Both tools document this
  * explicitly in their descriptions below; keep them in sync if either changes. `elapsedMs` is `null` for
- * every tombstone-fallback state (`settled`/`evicted-dead-owner`/`orphaned-by-restart`/`pending`) — there
- * is no live admission clock to read once the op is no longer in the live registry.
+ * every SETTLED/evicted/orphaned tombstone-fallback state — there is no live admission clock to read once
+ * the op is no longer in the live registry. ⚠️ CORRECTED (card d5e67146): the tombstone `"pending"` state
+ * is the ONE exception — `elapsedMs` there is now `Date.now() - startedAt` (time since MINT, not admission;
+ * see `SessionService.gateStatus`'s own doc on its return type for why no admission-scoped clock survives
+ * once an op has fallen out of the live registry), and the row ALSO carries `ownerSessionAlive` — MANAGER
+ * surface only (unreachable-`false` on a worker's own scoped op, so it's omitted there — see that doc), and
+ * omitted on a foreign-project read too (redacted, not a bare fleet-magnitude fact like `admittedAt`/
+ * `gateCap` — see the manager description's own cross-project section). See that same doc for what it does
+ * and does not prove, and for why it's derived via the SAME lineage-successor walk every settle nudge
+ * already resolves its delivery target through, never a bare "is the minting session itself gone" check
+ * (the latter falsely reads a healthy batch as stranded the moment its manager recycles mid-finalize — an
+ * ordinary event, not an edge case, for a run this long). This closes the gap card 81d795de opened: once
+ * `mergeBatch` defers its tombstone settle to full completion, a healthy in-flight batch can sit
+ * `"pending"` for tens of minutes, and until this card that state carried no way to tell it apart from a
+ * genuinely stranded row.
  *
  * `idleMs`/`extended`: `elapsedMs` (however large) is frequently HEALTHY BY DESIGN and cannot by itself
  * answer "is this wedged?" — `gate-runner.ts`'s own `runGateStep` extends a step's timeout, rather than
@@ -222,7 +235,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "cannot use this to probe another worker's run. `opId` accepts the FULL id OR an unambiguous " +
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
-      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, note?, admittedAt?, passed?, cancelled?, reason?, " +
+      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, note?, admittedAt?, " +
+      "passed?, cancelled?, reason?, " +
       "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, outputFile?, gateDetail?, proximity?}. " +
       "`outputFile` (card a16c580b), present whenever `outputTail` is, is an absolute path to this op's " +
       "FULL captured gate output — `outputTail` above is a bounded ~4KB (or content-selected ~16KB on a " +
@@ -277,9 +291,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "to appear, wait for the nudge and use this as the fallback. `evicted-dead-owner` and " +
       "`orphaned-by-restart` are edge-case terminal states you're " +
       "unlikely to see for your OWN gate op (they're merge-op/restart shapes) — if you do, treat them like " +
-      "`settled`: no verdict was ever reached, re-run `run_gate` if you still need one. `pending` is rare: " +
-      "the op is known to exist but isn't visible in the live registry yet (a narrow just-started or " +
-      "post-restart window) — wait and re-check rather than treating it as stuck. `unknown` covers BOTH " +
+      "`settled`: no verdict was ever reached, re-run `run_gate` if you still need one. `pending` is rare for " +
+      "your OWN gate op: the op is known to exist but isn't visible in the live registry yet (a narrow " +
+      "just-started or post-restart window) — wait and re-check rather than treating it as stuck. (Card " +
+      "d5e67146: this state widens for a manager's own `merge_batch` op, whose tombstone can sit `pending` " +
+      "for tens of minutes — see the manager-facing description below; for your own `run_gate` self-check " +
+      "specifically the window stays narrow.) While `pending`, `elapsedMs` is time SINCE MINT (not since " +
+      "admission — there's no live admission clock left once an op has fallen out of the registry). " +
+      "(This tool ALSO carries an `ownerSessionAlive` field on the MANAGER surface for exactly this " +
+      "widened-`merge_batch` case — omitted HERE: your own scoped lookup can only ever resolve an op YOU " +
+      "started, so it would always read `true` and teach you nothing.) `unknown` covers BOTH " +
       "\"this opId never existed\" AND \"it exists but isn't yours\" — this tool deliberately can't (and " +
       "won't) tell those apart for you (that's what keeps it from being usable to probe another worker's " +
       "run), so never read `unknown` as proof an id is bogus; never confuse it with `settled` either (a " +
@@ -355,22 +376,30 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
+      "idleMs, extended?, error?, note?, admittedAt?, ownerSessionAlive?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
       "this tool is UNSCOPED for a manager — a real opId from ANY project on this daemon resolves here, not " +
       "just your own. For an op belonging to a DIFFERENT project than yours (card a16c580b, widened by card " +
       "5ef78900), the following are REDACTED (omitted) — every field that can carry that project's own " +
       "content, paths, or identifiers: `outputFile`, `outputTail`, `steps`, `gateDetail`, `reason`, " +
       "`commitSubject`, `retriedFile`, `retryWarning`, `emitCompareTestFiles`, " +
-      "`emitCompareNotHermeticExcluded`, `validatedHead`, `headWarning`, and `timingBand` (the last is a " +
-      "lower-severity but still real disclosure — a foreign project's test-file count and gate-duration " +
-      "distribution) — mirroring `gate_queue`'s own " +
-      "cross-project redaction. This is an EXPLICIT, enumerated list, not \"everything sensitive\" by " +
+      "`emitCompareNotHermeticExcluded`, `validatedHead`, `headWarning`, `timingBand` (a foreign project's " +
+      "test-file count and gate-duration distribution — mirroring `gate_queue`'s own cross-project " +
+      "redaction), and `ownerSessionAlive` (card d5e67146 — see below for why this one is redacted despite " +
+      "carrying no path/test/error content of its own). This is an EXPLICIT, enumerated list, not " +
+      "\"everything sensitive\" by " +
       "inference — treat any field not named here as VISIBLE on a foreign read, never assume redaction. " +
       "What stays visible on a foreign read: `state`/`passed`/`cancelled`/`outcome`/`gateType`/`durationMs`/" +
       "`admittedAt`/`settledAt`/`totalDurationMs`/`extended`/`proximity`/`gateCap`/`concurrentGates`/" +
       "`concurrentGatesMax`/`emitCompareReduced`/`emitCompareIdenticalCount`/`retryPassed`/`transientRetried`/" +
       "`transientRetryWarning` — this is a targeted redaction of content-bearing fields, not a refusal. " +
+      "`ownerSessionAlive` is the ONE EXCEPTION to \"redacted only when content-bearing\": it's a bare " +
+      "boolean with no path/test/error content, but unlike `gateCap`/`concurrentGates` (daemon-GLOBAL " +
+      "operational facts) it's a PER-TENANT fact about one foreign project's own session, AND a foreign " +
+      "reader has no stake or available action on it either way — by the time a tombstone reaches " +
+      "`state===\"pending\"` its op has already left the shared GateSemaphore (no slot held, nothing a " +
+      "foreign caller could contend with), so there's no fleet-operational reason to disclose it. Redacted " +
+      "on that basis (card d5e67146, code review M2), not because it fails the usual content test. " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
       "retriedFile?, retryPassed?, retryWarning?, transientRetried?, transientRetryWarning?}. `queued`/`running` " +
       "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
@@ -546,9 +575,31 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "daemon restart (no durable settle record was found for it) — you should already have received a " +
       "synthetic `[loom:merge-orphaned]` nudge for it at boot, a DISTINCT signal from `[loom:merge-failed]` " +
       "since NO verdict was ever reached; not a failure — re-run `worker_merge_confirm` to get a real " +
-      "result. `pending` is rare: the op is known to exist but isn't visible in the " +
-      "live registry yet (a narrow just-started or post-restart window) — wait and re-check rather than " +
-      "treating it as stuck. `never_existed` is a POSITIVE assertion the id was never minted at all — never " +
+      "result. `pending` means the op is known to exist but isn't visible in the " +
+      "live registry yet — for an ordinary solo `worker_merge_confirm` this is a narrow just-started or " +
+      "post-restart window, wait and re-check rather than treating it as stuck. ⚠️ FOR A `merge_batch` OP " +
+      "(card d5e67146, closing a gap card 81d795de opened) THIS IS NOT NARROW: once the batch's own gate " +
+      "run finishes it releases its live gate-queue entry and keeps working (fast-forward, then every " +
+      "fallback candidate's own sequential solo merge) — so a HEALTHY, still-finalizing batch can " +
+      "legitimately read `pending` for tens of minutes, and until this card that was byte-identical to a " +
+      "genuinely stranded row. Two fields now tell them apart WITHOUT you needing to already know which " +
+      "one you're looking at: `elapsedMs` (time since this op was MINTED — not since admission, since " +
+      "there's no live admission clock left once an op has fallen out of the registry; a large value here " +
+      "is routine for a batch with a long fallback chain, not itself a wedge signal) and " +
+      "`ownerSessionAlive` (whether ANYONE is still around to be told the result — walked through a " +
+      "recycle, exactly like the settle nudge itself: `false` means the ENTIRE lineage of the session that " +
+      "started this op — the original manager AND every successor it may have been `worker_recycle`d/" +
+      "`worker_stop`d/replaced into — is gone, not merely that the ORIGINAL manager session has exited; a " +
+      "mid-batch recycle is ordinary for a run this long and must not, by itself, read as stranded. `false` " +
+      "IS then a genuine stranded signal: nobody is left alive to ever see this op's result, even if it's " +
+      "still nominally running unreachable in the background; `true` only rules that dead-lineage case OUT, " +
+      "it does NOT by itself prove the batch is healthy or progressing — a hung-but-owner-still-around op " +
+      "would read `true` too, indistinguishably). ONLY on THIS (manager) surface, and never on a foreign " +
+      "project's op (see the cross-project redaction section above) — omitted, not a fabricated value, in " +
+      "both cases. `elapsedMs` (unlike `ownerSessionAlive`) is populated cross-project and stays populated " +
+      "regardless. Both are populated ONLY while `state===\"pending\"` — " +
+      "omitted for every settled/evicted/orphaned state, where the state itself (or a recorded verdict) " +
+      "already answers the question. `never_existed` is a POSITIVE assertion the id was never minted at all — never " +
       "confuse it with `settled` (a real op DID run, you just don't have its outcome from this tool). " +
       "A `deploy` opId (from the `deploy` tool, if registered) is resolved the SAME way as a merge/worker " +
       "gate opId — it writes its own durable `pending_gate_ops` tombstone (card bed91595), so it reaches " +

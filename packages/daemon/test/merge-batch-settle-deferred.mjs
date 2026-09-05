@@ -87,7 +87,13 @@ try {
   const db = new Db(); dbs.push(db);
   db.insertProject({ id: projId, name: "MBSD", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: 'node -e "process.exit(0)"' } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
-  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  // processState:"live" (card d5e67146): realistically simulates the manager PARKED, alive, awaiting this
+  // exact op's own completion nudge while the batch runs on in the background — the ordinary resting state
+  // this card's gate_status(opId).ownerSessionAlive check is about. (Every OTHER session literal in this
+  // suite uses "exited" as a placeholder since nothing else here consults session liveness; this one
+  // specifically needs to be live for the (RACE) block's new ownerSessionAlive assertion below to exercise
+  // the real, non-dead-owner arm rather than an artifact of this fixture never having been live at all.)
+  db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
   const baseMainSha = execSync("git rev-parse HEAD", { cwd: repo }).toString().trim();
 
@@ -156,6 +162,17 @@ try {
     midFinalize.state !== "settled");
   check("(RACE) gate_status(opId) is still a genuinely live/pending state, not some other terminal misclassification",
     midFinalize.state === "running" || midFinalize.state === "pending" || midFinalize.state === "queued");
+  // Code Review, card d5e67146 finding M4: every ownerSessionAlive/elapsedMs assertion so far ran against a
+  // HAND-INSERTED synthetic pending_gate_ops row — this card's own central premise (a healthy in-flight
+  // batch actually REACHES state:"pending" on the tombstone branch, with real liveness on it) was asserted
+  // nowhere against a REAL mergeBatchTracked op. This is that proof: if the live GateSemaphore entry has
+  // already been released by this point (state==="pending", the tombstone fallback — the expected shape,
+  // since the batch's OWN gate command finished before main advanced), it must carry ownerSessionAlive:true
+  // (mgrId is genuinely "live" above) and a real numeric elapsedMs, never the old null/undefined; if it's
+  // still somehow "running"/"queued" (still registered live), neither field applies yet and there's nothing
+  // to assert here — that's what the OR expresses.
+  check("(RACE — d5e67146) a real, healthy, mid-finalize batch tombstone carries real liveness once it's fallen to the tombstone branch",
+    midFinalize.state !== "pending" || (midFinalize.ownerSessionAlive === true && typeof midFinalize.elapsedMs === "number"));
 
   // Release the gate — finalize proceeds, mergeBatchTracked's own run() resolves, and the DEFERRED
   // settlePendingGateOp write (this card's own onSettle hook) finally fires.
