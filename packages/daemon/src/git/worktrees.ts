@@ -3219,7 +3219,14 @@ const GIT_GREP_NO_MATCH_EXIT_CODE = 1;
  * repoTreeReferencesInertPrefix} matches `anchor…token` OR `token…anchor` for exactly this reason.
  *
  * NOT A PERFECT DISCRIMINATOR — THREE NAMED GAPS, NOT HIDDEN ONES (Code Review, card 1c0d4aa4, measured:
- * 11 realistic read shapes, 4 matched, 7 missed, ALL in the safe-to-fail-closed-on direction):
+ * 11 realistic read shapes, 4 matched, 7 missed). TWO AXES HERE, AND ONLY ONE OF THEM IS FAIL-CLOSED:
+ * the EXIT-CODE axis genuinely is — any outcome other than a confirmed no-match (a spawn error, a
+ * nonzero-non-1 exit, a timeout) forces the full gate rather than trust an unproven scan (see {@link
+ * repoTreeReferencesInertPrefix}'s own doc for that contract). The PATTERN-COVERAGE axis below is NOT
+ * fail-closed: a miss is indistinguishable from a true absence — both surface as the SAME confirmed
+ * no-match exit code — so each of the three named gaps below is fail-OPEN on this axis: it silently
+ * SKIPS the gate on a repo that genuinely reads the prefix, which is precisely the harm card 1c0d4aa4
+ * added this per-repo scan to prevent, not a safe direction for it to fail in.
  * 1. INDIRECTION: a real read anchored through a locally-defined constant (`const ROOT =
  *    path.resolve(__dirname, "..")`, used on a LATER line) is invisible to this single-line, single-call
  *    scan.
@@ -3239,6 +3246,10 @@ const GIT_GREP_NO_MATCH_EXIT_CODE = 1;
  * still preferred here to no check at all, because the asymmetry is the same — a missed reference costs
  * one wrongly-skipped gate (bad), but that is what this whole mechanism already risked pre-card for EVERY
  * non-Loom project.
+ *
+ * WHAT A CLEAN RUN IS THEREFORE WORTH: a confirmed no-match exit code is a strong signal — its known
+ * miss-modes (the three gaps above) all cut toward that same answer — but it is NEVER a proof of absence.
+ * Trust it accordingly: as good evidence the gate can safely skip, not as a guarantee it should.
  *
  * ⚠️ A FOURTH gap, NOT one of these three, WAS hidden until card 0910531e: all three above are missed
  * SHAPES within a JS/TS repo — occasional, and only ever costing one wrongly-skipped gate on an unusual
