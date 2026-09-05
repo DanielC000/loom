@@ -91,17 +91,20 @@ registerForCleanup(WORKTREES_DIR);
 // survives it — see this card's worker_report for the numbers; not embedded here as a test since it
 // depends on env mutation this file doesn't otherwise perform).
 const KICKOFF_PRE_DELIVERY_FLOOR_MS = MODE_LOG_MAX_ATTEMPTS * MODE_LOG_POLL_MS;
-// Card 53a818eb DoD-2 correction: the floor above is NOT the whole pre-delivery cost for every role.
-// `scheduleKickoffGuarantee`'s `gateOnMcp` branch (host.ts, `usesOrchestrationMcp`) makes manager/worker/
-// assistant additionally await `waitForMcpSeen` (bounded by `MCP_READY_TIMEOUT_MS`, default 9000ms) before
-// ever calling submit() — platform/setup/auditor skip that wait entirely (they never mount loom-orchestration).
-// This harness never runs the real HTTP gateway, so `markMcpSeen` (only reachable via a genuine `/mcp-orch/
-// :sessionId` hit) can NEVER fire here — meaning every manager/worker/assistant delivery in this file pays
-// the FULL MCP_READY_TIMEOUT_MS deterministically, on every run, independent of host load. This is the
-// actual explanation for the file's own per-role split (fast: platform/setup/auditor; slow: manager/worker/
-// assistant, by roughly one MCP_READY_TIMEOUT_MS) — NOT Enter-confirmation luck, which was this file's
-// original (incorrect) working theory. `role:"worker"` appears 4 times in this file (the sweep entry plus
-// both large-payload sections plus late-ready), so this ~9s tax is paid 4 times just for that role alone.
+// Card 53a818eb DoD-2 correction, RESOLVED by card cf34c028: the floor above was NOT the whole
+// pre-delivery cost for every role. `scheduleKickoffGuarantee`'s `gateOnMcp` branch (host.ts,
+// `usesOrchestrationMcp`) makes manager/worker/assistant additionally await `waitForMcpSeen` (bounded by
+// `MCP_READY_TIMEOUT_MS`, default 9000ms) before ever calling submit() — platform/setup/auditor skip that
+// wait entirely (they never mount loom-orchestration). This harness never runs the real HTTP gateway, so
+// `markMcpSeen` (only reachable via a genuine `/mcp-orch/:sessionId` hit) could never fire here on its
+// own — meaning every manager/worker/assistant delivery in this file used to pay the FULL
+// MCP_READY_TIMEOUT_MS deterministically (6 × 9s = 54s total across this file's role-sweep/large-payload/
+// late-ready sections), on every run, independent of host load. **Fixed**: `verifyRealDelivery` now calls
+// `host.markMcpSeen(sessionId)` itself right after `spawn()` — the same signal a real gateway's first
+// `/mcp-orch/:sessionId` hit would send — so `waitForMcpSeen` resolves immediately instead of timing out.
+// The per-role split this file used to exhibit (fast: platform/setup/auditor; slow: manager/worker/
+// assistant, by roughly one MCP_READY_TIMEOUT_MS) is gone as a result — NOT Enter-confirmation luck, which
+// was this file's original (incorrect) working theory for the split before 53a818eb's diagnosis.
 // The FIXTURE_READY wait (real child process boot, BEFORE SessionStart/markReady ever runs) is NOT
 // touched by 0050a17e's floor at all — nothing about logLandedMode runs before the child has even booted.
 // It has no analogous code-level floor to derive from, so widening it "because it might be more
@@ -286,6 +289,17 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   // timing-sensitive-test pattern a sibling card (1addef27) is closing. performance.now(), never Date.now().
   host.spawn(opts);
   harness.attach(sessionId);
+  // Card cf34c028: `scheduleKickoffGuarantee`'s `gateOnMcp` branch (host.ts) makes manager/worker/assistant
+  // delivery await `waitForMcpSeen` before this fixture's own SessionStart→delivery wait even starts — and
+  // `markMcpSeen` is normally only reachable via a real `/mcp-orch/:sessionId` HTTP hit, which this bare
+  // `PtyHost` harness (no HTTP gateway) can never produce, so every such role paid the full
+  // MCP_READY_TIMEOUT_MS (9s default) on every run before this fix. `host` here is the SAME real,
+  // unsubclassed PtyHost production code calls `markMcpSeen` on — calling it ourselves right after spawn()
+  // is exactly what a real gateway's first `/mcp-orch/:sessionId` request would do (see markMcpSeen's own
+  // doc: idempotent, a no-op for a role that never gates on it), not a mock of the wait itself. No
+  // assertion in this file exercises the gate/timeout behavior of waitForMcpSeen, so resolving it
+  // immediately removes dead wall-clock without dropping any coverage this file actually has.
+  host.markMcpSeen(sessionId);
 
   // Regression risk 1, at the real-spawn layer: lastPrompt must be seeded SYNCHRONOUSLY at spawn() —
   // checked here BEFORE the fixture has even had a chance to print FIXTURE_READY, i.e. before ANY
