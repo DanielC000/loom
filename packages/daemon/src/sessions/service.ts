@@ -16471,6 +16471,11 @@ export class SessionService {
         const baseMainSha = (await resolveGitRef(finalRepoPath, "HEAD", { timeoutMs: this.gitOpMs })) ?? "";
         let batchWorktreePath: string | undefined;
         const batchTaskId = `batch-${opId}`;
+        // Card dd961cf9: mirrors confirmWorkerMerge's own `gateRan` — true iff `runGate` was actually
+        // invoked (i.e. `runBatchedMerge` didn't short-circuit on a `landed.length === 0` batch, see
+        // batch-merge.ts), so the `endSquash` call below never fires for an opId that was never admitted
+        // for `finalRepoPath` in the first place.
+        let batchGateRan = false;
         try {
           // Card 6cc803b2 — phase instrumentation: wall time of cutting the dedicated batch worktree, the
           // FIRST of the five phases this card measures (batch-worktree cut · per-branch assembly · gate
@@ -16483,6 +16488,10 @@ export class SessionService {
           const worktreeCutMs = Date.now() - worktreeCutStartMs;
 
           const runGate = async (worktreePath: string, gateBaseMainSha: string, landedCount: number, assemblyMs: number): Promise<BatchGateResult> => {
+            // Card dd961cf9: reaching this closure at all means `runBatchedMerge` decided to gate for
+            // real (it skips calling `runGate` entirely on a `landed.length === 0` batch) — set BEFORE
+            // anything below can throw, so a real gate attempt is never misclassified as `false`.
+            batchGateRan = true;
             // Diagnostic-only reduction eligibility (see this method's own header doc) — never acted on.
             // NAMED `batchEmitCompare`, deliberately NOT the bare name confirmWorkerMerge's own classification
             // local uses: emit-compare-branch-capture-order-guard.mjs scans this file for exactly one line
@@ -16626,9 +16635,17 @@ export class SessionService {
           const batchCandidates: BatchCandidate[] = chosen.map((c) => ({ workerSessionId: c.workerSessionId, taskId: c.taskId, branch: c.branch, taskTitle: c.taskTitle }));
           const result = await runBatchedMerge(finalRepoPath, batchWorktreePath, baseMainSha, batchCandidates, runGate, { timeoutMs: this.gitOpMs });
 
-          // Always release the repo-admission guard extension the gate callback above took on a pass — the
-          // guard must not outlive this call regardless of what the fast-forward/finalize below does with it.
-          this.gateSemaphore.endSquash(finalRepoPath, opId);
+          // Release the repo-admission guard extension the gate callback above took on a pass — the guard
+          // must not outlive this call regardless of what the fast-forward/finalize below does with it.
+          // CONFINED TO `batchGateRan` (card dd961cf9 — mirrors confirmWorkerMerge's own `gateRan`-gated
+          // `endSquash` call, service.ts's own doc on that call site): an unconditional call here fired
+          // even on a `landed.length === 0` batch, whose opId was never admitted for `finalRepoPath` at
+          // all (`runBatchedMerge` never calls `runGate` on that path — see batch-merge.ts) — safe only
+          // because `GateSemaphore.freeRepoPath`'s identity check refused it as a no-op, but it logged a
+          // spurious, alarming-looking `refused-not-owner` line on every such batch (observed in
+          // production: op aa9b6e15 vs a genuinely-admitted sibling 0bf14248, 2026-09-04T21:02:15.775Z) —
+          // noise that degrades the very `[gate:repo-guard]` instrument this card's diagnosis depends on.
+          if (batchGateRan) this.gateSemaphore.endSquash(finalRepoPath, opId);
 
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
