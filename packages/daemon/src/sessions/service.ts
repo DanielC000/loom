@@ -519,6 +519,23 @@ type GateRejectionDetail = {
  *  `confirmWorkerMergeTracked`'s `AttachResult<ConfirmMergeResult>`) is new. */
 type MergeBatchResult = {
   ok: boolean;
+  /** Card c85f842d — mirrors `ConfirmMergeResult.opId`, closing the asymmetry a Code Review of card
+   *  `553ea58c` surfaced: the solo merge path has always echoed its `opId` on the sync-settled return,
+   *  but this batch sibling never did, so a manager whose batch settled INLINE (the common case, under
+   *  `syncAttachBudgetMs`) had no id to pass to `gate_status(opId)` at all — exactly the durable, post-hoc
+   *  reader a recycle/restart/successor manager depends on. Set ONLY from inside `mergeBatchTracked`'s own
+   *  `run(opId)` closure (both the `ok:true` landed return and the `ok:false` rejected/forfeited return) —
+   *  i.e. only once `pendingOps.attach()` has actually minted a real op for this batch. `undefined` on every
+   *  EARLIER bail-out this method takes BEFORE ever calling `attach()` (ownership/repo-mismatch refusals,
+   *  "fewer than 2 eligible candidates", "no gateCommand configured") — those return a synthesized
+   *  `MergeBatchResult` with no op ever minted, so there is genuinely no id in scope there, unlike the solo
+   *  path (`ConfirmMergeResult.opId`), which is non-optional because `confirmWorkerMergeTracked` pushes ALL
+   *  of its own equivalent validation inside `confirmWorkerMerge`, called only from within its own
+   *  `attach()` closure — this type stays OPTIONAL rather than mirroring that non-optionality, precisely
+   *  because this method's early bail-outs are real and have no analogous solo-path counterpart. A cached
+   *  verdict (`r.cacheHit` set) still carries the ORIGINATING op's `opId` here (embedded inside the cached
+   *  `value` at the settle that first produced it) — a real, resolvable historical op, not a fabricated one. */
+  opId?: string;
   landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[];
   /** Card 553ea58c (Code Review fold-in): the REAL git-verified landed count (`result.landed.length` from
    *  `runBatchedMerge`) — present on `ok:true` only, and NOT always equal to `landed.length` immediately
@@ -17740,7 +17757,7 @@ export class SessionService {
               ...strandedFallback,
             ], opId);
             return {
-              ok: false, landed: [], fallback, reason: result.reason,
+              ok: false, opId, landed: [], fallback, reason: result.reason,
               phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
               // Card 67030bb9: a retry that ALSO failed still recorded that one was attempted — mirrors
               // confirmWorkerMerge's own identical rejection-path observability.
@@ -17804,7 +17821,7 @@ export class SessionService {
             ...strandedFallback,
           ], opId);
           return {
-            ok: true, landed, landedCount: result.landed.length, fallback,
+            ok: true, opId, landed, landedCount: result.landed.length, fallback,
             phaseTimings: { worktreeCutMs, assemblyMs: result.assemblyMs, fastForwardMs: result.fastForwardMs },
             // Card 67030bb9: a retry-assisted batch landing is WEAKER evidence than an ordinary clean batch
             // pass — see `MergeBatchResult.retryWarning`'s own doc. `result.landed.length` (not the

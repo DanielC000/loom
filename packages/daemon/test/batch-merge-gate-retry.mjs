@@ -114,13 +114,22 @@ async function seedTwoWorkers(db, P) {
 
 // Resolve a settled MergeBatchResult, tolerating the documented sync-vs-async-degrade split
 // (mergeBatchTracked -> PendingOpRegistry.attach) the same way batch-merge-gate-history.mjs already does.
+// Card c85f842d: on the SETTLED branch, `r.op` never exists (only the `{settled:false, op}` pending shape
+// carries it — `AttachResult`'s settled variants deliberately don't, see PendingOpRegistry's own doc), so
+// `r.op?.opId` is structurally always undefined there. Before card c85f842d that meant `outcome.opId` was
+// ALWAYS undefined on a sync-settled batch — the exact gap that card fixes: the real id now lives INSIDE
+// `r.value.opId` (`MergeBatchResult.opId`), set whenever `mergeBatchTracked`'s own `run(opId)` closure
+// actually ran (i.e. not one of the pre-attach() early bail-outs, which never mint an op at all).
 //
 // Verification-only escape hatch (card 9167962f's own DoD-3 positive control): when set, forces EVERY
 // resolveBatch() call below down the async-degrade branch regardless of what mergeBatchTracked actually
 // returned, so degradeCoverage's own check (see near EOF) can be shown to fire without depending on real
 // host timing — the genuine async degrade is "a coin flip on real host timing" per the (iii) comment
 // above and not something this file can reliably force end to end. Default off: an ordinary run (this
-// env var unset) is byte-for-byte the same resolveBatch behavior as before this flag existed.
+// env var unset) is byte-for-byte the same resolveBatch behavior as before this flag existed. Deliberately
+// mints NO opId of its own (`r.op?.opId`, unchanged by card c85f842d) — this branch is a SYNTHETIC stand-in
+// for a degrade that (for a genuinely sync-settled `r`) never happened, so it must not leak `r.value.opId`
+// as if it had; a real forced-pending `r` still carries its own `r.op.opId` here exactly as before.
 const FORCE_DEGRADE_ALL = process.env.BMGR_FORCE_DEGRADE_ALL === "1";
 async function resolveBatch(sessions, batchPromise) {
   const r = await batchPromise;
@@ -130,7 +139,7 @@ async function resolveBatch(sessions, batchPromise) {
   }
   if (FORCE_DEGRADE_ALL) return { settled: true, ok: undefined, value: undefined, opId: r.op?.opId };
   if (!r.settled) return { settled: true, ok: undefined, value: undefined, opId: r.op.opId };
-  return { settled: true, ok: r.ok, value: r.ok ? r.value : undefined, opId: r.op?.opId };
+  return { settled: true, ok: r.ok, value: r.ok ? r.value : undefined, opId: r.ok ? r.value?.opId : undefined };
 }
 
 // Card 9167962f DoD-1: every block below that branches on `outcome.value` (skipping its value-dependent
@@ -175,16 +184,32 @@ try {
     check("(i) exactly 2 gate calls (attempt 1 genuine failure, one multi-file retry, never looped)", calls === 2);
     check("(i) the retry call is the real --only= single-file re-invocation", seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=flaky-batch-pass");
     recordDegradeOutcome("(i)/(ii)", outcome);
+    // Card c85f842d: hoisted ahead of the `if (outcome.value)` block below (it used to sit after) so the
+    // new opId cross-check inside that block can reference `row` — this DB read is unconditional either
+    // way (a build_gate row is written regardless of which path resolveBatch took), so moving it earlier
+    // changes nothing about what it reads, only when.
+    const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const row = page.items.find((r) => r.branch === null);
     if (outcome.value) {
       check("(ii) ok:true, both branches landed", outcome.value.ok === true && outcome.value.landed.length === 2);
       check("(ii) retriedFile/retryPassed:true on the returned MergeBatchResult", outcome.value.retriedFile === "flaky-batch-pass" && outcome.value.retryPassed === true);
       check("(ii) retryWarning carries the BATCH clause naming landed.length (2), not just the solo wording", typeof outcome.value.retryWarning === "string" && outcome.value.retryWarning.includes("BATCH of 2 branch(es)"));
+      // THE FIX (card c85f842d): before this card, `outcome.opId` was ALWAYS undefined on a sync-settled
+      // batch (see resolveBatch's own doc) — a manager whose batch landed inline had no id to hand
+      // gate_status(opId) at all, unlike worker_merge_confirm's ConfirmMergeResult.opId. Proves the id is
+      // now reachable straight off the sync return, and that it names this exact op (the same one the
+      // durable build_gate row records), with no db lookup needed to recover it. Kept VALUE-DEPENDENT
+      // (inside this same guard, not a bare unconditional check) deliberately: under card 9167962f's
+      // BMGR_FORCE_DEGRADE_ALL escape hatch, `resolveBatch`'s forced branch reports `opId: r.op?.opId`,
+      // which is genuinely `undefined` for a batch that actually settled synchronously (a settled
+      // AttachResult carries no `op` field at all — see resolveBatch's own doc) — an unconditional check
+      // here would spuriously fail under that harness-only scenario without indicating any real defect.
+      check("(ii) THE FIX (card c85f842d): the sync-settled MergeBatchResult now carries an opId", typeof outcome.opId === "string");
+      check("(ii) THE FIX: that opId matches the durable build_gate row's own opId for this exact op", outcome.opId === row?.opId);
     } else {
-      console.log("(i)/(ii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the 3 return-value assertions above. Every DB-derived check below is unconditional and still runs.");
+      console.log("(i)/(ii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the 5 return-value assertions above. Every DB-derived check below is unconditional and still runs.");
     }
 
-    const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
-    const row = page.items.find((r) => r.branch === null);
     check("(i) a build_gate row exists for the batch op (branch:null, filed under the manager)", !!row);
     check("(i) the row passed, batched:true, branchCount:2", row?.passed === true && row?.batched === true && row?.branchCount === 2);
     check("(i) the row carries retriedFile/retryPassed:true", row?.retriedFile === "flaky-batch-pass" && row?.retryPassed === true);
@@ -228,6 +253,10 @@ try {
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
     check("(iv) exactly 2 gate calls to the BATCH gate itself (attempt 1 + the one multi-file retry) before any fallback call", seenGates[0] === "pnpm gate" && seenGates[1] === "node packages/daemon/scripts/test-daemon.mjs --only=flaky-batch-fail");
     recordDegradeOutcome("(iv)", outcome);
+    // Card c85f842d: hoisted ahead of the `if (outcome.value)` block below — see the (i)/(ii) block's
+    // identical hoist comment above for why (the new opId cross-check needs `row` inside that guard).
+    const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const row = page.items.find((r) => r.branch === null);
     if (outcome.value) {
       check("(iv) ok:false — the whole batch falls back on a retry that ALSO failed", outcome.value.ok === false);
       check("(iv) retriedFile/retryPassed:false surfaced on the returned MergeBatchResult — a retry that also failed is still recorded, never silently dropped", outcome.value.retriedFile === "flaky-batch-fail" && outcome.value.retryPassed === false);
@@ -240,12 +269,16 @@ try {
       check("(iv) retryWarning matches the shared formatter's output exactly, with the batch's REAL assembled/gated count (2, not 0 and not chosen/overflow/stranded)", outcome.value.retryWarning === formatRetryAlsoFailedWarning("flaky-batch-fail", "", 2));
       check("(iv) retryWarning never says \"passed\" on a rejected batch", typeof outcome.value.retryWarning === "string" && !outcome.value.retryWarning.includes("passed"));
       check("(iv) retryWarning states the correct branch count, never a confidently-worded zero", typeof outcome.value.retryWarning === "string" && outcome.value.retryWarning.includes("2 branch(es)") && !outcome.value.retryWarning.includes("0 branch(es)"));
+      // THE FIX (card c85f842d): a REJECTED batch's sync return also needs an opId — the manager reading a
+      // red gate is exactly who needs gate_status(opId) to pull the full diagnostic detail. Kept
+      // VALUE-DEPENDENT (see the (i)/(ii) block's identical comment above for why — the
+      // BMGR_FORCE_DEGRADE_ALL interaction).
+      check("(iv) THE FIX (card c85f842d): the RED batch's sync-settled MergeBatchResult also carries an opId", typeof outcome.opId === "string");
+      check("(iv) THE FIX: that opId matches the durable build_gate row's own opId for this exact rejected op", outcome.opId === row?.opId);
     } else {
-      console.log("(iv) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the 2 return-value assertions above.");
+      console.log("(iv) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the 4 return-value assertions above.");
     }
 
-    const page = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
-    const row = page.items.find((r) => r.branch === null);
     check("(iv) a build_gate row exists for the batch op", !!row);
     check("(iv) the row failed", row?.passed === false);
     check("(iv) retriedFile/retryPassed:false recorded on the rejected row", row?.retriedFile === "flaky-batch-fail" && row?.retryPassed === false);
@@ -437,6 +470,26 @@ try {
 
     const outcome = await resolveBatch(sessions, sessions.mergeBatchTracked(P.mgrId, [wA, wB]));
     recordDegradeOutcome("(vii)", outcome);
+    // THE SECOND SURFACE (card 553ea58c): `outcome.value`/the sync return is only ONE of two readers of
+    // this exact op — `gate_status(opId)` is the durable, post-hoc reader (a recycle, a restart, a
+    // successor reading history later) and reads a SEPARATE stored verdict (`batchGateVerdict`, minted
+    // inside `runGate` — BEFORE `runBatchedMerge` could still forfeit the fast-forward — and, pre-fix,
+    // never corrected afterward). This runs regardless of the sync-vs-async split above: the tombstone is
+    // durable either way.
+    // CORRECTED (card c85f842d): a PRIOR version of this comment claimed `outcome.opId` is NOT populated
+    // on the sync-settled path, and that `resolveBatch`'s own `opId: r.op?.opId` is therefore always
+    // `undefined` here — TRUE of `r.op?.opId` specifically (a settled `AttachResult` genuinely carries no
+    // `op` field — see PendingOpRegistry's own doc), but FALSE as a claim about `outcome.opId` overall:
+    // `resolveBatch` now also falls back to `r.value?.opId` (`MergeBatchResult.opId`, card c85f842d's own
+    // fix), which the sync-settled path DOES carry. Kept here as the exact case this card fixed — a
+    // confident parenthetical inside working test code, half right and half wrong, is precisely the shape
+    // this card's own provenance section warns about. The db-row lookup below is kept anyway, as an
+    // INDEPENDENT cross-check that both readers (the sync return and the durable tombstone) agree on the
+    // SAME op — not because it's still the only way to recover the id. Hoisted ahead of the
+    // `if (outcome.value)` block below (like the (i)/(ii) and (iv) blocks above) so the opId cross-check
+    // can reference `forfeitRow` from inside that guard.
+    const forfeitPage = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
+    const forfeitRow = forfeitPage.items.find((r) => r.branch === null);
     if (outcome.value) {
       check("(vii) precondition: the retry itself passed", outcome.value.retriedFile === "flaky-batch-forfeit" && outcome.value.retryPassed === true);
       check("(vii) precondition: ok:false anyway — gate+retry passed but fast-forward refused (main advanced mid-gate)", outcome.value.ok === false);
@@ -448,23 +501,14 @@ try {
       check("(vii) THE FIX: retryWarning omits the batch clause entirely (no \"BATCH of\" wording) rather than assert a false count", typeof outcome.value.retryWarning === "string" && !outcome.value.retryWarning.includes("BATCH of"));
       check("(vii) retryWarning still states the solo weaker-pass fact (retry fired, passed only after retrying)", typeof outcome.value.retryWarning === "string" && outcome.value.retryWarning.includes("passed only after retrying"));
       check("(vii) retryWarning matches the shared formatter's output exactly, called with batchBranchCount:undefined", outcome.value.retryWarning === formatWeakerPassWarning("flaky-batch-forfeit", "", undefined));
+      // THE FIX (card c85f842d): kept VALUE-DEPENDENT (see the (i)/(ii) block's identical comment above for
+      // why — the BMGR_FORCE_DEGRADE_ALL interaction).
+      check("(vii) THE FIX (card c85f842d): outcome.opId is populated on the sync-settled path (previously always undefined here)", typeof outcome.opId === "string");
+      check("(vii) THE FIX: outcome.opId matches the forfeited batch's own durable build_gate row — both readers agree on the SAME op", outcome.opId === forfeitRow?.opId);
     } else {
       console.log("(vii) NOTE: settled via the async degrade path — MergeBatchResult is not recoverable that way; skipping the return-value assertions above.");
     }
 
-    // THE SECOND SURFACE (card 553ea58c): `outcome.value`/the sync return is only ONE of two readers of
-    // this exact op — `gate_status(opId)` is the durable, post-hoc reader (a recycle, a restart, a
-    // successor reading history later) and reads a SEPARATE stored verdict (`batchGateVerdict`, minted
-    // inside `runGate` — BEFORE `runBatchedMerge` could still forfeit the fast-forward — and, pre-fix,
-    // never corrected afterward). This runs regardless of the sync-vs-async split above: the tombstone is
-    // durable either way. `outcome.opId` is NOT populated on the sync-settled path (`AttachResult`'s
-    // `{settled:true, ...}` shape carries no `op` field at all — only the `{settled:false, op}` pending
-    // shape does; `resolveBatch`'s own `opId: r.op?.opId` is therefore always `undefined` here, exactly
-    // like every earlier block in this file) — resolve the opId the SAME way (i)/(iv) already do: off the
-    // batch's own durable `build_gate` row (`branch === null` identifies the batch-level row, never a
-    // per-candidate fallback row).
-    const forfeitPage = db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 });
-    const forfeitRow = forfeitPage.items.find((r) => r.branch === null);
     check("(vii) a build_gate row exists for the forfeited batch op", !!forfeitRow);
     const stForfeit = forfeitRow?.opId ? sessions.gateStatus(forfeitRow.opId) : undefined;
     check("(vii) gate_status(opId) resolves the forfeited batch op", !!stForfeit);
