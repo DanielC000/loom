@@ -12,8 +12,13 @@ import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 
 // Per-project Archive: every STOPPED session of the header's active project (sessions auto-archive on
 // exit, so Archive = all stopped sessions). Structured as a searchable manager → worker fold-out tree:
-// each manager is a top-level row with the workers it spawned (parentSessionId === manager.id) NESTED
-// and folding out under it; orphan/plain sessions (no manager in the set) sit at top level. Managers
+// each manager is a top-level row with the workers it spawned NESTED and folding out under it; orphan/
+// plain sessions (no manager in the set) sit at top level. Nesting keys off `dispatchedBySessionId`
+// (falling back to `parentSessionId` only when the server had no spawn_worker event to resolve from) —
+// NOT `parentSessionId` alone, which is reparented onto a recycle successor for a worker that was still
+// live when its manager recycled (card af87a9ff). This is a HISTORICAL view, so it shows who actually
+// dispatched the worker, not who owns it now; the live fleet views (Overview/Mission Control/Terminals)
+// correctly keep nesting by `parentSessionId` — see that field's own doc comment in @loom/shared. Managers
 // fold COLLAPSED by default so a large archive stays scannable. View a session's captured transcript
 // snapshot, Resume it back to the live rail (clears archived_at), or Delete permanently. Scoped to the
 // active project (useActiveProject) — NOT god-eye; the cross-project view lives elsewhere.
@@ -159,16 +164,20 @@ function buildTree(rows: ArchivedSessionListItem[], rawQuery: string): { nodes: 
   const filtered = rows.filter(match);
   const idSet = new Set(filtered.map((s) => s.id));
 
-  // A session nests under its manager only when that manager is also in the (filtered) set; otherwise
-  // it surfaces at top level — that covers managers (no parent) AND orphan workers (manager filtered
+  // A session nests under its DISPATCHER (the manager that actually spawned it, per
+  // `dispatchedBySessionId` — falling back to `parentSessionId` only for a row the server couldn't
+  // resolve a spawn_worker event for) only when that manager is also in the (filtered) set; otherwise
+  // it surfaces at top level — that covers managers (no dispatcher) AND orphan workers (manager filtered
   // out or never archived in this project).
+  const dispatcherOf = (s: ArchivedSessionListItem) => s.dispatchedBySessionId ?? s.parentSessionId;
   const childrenByParent = new Map<string, ArchivedSessionListItem[]>();
   const topLevel: ArchivedSessionListItem[] = [];
   for (const s of filtered) {
-    if (s.parentSessionId && idSet.has(s.parentSessionId)) {
-      const arr = childrenByParent.get(s.parentSessionId) ?? [];
+    const dispatcher = dispatcherOf(s);
+    if (dispatcher && idSet.has(dispatcher)) {
+      const arr = childrenByParent.get(dispatcher) ?? [];
       arr.push(s);
-      childrenByParent.set(s.parentSessionId, arr);
+      childrenByParent.set(dispatcher, arr);
     } else {
       topLevel.push(s);
     }

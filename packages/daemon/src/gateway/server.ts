@@ -5582,7 +5582,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const s = deps.db.getArchivedSessionById(id);
     if (!s) return reply.code(404).send({ error: "archived session not found" });
-    return { ...s, snapshotExists: archivedTranscriptExists(s.projectId, s.id) };
+    // Card af87a9ff: the true spawn-time dispatcher, from the immutable spawn_worker event — falls back
+    // to parentSessionId (today's behavior) when no such event exists for this row.
+    const dispatcherId = deps.db.resolveDispatcherSessionIds([s.id]).get(s.id) ?? s.parentSessionId ?? null;
+    return { ...s, snapshotExists: archivedTranscriptExists(s.projectId, s.id), dispatchedBySessionId: dispatcherId };
   });
   // Archived sessions for a project's Archive tab, each tagged with whether a transcript snapshot was
   // captured on exit (false ⇒ "no transcript captured" — it was already dead when archived). PAGINATED
@@ -5599,7 +5602,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const offset = parsePageParam(q.offset, 0);
     const { rows, total, limit: effectiveLimit } = deps.db.listArchivedSessionsPage(id, limit, offset);
     const snapshotIds = archivedSnapshotIds(id); // ONE readdir instead of a per-row fs.existsSync stat
-    return { items: rows.map((s) => ({ ...s, snapshotExists: snapshotIds.has(s.id) })), total, limit: effectiveLimit };
+    // Card af87a9ff: ONE set-based query for the whole page (never per-row) resolving each row's true
+    // spawn-time dispatcher; falls back to parentSessionId (today's behavior) for a row with no
+    // spawn_worker event.
+    const dispatcherIds = deps.db.resolveDispatcherSessionIds(rows.map((s) => s.id));
+    return {
+      items: rows.map((s) => ({
+        ...s,
+        snapshotExists: snapshotIds.has(s.id),
+        dispatchedBySessionId: dispatcherIds.get(s.id) ?? s.parentSessionId ?? null,
+      })),
+      total, limit: effectiveLimit,
+    };
   });
   // Cross-project Archive (god-eye): archived sessions across ALL projects, each enriched with
   // projectId/projectName (already on the SessionListItem) + snapshotExists, newest-archived first.
@@ -5619,10 +5633,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // One readdir PER DISTINCT project (not per row) — a bulk-existence cache keyed by projectId, since
     // rows span many projects here (unlike the single-project route above).
     const snapshotIdsByProject = new Map<string, Set<string>>();
+    // Card af87a9ff: ONE set-based query for the whole page — see the per-project route above.
+    const dispatcherIds = deps.db.resolveDispatcherSessionIds(rows.map((s) => s.id));
     const items = rows.map((s) => {
       let ids = snapshotIdsByProject.get(s.projectId);
       if (!ids) { ids = archivedSnapshotIds(s.projectId); snapshotIdsByProject.set(s.projectId, ids); }
-      return { ...s, snapshotExists: ids.has(s.id) };
+      return { ...s, snapshotExists: ids.has(s.id), dispatchedBySessionId: dispatcherIds.get(s.id) ?? s.parentSessionId ?? null };
     });
     return { items, total, limit: effectiveLimit };
   });

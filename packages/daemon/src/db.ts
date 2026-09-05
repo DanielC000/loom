@@ -5482,7 +5482,31 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE engine_session_id IS NOT NULL")
       .all() as Row[]).map(toSession);
   }
-  /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff. */
+  /**
+   * Card af87a9ff: batch-resolve the TRUE spawn-time dispatcher for a set of worker session ids, from
+   * the immutable `spawn_worker` orchestration_event — never `sessions.parent_session_id`, which
+   * `reparentLiveWorkers`/`relinkWorkerToManager` below REPARENT onto a recycle successor (see
+   * `Session.parentSessionId`'s own doc comment). Powers the Archive view's historical "who spawned
+   * this" nesting. Set-based (one query for the whole page), not per-row — the archive list is
+   * paginated/infinite-scroll, so an N+1 here would fire once per row per page. A worker id with no
+   * `spawn_worker` event (predates that event kind, or a non-worker/role-less row) is simply absent
+   * from the returned map; the caller falls back to `parentSessionId` for those.
+   */
+  resolveDispatcherSessionIds(workerSessionIds: string[]): Map<string, string> {
+    const map = new Map<string, string>();
+    if (workerSessionIds.length === 0) return map;
+    const placeholders = workerSessionIds.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT worker_session_id, manager_session_id FROM orchestration_events
+       WHERE kind = 'spawn_worker' AND worker_session_id IN (${placeholders})`,
+    ).all(...workerSessionIds) as Row[];
+    for (const r of rows) map.set(r.worker_session_id as string, r.manager_session_id as string);
+    return map;
+  }
+  /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff.
+   *  Card af87a9ff: this is WHY `parent_session_id` is a routing target, not provenance, for a worker
+   *  that was live across the recycle — see `resolveDispatcherSessionIds` above for the historical read
+   *  that resolves the true original dispatcher instead. */
   reparentLiveWorkers(oldManagerId: string, newManagerId: string): number {
     const ids = (this.db.prepare(
       "SELECT id FROM sessions WHERE parent_session_id = ? AND process_state = 'live'",
@@ -5499,6 +5523,9 @@ export class Db {
    * mcp/orchestration.ts (`selfHealWorkerLink`) the instant a manager/worker parent desync is caught —
    * so recovery no longer needs a daemon restart. The caller is responsible for verifying ownership
    * (lineage) BEFORE calling this — this method performs no ownership check of its own.
+   *
+   * Card af87a9ff: like `reparentLiveWorkers`, this REPARENTS `parent_session_id` — it is not, and must
+   * never be read as, spawn-time provenance. See `resolveDispatcherSessionIds` for the historical read.
    */
   relinkWorkerToManager(workerId: string, newManagerId: string): void {
     this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(newManagerId, workerId);

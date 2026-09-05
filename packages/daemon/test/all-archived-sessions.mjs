@@ -34,6 +34,18 @@
 //      archived manager once 300+ fresher non-manager rows exist) AND proves role=manager reaches it —
 //      both at the db layer and over REST, the exact path MissionControl's Run Replay picker calls. Also
 //      covers an unrecognized `role=` value being ignored (falls back to unfiltered) rather than erroring.
+//
+// Follow-up (card af87a9ff — parent_session_id is reparented on recycle, Archive read it as provenance):
+//   J. `db.resolveDispatcherSessionIds` resolves the TRUE spawn-time dispatcher from the immutable
+//      `spawn_worker` orchestration_event, batched (one query, not N+1) — and NOT from `parent_session_id`,
+//      which a recycle reparents onto the successor. Reproduces the exact failure (a worker reparented
+//      onto a successor manager must resolve to its ORIGINAL dispatcher, not the successor) AND the two
+//      positive controls that distinguish a correct derivation from one that just always disagrees with
+//      parentSessionId: (i) a NEVER-reparented worker resolves to the SAME value by both routes, and
+//      (ii) a worker with no spawn_worker event at all (predates the event, or non-worker) is absent from
+//      the map, so callers fall back to parentSessionId for it. Then the same three shapes verified over
+//      REST on all three archived-sessions routes ({items,total,limit} pair + the by-id route), each now
+//      carrying `dispatchedBySessionId`.
 // Run: 1) build the daemon, 2) node test/all-archived-sessions.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -276,6 +288,76 @@ try {
     const restBogus = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=300&role=not-a-real-role" });
     check("I4: an unrecognized ?role= is ignored (200, behaves as unfiltered)",
       restBogus.statusCode === 200 && restBogus.json().items.length === NEW_WORKERS);
+
+    // ===================== J. dispatchedBySessionId (card af87a9ff) =====================
+    // A dedicated project so the archived_at stamping here can't perturb any ordering assertion above.
+    db.insertProject({ id: "pDisp", name: "Dispatch", repoPath: "C:/tmp/disp", vaultPath: "C:/tmp/disp", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "aDisp", projectId: "pDisp", name: "agentDisp", startupPrompt: "", position: 0 });
+
+    // mgrOld recycles into mgrNew; workerReparented was LIVE across that recycle, so its
+    // parent_session_id now reads mgrNew (post-reparent) even though mgrOld actually spawned it.
+    db.insertSession(mkSession("mgrOld", "pDisp", "aDisp", { role: "manager" }));
+    db.insertSession(mkSession("mgrNew", "pDisp", "aDisp", { role: "manager" }));
+    db.insertSession(mkSession("workerReparented", "pDisp", "aDisp", { role: "worker", parentSessionId: "mgrNew" }));
+    // workerStable was never reparented: parent_session_id already agrees with its spawn_worker event.
+    db.insertSession(mkSession("workerStable", "pDisp", "aDisp", { role: "worker", parentSessionId: "mgrOld" }));
+    // workerNoEvent has no spawn_worker event at all (predates the event kind) — must fall back to
+    // parentSessionId rather than being left with no dispatcher.
+    db.insertSession(mkSession("workerNoEvent", "pDisp", "aDisp", { role: "worker", parentSessionId: "mgrOld" }));
+
+    db.appendEvent({ id: "ev-spawn-reparented", ts: at(0), managerSessionId: "mgrOld", workerSessionId: "workerReparented", kind: "spawn_worker" });
+    db.appendEvent({ id: "ev-spawn-stable", ts: at(0), managerSessionId: "mgrOld", workerSessionId: "workerStable", kind: "spawn_worker" });
+    // Simulate the recycle itself actually reparenting the live worker (the real code path under test).
+    db.reparentLiveWorkers("mgrOld", "mgrNew");
+
+    const raw5 = new Database(dbFile);
+    const stampDisp = raw5.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?");
+    for (const id of ["mgrOld", "mgrNew", "workerReparented", "workerStable", "workerNoEvent"]) stampDisp.run(at(200_000), id);
+    raw5.close();
+
+    // J1 (db layer): the reparent actually happened (precondition — otherwise this proves nothing).
+    check("J1 precondition: reparentLiveWorkers actually moved workerReparented onto mgrNew",
+      db.getSession("workerReparented").parentSessionId === "mgrNew");
+
+    const dispatcherMap = db.resolveDispatcherSessionIds(["workerReparented", "workerStable", "workerNoEvent"]);
+    // J2: the reproduction — resolves to the TRUE original dispatcher, not the successor parent_session_id.
+    check("J2: resolveDispatcherSessionIds resolves the reparented worker to its ORIGINAL manager (mgrOld)",
+      dispatcherMap.get("workerReparented") === "mgrOld");
+    check("J2: ...and NOT to the successor it's currently parented under (mgrNew)",
+      dispatcherMap.get("workerReparented") !== "mgrNew");
+    // J3: positive control (i) — a never-reparented worker agrees with parentSessionId either way.
+    check("J3: a never-reparented worker resolves to the SAME value as parentSessionId (mgrOld)",
+      dispatcherMap.get("workerStable") === "mgrOld" && dispatcherMap.get("workerStable") === db.getSession("workerStable").parentSessionId);
+    // J4: positive control (ii) — no spawn_worker event ⇒ absent from the map (caller falls back).
+    check("J4: a worker with no spawn_worker event is ABSENT from the map (caller falls back to parentSessionId)",
+      !dispatcherMap.has("workerNoEvent"));
+    check("J4: resolveDispatcherSessionIds([]) returns an empty map (no query fired on an empty batch)",
+      db.resolveDispatcherSessionIds([]).size === 0);
+
+    // J5 (REST): all three archived-sessions routes carry `dispatchedBySessionId`, correctly resolved.
+    const projDispRes = await app.inject({ method: "GET", url: "/api/projects/pDisp/archive?limit=10" });
+    const projDispBody = projDispRes.json();
+    const reparentedItem = projDispBody.items.find((s) => s.id === "workerReparented");
+    const stableItem = projDispBody.items.find((s) => s.id === "workerStable");
+    const noEventItem = projDispBody.items.find((s) => s.id === "workerNoEvent");
+    check("J5: GET /api/projects/:id/archive — reparented worker's dispatchedBySessionId is the ORIGINAL manager",
+      reparentedItem?.dispatchedBySessionId === "mgrOld");
+    check("J5: ...its parentSessionId still reads the CURRENT owner (mgrNew) — the live-view field is untouched",
+      reparentedItem?.parentSessionId === "mgrNew");
+    check("J5: GET /api/projects/:id/archive — stable worker's dispatchedBySessionId matches parentSessionId",
+      stableItem?.dispatchedBySessionId === "mgrOld" && stableItem?.dispatchedBySessionId === stableItem?.parentSessionId);
+    check("J5: GET /api/projects/:id/archive — no-event worker falls back to parentSessionId (mgrOld)",
+      noEventItem?.dispatchedBySessionId === "mgrOld");
+
+    const allDispRes = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=1000" });
+    const allDispBody = allDispRes.json();
+    const reparentedAll = allDispBody.items.find((s) => s.id === "workerReparented");
+    check("J6: GET /api/archived-sessions (cross-project) also resolves the reparented worker's dispatcher correctly",
+      reparentedAll?.dispatchedBySessionId === "mgrOld");
+
+    const reparentedByIdRes = await app.inject({ method: "GET", url: "/api/archived-sessions/workerReparented" });
+    check("J7: GET /api/archived-sessions/:id resolves the same, single-row route",
+      reparentedByIdRes.json().dispatchedBySessionId === "mgrOld");
   } finally {
     await app.close();
   }
@@ -286,6 +368,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — listAllArchivedSessions spans all projects newest-first enriched with names; the new bounded-page db methods + REST routes ({items,total,limit}, ?limit=/?offset=) return the same shape; GET /api/archived-sessions/:id resolves a session sitting off the first page, 404ing for an unknown/non-archived id; a REAL >500-row seed proves the MAX_ARCHIVED_PAGE clamp actually caps rows while reporting its effective limit back; the actual Load-more accumulation loop reaches every row past the old 500-row dead-end, exactly once; and the new ?role= filter reproduces + fixes the archived-manager-falls-off-the-page bug (db layer + REST), ignoring an unrecognized role value rather than erroring."
+  ? "\n✅ ALL PASS — listAllArchivedSessions spans all projects newest-first enriched with names; the new bounded-page db methods + REST routes ({items,total,limit}, ?limit=/?offset=) return the same shape; GET /api/archived-sessions/:id resolves a session sitting off the first page, 404ing for an unknown/non-archived id; a REAL >500-row seed proves the MAX_ARCHIVED_PAGE clamp actually caps rows while reporting its effective limit back; the actual Load-more accumulation loop reaches every row past the old 500-row dead-end, exactly once; the new ?role= filter reproduces + fixes the archived-manager-falls-off-the-page bug (db layer + REST), ignoring an unrecognized role value rather than erroring; and resolveDispatcherSessionIds + dispatchedBySessionId (card af87a9ff) resolve a reparented worker's TRUE original dispatcher (not the recycle successor parentSessionId reads), agree with parentSessionId for a never-reparented worker, and fall back to parentSessionId when no spawn_worker event exists — verified at the db layer and across all three archived-sessions REST routes."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -727,7 +727,14 @@ export interface Session {
   lastError: string | null;
   // --- phase-2 orchestration lineage + context counters (additive; null/0 on phase-1 sessions) ---
   role?: SessionRole | null;
-  parentSessionId?: string | null;  // the manager that spawned this worker
+  // Card af87a9ff: the manager CURRENTLY responsible for this worker — reparented onto a recycle
+  // successor for a worker that was still live at the moment its manager recycled (db.ts's
+  // `reparentLiveWorkers`/`relinkWorkerToManager`). Live fleet views (Overview/Mission Control/
+  // Terminals) correctly nest by THIS field — "who owns this worker now" is exactly what they want.
+  // It is NOT spawn-time provenance, despite the name: a HISTORICAL view (the Archive) must instead
+  // resolve the true original dispatcher from the immutable `spawn_worker` orchestration_event — see
+  // `ArchivedSessionListItem.dispatchedBySessionId`, which does exactly that.
+  parentSessionId?: string | null;
   taskId?: string | null;           // the board task this worker is working (references tasks)
   worktreePath?: string | null;     // a worker's isolated git worktree cwd
   branch?: string | null;           // the worker's branch
@@ -1592,6 +1599,16 @@ export interface SessionListItem extends Session {
  */
 export interface ArchivedSessionListItem extends SessionListItem {
   snapshotExists: boolean;
+  /**
+   * Card af87a9ff: the manager that actually DISPATCHED this session at spawn time, resolved
+   * server-side from the immutable `spawn_worker` orchestration_event — never from `parentSessionId`,
+   * which is REPARENTED onto a recycle successor for a worker that was still LIVE across its manager's
+   * recycle (see `Session.parentSessionId`'s own doc comment for the full split). This is what the
+   * Archive view's historical "who spawned this" nesting must key off. `null` when the server had no
+   * spawn_worker event to resolve from for this row (predates that event kind, or a non-worker/role-less
+   * session) — a consumer should fall back to `parentSessionId` in that case, matching pre-fix behavior.
+   */
+  dispatchedBySessionId: string | null;
 }
 
 /** A bounded page of archived sessions (both the per-project and cross-project list routes) plus the
