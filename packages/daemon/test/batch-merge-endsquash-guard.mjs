@@ -93,8 +93,23 @@ try {
   console.log = (...args) => { lines.push(args.map(String).join(" ")); origLog(...args); };
   let result;
   try {
-    const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
-    result = r.settled && r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: `did not settle synchronously: ${JSON.stringify(r)}` };
+    // Card dd961cf9 follow-up (a real gate rejection, op b2f5c2cc): under host contention this batch's
+    // own assembly + the two fallback solo confirms can outrun `syncAttachBudgetMs`, so the FIRST call
+    // degrades to `{settled:false}` — reliably reproduced locally (6/6) by running several copies of
+    // this file concurrently under CPU load. `PendingOpRegistry.attach` dedupes by key
+    // (`merge-batch:<mgrId>:<sorted workerIds>`, sessions/service.ts) — re-calling with the SAME worker
+    // ids re-attaches to the SAME in-flight op (never re-invokes `run()`) and waits again, exactly the
+    // re-poll a real caller facing this contract already relies on. Bounded overall so a genuine hang
+    // still fails this test loudly instead of silently synthesizing a wrong-shaped result (the original
+    // defect here: a `{settled:false}` case was papered over into a fabricated `ok:false` value whose
+    // `reason` text didn't match this test's own precondition check, failing it for the wrong reason).
+    const deadline = Date.now() + 60_000;
+    let r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    while (!r.settled) {
+      if (Date.now() > deadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
+      r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+    }
+    result = r.ok ? r.value : { ok: false, landed: [], fallback: [], reason: `mergeBatchTracked errored: ${r.error instanceof Error ? r.error.message : String(r.error)}` };
   } finally {
     console.log = origLog;
   }
