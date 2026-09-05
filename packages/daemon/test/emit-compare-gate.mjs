@@ -181,6 +181,9 @@ try {
     // swallowed by the `notApplicable` widening below (that widening is scoped to (F)'s shape, not this
     // one).
     check("(B) emitCompareReduced:false — genuinely proven not reduced, never omitted", confirm.emitCompareReduced === false);
+    // Card fd0d34da — DoD-3 REGRESSION CONTROL: an ordinary proven-full (false) row must carry NO coarse
+    // WHY at all — that field is set IFF notApplicable:true, never alongside a genuine decided false.
+    check("(B, card fd0d34da — NEGATIVE CONTROL) emitCompareNotApplicableKind is undefined on a proven-full (false) merge — never fabricated alongside a real decided verdict", confirm.emitCompareNotApplicableKind === undefined);
   }
 
   // ── (C) WHITESPACE-ONLY .ts edit -> REDUCED gate ────────────────────────────────────────────────────
@@ -319,6 +322,7 @@ try {
     check("(F) direct call: not eligible", direct.eligible === false);
     check("(F) direct call: reason IS the out-of-scope catch-all", /path outside emit-compare scope/.test(direct.reason ?? ""));
     check("(F) direct call: notApplicable:true — this is a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
+    check("(F, card fd0d34da) direct call: notApplicableKind is \"path-out-of-scope\" — the SAME diff also touches the in-scope packages/daemon/src/example.ts", direct.notApplicableKind === "path-out-of-scope");
 
     seed(db, F);
     const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
@@ -329,6 +333,7 @@ try {
     // has nothing to do with (B)'s reason. A cross-project reader (or a same-repo web-only diff) must see
     // this OMITTED, never a fabricated `false`.
     check("(F) emitCompareReduced OMITTED, not fabricated false — the predicate never had a chance to apply here", confirm.emitCompareReduced === undefined);
+    check("(F, card fd0d34da) the merge-confirm result carries the SAME coarse WHY the direct call reported — the diagnosable half of what OMITTED emitCompareReduced used to leave a null-shaped mystery", confirm.emitCompareNotApplicableKind === "path-out-of-scope");
   }
 
   // ── (P) card 82662e98 — COMMENT-ONLY packages/daemon/scripts/**/*.mjs edit -> REDUCED gate ────────────
@@ -539,12 +544,19 @@ try {
     check("(O) direct call: not eligible — CLAUDE.md is outside emit-compare scope", direct.eligible === false);
     check("(O) direct call: reason IS the out-of-scope catch-all, naming CLAUDE.md", /path outside emit-compare scope: CLAUDE\.md/.test(direct.reason ?? ""));
     check("(O) direct call: notApplicable:true — a repo-layout limit, not a proven-not-reducible verdict", direct.notApplicable === true);
+    // Card fd0d34da: CLAUDE.md sorts BEFORE "packages/" in git's own lexical --name-status order, so this
+    // is the ordering caveat's OWN shape — the catch-all fires on the FIRST changed path, yet the in-scope
+    // packages/daemon/src/example.ts sits LATER in the same diff. Proves the whole-`entries` rescan (not
+    // just what the classification loop consumed before returning) actually finds it: "path-out-of-scope",
+    // never "repo-out-of-domain".
+    check("(O, card fd0d34da) direct call: notApplicableKind is \"path-out-of-scope\" even though CLAUDE.md tripped the catch-all FIRST — the in-scope path sits later in the same diff", direct.notApplicableKind === "path-out-of-scope");
 
     seed(db, O);
     const confirm = await sessions.confirmWorkerMerge(O.mgrId, O.workerId);
     check("(O) gateRan:true", confirm.gateRan === true);
     check("(O) captured command IS the full gate — CLAUDE.md alongside an otherwise-reducible .ts edit still fails closed", capturedGate === FULL_GATE);
     check("(O) emitCompareReduced OMITTED, not fabricated false", confirm.emitCompareReduced === undefined);
+    check("(O, card fd0d34da) merge-confirm result carries the SAME coarse WHY", confirm.emitCompareNotApplicableKind === "path-out-of-scope");
   }
 
   // ── (S) card fe848bfc — THE DISCRIMINATING CASE FOR THE ARG REMOVAL: `ref="HEAD"` resolved from a

@@ -3529,6 +3529,17 @@ const EMIT_COMPARE_TEST_PREFIX = "packages/daemon/test/";
 const EMIT_COMPARE_ASSETS_PREFIX = "packages/daemon/assets/";
 const EMIT_COMPARE_SCRIPTS_PREFIX = "packages/daemon/scripts/";
 
+/** Whether `p` falls inside any of the four scopes {@link computeEmitCompareGate} classifies against —
+ *  shared by the classification loop's own per-path checks and by {@link EmitCompareNotApplicableKind}'s
+ *  `"repo-out-of-domain"` vs `"path-out-of-scope"` split, which asks this of the WHOLE diff first (not just
+ *  the one path that tripped the catch-all) as a cheap pre-check before falling back to a real `git ls-tree`
+ *  against the repo's own tree — see that catch-all's own doc for why the diff-only question alone is not
+ *  sufficient to answer a claim about the REPO. */
+function isEmitCompareInScopePath(p: string): boolean {
+  return p.startsWith(EMIT_COMPARE_SRC_PREFIX) || p.startsWith(EMIT_COMPARE_TEST_PREFIX)
+    || p.startsWith(EMIT_COMPARE_ASSETS_PREFIX) || p.startsWith(EMIT_COMPARE_SCRIPTS_PREFIX);
+}
+
 /** The static source-TEXT guards (Code Review, `docs/investigations/c4ccae66-.../findings.md`) — these
  *  grep raw file content rather than compiled behavior, so {@link computeEmitCompareGate}'s emit-compare
  *  proof does not cover them; a reduced gate built from {@link buildReducedGateCommand} always runs them
@@ -3776,6 +3787,49 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/vault-lint.mjs",
 ];
 
+/**
+ * Card fd0d34da: a coarse, PATH-FREE classification of *why* {@link EmitCompareGateResult.notApplicable}
+ * is `true` — set ONLY alongside `notApplicable:true`, never alongside a `notReducible` (`false`) verdict.
+ * Exists because `reason` (the human-readable string this sits beside — for several of these reasons it
+ * embeds a repo-relative path) is on `gate_status`'s cross-project redaction list, so a manager reading a
+ * FOREIGN project's op cannot see `reason` at all: without this field a foreign `notApplicable:true` row
+ * carries no more information than the bare boolean. This one is safe to leave VISIBLE cross-project —
+ * every value names a CATEGORY of reason, never a path/filename/error string.
+ *  - `"repo-out-of-domain"` / `"path-out-of-scope"`: the two ways the classification loop's own catch-all
+ *    ("path outside emit-compare scope") can be reached (see that catch-all's own doc for the full
+ *    ordering caveat). `"repo-out-of-domain"` is a claim about the REPO, not this diff: the repo's own tree
+ *    at `ref` has NONE of the four scope directories {@link isEmitCompareInScopePath} tests, checked via a
+ *    dedicated `git ls-tree` (Code Review, card fd0d34da — see the catch-all's own doc for why a diff-only
+ *    check was insufficient and asserted this confidently wrong on a real Loom-shaped merge) — meaning the
+ *    predicate can never decide ANY diff on this repo. `"path-out-of-scope"` covers BOTH remaining shapes,
+ *    which share the identical actionable fact ("the predicate applies to this repo, just not — fully, or
+ *    at all — to THIS diff"): the diff DOES touch an in-scope path elsewhere, OR the repo's tree has one of
+ *    the four scope directories even though this particular diff doesn't touch it. This is the exact
+ *    distinction card `fd0d34da` exists to make diagnosable without re-running the predicate by hand.
+ *  - `"harness-config-unavailable"`: this diff's own `scripts/test-daemon.mjs` (`EXCLUDED_DIR_NAMES` /
+ *    `NOT_HERMETIC`) couldn't be loaded — expected on a shipped end-user install, which never ships that
+ *    script (see {@link loadExcludedTestDirNames}'s own doc).
+ *  - `"typescript-unresolvable"`: this whole mechanism's own `typescript` dev-dependency isn't resolvable
+ *    — also expected on a shipped end-user install.
+ *  - `"git-operation-failed"`: a git read failed (the diff itself, a before/after `git show` for a changed
+ *    compiled file, or the `"repo-out-of-domain"` `git ls-tree` check above) — a mechanism failure, proves
+ *    nothing about reducibility either way. Deliberately reused here rather than a dedicated kind: an
+ *    unresolvable domain check must NEVER fall back to a confident (and possibly wrong) `"repo-out-of-
+ *    domain"` — see that check's own doc for the incident this closes.
+ *  - `"empty-diff"`: the diff between the two refs is empty — nothing to prove inert from.
+ *  - `"unparseable-diff"`: a `--name-status` line didn't parse into `<status>\t<path>` — the same
+ *    mechanism-failure bucket as `"git-operation-failed"`, kept distinct because it names a different
+ *    failure surface (a malformed line, not a failed git invocation).
+ */
+export type EmitCompareNotApplicableKind =
+  | "repo-out-of-domain"
+  | "path-out-of-scope"
+  | "harness-config-unavailable"
+  | "typescript-unresolvable"
+  | "git-operation-failed"
+  | "empty-diff"
+  | "unparseable-diff";
+
 /** {@link computeEmitCompareGate}'s verdict. */
 export interface EmitCompareGateResult {
   /** `true` ⇒ the caller may run {@link buildReducedGateCommand}'s output in place of the real
@@ -3902,6 +3956,11 @@ export interface EmitCompareGateResult {
    *  all" (never report a fabricated `false` for it) — see {@link EMIT_COMPARE_SRC_PREFIX}'s own doc /
    *  `sessions/service.ts`'s `emitCompareNotApplicable`. */
   notApplicable: boolean;
+  /** Card fd0d34da: set IFF `notApplicable:true` — see {@link EmitCompareNotApplicableKind}'s own doc for
+   *  the full per-value discipline. `undefined` whenever `notApplicable` is `false` (both on `eligible:true`
+   *  and on a `notReducible` `eligible:false`) — never a fabricated category for a real, informative
+   *  reducibility verdict. */
+  notApplicableKind?: EmitCompareNotApplicableKind;
 }
 
 /**
@@ -4057,7 +4116,10 @@ export async function computeEmitCompareGate(
   // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
   const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: false });
-  const notApplicableHere = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: true });
+  // Card fd0d34da: `kind` is now a required second argument (never a defaulted/optional param) — the same
+  // "no call site can express the wrong thing by omission" discipline card 4def0708 already applied to the
+  // `notReducible`/`notApplicableHere` split itself, one layer in.
+  const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
   const { git, timeoutMs } = boundedGit(worktreePath, deps);
 
   let entries: string[];
@@ -4076,9 +4138,9 @@ export async function computeEmitCompareGate(
   } catch {
     // Card 4def0708: a git error is a MECHANISM failure, not a verdict about reducibility — it proves
     // nothing either way, so it must OMIT (notApplicableHere), never stamp an informative "not reduced".
-    return notApplicableHere("git error reading the diff");
+    return notApplicableHere("git error reading the diff", "git-operation-failed");
   }
-  if (entries.length === 0) return notApplicableHere("empty diff — nothing to prove inert from");
+  if (entries.length === 0) return notApplicableHere("empty diff — nothing to prove inert from", "empty-diff");
 
   const changedTsFiles: string[] = [];
   // Card 82662e98: changed packages/daemon/scripts/**/*.mjs paths proven transpile-identical — same
@@ -4106,7 +4168,7 @@ export async function computeEmitCompareGate(
   for (const line of entries) {
     const tab = line.indexOf("\t");
     // Card 4def0708: an unparseable line is the same mechanism-failure shape as the git error above — omit.
-    if (tab < 0) return notApplicableHere(`unparseable diff line: ${line}`);
+    if (tab < 0) return notApplicableHere(`unparseable diff line: ${line}`, "unparseable-diff");
     const status = line[0];
     const p = line.slice(tab + 1);
     // Card b97f643d: a path already certified inert by {@link isInertMergePath} (e.g. `docs/**`) is
@@ -4176,7 +4238,7 @@ export async function computeEmitCompareGate(
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
         if (excludedDirNames === undefined) excludedDirNames = await loadExcludedTestDirNames(worktreePath);
-        if (excludedDirNames === null) return notApplicableHere(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        if (excludedDirNames === null) return notApplicableHere(`could not load EXCLUDED_DIR_NAMES from this diff's own scripts/test-daemon.mjs to classify ${p}`, "harness-config-unavailable");
         if (dirSegments.some((seg) => (excludedDirNames as Set<string>).has(seg))) {
           return notReducible(`${p} sits inside an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) — its consumers outside this diff can't be proven unaffected, so the full gate runs (card 44968963)`);
         }
@@ -4205,7 +4267,7 @@ export async function computeEmitCompareGate(
         // keys on; a nested file's name (containing a `/`) can never match a NOT_HERMETIC entry, which is
         // correct — NOT_HERMETIC only ever names test/'s top-level files.
         if (notHermeticNames === undefined) notHermeticNames = await loadNotHermeticNames(worktreePath);
-        if (notHermeticNames === null) return notApplicableHere(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`);
+        if (notHermeticNames === null) return notApplicableHere(`could not load NOT_HERMETIC from this diff's own scripts/test-daemon.mjs to classify ${p}`, "harness-config-unavailable");
         const harnessName = p.slice(EMIT_COMPARE_TEST_PREFIX.length, -".mjs".length);
         if (notHermeticNames.has(harnessName)) {
           notHermeticExcluded.push(p);
@@ -4232,7 +4294,55 @@ export async function computeEmitCompareGate(
     // reachable on a Loom-shaped diff that touches a path this predicate simply doesn't cover (e.g.
     // `packages/web/**`) — equally `notApplicable`, for the identical reason: the predicate never had this
     // path in its domain, so "not reduced" would overclaim there too.
-    return notApplicableHere(`path outside emit-compare scope: ${p}`);
+    //
+    // Card fd0d34da: the two reachability shapes just described are exactly `EmitCompareNotApplicableKind`'s
+    // `"repo-out-of-domain"` vs `"path-out-of-scope"` — first cheaply by rescanning the WHOLE
+    // already-in-memory `entries` list (not just what this loop has consumed up to `p`) for ANY path this
+    // predicate's four scopes cover at all. Rescanning the whole list, not just what's left to iterate, is
+    // required BECAUSE of the FIRST-TERMINAL-WINS ordering this catch-all's own doc names: an in-scope path
+    // can sit LATER in `entries`, after the one that just tripped this return, in the exact `fdf1291f`-shaped
+    // diff that doc cites.
+    const repoHasAnyInScopePath = entries.some((line) => {
+      const t = line.indexOf("\t");
+      return t >= 0 && isEmitCompareInScopePath(line.slice(t + 1));
+    });
+    if (repoHasAnyInScopePath) {
+      return notApplicableHere(`path outside emit-compare scope: ${p}`, "path-out-of-scope");
+    }
+    // Code Review (blocking, this card): `repoHasAnyInScopePath` alone only ever answers "does THIS DIFF
+    // touch an in-scope path" — it says NOTHING about the REPO's actual structure. Stamping
+    // `"repo-out-of-domain"` purely off that would assert a fact about the REPO (per
+    // `EmitCompareNotApplicableKind`'s own doc: "this repo's sources don't live under any scope … on ANY
+    // diff") from evidence that only ever covers ONE diff — wrong for any Loom-shaped merge whose own
+    // branch-vs-main diff happens to touch none of the four scopes (a `packages/web/**`-only fix, a
+    // `packages/shared/**`-only change, a `CLAUDE.md`-only edit): those would read `repo-out-of-domain`
+    // even though this repo plainly IS shaped like Loom's own daemon package — state 2 asserted for a
+    // state 3 row, CONFIDENTLY WRONG rather than the honest `null` it replaces. So when the diff alone
+    // doesn't decide it, ask the REPO's own tree directly: does `ref` (independent of what THIS diff
+    // touches) actually contain any of the four scope directories at all. One bounded `git ls-tree` call,
+    // firing ONLY on this already-rare catch-all branch — the same cost class as the `git diff
+    // --name-status` call this function already makes unconditionally above.
+    let repoIsInDomain: boolean;
+    try {
+      const lsTreeOut = (await withTimeout(
+        git.raw(["ls-tree", "-d", "--name-only", ref, "--",
+          EMIT_COMPARE_SRC_PREFIX.slice(0, -1), EMIT_COMPARE_TEST_PREFIX.slice(0, -1),
+          EMIT_COMPARE_ASSETS_PREFIX.slice(0, -1), EMIT_COMPARE_SCRIPTS_PREFIX.slice(0, -1)]),
+        timeoutMs, "git ls-tree (emit-compare repo-domain check)",
+      )).trim();
+      repoIsInDomain = lsTreeOut.length > 0;
+    } catch {
+      // FAIL CLOSED ON DOUBT (Code Review, this card): an unresolvable domain check must NEVER stamp the
+      // confident-but-possibly-wrong `"repo-out-of-domain"` — that is the exact failure mode this fix
+      // closes. Routed through the SAME mechanism-failure bucket every other git read in this function
+      // already uses on error, never a guessed reducibility verdict.
+      return notApplicableHere(`could not verify repo domain while classifying ${p} (path outside emit-compare scope)`, "git-operation-failed");
+    }
+    // `repoIsInDomain:true` means the SAME actionable fact `repoHasAnyInScopePath` above already covers —
+    // the predicate applies to this repo, just not (fully, or at all) to THIS diff — so it shares
+    // `"path-out-of-scope"`'s label; `repoIsInDomain:false` is the one case left where NEITHER the diff NOR
+    // the repo's own tree has anything the predicate covers — a genuinely non-Loom-shaped project.
+    return notApplicableHere(`path outside emit-compare scope: ${p}`, repoIsInDomain ? "path-out-of-scope" : "repo-out-of-domain");
   }
 
   if (changedTsFiles.length === 0 && changedScriptFiles.length === 0 && changedTestFiles.length === 0 && notHermeticExcluded.length === 0 && changedAssetPaths.length === 0) {
@@ -4273,7 +4383,7 @@ export async function computeEmitCompareGate(
       const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
       tsModule = imported.default ?? imported;
     } catch {
-      return notApplicableHere("typescript module not resolvable (expected on a shipped end-user install)");
+      return notApplicableHere("typescript module not resolvable (expected on a shipped end-user install)", "typescript-unresolvable");
     }
     for (const p of changedTsFiles) {
       let before: string;
@@ -4282,12 +4392,12 @@ export async function computeEmitCompareGate(
         before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
       } catch {
         // Card 4def0708: a failed git read is the same mechanism-failure shape as the diff-read error above.
-        return notApplicableHere(`could not read base content for ${p}`);
+        return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
       }
       try {
         after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
       } catch {
-        return notApplicableHere(`could not read branch content for ${p}`);
+        return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
       }
       const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
       const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
@@ -4307,12 +4417,12 @@ export async function computeEmitCompareGate(
       try {
         before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
       } catch {
-        return notApplicableHere(`could not read base content for ${p}`);
+        return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
       }
       try {
         after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
       } catch {
-        return notApplicableHere(`could not read branch content for ${p}`);
+        return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
       }
       const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;
       const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;

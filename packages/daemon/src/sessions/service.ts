@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -746,6 +746,11 @@ type ConfirmMergeResult = {
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
   emitCompareNotHermeticExcluded?: string[];
+  /** Card fd0d34da: set IFF `emitCompareReduced` is left `undefined` because the predicate's own verdict
+   *  was `notApplicable:true` (never on `false`/`true`) — see {@link EmitCompareNotApplicableKind}'s own
+   *  doc (git/worktrees.ts) for the full per-value discipline. Carried straight from
+   *  `EmitCompareGateResult.notApplicableKind`, never re-derived here. */
+  emitCompareNotApplicableKind?: EmitCompareNotApplicableKind;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -969,6 +974,10 @@ function deriveMergeGateVerdict(
       ...(v.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: v.emitCompareIdenticalCount } : {}),
       ...(v.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: v.emitCompareTestFiles } : {}),
       ...(v.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: v.emitCompareNotHermeticExcluded } : {}),
+      // Card fd0d34da: the coarse WHY sibling — carried through IFF the caller stamped one (only ever
+      // alongside `emitCompareReduced` left `undefined` for a `notApplicable:true` verdict; see
+      // `PendingGateOpVerdict.emitCompareNotApplicableKind`'s own doc).
+      ...(v.emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind: v.emitCompareNotApplicableKind } : {}),
       // Card 7a1a76e9 DoD-2: the landed squash subject — `merged:true` only (a rejection/error never lands
       // a new commit, so `v.commitSubject` is never set there); see `PendingGateOpVerdict.commitSubject`'s
       // own doc for the ALREADY_MERGED-path caveat (that path bypasses this function's onSettle entirely).
@@ -1086,7 +1095,9 @@ function deriveDeployGateVerdict(
  * narrower gate-command-only span, unchanged. Computed from ONE captured `nowMs` (see the call site's own
  * comment for why), mirroring {@link deriveMergeGateVerdict}'s identical single-clock-read discipline.
  *
- * DELIBERATELY OMITS `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles`: unlike a
+ * DELIBERATELY OMITS `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles`/
+ * `emitCompareNotApplicableKind` (card fd0d34da adds the last of these to the same omission, for the
+ * identical reason): unlike a
  * solo merge, a batch's `build_gate` event already stamps a genuine decidable tri-state directly onto its
  * OWN `detail` (see `mergeBatch`'s own `evtBatch("build_gate", ...)` call), and `gate_history`'s reader
  * (`toGateHistoryRow`, db.ts) has a dedicated, already-correct `detail.batched === true` fallback for
@@ -5033,6 +5044,12 @@ export class SessionService {
         concurrentGatesMax: "structural",
         emitCompareReduced: "structural",
         emitCompareIdenticalCount: "structural",
+        // Card fd0d34da: a coarse CATEGORY of reason, never a path/filename/error string (see
+        // `EmitCompareNotApplicableKind`'s own doc, git/worktrees.ts, for the exhaustive value list) —
+        // same bucket as `emitCompareReduced`/`emitCompareIdenticalCount` just above, deliberately NOT
+        // grouped with `emitCompareTestFiles`/`emitCompareNotHermeticExcluded` above (which DO carry
+        // foreign paths and are "sensitive").
+        emitCompareNotApplicableKind: "structural",
         retryPassed: "structural",
         transientRetried: "structural",
         passed: "structural",
@@ -5133,6 +5150,9 @@ export class SessionService {
           ...(payload?.emitCompareIdenticalCount !== undefined ? { emitCompareIdenticalCount: payload.emitCompareIdenticalCount } : {}),
           ...(payload?.emitCompareTestFiles !== undefined ? { emitCompareTestFiles: payload.emitCompareTestFiles } : {}),
           ...(payload?.emitCompareNotHermeticExcluded !== undefined ? { emitCompareNotHermeticExcluded: payload.emitCompareNotHermeticExcluded } : {}),
+          // Card fd0d34da: same "written to verdict_payload_json but never read back" gap e2b6f900/725dc89a
+          // already closed above, one field over — the coarse WHY sibling of `emitCompareReduced`.
+          ...(payload?.emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind: payload.emitCompareNotApplicableKind } : {}),
           // Card 7a1a76e9 DoD-2: same "written to verdict_payload_json but never read back" gap e2b6f900/
           // 725dc89a already closed for the concurrency triple / reduced-gate facts, one field over.
           ...(payload?.commitSubject !== undefined ? { commitSubject: payload.commitSubject } : {}),
@@ -14730,6 +14750,19 @@ export class SessionService {
     // consulted. The default is now the UNINFORMATIVE value (`true` ⇒ omit): only the guarded assignments
     // below — reached exclusively when the predicate actually ran — ever set this to `false`.
     let emitCompareNotApplicable = true;
+    // Card fd0d34da: the coarse, path-free WHY behind `emitCompareNotApplicable` above — carried straight
+    // from `EmitCompareGateResult.notApplicableKind` at each of that flag's own assignment sites below,
+    // never re-derived here. Code Review correction: this is `undefined` in every case EXCEPT when the
+    // predicate genuinely ran AND returned `notApplicable:true` — do not read that as simply "whenever
+    // `emitCompareNotApplicable` is `false`". `emitCompareNotApplicable === false` (a real eligible:true or
+    // notReducible verdict) is ONE such case, but so is the more easily-missed one: the predicate NEVER RAN
+    // at all (`inertSkip`/`reuseResult`/an unresolved `gateBaseMainHead`), which leaves
+    // `emitCompareNotApplicable` at its own uninformative `true` DEFAULT (see that flag's own comment,
+    // immediately above) while this field independently stays at ITS OWN `undefined` default — the two
+    // "never ran" and "ran, said not applicable" causes both read `emitCompareNotApplicable:true`, but only
+    // the latter ever populates this field. See `ConfirmMergeResult.emitCompareNotApplicableKind`'s own doc
+    // for the full discipline.
+    let emitCompareNotApplicableKind: EmitCompareNotApplicableKind | undefined;
     // Card 7183540f: the branch/main tips THIS classification actually ran against — captured strictly
     // BEFORE the `computeEmitCompareGate` call below (see that call site's own doc for the ordering-trap
     // reasoning, mirroring db413510's identical discipline for the inert-skip path). Read again at
@@ -15496,8 +15529,10 @@ export class SessionService {
           // uninformative-`true` default above, which would otherwise wrongly OMIT the field on the one
           // outcome (`eligible:true`) where a real decision was unambiguously made.
           emitCompareNotApplicable = false;
+          emitCompareNotApplicableKind = undefined;
         } else {
           emitCompareNotApplicable = emitCompare.notApplicable;
+          emitCompareNotApplicableKind = emitCompare.notApplicableKind;
         }
       }
       // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
@@ -15734,6 +15769,7 @@ export class SessionService {
               // `eligible:true` branch, above — the re-derivation DID run and decided this diff is
               // applicable.
               emitCompareNotApplicable = false;
+              emitCompareNotApplicableKind = undefined;
             } else {
               // No longer provably reducible (or the re-derivation itself was ambiguous — an unresolvable
               // branch ref, or `emitCompareAdmissionMainHead` itself unresolved) — this MUST take the full
@@ -15757,6 +15793,7 @@ export class SessionService {
               // fabricated a decided "not reduced" for an ambiguous re-derivation the predicate never
               // actually completed.
               emitCompareNotApplicable = reclassified?.notApplicable ?? true;
+              emitCompareNotApplicableKind = reclassified?.notApplicableKind;
               effectiveGate = gate;
             }
           }
@@ -16408,10 +16445,15 @@ export class SessionService {
           // false` here despite this guard's own intent. The declaration's default is now `true`
           // (uninformative), so this same `emitCompareNotApplicable ? {} : {...}` correctly omits on that
           // route without any change to the guard expression itself.
-          ...(emitCompareNotApplicable ? {} : {
-            emitCompareReduced: emitCompareSkip,
-            ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
-          }),
+          ...(emitCompareNotApplicable
+            // Card fd0d34da: the OTHER half of this guard — a real gate genuinely spawned (this whole
+            // block is the rejection path) AND the predicate said `notApplicable:true`, so the coarse WHY
+            // is the one thing worth reporting here instead of the omitted `emitCompareReduced` triple.
+            ? (emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind } : {})
+            : {
+              emitCompareReduced: emitCompareSkip,
+              ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}),
+            }),
           // Card 720bb7ad: mirrors the plain-GREEN return's own `gateSteps` — see this field's own doc for
           // why the rejection path used to leave it unset here (nested only in `gateDetail.steps` above).
           ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}),
@@ -16762,7 +16804,11 @@ export class SessionService {
     // The default is now the uninformative `true`, so this same expression is correct without change.
     const emitCompareStructuredFields = (gateRan && !emitCompareNotApplicable)
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
-      : {};
+      // Card fd0d34da: mirrors the rejection return's own `emitCompareNotApplicableKind` stamp just
+      // above — a real gate genuinely spawned and PASSED (`gateRan:true`) on a repo/diff the predicate
+      // said `notApplicable:true` for, so the coarse WHY is worth reporting even though `emitCompareReduced`
+      // itself stays correctly omitted.
+      : (gateRan && emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind } : {});
     return warning
       ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
       : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
@@ -17449,6 +17495,13 @@ export class SessionService {
               // and this stamp itself never carried the count. See db.ts's own fallback for the reader
               // side of this fix.
               ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles, emitCompareIdenticalCount: batchEmitCompare!.identicalFileCount } : {}) } : {}),
+              // Card fd0d34da: the coarse WHY, stamped directly on THIS event's own `detail` — same
+              // "batch never routes through PendingOpRegistry" reason `emitCompareReduced` itself is
+              // stamped here rather than via `deriveBatchGateVerdict`'s payload (see that function's own
+              // doc). `batchEmitCompare?.notApplicableKind` is `undefined` exactly when `emitCompareDecidable`
+              // is true (the two are mutually exclusive by construction — `notApplicableKind` is only ever
+              // set alongside `notApplicable:true`), so no extra guard is needed here.
+              ...(batchEmitCompare?.notApplicableKind !== undefined ? { emitCompareNotApplicableKind: batchEmitCompare.notApplicableKind } : {}),
               // Card 67030bb9: mirrors confirmWorkerMerge's own `build_gate` retry-observability pair.
               ...(retriedFile ? { retriedFile, retryPassed } : {}),
               // Code Review, card 67030bb9 finding [3]: mirrors the solo path's own `retryDeclineReason`

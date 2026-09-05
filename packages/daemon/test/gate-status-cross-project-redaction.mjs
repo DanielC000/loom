@@ -172,6 +172,24 @@ try {
   check("(foreign, fail) structural fields survive untouched (passed/outcome/gateType) — targeted redaction, not a degraded response",
     foreignFail.passed === false && foreignFail.outcome === "fail" && foreignFail.gateType === "merge");
 
+  // ── CARD fd0d34da — emitCompareNotApplicableKind, DELIBERATELY VISIBLE cross-project (classified ────────
+  // "structural" in GATE_VERDICT_FIELD_CLASSIFICATION, unlike its `emitCompareTestFiles`/
+  // `emitCompareNotHermeticExcluded` siblings above): it names a CATEGORY of reason (e.g.
+  // "path-out-of-scope"), never a path/filename/error string the way `reason` itself does — that's exactly
+  // why `reason` is redacted above while this field is not.
+  const notApplicableOpId = "11111111-0000-4000-8000-00000000fbcd";
+  db.insertPendingGateOp({
+    opId: notApplicableOpId, kind: "merge", key: "k-notapplicable", ownerSessionId: "mgrA", projectId: "pA",
+    taskId: "t4", branch: "loom/t4", startedAt: now, state: "pending", surfacedPending: true,
+  });
+  db.settlePendingGateOp(notApplicableOpId, { kind: "pass", payload: { emitCompareNotApplicableKind: "path-out-of-scope" } });
+  const sameProjectNotApplicable = await callGateStatusAs(serverA, notApplicableOpId);
+  check("(same-project, notApplicable) emitCompareNotApplicableKind is REAL", sameProjectNotApplicable.emitCompareNotApplicableKind === "path-out-of-scope");
+  const foreignNotApplicable = await callGateStatusAs(serverB, notApplicableOpId);
+  check("(foreign, notApplicable — precondition) still resolvable", foreignNotApplicable.state === "settled" && foreignNotApplicable.passed === true);
+  check("(foreign, notApplicable — card fd0d34da) emitCompareNotApplicableKind is VISIBLE — a coarse category with no path/test-name/error-text of its own, unlike reason",
+    foreignNotApplicable.emitCompareNotApplicableKind === "path-out-of-scope", () => JSON.stringify(foreignNotApplicable.emitCompareNotApplicableKind));
+
   // ── retryWarning BYPASS — a DERIVED field computed from RAW outputTail/retriedFile. The regression this ─
   // guards: gating the verbatim `outputTail`/`retriedFile` spreads does nothing to stop `retryWarning`'s
   // own text from leaking a one-bit read of foreign content, because `formatWeakerPassWarning` reads
@@ -364,6 +382,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while the FULL cross-project-sensitive field set — outputTail/steps/gateDetail (round 1) plus reason/commitSubject/retriedFile/retryWarning/emitCompareTestFiles/emitCompareNotHermeticExcluded/validatedHead/headWarning (round 2, after a code-review probe found them still leaking) — is now redacted on a foreign read, across pass/fail/cancelled/error verdicts; the retryWarning DERIVED-FIELD BYPASS is closed (proven with a timeout-kill-shaped outputTail, so 'absent' can't be confused with 'same text either way'); the batchBranchCount SECOND-CARRIER case (round 3, a real sibling-branch field landed mid-card) is decided consistently: the bare count is visible, the prose that would restate it stays fully absent regardless; every structural field (passed/outcome/gateType/timing/concurrency/retryPassed/batchBranchCount) survives a foreign read intact; a legacy projectId:null row redacts for EVERY caller; a bogus opId still reads never_existed for either manager; a failed caller-session lookup fails SAFE; and the isCrossProjectGateOp helper timingBand's own gating relies on matches gateStatus's own fail-safe polarity exactly."
+  ? "\n✅ ALL PASS — gate_status's manager surface stays genuinely unscoped (a foreign project's real op still resolves, never silently hidden) while the FULL cross-project-sensitive field set — outputTail/steps/gateDetail (round 1) plus reason/commitSubject/retriedFile/retryWarning/emitCompareTestFiles/emitCompareNotHermeticExcluded/validatedHead/headWarning (round 2, after a code-review probe found them still leaking) — is now redacted on a foreign read, across pass/fail/cancelled/error verdicts; the retryWarning DERIVED-FIELD BYPASS is closed (proven with a timeout-kill-shaped outputTail, so 'absent' can't be confused with 'same text either way'); the batchBranchCount SECOND-CARRIER case (round 3, a real sibling-branch field landed mid-card) is decided consistently: the bare count is visible, the prose that would restate it stays fully absent regardless; card fd0d34da's emitCompareNotApplicableKind is deliberately VISIBLE cross-project too, decided the same way batchBranchCount was — a bare category with no foreign path/test-name/error-text; every structural field (passed/outcome/gateType/timing/concurrency/retryPassed/batchBranchCount/emitCompareNotApplicableKind) survives a foreign read intact; a legacy projectId:null row redacts for EVERY caller; a bogus opId still reads never_existed for either manager; a failed caller-session lookup fails SAFE; and the isCrossProjectGateOp helper timingBand's own gating relies on matches gateStatus's own fail-safe polarity exactly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -202,6 +202,10 @@ try {
     check("(e2e) DoD-3: the row already carried the ACTUAL LANDED count (2), never the requested K — pre-existing, unchanged by this card", true);
     check("(e2e) the row passed", row?.passed === true);
     check("(e2e) emitCompareReduced reads null — genuinely NOT DECIDABLE for this repo's diff shape (paths outside packages/daemon/src|test/), never a fabricated value", row?.emitCompareReduced === null);
+    // Card fd0d34da: the fixture repo's ENTIRE diff (feature-a.txt/feature-b.txt at repo root) has no path
+    // under any of the four emit-compare scopes at all — the exact "repo-out-of-domain" shape, not the
+    // "path-out-of-scope" one (which needs an otherwise in-scope path present ELSEWHERE in the same diff).
+    check("(e2e) emitCompareNotApplicableKind reads \"repo-out-of-domain\" — this repo's diff touches no in-scope path at all, real production shape (opId 1cfb5219 predates this field and would have read null here)", row?.emitCompareNotApplicableKind === "repo-out-of-domain");
 
     // ── card 6cc803b2: phase-timing instrumentation. `GateHistoryRow` (the typed read above) deliberately
     // does NOT surface arbitrary detail fields — read the RAW event's own detail instead, the same seam
@@ -597,15 +601,28 @@ try {
       id: randomUUID(), ts: new Date(Date.now() - 1000).toISOString(), managerSessionId: mgr, kind: "build_gate",
       detail: { opId: opSolo, passed: true, durationMs: 999, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 1 },
     });
+    // Card fd0d34da: the SAME `detail.batched === true` fallback, widened to the new coarse-WHY field —
+    // stamped alongside a `notApplicable:true` verdict (never alongside a real true/false, mirroring the
+    // producer's own mutual-exclusion guarantee — see `evtBatch("build_gate", ...)`'s own comment).
+    const opNotApplicable = randomUUID();
+    db.appendEvent({
+      id: randomUUID(), ts: new Date(Date.now() - 500).toISOString(), managerSessionId: mgr, kind: "build_gate",
+      detail: { opId: opNotApplicable, passed: true, batched: true, branchCount: 2, durationMs: 4321, gateCap: 2, concurrentGates: 1, concurrentGatesMax: 2, emitCompareNotApplicableKind: "path-out-of-scope" },
+    });
 
     const page = db.listGateEvents({ projectId: P, limit: 50, offset: 0 });
     const decidedFalse = page.items.find((r) => r.opId === opDecidedFalse);
     const undecidable = page.items.find((r) => r.opId === opUndecidable);
     const solo = page.items.find((r) => r.opId === opSolo);
+    const notApplicableRow = page.items.find((r) => r.opId === opNotApplicable);
     check("(unit) a batched row's DECIDABLE false is recovered from detail, not left null", decidedFalse?.emitCompareReduced === false);
     check("(unit) the SAME row's durationMs/gateCap/concurrentGates/concurrentGatesMax read back intact", decidedFalse?.durationMs === 12345 && decidedFalse?.gateCap === 2 && decidedFalse?.concurrentGates === 1 && decidedFalse?.concurrentGatesMax === 2);
     check("(unit) a batched row with NO emitCompareReduced in detail (undecidable) reads back null, never fabricated", undecidable?.emitCompareReduced === null);
     check("(unit) a non-batched row's own detail (no emitCompareReduced at all) reads back null, unaffected by this fallback", solo?.emitCompareReduced === null);
+    check("(unit, card fd0d34da) a batched row's coarse WHY is recovered from detail via the SAME fallback", notApplicableRow?.emitCompareNotApplicableKind === "path-out-of-scope");
+    check("(unit, card fd0d34da) that SAME row's emitCompareReduced stays null — a notApplicable verdict is never also a decided true/false", notApplicableRow?.emitCompareReduced === null);
+    check("(unit, card fd0d34da — NEGATIVE CONTROL) a genuinely-decided false row carries NO coarse WHY (mutually exclusive by construction)", decidedFalse?.emitCompareNotApplicableKind === null);
+    check("(unit, card fd0d34da — NEGATIVE CONTROL) a non-batched row's legacy detail (no such key at all) reads emitCompareNotApplicableKind:null, unaffected by this fallback", solo?.emitCompareNotApplicableKind === null);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

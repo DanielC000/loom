@@ -767,14 +767,18 @@ function seed(db) {
     // (4) No matching `pending_gate_ops` tombstone at all (payload:null skips seeding one) — must read back
     // `null` for all three fields, never a fabricated `false`.
     const noPayloadOp = seedOp("nopayload", 2000, null);
+    // (5, card fd0d34da) NOT APPLICABLE — the predicate ran and said `notApplicable:true`; `emitCompareReduced`
+    // itself stays `null` (never a fabricated true/false) but the coarse WHY is now recoverable.
+    const notApplicableOp = seedOp("notapplicable", 1000, { emitCompareNotApplicableKind: "repo-out-of-domain" });
 
     const page = db.listGateEvents({ projectId: P, limit: 100, offset: 0 });
-    check("(unit, card 6ca4b1a0) all 4 fixture rows returned", page.items.length === 4);
+    check("(unit, card 6ca4b1a0) all 5 fixture rows returned", page.items.length === 5);
     const testFilesArmRow = page.items.find((r) => r.opId === testFilesArmOp);
     const identityArmRow = page.items.find((r) => r.opId === identityArmOp);
     const falseRow = page.items.find((r) => r.opId === falseOp);
     const noPayloadRow = page.items.find((r) => r.opId === noPayloadOp);
-    check("(unit, card 6ca4b1a0) precondition: all 4 fixtures resolved to 4 distinct rows", new Set([testFilesArmRow, identityArmRow, falseRow, noPayloadRow]).size === 4 && [testFilesArmRow, identityArmRow, falseRow, noPayloadRow].every(Boolean));
+    const notApplicableRow = page.items.find((r) => r.opId === notApplicableOp);
+    check("(unit, card 6ca4b1a0) precondition: all 5 fixtures resolved to 5 distinct rows", new Set([testFilesArmRow, identityArmRow, falseRow, noPayloadRow, notApplicableRow]).size === 5 && [testFilesArmRow, identityArmRow, falseRow, noPayloadRow, notApplicableRow].every(Boolean));
 
     check("(unit, card 6ca4b1a0) (1) changed-test-files arm: emitCompareReduced:true", testFilesArmRow?.emitCompareReduced === true);
     check("(unit, card 6ca4b1a0) (1) changed-test-files arm: emitCompareIdenticalCount:0 (VACUOUS — nothing to compare, not \"nothing found\")", testFilesArmRow?.emitCompareIdenticalCount === 0);
@@ -790,6 +794,12 @@ function seed(db) {
     check("(unit, card 6ca4b1a0 — NEVER FABRICATE false) (4) a row with no matching pending_gate_ops tombstone reads emitCompareReduced:null, NOT false", noPayloadRow?.emitCompareReduced === null);
     check("(unit, card 6ca4b1a0) (4) no-payload row's identicalCount/testFiles are also null", noPayloadRow?.emitCompareIdenticalCount === null && noPayloadRow?.emitCompareTestFiles === null);
 
+    check("(unit, card fd0d34da) (5) notApplicable row: emitCompareReduced stays null — a notApplicable verdict is never also a decided true/false", notApplicableRow?.emitCompareReduced === null);
+    check("(unit, card fd0d34da) (5) notApplicable row: emitCompareNotApplicableKind is recovered from verdict_payload_json", notApplicableRow?.emitCompareNotApplicableKind === "repo-out-of-domain");
+    check("(unit, card fd0d34da — NEGATIVE CONTROLS) (1)/(2)/(3)/(4) carry NO coarse WHY — this field is set IFF notApplicable:true, never alongside a decided true/false or a no-tombstone row",
+      testFilesArmRow?.emitCompareNotApplicableKind === null && identityArmRow?.emitCompareNotApplicableKind === null &&
+      falseRow?.emitCompareNotApplicableKind === null && noPayloadRow?.emitCompareNotApplicableKind === null);
+
     // Card eb9348b0 — NEGATIVE CONTROLS for `failingTest`'s new verdict-payload fallback, riding the SAME
     // fixtures above: a `"pass"` verdict never carries `gateDetail` (fail-only), so all three genuinely-
     // settled rows must read `failingTest:null`, same as the never-fabricated `emitCompareReduced` case.
@@ -804,6 +814,7 @@ function seed(db) {
     const legacyPage = db.listGateEvents({ projectId: P1, limit: 100, offset: 0 });
     const legacyPassed = legacyPage.items.find((r) => r.durationMs === 61234);
     check("(unit, card 6ca4b1a0) a PRE-EXISTING (seed()) row with no opId/tombstone also reads emitCompareReduced:null", legacyPassed?.emitCompareReduced === null && legacyPassed?.emitCompareIdenticalCount === null && legacyPassed?.emitCompareTestFiles === null);
+    check("(unit, card fd0d34da) that SAME pre-existing row also reads emitCompareNotApplicableKind:null — a pre-card row has nothing to recover", legacyPassed?.emitCompareNotApplicableKind === null);
     check("(unit, card eb9348b0) that SAME pre-existing row also reads failingTest:null (no opId to join through at all)", legacyPassed?.failingTest === null);
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }

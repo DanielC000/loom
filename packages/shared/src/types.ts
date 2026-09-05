@@ -1965,6 +1965,26 @@ export interface GateHistoryRow {
    *  inside it). Never pool a `null` row with a `false` row either — `null` means "not determinable", not
    *  "known full run". */
   emitCompareReduced: boolean | null;
+  /** Card fd0d34da — the coarse, PATH-FREE reason `emitCompareReduced` above reads `null` FOR THIS ROW
+   *  because the reduce-predicate itself said "not applicable" (as opposed to the row simply never having
+   *  a gate spawn, or predating this feature entirely — this field is present ONLY when the predicate
+   *  actually ran and decided `notApplicable:true`, `null` for every other cause of a `null`
+   *  `emitCompareReduced`, including a genuine `false`). One of `"repo-out-of-domain"` (a REPO-LEVEL fact,
+   *  checked via a dedicated `git ls-tree` against the repo's own tree rather than inferred from this diff
+   *  alone — none of the four scope directories exist anywhere in this repo, so the predicate could never
+   *  decide ANY diff for it), `"path-out-of-scope"` (covers BOTH remaining shapes, sharing the identical
+   *  actionable fact that the predicate applies to this repo fine, just not — fully, or at all — to THIS
+   *  diff: either this diff touched a path outside the predicate's scope while the SAME diff also touches
+   *  an in-scope path elsewhere, or the repo's own tree DOES have one of the four scope directories even
+   *  though this particular diff doesn't touch it — see `merge_batch`'s own tool description
+   *  for the batch-size degradation this specific shape drives), `"harness-config-unavailable"`,
+   *  `"typescript-unresolvable"`, `"git-operation-failed"`, `"empty-diff"`, or `"unparseable-diff"` —
+   *  typed loosely as `string` here rather than importing the daemon-internal union into this shared
+   *  package (same posture as `retryDeclineReason`'s own doc, above, for the identical reason). Before
+   *  this card, EVERY one of these seven causes collapsed onto the same bare `null` `emitCompareReduced`,
+   *  indistinguishable from each other and from "no gate spawned at all" without re-running the predicate
+   *  by hand against the diff. */
+  emitCompareNotApplicableKind: string | null;
   /** Card 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; `null` whenever
    *  `emitCompareReduced` is `false` or `null` (nothing reduced to report).
    *  ⚠️ VACUOUS ON ONE OF TWO ARMS — never read this alone, always alongside `emitCompareTestFiles`

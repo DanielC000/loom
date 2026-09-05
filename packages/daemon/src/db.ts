@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
+import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
 
 /**
  * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
@@ -2128,6 +2129,15 @@ export interface PendingGateOpVerdict {
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
   emitCompareNotHermeticExcluded?: string[];
+  /** Card fd0d34da: set IFF `emitCompareReduced` is left `undefined` on THIS row because the predicate's
+   *  own verdict was `notApplicable:true` (never alongside a real `true`/`false`) — see
+   *  `EmitCompareNotApplicableKind`'s own doc (git/worktrees.ts) for the full per-value discipline. Carried
+   *  straight from `ConfirmMergeResult.emitCompareNotApplicableKind`, itself carried straight from
+   *  `EmitCompareGateResult.notApplicableKind` — never re-derived at any hop. `undefined` for every row
+   *  that predates this card, same never-backfilled discipline as `concurrentGatesMax`. This field carries
+   *  no path/filename/error text (unlike `reason`) — see `gate_status`'s own cross-project redaction
+   *  classification, which leaves it VISIBLE on a foreign read for exactly that reason. */
+  emitCompareNotApplicableKind?: EmitCompareNotApplicableKind;
   /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
    *  the `gate_status(opId)` half of the same fix DoD-1 applied to the `[loom:merge-done]` nudge text.
    *  Undefined-means-not-determinable, same discipline as `emitCompareReduced` above: `undefined` means
@@ -8034,6 +8044,19 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
     ? verdictPayload.emitCompareReduced
     : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;
+  // Card fd0d34da: the coarse WHY behind a `null` `emitCompareReduced` — SAME two-producer fallback shape
+  // as `emitCompareReduced` itself immediately above (`verdictPayload` for a solo merge,
+  // `detail.batched === true` for a batch — see `deriveBatchGateVerdict`'s own doc for why a batch never
+  // reaches `verdictPayload` for these facts at all). NOT re-gated on `emitCompareReduced === null` here —
+  // the producer already guarantees the two are mutually exclusive (this field is only ever stamped
+  // alongside a `notApplicable:true` verdict, which is exactly when `emitCompareReduced` itself is left
+  // unstamped) — see `PendingGateOpVerdict.emitCompareNotApplicableKind`'s own doc for the full contract.
+  // `null` for every row that predates this card, same never-backfilled discipline as `concurrentGatesMax`.
+  const emitCompareNotApplicableKind = typeof verdictPayload.emitCompareNotApplicableKind === "string"
+    ? (verdictPayload.emitCompareNotApplicableKind as EmitCompareNotApplicableKind)
+    : (detail.batched === true && typeof detail.emitCompareNotApplicableKind === "string")
+      ? (detail.emitCompareNotApplicableKind as EmitCompareNotApplicableKind)
+      : null;
   // Code Review, card d422e279 CORRECTION: these two used to fall back to `verdictPayload` ONLY, on the
   // premise that `emitCompareReduced`'s own `detail` fallback (immediately above) was "a non-factor for
   // THIS field specifically" — true only because a batch could never actually decide `eligible:true` at
@@ -8117,6 +8140,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     retryDeclineReason,
     transientRetried,
     emitCompareReduced,
+    emitCompareNotApplicableKind,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
     batched,
